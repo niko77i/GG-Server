@@ -1238,9 +1238,24 @@ def products_list():
     ).fetchall()]
     mcc_options_for_filter = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()]
 
-    # runner 统计（兼容 is_archived NULL 的老数据）
+    # runner 统计（跟随 status 过滤）
+    stat_clause = "1=1"
+    stat_params_all = []
+    stat_params_mine = []
+    if status_filter is not None:
+        status_filter_val = status_filter.strip() if isinstance(status_filter, str) else status_filter
+        if status_filter_val:
+            stat_clause = "p.status = ?"
+            stat_params_all = [status_filter_val]
+            stat_params_mine = [status_filter_val]
+        else:
+            stat_clause = "(p.status IS NULL OR p.status = '' OR p.status = '0' OR p.status = 0)"
+            stat_params_all = []
+            stat_params_mine = []
+
     runner_counts = {"all": db.execute(
-        "SELECT COUNT(*) FROM products p WHERE is_archived IS NULL OR is_archived = 0"
+        f"SELECT COUNT(*) FROM products p WHERE {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
+        stat_params_all
     ).fetchone()[0]}
     try:
         uid = int(get_jwt_identity())
@@ -1248,8 +1263,8 @@ def products_list():
         uid = None
     if uid:
         runner_counts["mine"] = db.execute(
-            "SELECT COUNT(*) FROM products p WHERE (p.runner_ids LIKE ? OR p.owner_id = ?) AND (is_archived IS NULL OR is_archived = 0)",
-            (f'%{uid}%', uid)
+            f"SELECT COUNT(*) FROM products p WHERE (p.runner_ids LIKE ? OR p.owner_id = ?) AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
+            [f'%{uid}%', uid] + stat_params_mine
         ).fetchone()[0]
     else:
         runner_counts["mine"] = runner_counts["all"]
