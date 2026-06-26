@@ -190,6 +190,23 @@ def _ensure_schema(conn: sqlite3.Connection):
     if "death_date" not in acols:
         conn.execute("ALTER TABLE accounts ADD COLUMN death_date TEXT DEFAULT ''")
 
+    # 迁移：videos 表补 owner_id 列（2026-06-26 数据隔离）
+    vcols2 = [r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()]
+    if "owner_id" not in vcols2:
+        conn.execute("ALTER TABLE videos ADD COLUMN owner_id INTEGER REFERENCES users(id)")
+    if "is_public" not in vcols2:
+        conn.execute("ALTER TABLE videos ADD COLUMN is_public INTEGER DEFAULT 0")
+
+    # 迁移：accounts 表补 owner_id 列（2026-06-26 数据隔离）
+    acols2 = [r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()]
+    if "owner_id" not in acols2:
+        conn.execute("ALTER TABLE accounts ADD COLUMN owner_id INTEGER REFERENCES users(id)")
+
+    # 迁移：mcc 表补 owner_id 列（2026-06-26 数据隔离）
+    mcols2 = [r[1] for r in conn.execute("PRAGMA table_info(mcc)").fetchall()]
+    if "owner_id" not in mcols2:
+        conn.execute("ALTER TABLE mcc ADD COLUMN owner_id INTEGER REFERENCES users(id)")
+
     # 初始化默认标签
     for k, v in [("regions", '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),
                  ("frame_types", '["融帧","非融帧"]'),
@@ -197,6 +214,19 @@ def _ensure_schema(conn: sqlite3.Connection):
                  ("product_names", '["p222","93ok"]'),
                  ("review_statuses", '["能过审","不能过审"]')]:
         conn.execute("INSERT OR IGNORE INTO tags(key,value) VALUES(?,?)", (k, v))
+
+    # 迁移：现有数据归属 developer（2026-06-26 数据隔离）
+    data_migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_owner_id'"
+    ).fetchone()
+    if not data_migrated:
+        # developer 用户 id 始终为 1
+        conn.execute("UPDATE videos SET owner_id = 1 WHERE owner_id IS NULL")
+        conn.execute("UPDATE accounts SET owner_id = 1 WHERE owner_id IS NULL")
+        conn.execute("UPDATE mcc SET owner_id = 1 WHERE owner_id IS NULL")
+        conn.execute(
+            "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_owner_id','1')"
+        )
 
 
 def _migrate_if_needed(conn: sqlite3.Connection):
