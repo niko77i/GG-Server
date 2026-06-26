@@ -143,33 +143,48 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
         except sqlite3.IntegrityError:
             pass
 
-    # === accounts: 归导入用户 ===
+    # === mcc: 归导入用户，跟踪 ID 映射 ===
+    mcc_map = {}  # old_mcc_id -> new_mcc_id
+    mcc_cols = [c[1] for c in db.execute("PRAGMA table_info(mcc)").fetchall()]
+    for r in data.get("mcc", []):
+        d = dict(r)
+        old_id = d.pop("id", None)
+        d["owner_id"] = target_user_id
+        cols = [k for k in d if k in mcc_cols]
+        placeholders = ", ".join(["?"] * len(cols))
+        vals = [d[c] for c in cols]
+        try:
+            db.execute(f"INSERT INTO mcc({', '.join(cols)}) VALUES({placeholders})", vals)
+            new_mid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            if old_id is not None:
+                mcc_map[old_id] = new_mid
+            report["mcc"] += 1
+        except sqlite3.IntegrityError:
+            report["skipped_count"] = report.get("skipped_count", 0) + 1
+
+    # 修正 MCC 的 parent_mcc_id 映射
+    for old_pid, new_pid in mcc_map.items():
+        db.execute("UPDATE mcc SET parent_mcc_id=? WHERE parent_mcc_id=? AND owner_id=?",
+                   (new_pid, old_pid, target_user_id))
+
+    # === accounts: 归导入用户，mcc_id 映射到新 ID ===
+    account_cols = [c[1] for c in db.execute("PRAGMA table_info(accounts)").fetchall()]
     for r in data.get("accounts", []):
         d = dict(r)
         d.pop("id", None)
         d["owner_id"] = target_user_id
-        existing_cols = [c[1] for c in db.execute("PRAGMA table_info(accounts)").fetchall()]
-        cols = [k for k in d if k in existing_cols]
+        # 映射 mcc_id
+        old_mcc = d.get("mcc_id")
+        if old_mcc is not None and old_mcc in mcc_map:
+            d["mcc_id"] = mcc_map[old_mcc]
+        elif old_mcc is not None:
+            d["mcc_id"] = None  # 映射不到，清空
+        cols = [k for k in d if k in account_cols]
         placeholders = ", ".join(["?"] * len(cols))
         vals = [d[c] for c in cols]
         try:
             db.execute(f"INSERT INTO accounts({', '.join(cols)}) VALUES({placeholders})", vals)
             report["accounts"] += 1
-        except sqlite3.IntegrityError:
-            report["skipped_count"] = report.get("skipped_count", 0) + 1
-
-    # === mcc: 归导入用户 ===
-    for r in data.get("mcc", []):
-        d = dict(r)
-        d.pop("id", None)
-        d["owner_id"] = target_user_id
-        existing_cols = [c[1] for c in db.execute("PRAGMA table_info(mcc)").fetchall()]
-        cols = [k for k in d if k in existing_cols]
-        placeholders = ", ".join(["?"] * len(cols))
-        vals = [d[c] for c in cols]
-        try:
-            db.execute(f"INSERT INTO mcc({', '.join(cols)}) VALUES({placeholders})", vals)
-            report["mcc"] += 1
         except sqlite3.IntegrityError:
             report["skipped_count"] = report.get("skipped_count", 0) + 1
 
