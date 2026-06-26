@@ -1127,11 +1127,21 @@ def products_list():
     product_id = request.args.get("product_id", "").strip()
     mcc_id = request.args.get("mcc_id", "").strip()
     status_filter = request.args.get("status")  # None=不传, ""=正常, "paused"=暂停
+    runner = request.args.get("runner", "mine").strip()  # "mine" | "all"
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
 
     where = []; params = []
+    if runner == "mine":
+        # 需要用户登录才能筛选"我在跑的"
+        try:
+            user_id = int(get_jwt_identity())
+        except Exception:
+            user_id = None
+        if user_id:
+            where.append("(p.runner_ids LIKE ? OR p.owner_id = ?)")
+            params += [f'%{user_id}%', user_id]
     if search:
         where.append("(p.product_name LIKE ? OR p.kpi LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -1242,6 +1252,115 @@ def products_delete(pid):
     db.execute("DELETE FROM products WHERE id=?", (pid,))
     db.commit(); db.close()
     return jsonify({"success": True})
+
+
+@app.route("/api/products/merge", methods=["POST"])
+@jwt_required()
+def products_merge():
+    """合并多个产品到主产品。"""
+    data = request.get_json(silent=True) or {}
+    master_id = data.get("master_id")  # 主产品 ID（保留）
+    merge_ids = data.get("merge_ids") or []  # 被合并产品 ID 列表
+
+    if not master_id or not merge_ids:
+        return jsonify({"success": False, "error": "请指定主产品和被合并产品"}), 400
+    if master_id in merge_ids:
+        return jsonify({"success": False, "error": "主产品不能在被合并列表中"}), 400
+
+    db = _yt_db()
+    db.execute("PRAGMA foreign_keys=OFF")
+
+    # 获取主产品的 runner_ids
+    master = db.execute("SELECT runner_ids FROM products WHERE id=?", (master_id,)).fetchone()
+    if not master:
+        db.close()
+        return jsonify({"success": False, "error": "主产品不存在"}), 404
+
+    try:
+        master_runners = _json.loads(master["runner_ids"] or "[]")
+    except Exception:
+        master_runners = []
+
+    merged_packages = 0
+    merged_runners = set()
+
+    for mid in merge_ids:
+        sub = db.execute("SELECT * FROM products WHERE id=?", (mid,)).fetchone()
+        if not sub:
+            continue
+
+        # 合并 runner_ids
+        try:
+            sub_runners = _json.loads(sub["runner_ids"] or "[]")
+        except Exception:
+            sub_runners = []
+        for r in sub_runners:
+            master_runners.append(r)
+            merged_runners.update(sub_runners)
+
+        # 迁移 packages
+        pkgs = db.execute("SELECT * FROM packages WHERE product_id=?", (mid,)).fetchall()
+        for p in pkgs:
+            pd = dict(p)
+            # 检查主产品中是否已有同名+同链接的包
+            existing = db.execute(
+                "SELECT id FROM packages WHERE product_id=? AND package_name=? AND url=?",
+                (master_id, pd.get("package_name", ""), pd.get("url", ""))
+            ).fetchone()
+            if not existing:
+                pd.pop("id", None)
+                pd["product_id"] = master_id
+                cols = list(pd.keys())
+                placeholders = ", ".join(["?"] * len(cols))
+                vals = [pd[c] for c in cols]
+                db.execute(
+                    f"INSERT INTO packages({', '.join(cols)}) VALUES({placeholders})", vals
+                )
+                merged_packages += 1
+
+        # 删除副产品
+        db.execute("DELETE FROM packages WHERE product_id=?", (mid,))
+        db.execute("DELETE FROM products WHERE id=?", (mid,))
+
+    # 去重并更新主产品 runner_ids
+    master_runners = list(set(master_runners))
+    db.execute("UPDATE products SET runner_ids=? WHERE id=?",
+               (_json.dumps(master_runners), master_id))
+
+    db.execute("PRAGMA foreign_keys=ON")
+    db.commit()
+    db.close()
+
+    return jsonify({
+        "success": True,
+        "merged_packages": merged_packages,
+        "merged_products": len(merge_ids),
+        "total_runners": len(master_runners),
+    })
+
+
+@app.route("/api/products/<int:pid>/runners", methods=["PUT"])
+@jwt_required()
+def products_update_runners(pid):
+    """更新产品的 runner 列表。"""
+    data = request.get_json(silent=True) or {}
+    runner_ids = data.get("runner_ids")  # list of user IDs
+
+    if runner_ids is None or not isinstance(runner_ids, list):
+        return jsonify({"success": False, "error": "请提供 runner_ids 列表"}), 400
+
+    db = _yt_db()
+    existing = db.execute("SELECT id FROM products WHERE id=?", (pid,)).fetchone()
+    if not existing:
+        db.close()
+        return jsonify({"success": False, "error": "产品不存在"}), 404
+
+    db.execute("UPDATE products SET runner_ids=? WHERE id=?",
+               (_json.dumps(runner_ids), pid))
+    db.commit()
+    db.close()
+
+    return jsonify({"success": True, "runner_ids": runner_ids})
 
 
 @app.route("/api/products/<int:pid>/detail", methods=["GET"])
