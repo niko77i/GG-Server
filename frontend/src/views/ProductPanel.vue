@@ -4,6 +4,10 @@
     <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
       <el-button type="primary" @click="showProductModal()">➕ 新增产品</el-button>
       <el-button @click="copyVisible = true">📋 复制导入</el-button>
+      <el-radio-group v-model="runnerFilter" @change="load" size="small">
+        <el-radio-button value="mine">我在跑的</el-radio-button>
+        <el-radio-button value="all">全部产品</el-radio-button>
+      </el-radio-group>
       <el-select v-model="store.filters.region" @change="load" placeholder="全部地区" clearable style="width:120px;" filterable>
         <el-option v-for="r in regions" :key="r" :label="r" :value="r" />
       </el-select>
@@ -15,6 +19,13 @@
         <el-radio-button :value="false">正常</el-radio-button>
         <el-radio-button :value="true">已暂停</el-radio-button>
       </el-radio-group>
+      <el-button
+        v-if="selectedIds.length >= 2"
+        type="warning"
+        @click="mergeProducts"
+      >
+        🔀 合并产品 ({{ selectedIds.length }})
+      </el-button>
     </div>
 
     <!-- 产品卡片列表 — 滚动区 -->
@@ -22,6 +33,8 @@
       <ProductCard
         v-for="p in store.products" :key="p.id"
         :product="p"
+        :selected="selectedIds.includes(p.id)"
+        @select="toggleSelect(p.id)"
         @edit="showProductModal($event)"
         @detail="showDetail($event)"
         @add-pkg="showAddPkg($event)"
@@ -58,11 +71,14 @@ import ProductModal from '@/components/ProductModal.vue'
 import ProductDetailModal from '@/components/ProductDetailModal.vue'
 import CopyImportModal from '@/components/CopyImportModal.vue'
 import AddPackageModal from '@/components/AddPackageModal.vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessageBox, ElMessage } from 'element-plus'
+import { productsApi } from '@/api/products'
 
 const store = useProductStore()
 const regions = ref([])
 const mccOptions = ref([])
+const runnerFilter = ref('mine')
+const selectedIds = ref([])
 
 const pmVisible = ref(false); const pmEditId = ref(null)
 const detailVisible = ref(false); const detailId = ref(null)
@@ -74,9 +90,35 @@ let searchTimer = null
 onMounted(() => load())
 
 async function load() {
-  const res = await store.loadProducts()
+  const res = await store.loadProducts({ runner: runnerFilter.value })
   regions.value = res.regions || []
   mccOptions.value = res.mcc_options || []
+  selectedIds.value = []
+}
+
+function toggleSelect(id) {
+  const idx = selectedIds.value.indexOf(id)
+  if (idx >= 0) selectedIds.value.splice(idx, 1)
+  else selectedIds.value.push(id)
+}
+
+async function mergeProducts() {
+  if (selectedIds.value.length < 2) return
+  try {
+    await ElMessageBox.confirm(
+      `将 ${selectedIds.value.length - 1} 个产品合并到第一个选中产品中？此操作不可撤销。`,
+      '确认合并', { type: 'warning', confirmButtonText: '合并', cancelButtonText: '取消' }
+    )
+    await productsApi.merge({
+      master_id: selectedIds.value[0],
+      merge_ids: selectedIds.value.slice(1),
+    })
+    ElMessage.success('合并完成')
+    selectedIds.value = []
+    load()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('合并失败')
+  }
 }
 
 function search() {

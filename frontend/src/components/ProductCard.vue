@@ -3,11 +3,23 @@
     <template #header>
       <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" @click="expanded = !expanded">
         <div style="display:flex;align-items:center;gap:12px;">
+          <input type="checkbox" :checked="selected" @click.stop="$emit('select')" style="width:auto;cursor:pointer;" />
           <span :style="{ width:'8px',height:'8px',borderRadius:'50%',background: product.status ? '#dc2626' : '#059669' }"></span>
           <strong>{{ product.product_name }}</strong>
           <el-tag v-if="product.kpi" size="small" type="warning">{{ product.kpi }}</el-tag>
           <el-tag v-if="product.region" size="small" type="primary">{{ product.region }}</el-tag>
           <el-tag v-if="product.mcc_name" size="small" type="info">🏢 {{ product.mcc_name }}</el-tag>
+          <span v-if="parsedRunnerIds.length" style="display:flex;align-items:center;gap:2px;">
+            <el-tooltip
+              v-for="rid in parsedRunnerIds" :key="rid"
+              :content="'Runner #' + rid"
+              placement="top"
+            >
+              <el-avatar :size="20" :style="{ fontSize:'10px', backgroundColor: avatarColor(rid) }">
+                {{ String(rid).slice(-2) }}
+              </el-avatar>
+            </el-tooltip>
+          </span>
           <span v-if="product.related_account_count" style="font-size:12px;color:#888;">
             👤 {{ product.related_account_count }} 账户
           </span>
@@ -76,13 +88,26 @@ import { useProductStore } from '@/stores/products'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 
-const props = defineProps({ product: Object })
-const emit = defineEmits(['edit', 'detail', 'add-pkg', 'del', 'toggle-pause', 'refresh'])
+const props = defineProps({ product: Object, selected: { type: Boolean, default: false } })
+const emit = defineEmits(['edit', 'detail', 'add-pkg', 'del', 'toggle-pause', 'refresh', 'select'])
 const store = useProductStore()
 const expanded = ref(false)
 const checkedIds = ref([])
 const filterStatus = ref('all')
 const editPkgModal = ref(null)
+
+const parsedRunnerIds = computed(() => {
+  const ids = props.product.runner_ids
+  if (!ids) return []
+  if (Array.isArray(ids)) return ids
+  try { const parsed = JSON.parse(ids); return Array.isArray(parsed) ? parsed : [] }
+  catch { return [] }
+})
+
+const avatarColors = ['#409EFF', '#67C23A', '#E6A23C', '#F56C6C', '#909399', '#B37FEB', '#36CFC9', '#FF85C0']
+function avatarColor(id) {
+  return avatarColors[Number(id) % avatarColors.length]
+}
 
 const packages = computed(() => {
   const pkgs = [...(props.product.packages || [])]

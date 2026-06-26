@@ -37,6 +37,36 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <el-divider />
+      <h4>🏃 在跑成员</h4>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+        <el-tag
+          v-for="rid in runnerIds"
+          :key="rid"
+          closable
+          @close="removeRunner(rid)"
+          size="small"
+        >
+          {{ getUserName(rid) }}
+        </el-tag>
+        <span v-if="!runnerIds.length" style="color:#999;font-size:12px;">暂无 runner</span>
+      </div>
+      <el-select
+        v-model="newRunnerId"
+        placeholder="添加 runner..."
+        size="small"
+        style="width:200px;"
+        @change="addRunner"
+      >
+        <el-option
+          v-for="u in availableUsers"
+          :key="u.id"
+          :label="u.display_name || u.username"
+          :value="u.id"
+          :disabled="runnerIds.includes(u.id)"
+        />
+      </el-select>
     </div>
     <template #footer>
       <el-button @click="$emit('update:visible', false)">关闭</el-button>
@@ -45,18 +75,66 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useProductStore } from '@/stores/products'
+import { productsApi } from '@/api/products'
+import { adminApi } from '@/api/admin'
+import { ElMessage } from 'element-plus'
 
 const props = defineProps({ visible: Boolean, prodId: Number })
 defineEmits(['update:visible'])
 const store = useProductStore()
 const product = ref(null)
+const availableUsers = ref([])
+const newRunnerId = ref(null)
+
+const runnerIds = computed(() => {
+  if (!product.value) return []
+  const ids = product.value.runner_ids
+  if (!ids) return []
+  if (Array.isArray(ids)) return ids
+  try { const parsed = JSON.parse(ids); return Array.isArray(parsed) ? parsed : [] }
+  catch { return [] }
+})
 
 async function load() {
   if (props.prodId) {
     const res = await store.loadProductDetail(props.prodId)
     product.value = res.product
+    loadUsers()
   }
+}
+
+async function loadUsers() {
+  try {
+    const res = await adminApi.listUsers()
+    availableUsers.value = res.users || []
+  } catch { availableUsers.value = [] }
+}
+
+function getUserName(rid) {
+  const u = availableUsers.value.find(u => u.id === rid)
+  return u ? (u.display_name || u.username) : `User #${rid}`
+}
+
+async function addRunner(newId) {
+  if (!newId || !product.value) return
+  const ids = [...runnerIds.value, newId]
+  try {
+    await productsApi.updateRunners(product.value.id, { runner_ids: ids })
+    product.value.runner_ids = JSON.stringify(ids)
+    ElMessage.success('Runner 已添加')
+  } catch { ElMessage.error('添加失败') }
+  newRunnerId.value = null
+}
+
+async function removeRunner(rid) {
+  if (!product.value) return
+  const ids = runnerIds.value.filter(id => id !== rid)
+  try {
+    await productsApi.updateRunners(product.value.id, { runner_ids: ids })
+    product.value.runner_ids = JSON.stringify(ids)
+    ElMessage.success('Runner 已移除')
+  } catch { ElMessage.error('移除失败') }
 }
 </script>

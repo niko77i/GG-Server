@@ -12,13 +12,14 @@ export const useProductStore = defineStore('products', {
   }),
 
   actions: {
-    async loadProducts() {
+    async loadProducts(extra = {}) {
       const params = {
         page: this.page, size: this.pageSize,
         search: this.filters.search || undefined,
         region: this.filters.region || undefined,
         mcc_id: this.filters.mcc_id || undefined,
         status: this.pausedMode ? 'paused' : '',
+        runner: extra.runner || undefined,
       }
       const res = await productsApi.list(params)
       this.products = res.products
