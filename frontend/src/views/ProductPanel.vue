@@ -5,8 +5,8 @@
       <el-button type="primary" @click="showProductModal()">➕ 新增产品</el-button>
       <el-button @click="copyVisible = true">📋 复制导入</el-button>
       <el-radio-group v-model="runnerFilter" @change="onRunnerFilterChange" size="small">
-        <el-radio-button value="mine">我在跑的</el-radio-button>
-        <el-radio-button value="all">全部产品</el-radio-button>
+        <el-radio-button value="mine">我在跑的 ({{ runnerCounts.mine ?? '...' }})</el-radio-button>
+        <el-radio-button value="all">全部产品 ({{ runnerCounts.all ?? '...' }})</el-radio-button>
       </el-radio-group>
       <el-select v-model="runnerUserId" @change="onRunnerUserChange" placeholder="按 runner 筛选" clearable size="small" style="width:160px;" filterable>
         <el-option v-for="u in runnerUserOptions" :key="u.id" :label="u.display_name || u.username" :value="u.id" />
@@ -84,6 +84,7 @@ const mccOptions = ref([])
 const runnerFilter = ref('mine')
 const runnerUserId = ref(null)
 const runnerUserOptions = ref([])
+const runnerCounts = ref({ mine: '...', all: '...' })
 const selectedIds = ref([])
 
 const pmVisible = ref(false); const pmEditId = ref(null)
@@ -103,6 +104,7 @@ async function load() {
   const res = await store.loadProducts({ runner: runnerParam() })
   regions.value = res.regions || []
   mccOptions.value = res.mcc_options || []
+  if (res.runner_counts) runnerCounts.value = res.runner_counts
   selectedIds.value = []
 }
 

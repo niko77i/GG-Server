@@ -1207,6 +1207,7 @@ def products_list():
         else:
             # 兼容旧数据 INTEGER 0（is_paused 迁移后）和新数据 TEXT ''
             where.append("(p.status IS NULL OR p.status = '' OR p.status = '0' OR p.status = 0)")
+    where.append("(p.is_archived IS NULL OR p.is_archived = 0)")
     sql = "SELECT p.*, m.name AS mcc_name, m.mcc_id AS mcc_code FROM products p LEFT JOIN mcc m ON p.mcc_id=m.id"
     if where: sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY p.created_at DESC LIMIT ? OFFSET ?"
@@ -1232,10 +1233,29 @@ def products_list():
         else:
             prod["related_account_count"] = 0
         products.append(prod)
-    regions = [r["region"] for r in db.execute("SELECT DISTINCT region FROM products WHERE region!='' ORDER BY region").fetchall()]
+    regions = [r["region"] for r in db.execute(
+        "SELECT DISTINCT region FROM products WHERE region!='' AND (is_archived IS NULL OR is_archived = 0) ORDER BY region"
+    ).fetchall()]
     mcc_options_for_filter = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()]
+
+    # runner 统计（兼容 is_archived NULL 的老数据）
+    runner_counts = {"all": db.execute(
+        "SELECT COUNT(*) FROM products p WHERE is_archived IS NULL OR is_archived = 0"
+    ).fetchone()[0]}
+    try:
+        uid = int(get_jwt_identity())
+    except Exception:
+        uid = None
+    if uid:
+        runner_counts["mine"] = db.execute(
+            "SELECT COUNT(*) FROM products p WHERE (p.runner_ids LIKE ? OR p.owner_id = ?) AND (is_archived IS NULL OR is_archived = 0)",
+            (f'%{uid}%', uid)
+        ).fetchone()[0]
+    else:
+        runner_counts["mine"] = runner_counts["all"]
+
     db.close()
-    return jsonify({"success": True, "products": products, "total": total, "regions": regions, "mcc_options": mcc_options_for_filter})
+    return jsonify({"success": True, "products": products, "total": total, "regions": regions, "mcc_options": mcc_options_for_filter, "runner_counts": runner_counts})
 
 
 @app.route("/api/products/create", methods=["POST"])
@@ -2600,26 +2620,11 @@ def auth_me():
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required(optional=True)
 def users_names():
-    """返回所有用户的 id/username/display_name，供 runner 选择器使用。
-    非 developer 用户看不到 developer 角色的用户。"""
+    """返回所有用户的 id/username/display_name，供 runner 选择器使用。"""
     db = database.get_db()
-    # 判断当前用户是否是 developer
-    is_dev = False
-    try:
-        uid = int(get_jwt_identity())
-        cur = db.execute("SELECT role FROM users WHERE id = ?", (uid,)).fetchone()
-        is_dev = cur and cur["role"] == "developer"
-    except Exception:
-        pass
-
-    if is_dev:
-        rows = db.execute(
-            "SELECT id, username, display_name FROM users WHERE role != 'hidden' ORDER BY id"
-        ).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT id, username, display_name FROM users WHERE role != 'hidden' AND role != 'developer' ORDER BY id"
-        ).fetchall()
+    rows = db.execute(
+        "SELECT id, username, display_name FROM users WHERE role != 'hidden' ORDER BY id"
+    ).fetchall()
     db.close()
     return jsonify({"success": True, "users": [dict(r) for r in rows]})
 
