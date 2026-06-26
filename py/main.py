@@ -971,8 +971,11 @@ def youtube_list():
 
 
 @app.route("/api/youtube/dates", methods=["GET"])
+@jwt_required()
 def youtube_dates():
     """返回当前筛选条件下有视频的日期及数量，供日期选择器标记使用。"""
+    user_id = int(get_jwt_identity())
+    scope = request.args.get("scope", "all").strip()
     region = request.args.get("region", "").strip()
     frame_type = request.args.get("frame_type", "").strip()
     effectiveness = request.args.get("effectiveness", "").strip()
@@ -981,6 +984,12 @@ def youtube_dates():
 
     db = _yt_db()
     where = []; params = []
+    if scope == "public":
+        where.append("is_public = 1")
+    elif scope == "private":
+        where.append("owner_id = ?"); params.append(user_id)
+    else:
+        where.append("(is_public = 1 OR owner_id = ?)"); params.append(user_id)
     for f, v in [("region", region), ("frame_type", frame_type), ("effectiveness", effectiveness), ("product_name", product_name)]:
         if v: where.append(f"{f}=?"); params.append(v)
     if review_status and review_status != "全部":
@@ -1000,11 +1009,12 @@ def youtube_dates():
 @app.route("/api/youtube/delete", methods=["POST"])
 @jwt_required()
 def youtube_delete():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
     if not ids: return jsonify({"success": False, "error": "未指定视频"}), 400
     db = _yt_db()
-    for vid in ids: db.execute("DELETE FROM videos WHERE id=?", (vid,))
+    for vid in ids: db.execute("DELETE FROM videos WHERE id=? AND owner_id=?", (vid, user_id))
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -1033,7 +1043,7 @@ def youtube_batch_edit():
     value = (data.get("value") or "").strip()
     if not ids:
         return jsonify({"success": False, "error": "未指定视频ID"}), 400
-    if field not in ("region", "frame_type", "effectiveness", "product_name", "review_status"):
+    if field not in ("region", "frame_type", "effectiveness", "product_name", "review_status", "is_public"):
         return jsonify({"success": False, "error": "无效字段"}), 400
     db = _yt_db()
     for vid in ids:
@@ -1044,6 +1054,7 @@ def youtube_batch_edit():
 
 
 @app.route("/api/youtube/tags", methods=["GET"])
+@jwt_required()
 def youtube_tags_get():
     db = _yt_db()
     tags = {}
@@ -1055,7 +1066,9 @@ def youtube_tags_get():
 
 
 @app.route("/api/youtube/tags", methods=["POST"])
+@jwt_required()
 def youtube_tags_save():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     new_regions = data.get("regions") or []
     new_frames = data.get("frame_types") or []
@@ -1084,12 +1097,12 @@ def youtube_tags_save():
                 deleted_videos.append((field_name, old_val))
 
     for (field, old_val), new_val in renames.items():
-        db.execute(f"UPDATE videos SET {field}=? WHERE {field}=?", (new_val, old_val))
+        db.execute(f"UPDATE videos SET {field}=? WHERE {field}=? AND owner_id=?", (new_val, old_val, user_id))
 
     affected = []
     if deleted_videos:
         for field, deleted_val in deleted_videos:
-            for r in db.execute(f"SELECT id, title FROM videos WHERE {field}=?", (deleted_val,)).fetchall():
+            for r in db.execute(f"SELECT id, title FROM videos WHERE {field}=? AND owner_id=?", (deleted_val, user_id)).fetchall():
                 affected.append({"id": r["id"], "title": r["title"] or r["id"], "field": field, "old_value": deleted_val})
 
     for k, v in [("regions", new_regions), ("frame_types", new_frames), ("effectiveness", new_effs), ("product_names", new_prods), ("review_statuses", new_review_statuses)]:
@@ -1502,8 +1515,8 @@ def accounts_list():
     for r in db.execute("SELECT status, COUNT(*) as cnt FROM accounts WHERE owner_id=? GROUP BY status", (user_id,)).fetchall():
         s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
     # 筛选下拉数据
-    mcc_options = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()]
-    agents = [r["agent"] for r in db.execute("SELECT DISTINCT agent FROM accounts WHERE agent!='' ORDER BY agent").fetchall()]
+    mcc_options = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc WHERE owner_id=? ORDER BY name", (user_id,)).fetchall()]
+    agents = [r["agent"] for r in db.execute("SELECT DISTINCT agent FROM accounts WHERE agent!='' AND owner_id=? ORDER BY agent", (user_id,)).fetchall()]
     db.close()
     return jsonify({"success": True, "accounts": accounts, "total": total, "mcc_options": mcc_options, "agents": agents, "status_counts": status_counts})
 
@@ -1576,9 +1589,10 @@ def accounts_update(aid):
 @app.route("/api/accounts/<int:aid>", methods=["DELETE"])
 @jwt_required()
 def accounts_delete(aid):
+    user_id = int(get_jwt_identity())
     db = _yt_db()
     try:
-        db.execute("DELETE FROM accounts WHERE id=?", (aid,))
+        db.execute("DELETE FROM accounts WHERE id=? AND owner_id=?", (aid, user_id))
         db.commit()
         return jsonify({"success": True})
     finally:
@@ -1588,6 +1602,7 @@ def accounts_delete(aid):
 @app.route("/api/accounts/batch-delete", methods=["POST"])
 @jwt_required()
 def accounts_batch_delete():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
     if not ids:
@@ -1595,7 +1610,7 @@ def accounts_batch_delete():
     db = _yt_db()
     try:
         for aid in ids:
-            db.execute("DELETE FROM accounts WHERE id=?", (aid,))
+            db.execute("DELETE FROM accounts WHERE id=? AND owner_id=?", (aid, user_id))
         db.commit()
         return jsonify({"success": True, "deleted": len(ids)})
     finally:
@@ -1744,6 +1759,7 @@ def mcc_update(mid):
 @app.route("/api/mcc/<int:mid>", methods=["DELETE"])
 @jwt_required()
 def mcc_delete(mid):
+    user_id = int(get_jwt_identity())
     db = _yt_db()
     # 检查是否有子 MCC
     children = db.execute("SELECT COUNT(*) FROM mcc WHERE parent_mcc_id=?", (mid,)).fetchone()[0]
@@ -1755,7 +1771,7 @@ def mcc_delete(mid):
     if acct_count > 0:
         db.close()
         return jsonify({"success": False, "error": f"该 MCC 下有 {acct_count} 个直接关联账户，请先解除关联"}), 400
-    db.execute("DELETE FROM mcc WHERE id=?", (mid,))
+    db.execute("DELETE FROM mcc WHERE id=? AND owner_id=?", (mid, user_id))
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -1763,6 +1779,7 @@ def mcc_delete(mid):
 @app.route("/api/mcc/batch-delete", methods=["POST"])
 @jwt_required()
 def mcc_batch_delete():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
     if not ids:
@@ -1779,7 +1796,7 @@ def mcc_batch_delete():
         if acct_count > 0:
             skipped.append({"id": mid, "reason": f"有 {acct_count} 个关联账户"})
             continue
-        db.execute("DELETE FROM mcc WHERE id=?", (mid,))
+        db.execute("DELETE FROM mcc WHERE id=? AND owner_id=?", (mid, user_id))
         deleted += 1
     db.commit(); db.close()
     return jsonify({"success": True, "deleted": deleted, "skipped": skipped})
