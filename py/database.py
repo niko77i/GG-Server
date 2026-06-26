@@ -169,6 +169,25 @@ def _ensure_schema(conn: sqlite3.Connection):
             last_scraped TEXT DEFAULT (datetime('now')),
             scraped_by INTEGER REFERENCES users(id)
         );
+
+        -- 导入历史记录
+        CREATE TABLE IF NOT EXISTS import_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES users(id),
+            file_name TEXT,
+            file_type TEXT,
+            products_count INTEGER DEFAULT 0,
+            packages_count INTEGER DEFAULT 0,
+            accounts_count INTEGER DEFAULT 0,
+            mcc_count INTEGER DEFAULT 0,
+            videos_count INTEGER DEFAULT 0,
+            copywritings_count INTEGER DEFAULT 0,
+            tags_count INTEGER DEFAULT 0,
+            skipped_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'success',
+            error_msg TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
     """)
 
     # 产品表迁移：补 mcc_id 和兼容 is_paused→status
@@ -206,6 +225,17 @@ def _ensure_schema(conn: sqlite3.Connection):
     mcols2 = [r[1] for r in conn.execute("PRAGMA table_info(mcc)").fetchall()]
     if "owner_id" not in mcols2:
         conn.execute("ALTER TABLE mcc ADD COLUMN owner_id INTEGER REFERENCES users(id)")
+
+    # 迁移：products 表补 owner_id/runner_ids/is_archived（2026-06-26 数据迁移）
+    pcols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+    if "owner_id" not in pcols:
+        conn.execute("ALTER TABLE products ADD COLUMN owner_id INTEGER REFERENCES users(id)")
+        conn.execute("UPDATE products SET owner_id = 1 WHERE owner_id IS NULL")
+    if "runner_ids" not in pcols:
+        conn.execute("ALTER TABLE products ADD COLUMN runner_ids TEXT DEFAULT '[]'")
+        conn.execute("UPDATE products SET runner_ids = '[1]' WHERE runner_ids IS NULL OR runner_ids = '[]'")
+    if "is_archived" not in pcols:
+        conn.execute("ALTER TABLE products ADD COLUMN is_archived INTEGER DEFAULT 0")
 
     # 初始化默认标签
     for k, v in [("regions", '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),
