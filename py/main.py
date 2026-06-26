@@ -102,6 +102,19 @@ def index():
     return send_from_directory(_FRONTEND_DIR, "index.html")
 
 
+@app.errorhandler(404)
+def spa_fallback(e):
+    """API 404 返回 JSON，其余返回 index.html（SPA 路由）。"""
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "error": "Not found"}), 404
+    # 如果请求的静态文件确实不存在，返回 404
+    full_path = os.path.join(_FRONTEND_DIR, request.path.lstrip("/"))
+    if os.path.isfile(full_path):
+        return send_from_directory(_FRONTEND_DIR, request.path.lstrip("/"))
+    # SPA 回退
+    return send_from_directory(_FRONTEND_DIR, "index.html")
+
+
 # ---------- API ----------
 
 @app.route("/api/health", methods=["GET"])
