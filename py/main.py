@@ -1438,7 +1438,9 @@ def _mcc_get_descendant_ids(mid):
 
 
 @app.route("/api/accounts/list", methods=["GET"])
+@jwt_required()
 def accounts_list():
+    user_id = int(get_jwt_identity())
     search = request.args.get("search", "").strip()
     mcc_id = request.args.get("mcc_id", "").strip()
     status = request.args.get("status", "").strip()
@@ -1446,7 +1448,7 @@ def accounts_list():
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
-    where = []; params = []
+    where = ["a.owner_id = ?"]; params = [user_id]
     if search:
         where.append("(a.name LIKE ? OR a.account_id LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -1477,7 +1479,7 @@ def accounts_list():
     accounts = [dict(r) for r in rows]
     # 各状态的计数
     status_counts = {}
-    for r in db.execute("SELECT status, COUNT(*) as cnt FROM accounts GROUP BY status").fetchall():
+    for r in db.execute("SELECT status, COUNT(*) as cnt FROM accounts WHERE owner_id=? GROUP BY status", (user_id,)).fetchall():
         s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
     # 筛选下拉数据
     mcc_options = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()]
@@ -1487,7 +1489,9 @@ def accounts_list():
 
 
 @app.route("/api/accounts/create", methods=["POST"])
+@jwt_required()
 def accounts_create():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     account_id = (data.get("account_id") or "").strip()
@@ -1498,7 +1502,7 @@ def accounts_create():
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
         db.execute(
-            "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,status,acquired_date,death_date,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,status,acquired_date,death_date,created_at,updated_at,owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (name, account_id,
              data.get("mcc_id") or None,
              (data.get("timezone") or "").strip(),
@@ -1506,7 +1510,7 @@ def accounts_create():
              (data.get("status") or "存活").strip(),
              (data.get("acquired_date") or datetime.date.today().isoformat()),
              (data.get("death_date") or "").strip(),
-             now, now))
+             now, now, user_id))
         db.commit()
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.close()
@@ -1522,6 +1526,7 @@ def accounts_create():
 
 
 @app.route("/api/accounts/<int:aid>", methods=["PUT"])
+@jwt_required()
 def accounts_update(aid):
     data = request.get_json(silent=True) or {}
     db = _yt_db()
@@ -1549,6 +1554,7 @@ def accounts_update(aid):
 
 
 @app.route("/api/accounts/<int:aid>", methods=["DELETE"])
+@jwt_required()
 def accounts_delete(aid):
     db = _yt_db()
     try:
@@ -1560,6 +1566,7 @@ def accounts_delete(aid):
 
 
 @app.route("/api/accounts/batch-delete", methods=["POST"])
+@jwt_required()
 def accounts_batch_delete():
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
@@ -1576,6 +1583,7 @@ def accounts_batch_delete():
 
 
 @app.route("/api/accounts/batch-update", methods=["POST"])
+@jwt_required()
 def accounts_batch_update():
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
