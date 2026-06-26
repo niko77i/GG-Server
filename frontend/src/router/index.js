@@ -14,12 +14,13 @@ const routes = [
   },
   {
     path: '/',
-    redirect: '/accounts'
+    redirect: '/youtube'
   },
   {
     path: '/accounts',
     component: () => import('../views/AccountsView.vue'),
     redirect: '/accounts/products',
+    meta: { admin: true },
     children: [
       { path: 'products', component: () => import('../views/ProductPanel.vue'), meta: { title: '产品管理' } },
       { path: 'ads', component: () => import('../views/AdsAccountPanel.vue'), meta: { title: '广告账户' } },
@@ -69,7 +70,7 @@ router.beforeEach((to, from, next) => {
     return
   }
   if (to.meta.admin && !auth.isAdmin) {
-    next('/accounts')
+    next('/youtube')
     return
   }
   if (!auth.isLoggedIn) {
