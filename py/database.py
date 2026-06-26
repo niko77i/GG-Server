@@ -122,6 +122,8 @@ def _ensure_schema(conn: sqlite3.Connection):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             region TEXT NOT NULL DEFAULT '通用',
             content TEXT NOT NULL,
+            owner_id INTEGER REFERENCES users(id),
+            effectiveness TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_copywritings_region ON copywritings(region);
@@ -236,6 +238,14 @@ def _ensure_schema(conn: sqlite3.Connection):
         conn.execute("UPDATE products SET runner_ids = '[1]' WHERE runner_ids IS NULL OR runner_ids = '[]'")
     if "is_archived" not in pcols:
         conn.execute("ALTER TABLE products ADD COLUMN is_archived INTEGER DEFAULT 0")
+
+    # 迁移：copywritings 表补 owner_id/effectiveness（2026-06-27 文案私有化）
+    cwcols = [r[1] for r in conn.execute("PRAGMA table_info(copywritings)").fetchall()]
+    if "owner_id" not in cwcols:
+        conn.execute("ALTER TABLE copywritings ADD COLUMN owner_id INTEGER REFERENCES users(id)")
+        conn.execute("UPDATE copywritings SET owner_id = 1 WHERE owner_id IS NULL")
+    if "effectiveness" not in cwcols:
+        conn.execute("ALTER TABLE copywritings ADD COLUMN effectiveness TEXT DEFAULT ''")
 
     # 初始化默认标签
     for k, v in [("regions", '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),

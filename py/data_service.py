@@ -191,22 +191,17 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
         except sqlite3.IntegrityError:
             report["skipped_count"] = report.get("skipped_count", 0) + 1
 
-    # === copywritings: 合并到共享池（按 content 去重） ===
+    # === copywritings: 归导入用户 ===
     for r in data.get("copywritings", []):
         d = dict(r)
         d.pop("id", None)
-        content = d.get("content", "")
-        region = d.get("region", "通用")
-        existing = db.execute(
-            "SELECT id FROM copywritings WHERE content=? AND region=?", (content, region)
-        ).fetchone()
-        if existing:
-            report["copywritings"]["skipped"] += 1
-        else:
-            db.execute(
-                "INSERT INTO copywritings(region, content, created_at) VALUES(?,?,?)",
-                (region, content, now)
-            )
+        d["owner_id"] = target_user_id
+        existing_cols = [c[1] for c in db.execute("PRAGMA table_info(copywritings)").fetchall()]
+        cols = [k for k in d if k in existing_cols]
+        if cols:
+            placeholders = ", ".join(["?"] * len(cols))
+            vals = [d[c] for c in cols]
+            db.execute(f"INSERT INTO copywritings({', '.join(cols)}) VALUES({placeholders})", vals)
             report["copywritings"]["imported"] += 1
 
     # === tags: 合并到共享池（按 key 去重） ===
@@ -294,8 +289,13 @@ def export_user_data(user_id: int) -> dict:
         except sqlite3.OperationalError:
             data[table] = []
 
-    # copywritings, tags, config (共享数据也导出，方便备份)
-    for table in ["copywritings", "tags"]:
+    # copywritings: 归入用户私有
+    data["copywritings"] = [dict(r) for r in db.execute(
+        "SELECT * FROM copywritings WHERE owner_id=?", (user_id,)
+    ).fetchall()]
+
+    # tags, config (共享数据也导出，方便备份)
+    for table in ["tags"]:
         data[table] = [dict(r) for r in db.execute(f"SELECT * FROM {table}").fetchall()]
 
     # config: 只导出非系统 key

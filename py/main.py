@@ -2374,10 +2374,13 @@ def google_ads_report():
 # ---------- 文案管理 API ----------
 
 @app.route("/api/copywriting/import", methods=["POST"])
+@jwt_required()
 def copywriting_import():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
     region = (data.get("region") or "通用").strip()
+    effectiveness = (data.get("effectiveness") or "").strip()
     if not text:
         return jsonify({"success": False, "error": "请输入文案内容"}), 400
 
@@ -2388,26 +2391,31 @@ def copywriting_import():
     db = _yt_db()
     for line in lines:
         db.execute(
-            "INSERT INTO copywritings(region, content) VALUES(?,?)",
-            (region, line)
+            "INSERT INTO copywritings(region, content, owner_id, effectiveness) VALUES(?,?,?,?)",
+            (region, line, user_id, effectiveness)
         )
     db.commit(); db.close()
     return jsonify({"success": True, "imported": len(lines)})
 
 
 @app.route("/api/copywriting/list", methods=["GET"])
+@jwt_required()
 def copywriting_list():
+    user_id = int(get_jwt_identity())
     region = request.args.get("region", "").strip()
     db = _yt_db()
 
     if region:
         rows = db.execute(
-            "SELECT * FROM copywritings WHERE region=? ORDER BY created_at DESC",
-            (region,)
+            "SELECT * FROM copywritings WHERE owner_id=? AND region=? "
+            "ORDER BY CASE effectiveness WHEN '成效' THEN 0 ELSE 1 END, created_at DESC",
+            (user_id, region)
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT * FROM copywritings ORDER BY created_at DESC"
+            "SELECT * FROM copywritings WHERE owner_id=? "
+            "ORDER BY CASE effectiveness WHEN '成效' THEN 0 ELSE 1 END, created_at DESC",
+            (user_id,)
         ).fetchall()
 
     items = [dict(r) for r in rows]
@@ -2421,13 +2429,14 @@ def copywriting_list():
 
 
 @app.route("/api/copywriting/edit", methods=["POST"])
+@jwt_required()
 def copywriting_edit():
     data = request.get_json(silent=True) or {}
     cid = data.get("id")
     if not cid:
         return jsonify({"success": False, "error": "未指定文案ID"}), 400
     db = _yt_db()
-    for f in ["region", "content"]:
+    for f in ["region", "content", "effectiveness"]:
         if f in data:
             db.execute(f"UPDATE copywritings SET {f}=? WHERE id=?", (data[f], cid))
     db.commit()
@@ -2437,6 +2446,7 @@ def copywriting_edit():
 
 
 @app.route("/api/copywriting/delete", methods=["POST"])
+@jwt_required()
 def copywriting_delete():
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
@@ -2450,17 +2460,22 @@ def copywriting_delete():
 
 
 @app.route("/api/copywriting/batch-edit", methods=["POST"])
+@jwt_required()
 def copywriting_batch_edit():
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
     region = (data.get("region") or "").strip()
+    effectiveness = data.get("effectiveness")
     if not ids:
         return jsonify({"success": False, "error": "未指定文案ID"}), 400
-    if not region:
-        return jsonify({"success": False, "error": "请选择地区"}), 400
+    if not region and effectiveness is None:
+        return jsonify({"success": False, "error": "请选择地区或成效标签"}), 400
     db = _yt_db()
     for cid in ids:
-        db.execute("UPDATE copywritings SET region=? WHERE id=?", (region, cid))
+        if region:
+            db.execute("UPDATE copywritings SET region=? WHERE id=?", (region, cid))
+        if effectiveness is not None:
+            db.execute("UPDATE copywritings SET effectiveness=? WHERE id=?", (effectiveness, cid))
     db.commit(); db.close()
     return jsonify({"success": True, "updated": len(ids)})
 

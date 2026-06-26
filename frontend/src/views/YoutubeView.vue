@@ -14,6 +14,10 @@
     <div v-show="activeTab === 'view'" class="yt-view-tab">
       <div style="flex-shrink:0;">
         <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+          <el-radio-group v-model="store.filters.scope" @change="loadVideos" size="small">
+            <el-radio-button value="public">公用</el-radio-button>
+            <el-radio-button value="private">私有</el-radio-button>
+          </el-radio-group>
           <el-select v-model="store.filters.region" @change="loadVideos" placeholder="全部地区" clearable size="small" style="flex:1;min-width:110px;">
             <el-option v-for="r in store.tags.regions" :key="r" :label="r + ' (' + (store.counts.region?.[r] || 0) + ')'" :value="r" />
           </el-select>
@@ -133,6 +137,9 @@
         <el-select v-model="cwBatchRegion" @change="val => cwDoBatchEdit(val)" placeholder="批量改地区" size="small" style="width:140px;" clearable filterable>
           <el-option v-for="r in store.tags.regions" :key="r" :label="r" :value="r" />
         </el-select>
+        <el-select v-model="cwBatchEff" @change="val => cwDoBatchEffEdit(val)" placeholder="批量改成效" size="small" style="width:140px;" clearable filterable>
+          <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e || '(空)'" :value="e" />
+        </el-select>
         <span style="font-size:12px;color:#888;margin-left:auto;">已选 {{ cwSelected.length }} 条</span>
       </div>
 
@@ -147,6 +154,7 @@
           <template #default="{ row }">
             <div v-if="!row.isRegion" class="cw-content-cell">
               <div class="cw-content-row">
+                <el-tag v-if="row.effectiveness" size="small" :type="row.effectiveness === '成效' ? 'success' : 'warning'" style="margin-right:6px;flex-shrink:0;">{{ row.effectiveness }}</el-tag>
                 <span class="cw-content-text" @click="copyCopywriting(row)" :title="row.content">{{ row.content }}</span>
                 <span class="cw-content-actions">
                   <el-button link size="small" @click.stop="cwTranslate(row)"
@@ -211,6 +219,9 @@
         <el-select v-model="cwImportRegion" placeholder="地区" size="small" style="width:100%;margin-bottom:12px;">
           <el-option v-for="r in store.tags.regions" :key="r" :label="r" :value="r" />
         </el-select>
+        <el-select v-model="cwImportEff" placeholder="成效（可选）" size="small" clearable style="width:100%;margin-bottom:12px;">
+          <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e || '(空)'" :value="e" />
+        </el-select>
         <el-input v-model="cwImportText" type="textarea" :rows="8" placeholder="每行一条文案，空行自动跳过" />
         <el-button type="primary" @click="cwDoImport" :loading="cwImporting" style="margin-top:12px;">导入文案</el-button>
         <div v-if="cwImportResult" style="margin-top:8px;font-size:12px;">{{ cwImportResult }}</div>
@@ -236,6 +247,11 @@
         <el-form-item label="地区">
           <el-select v-model="cwEditForm.region" style="width:100%;" filterable>
             <el-option v-for="r in store.tags.regions" :key="r" :label="r" :value="r" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="成效">
+          <el-select v-model="cwEditForm.effectiveness" style="width:100%;" clearable>
+            <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e || '(空)'" :value="e" />
           </el-select>
         </el-form-item>
         <el-form-item label="文案内容">
@@ -489,9 +505,11 @@ const cwTableRef = ref(null)
 const cwSelected = ref([])
 const cwImportText = ref('')
 const cwImportRegion = ref('通用')
+const cwImportEff = ref('')
 const cwImporting = ref(false)
 const cwImportResult = ref('')
 const cwBatchRegion = ref('')
+const cwBatchEff = ref('')
 const cwTransMap = ref({})
 
 const CW_LANGS = [
@@ -602,7 +620,7 @@ const cwEditForm = ref({})
 const cwSavingEdit = ref(false)
 
 function cwOpenEdit(row) {
-  cwEditForm.value = { id: row.id, region: row.region, content: row.content }
+  cwEditForm.value = { id: row.id, region: row.region, effectiveness: row.effectiveness || '', content: row.content }
   cwEditVisible.value = true
 }
 
@@ -644,13 +662,21 @@ async function cwDoBatchEdit(region) {
   loadCopywritings()
 }
 
+async function cwDoBatchEffEdit(effectiveness) {
+  if (effectiveness === undefined || effectiveness === null || !cwSelected.value.length) return
+  await store.batchEditCopywritings({ ids: cwSelected.value.map(v => v.id), effectiveness })
+  cwBatchEff.value = ''
+  ElMessage.success(`已更新 ${cwSelected.value.length} 条文案成效 ✓`)
+  loadCopywritings()
+}
+
 // 导入
 async function cwDoImport() {
   const text = cwImportText.value.trim()
   if (!text) return
   cwImporting.value = true
   try {
-    const res = await store.importCopywritings({ text, region: cwImportRegion.value })
+    const res = await store.importCopywritings({ text, region: cwImportRegion.value, effectiveness: cwImportEff.value })
     cwImportResult.value = `导入 ${res.imported} 条`
     cwImportText.value = ''
     loadCopywritings()

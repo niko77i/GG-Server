@@ -6,7 +6,7 @@ export const useYoutubeStore = defineStore('youtube', {
     videos: [],
     counts: {},
     tags: { regions: [], frame_types: [], effectiveness: [], product_names: [], review_statuses: [] },
-    filters: { region: '', frame_type: '', effectiveness: '', product_name: '', review_status: '能过审', from_date: '', to_date: '' },
+    filters: { region: '', frame_type: '', effectiveness: '', product_name: '', review_status: '能过审', from_date: '', to_date: '', scope: 'private' },
     videoDates: {},
     copywritings: [],
     copywritingCounts: {},
