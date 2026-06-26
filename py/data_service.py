@@ -183,8 +183,8 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
         placeholders = ", ".join(["?"] * len(cols))
         vals = [d[c] for c in cols]
         try:
-            db.execute(f"INSERT OR IGNORE INTO videos({', '.join(cols)}) VALUES({placeholders})", vals)
-            if db.changes():
+            cur = db.execute(f"INSERT OR IGNORE INTO videos({', '.join(cols)}) VALUES({placeholders})", vals)
+            if cur.rowcount > 0:
                 report["videos"] += 1
             else:
                 report["skipped_count"] = report.get("skipped_count", 0) + 1
