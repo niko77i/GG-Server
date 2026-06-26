@@ -96,7 +96,7 @@ def _ensure_schema(conn: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS mcc (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            mcc_id TEXT UNIQUE NOT NULL,
+            mcc_id TEXT NOT NULL,
             level TEXT DEFAULT '',
             parent_mcc_id INTEGER REFERENCES mcc(id),
             created_at TEXT DEFAULT (datetime('now','localtime')),
