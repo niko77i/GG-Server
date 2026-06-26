@@ -892,6 +892,8 @@ def youtube_import():
     effectiveness = (data.get("effectiveness") or "").strip()
     product_name = (data.get("product_name") or "").strip()
     review_status = (data.get("review_status") or "能过审").strip()
+    imported_at = (data.get("imported_at") or "").strip()  # 用户指定时间，为空则用当前时间
+    is_public = data.get("is_public", 0)  # 0=私有, 1=公开
     if not urls:
         return jsonify({"success": False, "error": "请输入至少一个链接"}), 400
 
@@ -900,6 +902,12 @@ def youtube_import():
     duplicates = []
     import datetime
     import requests as _req
+
+    # 时间：用户指定优先，否则用当前时间
+    if imported_at:
+        ts = imported_at
+    else:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     for url in urls:
         url = url.strip()
@@ -921,8 +929,7 @@ def youtube_import():
                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                    (vid, f"https://www.youtube.com/watch?v={vid}", title, region, frame_type,
                     effectiveness, product_name, review_status,
-                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    user_id, 0))
+                    ts, user_id, is_public))
         imported += 1
 
     db.commit(); db.close()
@@ -1134,13 +1141,14 @@ def youtube_tags_save():
 import re as _re_prod
 
 @app.route("/api/products/list", methods=["GET"])
+@jwt_required(optional=True)
 def products_list():
     search = request.args.get("search", "").strip()
     region = request.args.get("region", "").strip()
     product_id = request.args.get("product_id", "").strip()
     mcc_id = request.args.get("mcc_id", "").strip()
     status_filter = request.args.get("status")  # None=不传, ""=正常, "paused"=暂停
-    runner = request.args.get("runner", "mine").strip()  # "mine" | "all"
+    runner = request.args.get("runner", "mine").strip()  # "mine" | "all" | <user_id>
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
@@ -1155,6 +1163,12 @@ def products_list():
         if user_id:
             where.append("(p.runner_ids LIKE ? OR p.owner_id = ?)")
             params += [f'%{user_id}%', user_id]
+    elif runner == "all":
+        pass  # 不过滤
+    elif runner.isdigit():
+        # 按指定用户筛选
+        where.append("(p.runner_ids LIKE ? OR p.owner_id = ?)")
+        params += [f'%{runner}%', int(runner)]
     if search:
         where.append("(p.product_name LIKE ? OR p.kpi LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -2563,13 +2577,28 @@ def auth_me():
 
 
 @app.route("/api/users/names", methods=["GET"])
-@jwt_required()
+@jwt_required(optional=True)
 def users_names():
-    """返回所有用户的 id/username/display_name，供 runner 选择器使用。"""
+    """返回所有用户的 id/username/display_name，供 runner 选择器使用。
+    非 developer 用户看不到 developer 角色的用户。"""
     db = database.get_db()
-    rows = db.execute(
-        "SELECT id, username, display_name FROM users WHERE role != 'hidden' ORDER BY id"
-    ).fetchall()
+    # 判断当前用户是否是 developer
+    is_dev = False
+    try:
+        uid = int(get_jwt_identity())
+        cur = db.execute("SELECT role FROM users WHERE id = ?", (uid,)).fetchone()
+        is_dev = cur and cur["role"] == "developer"
+    except Exception:
+        pass
+
+    if is_dev:
+        rows = db.execute(
+            "SELECT id, username, display_name FROM users WHERE role != 'hidden' ORDER BY id"
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, username, display_name FROM users WHERE role != 'hidden' AND role != 'developer' ORDER BY id"
+        ).fetchall()
     db.close()
     return jsonify({"success": True, "users": [dict(r) for r in rows]})
 
@@ -2612,7 +2641,7 @@ def admin_list_users():
     search = request.args.get("search", "")
     page = int(request.args.get("page", 1))
     page_size = int(request.args.get("page_size", 20))
-    result = auth.list_users(search, page, page_size)
+    result = auth.list_users(search, page, page_size, current_user_id=user_id)
     return jsonify(success=True, **result)
 
 @app.route("/api/admin/users/<int:uid>/role", methods=["POST"])
@@ -2622,6 +2651,8 @@ def admin_update_role(uid):
     user = auth.get_user_by_id(user_id)
     if not user or user["role"] not in ("developer", "admin"):
         return jsonify(success=False, error="Permission denied"), 403
+    if uid == user_id:
+        return jsonify(success=False, error="不能修改自己的角色"), 403
     data = request.get_json()
     new_role = data.get("role", "")
     if new_role not in ("user", "admin", "hidden"):
@@ -2637,6 +2668,8 @@ def admin_toggle_user(uid):
     user = auth.get_user_by_id(user_id)
     if not user or user["role"] not in ("developer", "admin"):
         return jsonify(success=False, error="Permission denied"), 403
+    if uid == user_id:
+        return jsonify(success=False, error="不能禁用自己"), 403
     result = auth.toggle_user_status(uid)
     if result:
         return jsonify(success=True, user=result)
@@ -2658,11 +2691,122 @@ def admin_delete_user(uid):
         return jsonify(success=False, error="Cannot delete developer account"), 400
     conn = database.get_db()
     try:
+        # 先解除外键关联：将其他表中引用此用户的字段置空
+        conn.execute("UPDATE users SET created_by = NULL WHERE created_by = ?", (uid,))
+        conn.execute("UPDATE products SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE accounts SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE mcc SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE videos SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE copywritings SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE scrape_cache SET scraped_by = NULL WHERE scraped_by = ?", (uid,))
+        conn.execute("DELETE FROM import_history WHERE user_id = ?", (uid,))
+        # 现在可以安全删除用户
         conn.execute("DELETE FROM users WHERE id = ?", (uid,))
         conn.commit()
         return jsonify(success=True)
+    except Exception as e:
+        return jsonify(success=False, error=f"删除失败: {str(e)}"), 500
     finally:
         conn.close()
+
+
+@app.route("/api/admin/users/<int:uid>", methods=["PUT"])
+@jwt_required()
+def admin_update_user(uid):
+    """编辑用户信息（用户名、显示名）。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] not in ("developer", "admin"):
+        return jsonify(success=False, error="Permission denied"), 403
+
+    target = auth.get_user_by_id(uid)
+    if not target:
+        return jsonify(success=False, error="User not found"), 404
+    # 非 developer 不能修改 developer 的信息
+    if target["role"] == "developer" and user["role"] != "developer":
+        return jsonify(success=False, error="Cannot modify developer account"), 400
+
+    data = request.get_json(silent=True) or {}
+    username = data.get("username")
+    display_name = data.get("display_name")
+
+    if username is not None:
+        username = username.strip()
+        if len(username) < 4 or len(username) > 20:
+            return jsonify(success=False, error="用户名需 4-20 个字符"), 400
+
+    result = auth.update_user(uid, username=username, display_name=display_name)
+    if result:
+        return jsonify(success=True, user=result)
+    return jsonify(success=False, error="用户名重复或更新失败"), 400
+
+
+@app.route("/api/admin/users/<int:uid>/password", methods=["PUT"])
+@jwt_required()
+def admin_reset_password(uid):
+    """管理员重置用户密码。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] not in ("developer", "admin"):
+        return jsonify(success=False, error="Permission denied"), 403
+
+    target = auth.get_user_by_id(uid)
+    if not target:
+        return jsonify(success=False, error="User not found"), 404
+    # 非 developer 不能修改 developer 的密码
+    if target["role"] == "developer" and user["role"] != "developer":
+        return jsonify(success=False, error="Cannot modify developer account"), 400
+
+    data = request.get_json(silent=True) or {}
+    password = data.get("password", "")
+    if not password or len(password) < 6:
+        return jsonify(success=False, error="密码至少 6 位"), 400
+
+    if auth.update_password(uid, password):
+        return jsonify(success=True)
+    return jsonify(success=False, error="更新失败"), 400
+
+
+@app.route("/api/auth/password", methods=["PUT"])
+@jwt_required()
+def auth_change_password():
+    """用户自己修改密码。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    old_password = data.get("old_password", "")
+    new_password = data.get("new_password", "")
+
+    if not old_password or not new_password:
+        return jsonify(success=False, error="请提供旧密码和新密码"), 400
+    if len(new_password) < 6:
+        return jsonify(success=False, error="新密码至少 6 位"), 400
+
+    current_user = auth.get_user_by_id(user_id)
+    if not current_user:
+        return jsonify(success=False, error="User not found"), 404
+    # get_user_by_id 不含 password，通过 username 获取完整信息验证旧密码
+    full_user = auth.get_user_by_username(current_user["username"])
+    if not auth.verify_password(old_password, full_user["password"]):
+        return jsonify(success=False, error="旧密码不正确"), 400
+
+    if auth.update_password(user_id, new_password):
+        return jsonify(success=True)
+    return jsonify(success=False, error="更新失败"), 400
+
+
+@app.route("/api/auth/profile", methods=["PUT"])
+@jwt_required()
+def auth_update_profile():
+    """用户自己更新个人信息（显示名）。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    display_name = data.get("display_name", "").strip()
+
+    result = auth.update_user(user_id, username=None, display_name=display_name)
+    if result:
+        return jsonify(success=True, user=result)
+    return jsonify(success=False, error="更新失败"), 400
+
 
 # ---------- admin_required decorator ----------
 

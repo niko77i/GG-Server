@@ -4,10 +4,13 @@
     <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
       <el-button type="primary" @click="showProductModal()">➕ 新增产品</el-button>
       <el-button @click="copyVisible = true">📋 复制导入</el-button>
-      <el-radio-group v-model="runnerFilter" @change="load" size="small">
+      <el-radio-group v-model="runnerFilter" @change="onRunnerFilterChange" size="small">
         <el-radio-button value="mine">我在跑的</el-radio-button>
         <el-radio-button value="all">全部产品</el-radio-button>
       </el-radio-group>
+      <el-select v-model="runnerUserId" @change="onRunnerUserChange" placeholder="按 runner 筛选" clearable size="small" style="width:160px;" filterable>
+        <el-option v-for="u in runnerUserOptions" :key="u.id" :label="u.display_name || u.username" :value="u.id" />
+      </el-select>
       <el-select v-model="store.filters.region" @change="load" placeholder="全部地区" clearable style="width:120px;" filterable>
         <el-option v-for="r in regions" :key="r" :label="r" :value="r" />
       </el-select>
@@ -73,11 +76,14 @@ import CopyImportModal from '@/components/CopyImportModal.vue'
 import AddPackageModal from '@/components/AddPackageModal.vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { productsApi } from '@/api/products'
+import api from '@/api/client'
 
 const store = useProductStore()
 const regions = ref([])
 const mccOptions = ref([])
 const runnerFilter = ref('mine')
+const runnerUserId = ref(null)
+const runnerUserOptions = ref([])
 const selectedIds = ref([])
 
 const pmVisible = ref(false); const pmEditId = ref(null)
@@ -87,13 +93,34 @@ const addPkgVisible = ref(false); const addPkgProdId = ref(null)
 
 let searchTimer = null
 
-onMounted(() => load())
+onMounted(() => { load(); loadRunnerUsers() })
+
+function runnerParam() {
+  return runnerUserId.value ? String(runnerUserId.value) : runnerFilter.value
+}
 
 async function load() {
-  const res = await store.loadProducts({ runner: runnerFilter.value })
+  const res = await store.loadProducts({ runner: runnerParam() })
   regions.value = res.regions || []
   mccOptions.value = res.mcc_options || []
   selectedIds.value = []
+}
+
+async function loadRunnerUsers() {
+  try {
+    const res = await api.get('/users/names')
+    runnerUserOptions.value = res.users || []
+  } catch { runnerUserOptions.value = [] }
+}
+
+function onRunnerFilterChange() {
+  runnerUserId.value = null
+  load()
+}
+
+function onRunnerUserChange(uid) {
+  if (uid) runnerFilter.value = 'mine'  // 重置 radio
+  load()
 }
 
 function toggleSelect(id) {
