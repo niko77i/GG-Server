@@ -50,8 +50,9 @@
       </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="160" />
       <el-table-column prop="last_login" label="最后登录" width="160" />
-      <el-table-column label="操作" min-width="200">
+      <el-table-column label="操作" width="280" fixed="right">
         <template #default="{ row }">
+          <el-button size="small" @click="showImportDialog(row)">📥 导入数据</el-button>
           <el-dropdown v-if="row.role !== 'developer'" trigger="click" @command="(v) => handleRoleChange(row.id, v)">
             <el-button size="small" link>切换角色</el-button>
             <template #dropdown>
@@ -74,12 +75,34 @@
       <el-pagination v-if="total > pageSize" background layout="prev,pager,next" :total="total" :page-size="pageSize" :current-page="currentPage" @current-change="handlePageChange" />
     </div>
   </div>
+
+    <el-dialog v-model="importDialogVisible" title="导入数据" width="400px">
+      <p>为 <b>{{ importTargetUser?.display_name || importTargetUser?.username }}</b> 导入数据</p>
+      <el-upload
+        :auto-upload="false"
+        :on-change="onAdminFileChange"
+        :limit="1"
+        accept=".db,.json"
+        drag
+      >
+        <el-icon><UploadFilled /></el-icon>
+        <div>拖拽或点击上传 .db / .json 文件</div>
+      </el-upload>
+      <template #footer>
+        <el-button @click="importDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="adminConfirmImport" :loading="adminImporting" :disabled="!adminImportFile">
+          确认导入
+        </el-button>
+      </template>
+    </el-dialog>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue'
 import { adminApi } from '../api/admin'
+import { adminDataApi } from '@/api/data'
 import { ElMessage } from 'element-plus'
+import { UploadFilled } from '@element-plus/icons-vue'
 
 const users = ref([])
 const total = ref(0)
@@ -141,6 +164,35 @@ async function handleDelete(uid) {
 }
 
 onMounted(() => fetchUsers())
+
+// ---- Admin import ----
+const importDialogVisible = ref(false)
+const importTargetUser = ref(null)
+const adminImportFile = ref(null)
+const adminImporting = ref(false)
+
+function showImportDialog(user) {
+  importTargetUser.value = user
+  importDialogVisible.value = true
+}
+
+function onAdminFileChange(file) {
+  adminImportFile.value = file.raw
+}
+
+async function adminConfirmImport() {
+  if (!adminImportFile.value || !importTargetUser.value) return
+  adminImporting.value = true
+  try {
+    const res = await adminDataApi.importForUser(adminImportFile.value, importTargetUser.value.id)
+    ElMessage.success('导入完成')
+    importDialogVisible.value = false
+    adminImportFile.value = null
+  } catch (e) {
+    ElMessage.error('导入失败: ' + (e.response?.data?.error || e.message))
+  }
+  adminImporting.value = false
+}
 
 const showCreateDialog = ref(false)
 const creating = ref(false)
