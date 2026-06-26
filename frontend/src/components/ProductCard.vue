@@ -9,17 +9,12 @@
           <el-tag v-if="product.kpi" size="small" type="warning">{{ product.kpi }}</el-tag>
           <el-tag v-if="product.region" size="small" type="primary">{{ product.region }}</el-tag>
           <el-tag v-if="product.mcc_name" size="small" type="info">🏢 {{ product.mcc_name }}</el-tag>
-          <span v-if="parsedRunnerIds.length" style="display:flex;align-items:center;gap:2px;">
-            <el-tooltip
-              v-for="rid in parsedRunnerIds" :key="rid"
-              :content="'Runner #' + rid"
-              placement="top"
-            >
-              <el-avatar :size="20" :style="{ fontSize:'10px', backgroundColor: avatarColor(rid) }">
-                {{ String(rid).slice(-2) }}
-              </el-avatar>
-            </el-tooltip>
-          </span>
+          <el-tooltip v-if="parsedRunnerIds.length" placement="top">
+            <template #content>
+              <div v-for="rid in parsedRunnerIds" :key="rid">{{ getRunnerName(rid) }}</div>
+            </template>
+            <el-tag size="small" type="info">🏃 {{ parsedRunnerIds.length }}人</el-tag>
+          </el-tooltip>
           <span v-if="product.related_account_count" style="font-size:12px;color:#888;">
             👤 {{ product.related_account_count }} 账户
           </span>
@@ -83,10 +78,11 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useProductStore } from '@/stores/products'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
+import api from '@/api/client'
 
 const props = defineProps({ product: Object, selected: { type: Boolean, default: false } })
 const emit = defineEmits(['edit', 'detail', 'add-pkg', 'del', 'toggle-pause', 'refresh', 'select'])
@@ -95,6 +91,17 @@ const expanded = ref(false)
 const checkedIds = ref([])
 const filterStatus = ref('all')
 const editPkgModal = ref(null)
+const allUsers = ref([])
+
+onMounted(async () => {
+  try { const res = await api.get('/users/names'); allUsers.value = res.users || [] }
+  catch { allUsers.value = [] }
+})
+
+function getRunnerName(rid) {
+  const u = allUsers.value.find(u => u.id === rid)
+  return u ? (u.display_name || u.username) : 'User #' + rid
+}
 
 const parsedRunnerIds = computed(() => {
   const ids = props.product.runner_ids
@@ -103,11 +110,6 @@ const parsedRunnerIds = computed(() => {
   try { const parsed = JSON.parse(ids); return Array.isArray(parsed) ? parsed : [] }
   catch { return [] }
 })
-
-const avatarColors = ['#409EFF', '#67C23A', '#E6A23C', '#F56C6C', '#909399', '#B37FEB', '#36CFC9', '#FF85C0']
-function avatarColor(id) {
-  return avatarColors[Number(id) % avatarColors.length]
-}
 
 const packages = computed(() => {
   const pkgs = [...(props.product.packages || [])]
