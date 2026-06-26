@@ -22,31 +22,7 @@
       <el-table-column label="角色" width="120">
         <template #default="{ row }">
           <el-tag :type="roleType(row.role)" size="small">{{ roleLabel(row.role) }}</el-tag>
-        
-    <el-dialog v-model="showCreateDialog" title="创建用户" width="400px">
-      <el-form :model="createForm" label-width="80px" size="small">
-        <el-form-item label="用户名">
-          <el-input v-model="createForm.username" placeholder="4-20个字符" />
-        </el-form-item>
-        <el-form-item label="密码">
-          <el-input v-model="createForm.password" type="password" placeholder="至少6位" show-password />
-        </el-form-item>
-        <el-form-item label="显示名">
-          <el-input v-model="createForm.display_name" placeholder="可选" />
-        </el-form-item>
-        <el-form-item label="角色">
-          <el-select v-model="createForm.role" style="width:100%">
-            <el-option label="普通用户" value="user" />
-            <el-option label="管理员" value="admin" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="showCreateDialog = false">取消</el-button>
-        <el-button type="primary" :loading="creating" @click="handleCreate">创建</el-button>
-      </template>
-    </el-dialog>
-</template>
+        </template>
       </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="160" />
       <el-table-column prop="last_login" label="最后登录" width="160" />
@@ -74,8 +50,33 @@
     <div style="display:flex;justify-content:center;padding:16px 0;">
       <el-pagination v-if="total > pageSize" background layout="prev,pager,next" :total="total" :page-size="pageSize" :current-page="currentPage" @current-change="handlePageChange" />
     </div>
-  </div>
 
+    <!-- 创建用户弹窗 -->
+    <el-dialog v-model="showCreateDialog" title="创建用户" width="400px">
+      <el-form :model="createForm" label-width="80px" size="small">
+        <el-form-item label="用户名">
+          <el-input v-model="createForm.username" placeholder="4-20个字符" />
+        </el-form-item>
+        <el-form-item label="密码">
+          <el-input v-model="createForm.password" type="password" placeholder="至少6位" show-password />
+        </el-form-item>
+        <el-form-item label="显示名">
+          <el-input v-model="createForm.display_name" placeholder="可选" />
+        </el-form-item>
+        <el-form-item label="角色">
+          <el-select v-model="createForm.role" style="width:100%">
+            <el-option label="普通用户" value="user" />
+            <el-option label="管理员" value="admin" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showCreateDialog = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="handleCreate">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 导入数据弹窗 -->
     <el-dialog v-model="importDialogVisible" title="导入数据" width="400px">
       <p>为 <b>{{ importTargetUser?.display_name || importTargetUser?.username }}</b> 导入数据</p>
       <el-upload
@@ -95,6 +96,7 @@
         </el-button>
       </template>
     </el-dialog>
+  </div>
 </template>
 
 <script setup>
@@ -165,35 +167,7 @@ async function handleDelete(uid) {
 
 onMounted(() => fetchUsers())
 
-// ---- Admin import ----
-const importDialogVisible = ref(false)
-const importTargetUser = ref(null)
-const adminImportFile = ref(null)
-const adminImporting = ref(false)
-
-function showImportDialog(user) {
-  importTargetUser.value = user
-  importDialogVisible.value = true
-}
-
-function onAdminFileChange(file) {
-  adminImportFile.value = file.raw
-}
-
-async function adminConfirmImport() {
-  if (!adminImportFile.value || !importTargetUser.value) return
-  adminImporting.value = true
-  try {
-    const res = await adminDataApi.importForUser(adminImportFile.value, importTargetUser.value.id)
-    ElMessage.success('导入完成')
-    importDialogVisible.value = false
-    adminImportFile.value = null
-  } catch (e) {
-    ElMessage.error('导入失败: ' + (e.response?.data?.error || e.message))
-  }
-  adminImporting.value = false
-}
-
+// ---- 创建用户 ----
 const showCreateDialog = ref(false)
 const creating = ref(false)
 const createForm = ref({
@@ -224,5 +198,34 @@ async function handleCreate() {
   } finally {
     creating.value = false
   }
+}
+
+// ---- 管理员导入 ----
+const importDialogVisible = ref(false)
+const importTargetUser = ref(null)
+const adminImportFile = ref(null)
+const adminImporting = ref(false)
+
+function showImportDialog(user) {
+  importTargetUser.value = user
+  importDialogVisible.value = true
+}
+
+function onAdminFileChange(file) {
+  adminImportFile.value = file.raw
+}
+
+async function adminConfirmImport() {
+  if (!adminImportFile.value || !importTargetUser.value) return
+  adminImporting.value = true
+  try {
+    await adminDataApi.importForUser(adminImportFile.value, importTargetUser.value.id)
+    ElMessage.success('导入完成')
+    importDialogVisible.value = false
+    adminImportFile.value = null
+  } catch (e) {
+    ElMessage.error('导入失败: ' + (e.response?.data?.error || e.message))
+  }
+  adminImporting.value = false
 }
 </script>
