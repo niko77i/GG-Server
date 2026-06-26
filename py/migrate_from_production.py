@@ -44,6 +44,7 @@ GG_CONFIG_KEYS = {
     "migrated_youtube",
     "migrated_font_recent",
     "gg_server_initialized",
+    "migrated_owner_id",
 }
 
 
@@ -159,8 +160,20 @@ def migrate(dry_run=True):
             print(f"  {table:20s} {count:>6} 条")
             stats[table] = count
 
+    # 3.5 补填 GG-Server 新增的隔离字段
+    print("\n[3.5/4] 设置数据隔离字段 (owner_id=1, is_public=0)...")
+    for table, col in [("mcc", "owner_id"), ("accounts", "owner_id"), ("videos", "owner_id")]:
+        if col in get_columns(dst, table):
+            updated = dst.execute(f"UPDATE {table} SET {col}=1 WHERE {col} IS NULL").rowcount
+            print(f"  {table}.{col}: {updated} 行设为 1")
+    if "is_public" in get_columns(dst, "videos"):
+        updated = dst.execute("UPDATE videos SET is_public=0 WHERE is_public IS NULL").rowcount
+        print(f"  videos.is_public: {updated} 行设为 0")
+    # 标记迁移完成（同时触发下次 _ensure_schema 跳过重复迁移）
+    dst.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_owner_id','1')")
+
     # 4. 更新自增序列
-    print("\n[3/4] 更新自增序列...")
+    print("\n[4/5] 更新自增序列...")
     for table, info in TABLES.items():
         if info["pk"] != "auto":
             continue
@@ -176,13 +189,13 @@ def migrate(dry_run=True):
     dst.commit()
 
     # 5. 验证
-    print("\n[4/4] 验证迁移结果:")
+    print("\n[5/5] 验证迁移结果:")
     print("-" * 60)
     for table in TABLES:
         sc = count_table(src, table)
         dc = count_table(dst, table)
-        status = "✅" if dc >= sc else "❌"
-        print(f"  {table:20s} 源: {sc:>6} → 目标: {dc:>6}  {status}")
+        status = "OK" if dc >= sc else "MISMATCH"
+        print(f"  {table:20s} src: {sc:>6} -> dst: {dc:>6}  [{status}]")
 
     user_count = count_table(dst, "users")
     print(f"  {'users':20s} {'':>8} 目标: {user_count:>6}  ✅ (未变更)")
