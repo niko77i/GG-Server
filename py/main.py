@@ -1611,14 +1611,16 @@ def accounts_batch_update():
 # ---------- MCC API ----------
 
 @app.route("/api/mcc/list", methods=["GET"])
+@jwt_required()
 def mcc_list():
+    user_id = int(get_jwt_identity())
     search = request.args.get("search", "").strip()
     level = request.args.get("level", "").strip()
     parent_filter = request.args.get("parent_filter", "")  # "has_parent", "top", ""
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
-    where = []; params = []
+    where = ["m.owner_id = ?"]; params = [user_id]
     if search:
         where.append("(m.name LIKE ? OR m.mcc_id LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -1643,15 +1645,22 @@ def mcc_list():
 
 
 @app.route("/api/mcc/options", methods=["GET"])
+@jwt_required()
 def mcc_options():
+    user_id = int(get_jwt_identity())
     db = _yt_db()
-    rows = db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()
+    rows = db.execute(
+        "SELECT id, name, mcc_id FROM mcc WHERE owner_id=? ORDER BY name",
+        (user_id,)
+    ).fetchall()
     db.close()
     return jsonify({"success": True, "options": [dict(r) for r in rows]})
 
 
 @app.route("/api/mcc/create", methods=["POST"])
+@jwt_required()
 def mcc_create():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     mcc_id = (data.get("mcc_id") or "").strip()
@@ -1670,11 +1679,11 @@ def mcc_create():
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
         db.execute(
-            "INSERT INTO mcc(name,mcc_id,level,parent_mcc_id,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO mcc(name,mcc_id,level,parent_mcc_id,created_at,updated_at,owner_id) VALUES(?,?,?,?,?,?,?)",
             (name, mcc_id,
              (data.get("level") or "").strip(),
              parent_mcc_id,
-             now, now))
+             now, now, user_id))
         db.commit()
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.close()
@@ -1685,6 +1694,7 @@ def mcc_create():
 
 
 @app.route("/api/mcc/<int:mid>", methods=["PUT"])
+@jwt_required()
 def mcc_update(mid):
     data = request.get_json(silent=True) or {}
     db = _yt_db()
@@ -1712,6 +1722,7 @@ def mcc_update(mid):
 
 
 @app.route("/api/mcc/<int:mid>", methods=["DELETE"])
+@jwt_required()
 def mcc_delete(mid):
     db = _yt_db()
     # 检查是否有子 MCC
@@ -1730,6 +1741,7 @@ def mcc_delete(mid):
 
 
 @app.route("/api/mcc/batch-delete", methods=["POST"])
+@jwt_required()
 def mcc_batch_delete():
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
@@ -1754,6 +1766,7 @@ def mcc_batch_delete():
 
 
 @app.route("/api/mcc/<int:mid>/detail", methods=["GET"])
+@jwt_required()
 def mcc_detail(mid):
     db = _yt_db()
     mcc = db.execute("SELECT * FROM mcc WHERE id=?", (mid,)).fetchone()
