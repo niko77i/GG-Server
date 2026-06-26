@@ -50,6 +50,27 @@ else:
 app = Flask(__name__, static_folder=_FRONTEND_DIR, static_url_path="")
 CORS(app)
 
+# --- 请求日志 ---
+import time as _time
+
+@app.before_request
+def _log_request():
+    """记录请求开始时间。"""
+    request._start_time = _time.time()
+
+@app.after_request
+def _log_response(response):
+    """打印请求日志，格式类似 ImageCrawling。"""
+    duration = (_time.time() - getattr(request, '_start_time', _time.time())) * 1000
+    qs = request.query_string.decode("utf-8", errors="replace")
+    url = request.path + (f"?{qs}" if qs else "")
+    method = request.method
+    status = response.status_code
+    # 日志格式：[时间] 方法 /路径?参数 → 状态码 (耗时ms)
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] {method} {url} → {status} ({duration:.0f}ms)")
+    return response
+
 # --- GG-Server: Config ---
 import json
 _CONFIG_PATH = os.path.join(os.path.dirname(_current_dir), "config", "config.json")
