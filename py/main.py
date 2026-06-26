@@ -2685,6 +2685,14 @@ def admin_list_users():
     result = auth.list_users(search, page, page_size, current_user_id=user_id)
     return jsonify(success=True, **result)
 
+
+def _can_modify_user(actor: dict, target: dict) -> bool:
+    """admin 只能操作 user/hidden，不能操作其他 admin。developer 不受限。"""
+    if actor["role"] == "developer":
+        return True
+    return target["role"] in ("user", "hidden")
+
+
 @app.route("/api/admin/users/<int:uid>/role", methods=["POST"])
 @jwt_required()
 def admin_update_role(uid):
@@ -2694,6 +2702,11 @@ def admin_update_role(uid):
         return jsonify(success=False, error="Permission denied"), 403
     if uid == user_id:
         return jsonify(success=False, error="不能修改自己的角色"), 403
+    target = auth.get_user_by_id(uid)
+    if not target:
+        return jsonify(success=False, error="User not found"), 404
+    if not _can_modify_user(user, target):
+        return jsonify(success=False, error="不能操作同级管理员"), 403
     data = request.get_json()
     new_role = data.get("role", "")
     if new_role not in ("user", "admin", "hidden"):
@@ -2711,6 +2724,11 @@ def admin_toggle_user(uid):
         return jsonify(success=False, error="Permission denied"), 403
     if uid == user_id:
         return jsonify(success=False, error="不能禁用自己"), 403
+    target = auth.get_user_by_id(uid)
+    if not target:
+        return jsonify(success=False, error="User not found"), 404
+    if not _can_modify_user(user, target):
+        return jsonify(success=False, error="不能操作同级管理员"), 403
     result = auth.toggle_user_status(uid)
     if result:
         return jsonify(success=True, user=result)
@@ -2728,6 +2746,8 @@ def admin_delete_user(uid):
     target = auth.get_user_by_id(uid)
     if not target:
         return jsonify(success=False, error="User not found"), 404
+    if not _can_modify_user(user, target):
+        return jsonify(success=False, error="不能操作同级管理员"), 403
     if target["role"] == "developer":
         return jsonify(success=False, error="Cannot delete developer account"), 400
     conn = database.get_db()
@@ -2766,6 +2786,8 @@ def admin_update_user(uid):
     # 非 developer 不能修改 developer 的信息
     if target["role"] == "developer" and user["role"] != "developer":
         return jsonify(success=False, error="Cannot modify developer account"), 400
+    if not _can_modify_user(user, target):
+        return jsonify(success=False, error="不能操作同级管理员"), 403
 
     data = request.get_json(silent=True) or {}
     username = data.get("username")
@@ -2797,6 +2819,8 @@ def admin_reset_password(uid):
     # 非 developer 不能修改 developer 的密码
     if target["role"] == "developer" and user["role"] != "developer":
         return jsonify(success=False, error="Cannot modify developer account"), 400
+    if not _can_modify_user(user, target):
+        return jsonify(success=False, error="不能操作同级管理员"), 403
 
     data = request.get_json(silent=True) or {}
     password = data.get("password", "")

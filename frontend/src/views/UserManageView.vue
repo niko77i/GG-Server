@@ -1,6 +1,9 @@
 <template>
   <div class="user-manage">
-    <h3 style="margin:0 0 16px;font-size:18px;font-weight:600;color:#111827;">用户管理</h3>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:18px;font-weight:600;color:#111827;">用户管理</h3>
+      <el-button @click="$router.push('/profile')">👤 个人信息</el-button>
+    </div>
     <el-card shadow="never" style="margin-bottom:16px;">
       <el-row :gutter="12" align="middle">
         <el-col :span="8">
@@ -26,24 +29,31 @@
       </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="160" />
       <el-table-column prop="last_login" label="最后登录" width="160" />
-      <el-table-column label="操作" width="280" fixed="right">
+      <el-table-column label="操作" width="360" fixed="right">
         <template #default="{ row }">
           <el-button size="small" @click="showImportDialog(row)">📥 导入数据</el-button>
-          <el-dropdown v-if="row.role !== 'developer'" trigger="click" @command="(v) => handleRoleChange(row.id, v)">
-            <el-button size="small" link>切换角色</el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="user" :disabled="row.role === 'user'">普通用户</el-dropdown-item>
-                <el-dropdown-item command="admin" :disabled="row.role === 'admin'">管理员</el-dropdown-item>
-                <el-dropdown-item command="hidden" :disabled="row.role === 'hidden'">禁用</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-          <el-popconfirm v-if="row.role !== 'developer'" title="确定删除该用户？" @confirm="handleDelete(row.id)">
-            <template #reference>
-              <el-button size="small" link type="danger" style="margin-left:8px;">删除</el-button>
-            </template>
-          </el-popconfirm>
+          <template v-if="canModify(row)">
+            <el-button size="small" @click="showEditDialog(row)">✏️ 编辑</el-button>
+            <el-button size="small" @click="showPwdDialog(row)">🔑 改密</el-button>
+            <el-dropdown trigger="click" @command="(v) => handleRoleChange(row.id, v)">
+              <el-button size="small" link>切换角色</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="user" :disabled="row.role === 'user'">普通用户</el-dropdown-item>
+                  <el-dropdown-item command="admin" :disabled="row.role === 'admin'">管理员</el-dropdown-item>
+                  <el-dropdown-item command="hidden" :disabled="row.role === 'hidden'">禁用</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-popconfirm title="确定删除该用户？" @confirm="handleDelete(row.id)">
+              <template #reference>
+                <el-button size="small" link type="danger" style="margin-left:8px;">删除</el-button>
+              </template>
+            </el-popconfirm>
+          </template>
+          <el-tooltip v-if="!canModify(row)" :content="'不能操作' + (row.role === 'developer' ? '开发者' : '同级管理员')" placement="top">
+            <span style="color:#999;font-size:12px;margin-left:4px;">🔒</span>
+          </el-tooltip>
         </template>
       </el-table-column>
     </el-table>
@@ -76,6 +86,38 @@
       </template>
     </el-dialog>
 
+    <!-- 编辑用户弹窗 -->
+    <el-dialog v-model="editDialogVisible" title="编辑用户" width="400px">
+      <el-form :model="editForm" label-width="80px" size="small">
+        <el-form-item label="用户名">
+          <el-input v-model="editForm.username" placeholder="4-20个字符" />
+        </el-form-item>
+        <el-form-item label="显示名">
+          <el-input v-model="editForm.display_name" placeholder="可选" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="editing" @click="handleEdit">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 改密弹窗 -->
+    <el-dialog v-model="pwdDialogVisible" title="重置密码" width="400px">
+      <el-form :model="pwdForm" label-width="80px" size="small">
+        <el-form-item label="用户">
+          <span>{{ pwdTargetUser?.display_name || pwdTargetUser?.username }}</span>
+        </el-form-item>
+        <el-form-item label="新密码">
+          <el-input v-model="pwdForm.password" type="password" placeholder="至少6位" show-password />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pwdDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="resetting" @click="handleResetPwd">确认</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 导入数据弹窗 -->
     <el-dialog v-model="importDialogVisible" title="导入数据" width="400px">
       <p>为 <b>{{ importTargetUser?.display_name || importTargetUser?.username }}</b> 导入数据</p>
@@ -101,10 +143,13 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useAuthStore } from '@/stores/auth'
 import { adminApi } from '../api/admin'
 import { adminDataApi } from '@/api/data'
 import { ElMessage } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
+
+const authStore = useAuthStore()
 
 const users = ref([])
 const total = ref(0)
@@ -112,6 +157,17 @@ const loading = ref(false)
 const search = ref('')
 const currentPage = ref(1)
 const pageSize = ref(20)
+
+function isSelf(uid) {
+  return authStore.user?.id === uid
+}
+
+function canModify(row) {
+  if (isSelf(row.id)) return false
+  if (authStore.isDeveloper) return true
+  // 管理员只能操作普通用户和已禁用用户，不能操作其他管理员
+  return ['user', 'hidden'].includes(row.role)
+}
 
 function roleType(role) {
   const m = { developer: 'danger', admin: 'warning', user: 'success', hidden: 'info' }
@@ -146,6 +202,10 @@ function handlePageChange(page) {
 }
 
 async function handleRoleChange(uid, role) {
+  if (isSelf(uid)) {
+    ElMessage.warning('不能修改自己的角色')
+    return
+  }
   try {
     await adminApi.updateRole(uid, role)
     ElMessage.success('角色已更新')
@@ -156,6 +216,10 @@ async function handleRoleChange(uid, role) {
 }
 
 async function handleDelete(uid) {
+  if (isSelf(uid)) {
+    ElMessage.warning('不能删除自己')
+    return
+  }
   try {
     await adminApi.deleteUser(uid)
     ElMessage.success('用户已删除')
@@ -197,6 +261,65 @@ async function handleCreate() {
     ElMessage.error(e.response?.data?.error || "创建失败")
   } finally {
     creating.value = false
+  }
+}
+
+// ---- 编辑用户 ----
+const editDialogVisible = ref(false)
+const editing = ref(false)
+const editTargetId = ref(null)
+const editForm = ref({ username: "", display_name: "" })
+
+function showEditDialog(row) {
+  editTargetId.value = row.id
+  editForm.value = { username: row.username, display_name: row.display_name || "" }
+  editDialogVisible.value = true
+}
+
+async function handleEdit() {
+  if (!editForm.value.username || editForm.value.username.length < 4 || editForm.value.username.length > 20) {
+    ElMessage.warning("用户名需 4-20 个字符")
+    return
+  }
+  editing.value = true
+  try {
+    await adminApi.updateUser(editTargetId.value, editForm.value)
+    ElMessage.success("用户信息已更新")
+    editDialogVisible.value = false
+    fetchUsers()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || "更新失败")
+  } finally {
+    editing.value = false
+  }
+}
+
+// ---- 改密 ----
+const pwdDialogVisible = ref(false)
+const resetting = ref(false)
+const pwdTargetUser = ref(null)
+const pwdForm = ref({ password: "" })
+
+function showPwdDialog(row) {
+  pwdTargetUser.value = row
+  pwdForm.value.password = ""
+  pwdDialogVisible.value = true
+}
+
+async function handleResetPwd() {
+  if (!pwdForm.value.password || pwdForm.value.password.length < 6) {
+    ElMessage.warning("密码至少6位")
+    return
+  }
+  resetting.value = true
+  try {
+    await adminApi.resetPassword(pwdTargetUser.value.id, pwdForm.value.password)
+    ElMessage.success("密码已重置")
+    pwdDialogVisible.value = false
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || "重置失败")
+  } finally {
+    resetting.value = false
   }
 }
 
