@@ -21,6 +21,9 @@ import database
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity, create_access_token, create_refresh_token
 import json
 import auth
+import data_service
+import datetime
+from functools import wraps
 # google_ads_service 按需加载，不打包进 EXE
 
 # 判断是否为 PyInstaller 打包模式
@@ -2502,6 +2505,177 @@ def admin_delete_user(uid):
         return jsonify(success=True)
     finally:
         conn.close()
+
+# ---------- admin_required decorator ----------
+
+def admin_required(fn):
+    @wraps(fn)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        user_id = int(get_jwt_identity())
+        user = auth.get_user_by_id(user_id)
+        if not user or user["role"] not in ("developer", "admin"):
+            return jsonify({"success": False, "error": "权限不足"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+# ---------- Data Import/Export ----------
+
+@app.route("/api/data/import", methods=["POST"])
+@jwt_required()
+def data_import():
+    """上传 db 或 json 文件，导入数据到当前用户。"""
+    user_id = int(get_jwt_identity())
+
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "请上传文件"}), 400
+
+    file = request.files["file"]
+    if not file.filename:
+        return jsonify({"success": False, "error": "文件名为空"}), 400
+
+    # 识别文件类型
+    fname = file.filename.lower()
+    if fname.endswith(".db"):
+        file_type = "db"
+    elif fname.endswith(".json"):
+        file_type = "json"
+    else:
+        return jsonify({"success": False, "error": "仅支持 .db 或 .json 文件"}), 400
+
+    # 保存临时文件
+    import tempfile
+    suffix = ".db" if file_type == "db" else ".json"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        file.save(tmp.name)
+        tmp_path = tmp.name
+
+    try:
+        report = data_service.execute_import(tmp_path, file_type, user_id)
+
+        # 记录导入历史
+        db = database.get_db()
+        history_report = report.get("report", {})
+        db.execute(
+            "INSERT INTO import_history(user_id, file_name, file_type, "
+            "products_count, packages_count, accounts_count, mcc_count, videos_count, "
+            "copywritings_count, tags_count, skipped_count, status) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (user_id, file.filename, file_type,
+             history_report.get("products", 0),
+             history_report.get("packages", 0),
+             history_report.get("accounts", 0),
+             history_report.get("mcc", 0),
+             history_report.get("videos", 0),
+             history_report.get("copywritings", {}).get("imported", 0),
+             history_report.get("tags", {}).get("imported", 0),
+             history_report.get("skipped_count", 0),
+             "success")
+        )
+        db.commit()
+        db.close()
+
+        return jsonify(report)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+@app.route("/api/data/export", methods=["GET"])
+@jwt_required()
+def data_export():
+    """导出当前用户的数据为 JSON 文件下载。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    username = user["username"] if user else str(user_id)
+
+    export_data = data_service.export_user_data(user_id)
+
+    from flask import Response
+    json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    filename = f"gg-server-export-{username}-{date_str}.json"
+
+    return Response(
+        json_str,
+        mimetype="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.route("/api/data/import-history", methods=["GET"])
+@jwt_required()
+def data_import_history():
+    """返回当前用户的导入历史（最近 10 条）。"""
+    user_id = int(get_jwt_identity())
+    db = database.get_db()
+    rows = db.execute(
+        "SELECT * FROM import_history WHERE user_id=? ORDER BY created_at DESC LIMIT 10",
+        (user_id,)
+    ).fetchall()
+    db.close()
+    return jsonify({"success": True, "history": [dict(r) for r in rows]})
+
+
+@app.route("/api/admin/data/import", methods=["POST"])
+@admin_required
+def admin_data_import():
+    """管理员为指定用户导入数据。"""
+    user_id = request.form.get("user_id", type=int)
+    if not user_id:
+        return jsonify({"success": False, "error": "请指定目标用户"}), 400
+
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "请上传文件"}), 400
+
+    file = request.files["file"]
+    fname = file.filename.lower()
+    file_type = "db" if fname.endswith(".db") else "json"
+
+    import tempfile
+    suffix = ".db" if file_type == "db" else ".json"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        file.save(tmp.name)
+        tmp_path = tmp.name
+
+    try:
+        report = data_service.execute_import(tmp_path, file_type, user_id)
+        return jsonify(report)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+@app.route("/api/admin/data/export/<int:uid>", methods=["GET"])
+@admin_required
+def admin_data_export(uid):
+    """管理员导出指定用户的数据。"""
+    user = auth.get_user_by_id(uid)
+    if not user:
+        return jsonify({"success": False, "error": "用户不存在"}), 404
+
+    export_data = data_service.export_user_data(uid)
+
+    from flask import Response
+    json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    filename = f"gg-server-export-{user['username']}-{date_str}.json"
+
+    return Response(
+        json_str,
+        mimetype="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
 
 if __name__ == "__main__":
     host = "0.0.0.0"
