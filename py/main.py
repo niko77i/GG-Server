@@ -2547,6 +2547,17 @@ def auth_me():
     return jsonify(success=True, user=user)
 
 
+@app.route("/api/users/names", methods=["GET"])
+@jwt_required()
+def users_names():
+    """返回所有用户的 id/username/display_name，供 runner 选择器使用。"""
+    db = database.get_db()
+    rows = db.execute(
+        "SELECT id, username, display_name FROM users WHERE role != 'hidden' ORDER BY id"
+    ).fetchall()
+    db.close()
+    return jsonify({"success": True, "users": [dict(r) for r in rows]})
+
 
 @app.route("/api/admin/users/create", methods=["POST"])
 @jwt_required()

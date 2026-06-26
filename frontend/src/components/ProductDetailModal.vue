@@ -78,7 +78,7 @@
 import { ref, computed } from 'vue'
 import { useProductStore } from '@/stores/products'
 import { productsApi } from '@/api/products'
-import { adminApi } from '@/api/admin'
+import api from '@/api/client'
 import { ElMessage } from 'element-plus'
 
 const props = defineProps({ visible: Boolean, prodId: Number })
@@ -107,7 +107,7 @@ async function load() {
 
 async function loadUsers() {
   try {
-    const res = await adminApi.listUsers()
+    const res = await api.get('/api/users/names')
     availableUsers.value = res.users || []
   } catch { availableUsers.value = [] }
 }
