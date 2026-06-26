@@ -866,7 +866,9 @@ def _extract_youtube_id(url: str):
 
 
 @app.route("/api/youtube/import", methods=["POST"])
+@jwt_required()
 def youtube_import():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     urls = data.get("urls") or []
     region = (data.get("region") or "通用").strip()
@@ -899,9 +901,12 @@ def youtube_import():
                 title = r.json().get("title", vid)
         except Exception: pass
 
-        db.execute("INSERT INTO videos(id,url,title,region,frame_type,effectiveness,product_name,review_status,imported_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                   (vid, f"https://www.youtube.com/watch?v={vid}", title, region, frame_type, effectiveness, product_name, review_status,
-                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+        db.execute("INSERT INTO videos(id,url,title,region,frame_type,effectiveness,product_name,review_status,imported_at,owner_id,is_public) "
+                   "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                   (vid, f"https://www.youtube.com/watch?v={vid}", title, region, frame_type,
+                    effectiveness, product_name, review_status,
+                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    user_id, 0))
         imported += 1
 
     db.commit(); db.close()
@@ -909,7 +914,10 @@ def youtube_import():
 
 
 @app.route("/api/youtube/list", methods=["GET"])
+@jwt_required()
 def youtube_list():
+    user_id = int(get_jwt_identity())
+    scope = request.args.get("scope", "all").strip()  # "public" | "private" | "all"
     region = request.args.get("region", "").strip()
     frame_type = request.args.get("frame_type", "").strip()
     effectiveness = request.args.get("effectiveness", "").strip()
@@ -921,6 +929,15 @@ def youtube_list():
 
     db = _yt_db()
     where = []; params = []
+
+    # 按 scope 过滤
+    if scope == "public":
+        where.append("is_public = 1")
+    elif scope == "private":
+        where.append("owner_id = ?"); params.append(user_id)
+    else:  # all
+        where.append("(is_public = 1 OR owner_id = ?)"); params.append(user_id)
+
     for f, v in [("region", region), ("frame_type", frame_type), ("effectiveness", effectiveness), ("product_name", product_name)]:
         if v: where.append(f"{f}=?"); params.append(v)
     # 审核状态：默认筛选「能过审」，传空或"全部"则不过滤
@@ -981,6 +998,7 @@ def youtube_dates():
 
 
 @app.route("/api/youtube/delete", methods=["POST"])
+@jwt_required()
 def youtube_delete():
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
@@ -992,12 +1010,13 @@ def youtube_delete():
 
 
 @app.route("/api/youtube/edit", methods=["POST"])
+@jwt_required()
 def youtube_edit():
     data = request.get_json(silent=True) or {}
     vid = (data.get("id") or "").strip()
     if not vid: return jsonify({"success": False, "error": "未指定视频ID"}), 400
     db = _yt_db()
-    for f in ["region", "frame_type", "effectiveness", "product_name", "review_status"]:
+    for f in ["region", "frame_type", "effectiveness", "product_name", "review_status", "is_public"]:
         if f in data: db.execute(f"UPDATE videos SET {f}=? WHERE id=?", (data[f], vid))
     db.commit()
     row = db.execute("SELECT * FROM videos WHERE id=?", (vid,)).fetchone()
@@ -1006,6 +1025,7 @@ def youtube_edit():
 
 
 @app.route("/api/youtube/batch-edit", methods=["POST"])
+@jwt_required()
 def youtube_batch_edit():
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
