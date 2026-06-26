@@ -1,0 +1,151 @@
+﻿from werkzeug.security import generate_password_hash, check_password_hash
+from flask_jwt_extended import create_access_token, create_refresh_token
+
+import database
+
+
+def hash_password(password: str) -> str:
+    return generate_password_hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return check_password_hash(hashed, password)
+
+
+def create_user(username: str, password: str, role: str = "user",
+                display_name: str = "", created_by: int = None) -> dict:
+    conn = database.get_db()
+    try:
+        cur = conn.execute(
+            "SELECT id FROM users WHERE username = ?", (username,)
+        )
+        if cur.fetchone():
+            return None
+
+        hashed = hash_password(password)
+        cur = conn.execute(
+            "INSERT INTO users (username, password, role, display_name, created_by) VALUES (?, ?, ?, ?, ?)",
+            (username, hashed, role, display_name, created_by)
+        )
+        conn.commit()
+        return get_user_by_id(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def get_user_by_id(user_id: int) -> dict | None:
+    conn = database.get_db()
+    try:
+        cur = conn.execute(
+            "SELECT id, username, role, display_name, created_at, last_login, created_by, config FROM users WHERE id = ?",
+            (user_id,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_user_by_username(username: str) -> dict | None:
+    conn = database.get_db()
+    try:
+        cur = conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_users(search: str = "", page: int = 1, page_size: int = 20) -> dict:
+    conn = database.get_db()
+    try:
+        if search:
+            like = f"%{search}%"
+            total = conn.execute(
+                "SELECT COUNT(*) as total FROM users WHERE username LIKE ? OR display_name LIKE ?",
+                (like, like)
+            ).fetchone()["total"]
+            offset = (page - 1) * page_size
+            rows = conn.execute(
+                "SELECT id, username, role, display_name, created_at, last_login, created_by FROM users WHERE username LIKE ? OR display_name LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                (like, like, page_size, offset)
+            ).fetchall()
+        else:
+            total = conn.execute("SELECT COUNT(*) as total FROM users").fetchone()["total"]
+            offset = (page - 1) * page_size
+            rows = conn.execute(
+                "SELECT id, username, role, display_name, created_at, last_login, created_by FROM users ORDER BY id DESC LIMIT ? OFFSET ?",
+                (page_size, offset)
+            ).fetchall()
+        return {"users": [dict(r) for r in rows], "total": total}
+    finally:
+        conn.close()
+
+
+def update_user_role(user_id: int, new_role: str) -> bool:
+    conn = database.get_db()
+    try:
+        cur = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+        row = cur.fetchone()
+        if not row or row["role"] == "developer":
+            return False
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, user_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def toggle_user_status(user_id: int) -> dict | None:
+    conn = database.get_db()
+    try:
+        cur = conn.execute("SELECT id, role FROM users WHERE id = ?", (user_id,))
+        row = cur.fetchone()
+        if not row or row["role"] == "developer":
+            return None
+        new_role = "hidden" if row["role"] in ("user", "admin") else "user"
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, user_id))
+        conn.commit()
+        return get_user_by_id(user_id)
+    finally:
+        conn.close()
+
+
+def update_last_login(user_id: int):
+    conn = database.get_db()
+    try:
+        conn.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def login_user(username: str, password: str) -> dict | None:
+    user = get_user_by_username(username)
+    if not user or user["role"] == "hidden":
+        return None
+    if not verify_password(password, user["password"]):
+        return None
+    update_last_login(user["id"])
+    access_token = create_access_token(identity=str(user["id"]))
+    refresh_token = create_refresh_token(identity=str(user["id"]))
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "user": {"id": user["id"], "username": user["username"], "role": user["role"], "display_name": user.get("display_name", "")}
+    }
+
+
+def register_user(username: str, password: str, display_name: str = "") -> dict | None:
+    return create_user(username=username, password=password, role="user", display_name=display_name, created_by=None)
+
+
+def init_developer(config: dict):
+    dev_config = config.get("developer", {})
+    username = dev_config.get("username", "admin")
+    password = dev_config.get("password", "admin123")
+    existing = get_user_by_username(username)
+    if existing:
+        return
+    create_user(username=username, password=password, role="developer", display_name="Developer")
+    print(f"[Auth] Developer account created: {username}")

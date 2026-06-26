@@ -1,0 +1,14 @@
+.el-table,.el-table__inner-wrapper,.el-table__body-wrapper,.el-table__header-wrapper{background:transparent!important}
+.el-table__inner-wrapper::before{display:none!important}
+.el-table th.el-table__cell{background:transparent!important;font-weight:500!important;font-size:12px!important;color:#6b7280!important;padding:10px 14px!important;border-bottom:1px solid #e5e7eb!important;border-right:none!important}
+.el-table td.el-table__cell{background:transparent!important;padding:10px 14px!important;border-bottom:1px solid #f3f4f6!important;border-right:none!important;font-size:13px!important;color:#374151!important}
+
+.el-table__body tr:hover>td.el-table__cell{background-color:rgba(0,0,0,0.02)!important}
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell{background:transparent!important}
+.el-table__body tr.current-row>td.el-table__cell{background-color:rgba(8,145,178,0.04)!important}
+.el-table .el-table__cell{border-right:none!important}
+.el-table__empty-block{border-bottom:none!important}
+.el-card{border:1px solid #e5e7eb!important;border-radius:8px!important;box-shadow:none!important}
+.el-form-item__label{font-weight:500!important;color:#374151!important;text-transform:none!important;letter-spacing:0!important;font-size:13px!important}
+.el-tabs__nav-wrap::after{height:1px!important;background-color:#e5e7eb!important}
+.sticky-tabs{position:sticky;top:0;z-index:100;background:#f5f7fa;padding:4px 0 0 0;box-shadow:0 1px 3px rgba(0,0,0,0.04);}

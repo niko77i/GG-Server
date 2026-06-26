@@ -1,0 +1,10 @@
+flask>=3.0
+flask-cors>=4.0
+requests>=2.31
+beautifulsoup4>=4.12
+Pillow>=10.0
+volcengine-python-sdk>=1.0
+google-ads>=24.0
+deep-translator>=1.11
+
+flask-jwt-extended>=4.6.0
