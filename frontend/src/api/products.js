@@ -10,4 +10,7 @@ export const productsApi = {
   updatePackage: (pkgId, body) => api.put(`/api/products/packages/${pkgId}`, body),
   deletePackage: (pkgId) => api.delete(`/api/products/packages/${pkgId}`),
   importText:  (body)   => api.post('/api/products/import-text', body),
+  // 新增
+  merge:       (body)   => api.post('/api/products/merge', body),
+  updateRunners: (pid, body) => api.put(`/api/products/${pid}/runners`, body),
 }
