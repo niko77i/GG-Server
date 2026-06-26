@@ -131,21 +131,9 @@ accounts、mcc、videos 已有 owner_id，无需额外变更。
 
 ## 6. 导入流程
 
-### 6.1 ImageCrawling 端：导出脚本
+### 6.1 ImageCrawling 端：直接取 db 文件
 
-在 ImageCrawling 项目中提供 `py/export_data.py`，运行后生成 JSON 文件。
-
-```bash
-cd ImageCrawling/py
-python export_data.py
-# → 生成 temp/export_20260626_203000.json
-```
-
-同时提供独立版本 `export_data_standalone.py`，不依赖项目结构，指定 db 路径即可：
-
-```bash
-python export_data_standalone.py --db path/to/app.db -o output.json
-```
+ImageCrawling 用户大部分跑的是 `.exe`，没有 Python 环境。他们只需找到 `.exe` 同目录下的 `temp/app.db` 文件，直接上传到 GG-Server 即可（Web 端支持 `.db` 上传）。
 
 ### 6.2 用户自助导入（Web 端）
 
@@ -306,16 +294,13 @@ python manage.py export-all [-o output_dir/]
 | `py/main.py` | 修改 | 新增 data API 路由 + 产品 API 调整 |
 | `py/database.py` | 修改 | products 表迁移 + import_history 表 |
 | `py/migrate_from_production.py` | 弃用 | 功能由 manage.py import-db 取代 |
-| `frontend/src/views/SettingsView.vue` | 修改 | 新增数据管理标签 |
+| `frontend/src/views/SettingsPanel.vue` | 修改 | 新增数据管理标签 |
 | `frontend/src/views/ProductPanel.vue` | 修改 | 筛选 + 合并 + runner 管理 |
 | `frontend/src/views/UserManageView.vue` | 修改 | 导入数据按钮 |
 
-### ImageCrawling 项目（分发）
+### ImageCrawling 项目
 
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `py/export_data.py` | **新建** | 项目内导出脚本，运行生成 JSON |
-| `py/export_data_standalone.py` | **新建** | 独立版，不依赖项目结构，指定 db 路径即可 |
+无需改动。用户直接取 `.exe` 同目录下的 `temp/app.db` 上传即可。
 
 ---
 
