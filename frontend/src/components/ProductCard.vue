@@ -55,7 +55,10 @@
         :style="normalizeStatus(pkg.status) === 'paused' ? 'opacity:0.6;' : normalizeStatus(pkg.status) === 'dropped' ? 'opacity:0.4;text-decoration:line-through;' : ''">
         <div style="display:flex;align-items:center;gap:6px;flex:1;overflow:hidden;">
           <input type="checkbox" :value="pkg.id" v-model="checkedIds" @click.stop style="width:auto;" />
-          <span style="font-weight:600;white-space:nowrap;cursor:pointer;" @click.stop="copySeriesName(pkg.series_name)">{{ pkg.series_name || '-' }}</span>
+          <span style="font-weight:600;white-space:nowrap;cursor:pointer;"
+  @click.stop="copySeriesName(pkg.series_name)"
+  @dblclick.stop="copySeriesNameCustom(pkg.series_name)"
+  :title="'单击复制「系列名-' + (myCustomName || '无后缀') + '」，双击自定义后缀'">{{ pkg.series_name || '-' }}</span>
           <span style="color:#ccc;">│</span>
           <span style="font-family:monospace;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="copy(pkg.package_name)">{{ pkg.package_name }}</span>
           <span style="color:#ccc;" v-if="pkg.url">│</span>
@@ -167,6 +170,21 @@ function copySeriesName(text) {
   if (!text) return
   const suffix = myCustomName.value ? '-' + myCustomName.value : ''
   copyToClipboard(text + suffix).then(() => { ElMessage.success('已复制 ' + (text + suffix) + ' ✓') })
+}
+
+async function copySeriesNameCustom(text) {
+  if (!text) return
+  const defSuffix = myCustomName.value || ''
+  try {
+    const { value } = await ElMessageBox.prompt('输入自定义后缀', '复制系列名', {
+      confirmButtonText: '复制',
+      cancelButtonText: '取消',
+      inputValue: defSuffix,
+      inputPlaceholder: '留空则不拼后缀',
+    })
+    const suffix = value?.trim() ? '-' + value.trim() : ''
+    copyToClipboard(text + suffix).then(() => { ElMessage.success('已复制 ' + (text + suffix) + ' ✓') })
+  } catch {}
 }
 
 function normalizeStatus(s) {
