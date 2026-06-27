@@ -1274,6 +1274,7 @@ def products_list():
 
 
 @app.route("/api/products/create", methods=["POST"])
+@jwt_required(optional=True)
 def products_create():
     data = request.get_json(silent=True) or {}
     product_name = (data.get("product_name") or "").strip()
@@ -1285,17 +1286,34 @@ def products_create():
         return jsonify({"success": False, "error": "产品名不能为空"}), 400
     db = _yt_db()
 
-    import datetime
+    import datetime, json as _json
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # 获取当前用户
+    try:
+        user_id = int(get_jwt_identity())
+    except Exception:
+        user_id = None
+
     # 已有同名产品则追加包
-    existing = db.execute("SELECT id FROM products WHERE product_name=?", (product_name,)).fetchone()
+    existing = db.execute("SELECT id, runner_ids FROM products WHERE product_name=?", (product_name,)).fetchone()
     if existing:
         pid = existing["id"]
         if mcc_id is not None:
             db.execute("UPDATE products SET mcc_id=? WHERE id=?", (mcc_id, pid))
+        # 将当前用户加入 runner
+        if user_id:
+            try:
+                runners = _json.loads(existing["runner_ids"] or "[]")
+            except Exception:
+                runners = []
+            if user_id not in runners:
+                runners.append(user_id)
+                db.execute("UPDATE products SET runner_ids=? WHERE id=?", (_json.dumps(runners), pid))
     else:
-        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,created_at) VALUES(?,?,?,?,?)",
-                   (product_name, kpi, region, mcc_id, now))
+        runner_ids = _json.dumps([user_id]) if user_id else "[]"
+        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?)",
+                   (product_name, kpi, region, mcc_id, user_id, runner_ids, now))
         pid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     for p in packages:
         pkg_name = p.get("package_name","")
