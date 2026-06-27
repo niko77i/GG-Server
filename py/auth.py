@@ -56,25 +56,35 @@ def get_user_by_username(username: str) -> dict | None:
         conn.close()
 
 
-def list_users(search: str = "", page: int = 1, page_size: int = 20) -> dict:
+def list_users(search: str = "", page: int = 1, page_size: int = 20, current_user_id: int = None) -> dict:
+    """列出用户。非 developer 用户看不到 developer 角色的用户。"""
     conn = database.get_db()
     try:
+        # 判断当前用户是否是 developer
+        is_dev = False
+        if current_user_id:
+            cur_user = conn.execute("SELECT role FROM users WHERE id = ?", (current_user_id,)).fetchone()
+            is_dev = cur_user and cur_user["role"] == "developer"
+
+        # 非 developer 用户看不到 developer 角色
+        dev_filter = "" if is_dev else " AND role != 'developer'"
+
         if search:
             like = f"%{search}%"
             total = conn.execute(
-                "SELECT COUNT(*) as total FROM users WHERE username LIKE ? OR display_name LIKE ?",
+                f"SELECT COUNT(*) as total FROM users WHERE (username LIKE ? OR display_name LIKE ?){dev_filter}",
                 (like, like)
             ).fetchone()["total"]
             offset = (page - 1) * page_size
             rows = conn.execute(
-                "SELECT id, username, role, display_name, created_at, last_login, created_by FROM users WHERE username LIKE ? OR display_name LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                f"SELECT id, username, role, display_name, created_at, last_login, created_by FROM users WHERE (username LIKE ? OR display_name LIKE ?){dev_filter} ORDER BY id DESC LIMIT ? OFFSET ?",
                 (like, like, page_size, offset)
             ).fetchall()
         else:
-            total = conn.execute("SELECT COUNT(*) as total FROM users").fetchone()["total"]
+            total = conn.execute(f"SELECT COUNT(*) as total FROM users WHERE 1=1{dev_filter}").fetchone()["total"]
             offset = (page - 1) * page_size
             rows = conn.execute(
-                "SELECT id, username, role, display_name, created_at, last_login, created_by FROM users ORDER BY id DESC LIMIT ? OFFSET ?",
+                f"SELECT id, username, role, display_name, created_at, last_login, created_by FROM users WHERE 1=1{dev_filter} ORDER BY id DESC LIMIT ? OFFSET ?",
                 (page_size, offset)
             ).fetchall()
         return {"users": [dict(r) for r in rows], "total": total}
@@ -90,6 +100,52 @@ def update_user_role(user_id: int, new_role: str) -> bool:
         if not row or row["role"] == "developer":
             return False
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, user_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def update_user(uid: int, username: str = None, display_name: str = None) -> dict | None:
+    """编辑用户信息（用户名、显示名）。返回更新后的用户 dict，失败返回 None。"""
+    conn = database.get_db()
+    try:
+        existing = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+        if not existing:
+            return None
+
+        if username is not None:
+            username = username.strip()
+            if len(username) < 4 or len(username) > 20:
+                return None
+            # 检查用户名是否被其他用户占用
+            dup = conn.execute(
+                "SELECT id FROM users WHERE username = ? AND id != ?", (username, uid)
+            ).fetchone()
+            if dup:
+                return None
+            conn.execute("UPDATE users SET username = ? WHERE id = ?", (username, uid))
+
+        if display_name is not None:
+            conn.execute("UPDATE users SET display_name = ? WHERE id = ?", (display_name.strip(), uid))
+
+        conn.commit()
+        return get_user_by_id(uid)
+    finally:
+        conn.close()
+
+
+def update_password(uid: int, new_password: str) -> bool:
+    """修改用户密码。"""
+    if not new_password or len(new_password) < 6:
+        return False
+    conn = database.get_db()
+    try:
+        existing = conn.execute("SELECT id FROM users WHERE id = ?", (uid,)).fetchone()
+        if not existing:
+            return False
+        hashed = hash_password(new_password)
+        conn.execute("UPDATE users SET password = ? WHERE id = ?", (hashed, uid))
         conn.commit()
         return True
     finally:
@@ -148,4 +204,4 @@ def init_developer(config: dict):
     if existing:
         return
     create_user(username=username, password=password, role="developer", display_name="Developer")
-    print(f"[Auth] Developer account created: {username}")
+    print(f"[Auth] Developer account created: {username}")

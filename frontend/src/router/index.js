@@ -56,6 +56,11 @@ const routes = [
     component: () => import('../views/UserManageView.vue'),
     meta: { admin: true, title: '用户管理' }
   },
+  {
+    path: '/profile',
+    component: () => import('../views/UserProfileView.vue'),
+    meta: { title: '个人信息' }
+  },
 ]
 
 const router = createRouter({

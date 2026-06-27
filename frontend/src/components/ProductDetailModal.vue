@@ -101,13 +101,13 @@ async function load() {
   if (props.prodId) {
     const res = await store.loadProductDetail(props.prodId)
     product.value = res.product
-    loadUsers()
+    await loadUsers()
   }
 }
 
 async function loadUsers() {
   try {
-    const res = await api.get('/api/users/names')
+    const res = await api.get('/users/names')
     availableUsers.value = res.users || []
   } catch { availableUsers.value = [] }
 }

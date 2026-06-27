@@ -14,6 +14,9 @@
         </button>
       </div>
       <div class="rail-spacer" />
+      <button class="rail-btn" title="个人信息" @click="router.push('/profile')">
+        <span class="rail-emoji">👤</span>
+      </button>
       <button class="rail-btn" :class="{ active: activeSection === 'settings' }" title="设置" @click="selectTab('settings')">
         <span class="rail-emoji">⚙</span>
       </button>

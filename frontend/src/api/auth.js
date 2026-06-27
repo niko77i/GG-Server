@@ -12,5 +12,11 @@ export const authApi = {
   },
   me() {
     return api.get('/auth/me')
+  },
+  changePassword(oldPassword, newPassword) {
+    return api.put('/auth/password', { old_password: oldPassword, new_password: newPassword })
+  },
+  updateProfile(data) {
+    return api.put('/auth/profile', data)
   }
 }

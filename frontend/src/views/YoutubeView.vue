@@ -194,7 +194,7 @@
 
       <div v-show="importSubTab === 'video'">
         <el-input v-model="importUrls" type="textarea" :rows="6" placeholder="每行一个 YouTube 链接..." />
-        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:12px;">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;">
           <el-select v-model="importRegion" placeholder="地区" size="small">
             <el-option v-for="r in store.tags.regions" :key="r" :label="r" :value="r" />
           </el-select>
@@ -210,8 +210,26 @@
           <el-select v-model="importReview" placeholder="审核" size="small">
             <el-option v-for="s in store.tags.review_statuses" :key="s" :label="s" :value="s" />
           </el-select>
+          <el-date-picker
+            v-model="importTime"
+            type="datetime"
+            placeholder="视频时间（可选）"
+            size="small"
+            format="YYYY-MM-DD HH:mm"
+            value-format="YYYY-MM-DD HH:mm"
+            :clearable="true"
+          />
         </div>
-        <el-button type="primary" @click="doImport" :loading="importing" style="margin-top:12px;">保存视频</el-button>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:10px;">
+          <span style="font-size:13px;color:#606266;">可见范围：</span>
+          <el-radio-group v-if="canChooseScope" v-model="importIsPublic" size="small">
+            <el-radio-button :value="false">🔒 私有</el-radio-button>
+            <el-radio-button :value="true">🌐 公开</el-radio-button>
+          </el-radio-group>
+          <el-tag v-else size="small" type="info">🌐 公开</el-tag>
+          <span v-if="!canChooseScope" style="font-size:11px;color:#999;">（普通用户仅可导入公开视频）</span>
+          <el-button type="primary" @click="doImport" :loading="importing" style="margin-left:auto;">保存视频</el-button>
+        </div>
         <div v-if="importResult" style="margin-top:8px;font-size:12px;">{{ importResult }}</div>
       </div>
 
@@ -305,6 +323,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useYoutubeStore } from '@/stores/youtube'
+import { useAuthStore } from '@/stores/auth'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 import { translateApi } from '@/api/youtube'
@@ -312,6 +331,7 @@ import { translateApi } from '@/api/youtube'
 const router = useRouter()
 const route = useRoute()
 const store = useYoutubeStore()
+const authStore = useAuthStore()
 
 const activeTab = computed(() => {
   if (route.path.includes('/copywriting')) return 'copywriting'
@@ -467,16 +487,31 @@ const importFrame = ref('非融帧')
 const importEff = ref('')
 const importProd = ref('')
 const importReview = ref('能过审')
+const importTime = ref('')           // 视频时间，格式 YYYY-MM-DD HH:mm
+const importIsPublic = ref(false)     // false=私有, true=公开
 const importing = ref(false)
 const importResult = ref('')
+
+// 普通用户只能选公开
+const canChooseScope = computed(() => authStore.isAdmin)
 
 async function doImport() {
   const urls = importUrls.value.split(/[\n,]+/).map(s => s.trim()).filter(s => s && s.includes('youtu'))
   if (!urls.length) return
   importing.value = true
-  const res = await store.importVideos({ urls, region: importRegion.value, frame_type: importFrame.value, effectiveness: importEff.value, product_name: importProd.value, review_status: importReview.value })
+  const res = await store.importVideos({
+    urls,
+    region: importRegion.value,
+    frame_type: importFrame.value,
+    effectiveness: importEff.value,
+    product_name: importProd.value,
+    review_status: importReview.value,
+    imported_at: importTime.value || undefined,
+    is_public: importIsPublic.value ? 1 : 0,
+  })
   importResult.value = `导入 ${res.imported} 个，重复 ${(res.duplicates || []).length} 个`
   importUrls.value = ''
+  importTime.value = ''
   importing.value = false
   loadVideos()
 }
