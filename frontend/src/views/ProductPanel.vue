@@ -133,13 +133,33 @@ function toggleSelect(id) {
 
 async function mergeProducts() {
   if (selectedIds.value.length < 2) return
+  const masterId = selectedIds.value[0]
+  const mergeId = selectedIds.value[1]  // 只比第一个被合并的
+
+  // 获取两边产品的包名
+  let masterPkgs = [], mergePkgs = []
   try {
-    await ElMessageBox.confirm(
-      `将 ${selectedIds.value.length - 1} 个产品合并到第一个选中产品中？此操作不可撤销。`,
-      '确认合并', { type: 'warning', confirmButtonText: '合并', cancelButtonText: '取消' }
-    )
+    const [masterRes, mergeRes] = await Promise.all([
+      productsApi.detail(masterId),
+      productsApi.detail(mergeId),
+    ])
+    masterPkgs = (masterRes.product?.packages || []).map(p => p.package_name)
+    mergePkgs = (mergeRes.product?.packages || []).map(p => p.package_name)
+  } catch {}
+
+  const hasMatch = masterPkgs.some(n => mergePkgs.includes(n))
+  const confirmMsg = hasMatch
+    ? `将 ${selectedIds.value.length - 1} 个产品合并到第一个？此操作不可撤销。`
+    : `⚠ 两个产品的包名完全不同，确定合并？`
+
+  try {
+    await ElMessageBox.confirm(confirmMsg, '确认合并', {
+      type: hasMatch ? 'warning' : 'error',
+      confirmButtonText: '合并',
+      cancelButtonText: '取消',
+    })
     await productsApi.merge({
-      master_id: selectedIds.value[0],
+      master_id: masterId,
       merge_ids: selectedIds.value.slice(1),
     })
     ElMessage.success('合并完成')
