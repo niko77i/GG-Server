@@ -55,7 +55,7 @@
         :style="normalizeStatus(pkg.status) === 'paused' ? 'opacity:0.6;' : normalizeStatus(pkg.status) === 'dropped' ? 'opacity:0.4;text-decoration:line-through;' : ''">
         <div style="display:flex;align-items:center;gap:6px;flex:1;overflow:hidden;">
           <input type="checkbox" :value="pkg.id" v-model="checkedIds" @click.stop style="width:auto;" />
-          <span style="font-weight:600;white-space:nowrap;cursor:pointer;" @click.stop="copy(pkg.series_name)">{{ pkg.series_name || '-' }}</span>
+          <span style="font-weight:600;white-space:nowrap;cursor:pointer;" @click.stop="copySeriesName(pkg.series_name)">{{ pkg.series_name || '-' }}</span>
           <span style="color:#ccc;">│</span>
           <span style="font-family:monospace;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="copy(pkg.package_name)">{{ pkg.package_name }}</span>
           <span style="color:#ccc;" v-if="pkg.url">│</span>
@@ -92,10 +92,13 @@ const checkedIds = ref([])
 const filterStatus = ref('all')
 const editPkgModal = ref(null)
 const allUsers = ref([])
+const myCustomName = ref('')
 
 onMounted(async () => {
   try { const res = await api.get('/users/names'); allUsers.value = res.users || [] }
   catch { allUsers.value = [] }
+  try { const res = await api.get('/auth/custom-name'); myCustomName.value = res.custom_name || '' }
+  catch { myCustomName.value = '' }
 })
 
 function getRunnerName(rid) {
@@ -158,6 +161,12 @@ function batchCopyLinks() {
 function copy(text) {
   if (!text) return
   copyToClipboard(text).then(() => { ElMessage.success('已复制 ✓') })
+}
+
+function copySeriesName(text) {
+  if (!text) return
+  const suffix = myCustomName.value ? '-' + myCustomName.value : ''
+  copyToClipboard(text + suffix).then(() => { ElMessage.success('已复制 ' + (text + suffix) + ' ✓') })
 }
 
 function normalizeStatus(s) {

@@ -32,6 +32,20 @@
       <el-button type="primary" size="small" :loading="savingProfile" @click="saveProfile">保存</el-button>
     </el-card>
 
+    <!-- 自定义后缀 -->
+    <el-card shadow="never" style="margin-bottom:16px;">
+      <template #header>
+        <span style="font-weight:600;">自定义后缀</span>
+      </template>
+      <p style="font-size:12px;color:#888;margin-bottom:8px;">复制系列名时自动拼接，格式：系列名-后缀</p>
+      <el-form :model="customNameForm" label-width="80px" size="small">
+        <el-form-item label="后缀">
+          <el-input v-model="customNameForm.custom_name" placeholder="例如 Carl" />
+        </el-form-item>
+      </el-form>
+      <el-button type="primary" size="small" :loading="savingCustomName" @click="saveCustomName">保存</el-button>
+    </el-card>
+
     <!-- 修改密码 -->
     <el-card shadow="never">
       <template #header>
@@ -58,12 +72,16 @@ import { ref, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { authApi } from '@/api/auth'
 import { ElMessage } from 'element-plus'
+import api from '@/api/client'
 
 const authStore = useAuthStore()
 const user = ref(null)
 
 const profileForm = ref({ display_name: "" })
 const savingProfile = ref(false)
+
+const customNameForm = ref({ custom_name: "" })
+const savingCustomName = ref(false)
 
 const pwdForm = ref({ old_password: "", new_password: "", confirm_password: "" })
 const changingPwd = ref(false)
@@ -78,11 +96,27 @@ function roleLabel(role) {
 }
 
 onMounted(async () => {
-  // 从服务端获取最新用户信息
   const u = await authStore.fetchMe()
   user.value = u
   profileForm.value.display_name = u?.display_name || ""
+  // 加载 custom_name
+  try {
+    const res = await api.get('/auth/custom-name')
+    customNameForm.value.custom_name = res.custom_name || ''
+  } catch {}
 })
+
+async function saveCustomName() {
+  savingCustomName.value = true
+  try {
+    await api.put('/auth/custom-name', { custom_name: customNameForm.value.custom_name })
+    ElMessage.success('后缀已更新')
+  } catch (e) {
+    ElMessage.error('更新失败')
+  } finally {
+    savingCustomName.value = false
+  }
+}
 
 async function saveProfile() {
   savingProfile.value = true

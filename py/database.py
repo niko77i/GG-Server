@@ -159,7 +159,8 @@ def _ensure_schema(conn: sqlite3.Connection):
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             last_login TEXT,
             created_by INTEGER REFERENCES users(id),
-            config TEXT DEFAULT '{}'
+            config TEXT DEFAULT '{}',
+            custom_name TEXT DEFAULT ''
         );
 
         -- 爬取缓存表
@@ -246,6 +247,11 @@ def _ensure_schema(conn: sqlite3.Connection):
         conn.execute("UPDATE copywritings SET owner_id = 1 WHERE owner_id IS NULL")
     if "effectiveness" not in cwcols:
         conn.execute("ALTER TABLE copywritings ADD COLUMN effectiveness TEXT DEFAULT ''")
+
+    # 迁移：users 表补 custom_name（2026-06-27 自定义后缀）
+    ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "custom_name" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN custom_name TEXT DEFAULT ''")
 
     # 初始化默认标签
     for k, v in [("regions", '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),

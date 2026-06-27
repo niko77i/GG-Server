@@ -2632,6 +2632,29 @@ def auth_me():
     return jsonify(success=True, user=user)
 
 
+@app.route("/api/auth/custom-name", methods=["GET"])
+@jwt_required()
+def auth_custom_name_get():
+    user_id = int(get_jwt_identity())
+    db = database.get_db()
+    row = db.execute("SELECT custom_name FROM users WHERE id=?", (user_id,)).fetchone()
+    db.close()
+    return jsonify({"success": True, "custom_name": row["custom_name"] if row else ""})
+
+
+@app.route("/api/auth/custom-name", methods=["PUT"])
+@jwt_required()
+def auth_custom_name_set():
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    custom_name = (data.get("custom_name") or "").strip()
+    db = database.get_db()
+    db.execute("UPDATE users SET custom_name=? WHERE id=?", (custom_name, user_id))
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "custom_name": custom_name})
+
+
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required(optional=True)
 def users_names():
