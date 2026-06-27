@@ -15,6 +15,16 @@
             </template>
             <el-tag size="small" type="info">🏃 {{ parsedRunnerIds.length }}人</el-tag>
           </el-tooltip>
+          <el-tooltip content="复制系列名时的后缀" placement="top">
+            <el-input
+              v-model="productSuffix"
+              size="small"
+              style="width:80px;"
+              placeholder="后缀"
+              @click.stop
+              @keydown.enter.stop
+            />
+          </el-tooltip>
           <span v-if="product.related_account_count" style="font-size:12px;color:#888;">
             👤 {{ product.related_account_count }} 账户
           </span>
@@ -57,8 +67,7 @@
           <input type="checkbox" :value="pkg.id" v-model="checkedIds" @click.stop style="width:auto;" />
           <span style="font-weight:600;white-space:nowrap;cursor:pointer;"
   @click.stop="copySeriesName(pkg.series_name)"
-  @dblclick.stop="copySeriesNameCustom(pkg.series_name)"
-  :title="'单击复制「系列名-' + (myCustomName || '无后缀') + '」，双击自定义后缀'">{{ pkg.series_name || '-' }}</span>
+  :title="'点击复制'">{{ pkg.series_name || '-' }}</span>
           <span style="color:#ccc;">│</span>
           <span style="font-family:monospace;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="copy(pkg.package_name)">{{ pkg.package_name }}</span>
           <span style="color:#ccc;" v-if="pkg.url">│</span>
@@ -96,12 +105,19 @@ const filterStatus = ref('all')
 const editPkgModal = ref(null)
 const allUsers = ref([])
 const myCustomName = ref('')
+const productSuffix = ref('')
 
 onMounted(async () => {
   try { const res = await api.get('/users/names'); allUsers.value = res.users || [] }
   catch { allUsers.value = [] }
   try { const res = await api.get('/auth/custom-name'); myCustomName.value = res.custom_name || '' }
   catch { myCustomName.value = '' }
+  productSuffix.value = myCustomName.value
+})
+
+// 监听 props.product 变化（切换筛选时卡片复用），重置后缀
+watch(() => props.product?.id, () => {
+  productSuffix.value = myCustomName.value
 })
 
 function getRunnerName(rid) {
@@ -168,23 +184,8 @@ function copy(text) {
 
 function copySeriesName(text) {
   if (!text) return
-  const suffix = myCustomName.value ? '-' + myCustomName.value : ''
+  const suffix = productSuffix.value ? '-' + productSuffix.value : ''
   copyToClipboard(text + suffix).then(() => { ElMessage.success('已复制 ' + (text + suffix) + ' ✓') })
-}
-
-async function copySeriesNameCustom(text) {
-  if (!text) return
-  const defSuffix = myCustomName.value || ''
-  try {
-    const { value } = await ElMessageBox.prompt('输入自定义后缀', '复制系列名', {
-      confirmButtonText: '复制',
-      cancelButtonText: '取消',
-      inputValue: defSuffix,
-      inputPlaceholder: '留空则不拼后缀',
-    })
-    const suffix = value?.trim() ? '-' + value.trim() : ''
-    copyToClipboard(text + suffix).then(() => { ElMessage.success('已复制 ' + (text + suffix) + ' ✓') })
-  } catch {}
 }
 
 function normalizeStatus(s) {
