@@ -5,9 +5,6 @@
       <el-form-item label="系列名前缀（可选）">
         <el-input v-model="form.prefix" placeholder="如 P222-A" />
       </el-form-item>
-      <el-form-item label="系列名后缀（可选）">
-        <el-input v-model="form.suffix" placeholder="如 carl" />
-      </el-form-item>
       <el-form-item label="粘贴内容">
         <el-input v-model="form.text" type="textarea" :rows="6" placeholder="粘贴包含链接的文本..." />
       </el-form-item>
@@ -38,10 +35,10 @@ const parsing = ref(false)
 const parsed = ref([])
 const editText = ref('')
 
-const form = reactive({ prefix: '', suffix: '', text: '' })
+const form = reactive({ prefix: '', text: '' })
 
 function init() {
-  Object.assign(form, { prefix: '', suffix: '', text: '' })
+  Object.assign(form, { prefix: '', text: '' })
   parsed.value = []
   editText.value = ''
 }
@@ -51,7 +48,7 @@ async function preview() {
   parsing.value = true
   try {
     const res = await store.importText({
-      text: form.text, prefix: form.prefix, suffix: form.suffix,
+      text: form.text, prefix: form.prefix, suffix: '',
       product_name: '', kpi: '', region: '',
     })
     parsed.value = res.parsed || []

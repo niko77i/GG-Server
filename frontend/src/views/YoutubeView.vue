@@ -18,6 +18,9 @@
             <el-radio-button value="public">公用</el-radio-button>
             <el-radio-button value="private">私有</el-radio-button>
           </el-radio-group>
+          <el-select v-model="store.filters.uploader_id" @change="loadVideos" placeholder="全部上传者" clearable size="small" style="flex:1;min-width:110px;">
+            <el-option v-for="(info, id) in store.counts.uploader" :key="id" :label="info.display_name + ' (' + info.cnt + ')'" :value="Number(id)" />
+          </el-select>
           <el-select v-model="store.filters.region" @change="loadVideos" placeholder="全部地区" clearable size="small" style="flex:1;min-width:110px;">
             <el-option v-for="r in store.tags.regions" :key="r" :label="r + ' (' + (store.counts.region?.[r] || 0) + ')'" :value="r" />
           </el-select>
@@ -85,6 +88,7 @@
                     <el-tag size="small" v-if="row.effectiveness" type="success">{{ row.effectiveness }}</el-tag>
                     <el-tag size="small" v-if="row.product_name" type="info">{{ row.product_name }}</el-tag>
                     <el-tag size="small" v-if="row.review_status" :type="row.review_status === '不能过审' ? 'danger' : 'success'">{{ row.review_status }}</el-tag>
+                    <el-tag size="small" type="warning" v-if="row.owner_display_name" effect="plain">{{ row.owner_display_name }}</el-tag>
                     <span v-if="copiedIds[row.id]" style="font-size:10px;color:#059669;">已复制</span>
                     <span class="video-time">{{ row.imported_at }}</span>
                   </div>

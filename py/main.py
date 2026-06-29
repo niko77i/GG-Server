@@ -969,6 +969,7 @@ def youtube_list():
     review_status = request.args.get("review_status", "").strip()
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
+    uploader_id = request.args.get("uploader_id", "").strip()
     import datetime
 
     db = _yt_db()
@@ -976,39 +977,48 @@ def youtube_list():
 
     # 按 scope 过滤
     if scope == "public":
-        where.append("is_public = 1")
+        where.append("v.is_public = 1")
     elif scope == "private":
-        where.append("owner_id = ?"); params.append(user_id)
+        where.append("v.owner_id = ?"); params.append(user_id)
     else:  # all
-        where.append("(is_public = 1 OR owner_id = ?)"); params.append(user_id)
+        where.append("(v.is_public = 1 OR v.owner_id = ?)"); params.append(user_id)
 
     for f, v in [("region", region), ("frame_type", frame_type), ("effectiveness", effectiveness), ("product_name", product_name)]:
-        if v: where.append(f"{f}=?"); params.append(v)
+        if v: where.append(f"v.{f}=?"); params.append(v)
     # 审核状态：默认筛选「能过审」，传空或"全部"则不过滤
     if review_status and review_status != "全部":
-        where.append("review_status=?"); params.append(review_status)
+        where.append("v.review_status=?"); params.append(review_status)
     if from_date:
-        where.append("imported_at >= ?"); params.append(from_date)
+        where.append("v.imported_at >= ?"); params.append(from_date)
     if to_date:
         # to_date 为结束日期当天，需包含完整当天，故加一天用 < 比较
         try:
             dt = datetime.datetime.strptime(to_date, "%Y-%m-%d") + datetime.timedelta(days=1)
-            where.append("imported_at < ?"); params.append(dt.strftime("%Y-%m-%d"))
+            where.append("v.imported_at < ?"); params.append(dt.strftime("%Y-%m-%d"))
         except ValueError:
             pass
+    if uploader_id:
+        where.append("v.owner_id = ?"); params.append(int(uploader_id))
 
-    query = "SELECT * FROM videos"
+    query = "SELECT v.*, u.display_name AS owner_display_name, u.username AS owner_username FROM videos v LEFT JOIN users u ON v.owner_id = u.id"
     if where: query += " WHERE " + " AND ".join(where)
-    query += " ORDER BY CASE review_status WHEN '不能过审' THEN 1 ELSE 0 END, CASE effectiveness WHEN '成效' THEN 0 WHEN '一般' THEN 1 ELSE 2 END, imported_at DESC"
+    query += " ORDER BY CASE v.review_status WHEN '不能过审' THEN 1 ELSE 0 END, CASE v.effectiveness WHEN '成效' THEN 0 WHEN '一般' THEN 1 ELSE 2 END, v.imported_at DESC"
 
     rows = db.execute(query, params).fetchall()
     videos = [dict(r) for r in rows]
 
-    counts = {"region": {}, "frame_type": {}, "effectiveness": {}, "product_name": {}, "review_status": {}}
+    counts = {"region": {}, "frame_type": {}, "effectiveness": {}, "product_name": {}, "review_status": {}, "uploader": {}}
     for v in videos:
-        for field in counts:
+        for field in ["region", "frame_type", "effectiveness", "product_name", "review_status"]:
             val = v.get(field, "") or ""
             if val: counts[field][val] = counts[field].get(val, 0) + 1
+        # uploader 计数：用 owner_id 作为 key，存 display_name 和 count
+        oid = v.get("owner_id")
+        if oid:
+            if oid not in counts["uploader"]:
+                dname = v.get("owner_display_name") or v.get("owner_username") or f"用户{oid}"
+                counts["uploader"][oid] = {"display_name": dname, "cnt": 0}
+            counts["uploader"][oid]["cnt"] += 1
 
     db.close()
     return jsonify({"success": True, "videos": videos, "counts": counts})
@@ -1025,21 +1035,24 @@ def youtube_dates():
     effectiveness = request.args.get("effectiveness", "").strip()
     product_name = request.args.get("product_name", "").strip()
     review_status = request.args.get("review_status", "").strip()
+    uploader_id = request.args.get("uploader_id", "").strip()
 
     db = _yt_db()
     where = []; params = []
     if scope == "public":
-        where.append("is_public = 1")
+        where.append("v.is_public = 1")
     elif scope == "private":
-        where.append("owner_id = ?"); params.append(user_id)
+        where.append("v.owner_id = ?"); params.append(user_id)
     else:
-        where.append("(is_public = 1 OR owner_id = ?)"); params.append(user_id)
+        where.append("(v.is_public = 1 OR v.owner_id = ?)"); params.append(user_id)
     for f, v in [("region", region), ("frame_type", frame_type), ("effectiveness", effectiveness), ("product_name", product_name)]:
-        if v: where.append(f"{f}=?"); params.append(v)
+        if v: where.append(f"v.{f}=?"); params.append(v)
     if review_status and review_status != "全部":
-        where.append("review_status=?"); params.append(review_status)
+        where.append("v.review_status=?"); params.append(review_status)
+    if uploader_id:
+        where.append("v.owner_id = ?"); params.append(int(uploader_id))
 
-    query = "SELECT substr(imported_at, 1, 10) AS date, COUNT(*) AS cnt FROM videos"
+    query = "SELECT substr(v.imported_at, 1, 10) AS date, COUNT(*) AS cnt FROM videos v"
     if where:
         query += " WHERE " + " AND ".join(where)
     query += " GROUP BY date ORDER BY date DESC"
@@ -1219,10 +1232,11 @@ def products_list():
     for r in rows:
         prod = dict(r)
         pkgs = db.execute("SELECT * FROM packages WHERE product_id=?", (r["id"],)).fetchall()
-        # 自然排序：正常包在前（status 为空/0），然后按 series_name 自然排序
+        # 先按状态排序（正常→拒登→暂停→掉包），同状态按导入时间升序
+        status_order = {"": 0, "0": 0, "rejected": 1, "paused": 2, "dropped": 3}
         pkgs = sorted(pkgs, key=lambda p: (
-            0 if (str(p["status"] or "")).strip() in ("", "0") else 1,
-            natural_sort_key(p["series_name"] or "")
+            status_order.get((str(p["status"] or "")).strip(), 0),
+            p["created_at"] or ""
         ))
         prod["packages"] = [dict(p) for p in pkgs]
         # 关联账户数：仅统计直属（递归在详情弹窗按需加载）
@@ -1476,10 +1490,11 @@ def products_detail(pid):
         return jsonify({"success": False, "error": "产品不存在"}), 404
     prod_data = dict(prod)
     # 包列表
-    pkgs = db.execute("SELECT * FROM packages WHERE product_id=? ORDER BY series_name", (pid,)).fetchall()
+    pkgs = db.execute("SELECT * FROM packages WHERE product_id=?", (pid,)).fetchall()
+    status_order = {"": 0, "0": 0, "rejected": 1, "paused": 2, "dropped": 3}
     pkgs = sorted(pkgs, key=lambda p: (
-        0 if (str(p["status"] or "")).strip() in ("", "0") else 1,
-        natural_sort_key(p["series_name"] or "")
+        status_order.get((str(p["status"] or "")).strip(), 0),
+        p["created_at"] or ""
     ))
     prod_data["packages"] = [dict(p) for p in pkgs]
     # 通过 MCC 关联的账户
@@ -1614,6 +1629,13 @@ def _guess_series(text, link):
         if "神包上线" in l:
             name = l.split("神包上线：")[-1].split("神包上线")[-1].strip()
             if name: return name
+    # 类型7（新增）：广告命名/渠道命名 前缀行，取整行内容含空格
+    for j in range(max(0, link_idx - 2), min(len(lines), link_idx + 5)):
+        l = lines[j].strip()
+        for prefix in ["广告命名：", "广告命名:", "渠道命名：", "渠道命名:"]:
+            if prefix in l:
+                name = l.split(prefix)[-1].strip()
+                if name: return name
     # 类型1：含APK或包号的行（排除"神包上线"以免误匹配）
     for j in range(link_idx, max(-1, link_idx - 10), -1):
         l = lines[j].strip()

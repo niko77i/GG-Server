@@ -63,18 +63,19 @@
       <div v-for="pkg in filteredPackages" :key="pkg.id"
         style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f5f5f5;font-size:12px;"
         :style="normalizeStatus(pkg.status) === 'paused' ? 'opacity:0.6;' : normalizeStatus(pkg.status) === 'dropped' ? 'opacity:0.4;text-decoration:line-through;' : ''">
-        <div style="display:flex;align-items:center;gap:6px;flex:1;overflow:hidden;">
-          <input type="checkbox" :value="pkg.id" v-model="checkedIds" @click.stop style="width:auto;" />
-          <span style="font-weight:600;white-space:nowrap;cursor:pointer;"
+        <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;overflow:hidden;">
+          <input type="checkbox" :value="pkg.id" v-model="checkedIds" @click.stop style="width:auto;flex-shrink:0;" />
+          <span style="font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer;"
   @click.stop="copySeriesName(pkg.series_name)"
   :title="'点击复制'">{{ pkg.series_name || '-' }}</span>
-          <span style="color:#ccc;">│</span>
+          <span style="color:#ccc;flex-shrink:0;">│</span>
           <span style="font-family:monospace;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="copy(pkg.package_name)">{{ pkg.package_name }}</span>
-          <span style="color:#ccc;" v-if="pkg.url">│</span>
+          <span style="color:#ccc;flex-shrink:0;" v-if="pkg.url">│</span>
           <span v-if="pkg.url" style="font-size:11px;color:var(--el-color-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;" @click.stop="copy(pkg.url)">{{ pkg.url }}</span>
           <a v-if="pkg.url" :href="pkg.url" target="_blank" style="font-size:11px;text-decoration:none;flex-shrink:0;" @click.stop>🔗</a>
         </div>
-        <div style="display:flex;gap:4px;">
+        <span style="font-size:11px;color:#888;white-space:nowrap;flex-shrink:0;margin:0 8px;">{{ pkg.created_at || '' }}</span>
+        <div style="display:flex;gap:4px;flex-shrink:0;">
           <el-select :model-value="normalizeStatus(pkg.status)" @change="v => setPkgStatus(pkg.id, v)" size="small" style="width:80px;">
             <el-option label="正常" value="normal" />
             <el-option label="暂停" value="paused" />
@@ -136,10 +137,10 @@ const parsedRunnerIds = computed(() => {
 const packages = computed(() => {
   const pkgs = [...(props.product.packages || [])]
   pkgs.sort((a, b) => {
-    const o = { '': 0, rejected: 1, paused: 2, dropped: 3 }
-    const sa = o[a.status || ''] || 0; const sb = o[b.status || ''] || 0
+    const o = { '': 0, '0': 0, rejected: 1, paused: 2, dropped: 3 }
+    const sa = o[(a.status || '').trim()] ?? 0; const sb = o[(b.status || '').trim()] ?? 0
     if (sa !== sb) return sa - sb
-    return (a.series_name || '').localeCompare(b.series_name || '', undefined, { numeric: true })
+    return (a.created_at || '').localeCompare(b.created_at || '')
   })
   return pkgs
 })

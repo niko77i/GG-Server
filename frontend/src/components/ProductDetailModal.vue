@@ -82,7 +82,7 @@ import api from '@/api/client'
 import { ElMessage } from 'element-plus'
 
 const props = defineProps({ visible: Boolean, prodId: Number })
-defineEmits(['update:visible'])
+const emit = defineEmits(['update:visible', 'saved'])
 const store = useProductStore()
 const product = ref(null)
 const availableUsers = ref([])
@@ -123,6 +123,7 @@ async function addRunner(newId) {
   try {
     await productsApi.updateRunners(product.value.id, { runner_ids: ids })
     product.value.runner_ids = JSON.stringify(ids)
+    emit('saved')
     ElMessage.success('Runner 已添加')
   } catch { ElMessage.error('添加失败') }
   newRunnerId.value = null
@@ -134,6 +135,7 @@ async function removeRunner(rid) {
   try {
     await productsApi.updateRunners(product.value.id, { runner_ids: ids })
     product.value.runner_ids = JSON.stringify(ids)
+    emit('saved')
     ElMessage.success('Runner 已移除')
   } catch { ElMessage.error('移除失败') }
 }

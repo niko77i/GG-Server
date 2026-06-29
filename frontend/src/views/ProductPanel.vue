@@ -60,7 +60,7 @@
 
     <!-- 弹窗 -->
     <ProductModal v-model:visible="pmVisible" :edit-id="pmEditId" :mcc-options="mccOptions" @saved="load" />
-    <ProductDetailModal v-model:visible="detailVisible" :prod-id="detailId" />
+    <ProductDetailModal v-model:visible="detailVisible" :prod-id="detailId" @saved="load" />
     <CopyImportModal v-model:visible="copyVisible" @saved="load" />
     <AddPackageModal v-model:visible="addPkgVisible" :prod-id="addPkgProdId" @saved="load" />
   </div>
@@ -121,7 +121,6 @@ function onRunnerFilterChange() {
 }
 
 function onRunnerUserChange(uid) {
-  if (uid) runnerFilter.value = 'mine'  // 重置 radio
   load()
 }
 
