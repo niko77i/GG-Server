@@ -1956,8 +1956,9 @@ def mcc_list():
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
-    where = ["(m.owner_id = ? OR m.shared_user_ids LIKE '%' || ? || '%')"]
-    params = [user_id, user_id]
+    uid_str = str(user_id)
+    where = ["(m.owner_id = ? OR m.shared_user_ids = ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ?)"]
+    params = [user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]"]
     if search:
         where.append("(m.name LIKE ? OR m.mcc_id LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -1986,9 +1987,11 @@ def mcc_list():
 def mcc_options():
     user_id = int(get_jwt_identity())
     db = _yt_db()
+    uid_str = str(user_id)
     rows = db.execute(
-        "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids LIKE '%' || ? || '%') ORDER BY name",
-        (user_id, user_id)
+        "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids=? OR "
+        "shared_user_ids LIKE ? OR shared_user_ids LIKE ? OR shared_user_ids LIKE ?) ORDER BY name",
+        (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
     ).fetchall()
     db.close()
     return jsonify({"success": True, "options": [dict(r) for r in rows]})
@@ -2175,36 +2178,7 @@ def mcc_link(mid):
         db.close()
         return jsonify({"success": False, "error": "MCC 不存在"}), 404
 
-    def _link_user_to_mcc(mcc_id, uid, visited=None):
-        """递归将用户加入 MCC 及其所有上级的 shared_user_ids。"""
-        if visited is None:
-            visited = set()
-        if mcc_id in visited:
-            return
-        visited.add(mcc_id)
-        row = db.execute(
-            "SELECT id, owner_id, shared_user_ids, parent_mcc_id FROM mcc WHERE id=?",
-            (mcc_id,)
-        ).fetchone()
-        if not row:
-            return
-        if row["owner_id"] == uid:
-            pass
-        else:
-            try:
-                shared = json.loads(row["shared_user_ids"] or "[]")
-            except Exception:
-                shared = []
-            if uid not in shared:
-                shared.append(uid)
-                db.execute(
-                    "UPDATE mcc SET shared_user_ids=? WHERE id=?",
-                    (json.dumps(shared), row["id"])
-                )
-        if row["parent_mcc_id"]:
-            _link_user_to_mcc(row["parent_mcc_id"], uid, visited)
-
-    _link_user_to_mcc(mid, user_id)
+    _link_mcc_chain_to_user(db, mid, user_id)
     db.commit()
     db.close()
     return jsonify({"success": True, "message": "MCC 已关联到您的账户"})

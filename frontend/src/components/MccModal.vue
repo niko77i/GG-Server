@@ -68,11 +68,16 @@ async function submit() {
             'MCC 已存在',
             { confirmButtonText: '关联', cancelButtonText: '取消', type: 'warning' }
           )
-          saving.value = true
+        } catch (e) {
+          // 用户取消关联
+          return
+        }
+        saving.value = true
+        try {
           await store.linkMcc(res.existing_mcc.id)
           ElMessage.success('MCC 已关联到您的账户')
         } catch (e) {
-          // 用户取消关联
+          ElMessage.error('关联失败：' + (e.response?.data?.error || e.message || '未知错误'))
           return
         }
       }
