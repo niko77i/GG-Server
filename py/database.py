@@ -280,6 +280,62 @@ def _ensure_schema(conn: sqlite3.Connection):
             "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_owner_id','1')"
         )
     _migrate_mcc_dedup(conn)
+    _migrate_mcc_share_runners(conn)
+
+
+def _migrate_mcc_share_runners(conn: sqlite3.Connection):
+    """回填已有产品的 runner 到 MCC 的 shared_user_ids（含上级链）。"""
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_mcc_share_runners'"
+    ).fetchone()
+    if migrated:
+        return
+
+    products = conn.execute(
+        "SELECT id, mcc_id, runner_ids FROM products WHERE mcc_id IS NOT NULL"
+    ).fetchall()
+
+    for prod in products:
+        try:
+            runners = json.loads(prod["runner_ids"] or "[]")
+        except Exception:
+            runners = []
+        if not runners:
+            continue
+
+        mcc_id = prod["mcc_id"]
+        visited = set()
+        stack = [mcc_id]
+        while stack:
+            cur_id = stack.pop()
+            if cur_id in visited:
+                continue
+            visited.add(cur_id)
+            mcc = conn.execute(
+                "SELECT id, owner_id, shared_user_ids, parent_mcc_id FROM mcc WHERE id=?",
+                (cur_id,)
+            ).fetchone()
+            if not mcc:
+                continue
+            try:
+                shared = json.loads(mcc["shared_user_ids"] or "[]")
+            except Exception:
+                shared = []
+            modified = False
+            for uid in runners:
+                if uid != mcc["owner_id"] and uid not in shared:
+                    shared.append(uid)
+                    modified = True
+            if modified:
+                conn.execute(
+                    "UPDATE mcc SET shared_user_ids=? WHERE id=?",
+                    (json.dumps(shared), mcc["id"])
+                )
+            if mcc["parent_mcc_id"]:
+                stack.append(mcc["parent_mcc_id"])
+
+    conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_mcc_share_runners','1')")
+    conn.commit()
 
 
 def _migrate_mcc_dedup(conn: sqlite3.Connection):
