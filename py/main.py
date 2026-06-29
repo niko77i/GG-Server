@@ -1189,20 +1189,23 @@ def products_list():
 
     where = []; params = []
     if runner == "mine":
-        # 需要用户登录才能筛选"我在跑的"
         try:
             user_id = int(get_jwt_identity())
         except Exception:
             user_id = None
         if user_id:
-            where.append("(p.runner_ids LIKE ? OR p.owner_id = ?)")
-            params += [f'%{user_id}%', user_id]
+            uid_s = str(user_id)
+            where.append("(p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)")
+            params += [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"]
     elif runner == "all":
-        pass  # 不过滤
+        pass
     elif runner.isdigit():
-        # 按指定用户筛选
-        where.append("(p.runner_ids LIKE ? OR p.owner_id = ?)")
-        params += [f'%{runner}%', int(runner)]
+        uid_s = str(runner)
+        where.append(
+            "(p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR "
+            "p.runner_ids LIKE ? OR p.owner_id = ?)"
+        )
+        params += [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]", int(runner)]
     if search:
         where.append("(p.product_name LIKE ? OR p.kpi LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -1276,9 +1279,10 @@ def products_list():
     except Exception:
         uid = None
     if uid:
+        uid_s = str(uid)
         runner_counts["mine"] = db.execute(
-            f"SELECT COUNT(*) FROM products p WHERE (p.runner_ids LIKE ? OR p.owner_id = ?) AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
-            [f'%{uid}%', uid] + stat_params_mine
+            f"SELECT COUNT(*) FROM products p WHERE (p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?) AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
+            [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"] + stat_params_mine
         ).fetchone()[0]
     else:
         runner_counts["mine"] = runner_counts["all"]
