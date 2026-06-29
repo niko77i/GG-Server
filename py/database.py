@@ -99,6 +99,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             mcc_id TEXT NOT NULL,
             level TEXT DEFAULT '',
             parent_mcc_id INTEGER REFERENCES mcc(id),
+            shared_user_ids TEXT DEFAULT '[]',
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         );
