@@ -17,6 +17,7 @@ export const mccApi = {
   delete: (id)     => api.delete(`/mcc/${id}`),
   batchDelete: (ids) => api.post('/mcc/batch-delete', { ids }),
   detail: (id)     => api.get(`/mcc/${id}/detail`),
+  link:   (id)     => api.post(`/mcc/${id}/link`),
 }
 
 export const settingsApi = {

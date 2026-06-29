@@ -30,8 +30,11 @@
         <el-table-column label="操作" width="160">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showDetail(row.id)">📋</el-button>
-            <el-button link type="primary" size="small" @click="showModal(row.id)">✏️</el-button>
-            <el-button link type="danger" size="small" @click="del(row.id)">🗑</el-button>
+            <template v-if="row.is_owner">
+              <el-button link type="primary" size="small" @click="showModal(row.id)">✏️</el-button>
+              <el-button link type="danger" size="small" @click="del(row.id)">🗑</el-button>
+            </template>
+            <span v-else style="color:#aaa;font-size:11px;">共享</span>
           </template>
         </el-table-column>
       </el-table>

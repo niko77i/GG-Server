@@ -31,6 +31,7 @@
 import { ref, reactive } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
 import { mccApi } from '@/api/accounts'
+import { ElMessageBox, ElMessage } from 'element-plus'
 
 const props = defineProps({ visible: Boolean, editId: [Number, null] })
 const emit = defineEmits(['update:visible', 'saved'])
@@ -57,7 +58,24 @@ async function submit() {
     if (props.editId) {
       await store.updateMcc(props.editId, { name: form.name, level: form.level, parent_mcc_id: form.parent_mcc_id || null })
     } else {
-      await store.createMcc(form)
+      const res = await store.createMcc(form)
+      // 处理 MCC 已存在的情况
+      if (res.exists && res.existing_mcc) {
+        saving.value = false
+        try {
+          await ElMessageBox.confirm(
+            `MCC "${res.existing_mcc.name} (${res.existing_mcc.mcc_id})" 已存在（属于 ${res.owner_name}），是否关联到您的列表？`,
+            'MCC 已存在',
+            { confirmButtonText: '关联', cancelButtonText: '取消', type: 'warning' }
+          )
+          saving.value = true
+          await store.linkMcc(res.existing_mcc.id)
+          ElMessage.success('MCC 已关联到您的账户')
+        } catch (e) {
+          // 用户取消关联
+          return
+        }
+      }
     }
     emit('update:visible', false)
     emit('saved')

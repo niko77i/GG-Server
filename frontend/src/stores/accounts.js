@@ -41,6 +41,7 @@ export const useAccountStore = defineStore('accounts', {
     async deleteMcc(id) { await mccApi.delete(id); return this.loadMccList() },
     async batchDeleteMcc(ids) { const res = await mccApi.batchDelete(ids); await this.loadMccList(); return res },
     async loadMccDetail(id) { return mccApi.detail(id) },
+    async linkMcc(id) { return mccApi.link(id) },
 
     async loadSettings() {
       const res = await settingsApi.get()
