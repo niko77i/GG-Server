@@ -230,6 +230,11 @@ def _ensure_schema(conn: sqlite3.Connection):
     if "owner_id" not in mcols2:
         conn.execute("ALTER TABLE mcc ADD COLUMN owner_id INTEGER REFERENCES users(id)")
 
+    # 迁移：mcc 表补 shared_user_ids 列（2026-06-29 MCC 共享）
+    mcols3 = [r[1] for r in conn.execute("PRAGMA table_info(mcc)").fetchall()]
+    if "shared_user_ids" not in mcols3:
+        conn.execute("ALTER TABLE mcc ADD COLUMN shared_user_ids TEXT DEFAULT '[]'")
+
     # 迁移：products 表补 owner_id/runner_ids/is_archived（2026-06-26 数据迁移）
     pcols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
     if "owner_id" not in pcols:
