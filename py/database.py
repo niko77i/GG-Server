@@ -279,6 +279,95 @@ def _ensure_schema(conn: sqlite3.Connection):
         conn.execute(
             "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_owner_id','1')"
         )
+    _migrate_mcc_dedup(conn)
+
+
+def _migrate_mcc_dedup(conn: sqlite3.Connection):
+    """合并重复 MCC（同一 mcc_id 字符串），developer 的记录优先保留。"""
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_mcc_dedup'"
+    ).fetchone()
+    if migrated:
+        return
+
+    # 查找重复的 mcc_id
+    dupes = conn.execute(
+        "SELECT mcc_id, COUNT(*) as cnt FROM mcc GROUP BY mcc_id HAVING cnt > 1"
+    ).fetchall()
+
+    if not dupes:
+        # 无重复，直接建唯一索引
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mcc_mcc_id_unique ON mcc(mcc_id)")
+        conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_mcc_dedup','1')")
+        conn.commit()
+        return
+
+    # 获取 developer 用户 ID
+    dev = conn.execute("SELECT id FROM users WHERE role='developer' LIMIT 1").fetchone()
+    dev_id = dev["id"] if dev else 1
+
+    for row in dupes:
+        mcc_id_str = row["mcc_id"]
+        # 获取该 mcc_id 的所有记录
+        all_rows = conn.execute(
+            "SELECT * FROM mcc WHERE mcc_id=? ORDER BY id ASC", (mcc_id_str,)
+        ).fetchall()
+
+        # 确定主记录：developer 的优先，否则最早创建的
+        master = None
+        for r in all_rows:
+            if r["owner_id"] == dev_id:
+                master = r
+                break
+        if not master:
+            master = all_rows[0]  # 最早创建的
+
+        master_id = master["id"]
+        master_owner = master["owner_id"] or 0
+
+        # 收集所有 shared 用户（排除 master owner）
+        shared_ids = set()
+        for r in all_rows:
+            oid = r["owner_id"] or 0
+            if oid and oid != master_owner:
+                shared_ids.add(oid)
+
+        # 合并已有的 shared_user_ids
+        try:
+            existing_shared = json.loads(master["shared_user_ids"] or "[]")
+        except Exception:
+            existing_shared = []
+        all_shared = list(set(existing_shared + list(shared_ids)))
+
+        # 更新关联数据：products 和 accounts 指向主记录
+        for r in all_rows:
+            if r["id"] == master_id:
+                continue
+            conn.execute("UPDATE products SET mcc_id=? WHERE mcc_id=?", (master_id, r["id"]))
+            conn.execute("UPDATE accounts SET mcc_id=? WHERE mcc_id=?", (master_id, r["id"]))
+            # 更新子 MCC 的 parent_mcc_id
+            conn.execute("UPDATE mcc SET parent_mcc_id=? WHERE parent_mcc_id=?", (master_id, r["id"]))
+
+        # 写入 shared_user_ids
+        conn.execute(
+            "UPDATE mcc SET shared_user_ids=? WHERE id=?",
+            (json.dumps(all_shared), master_id)
+        )
+
+        # 删除重复记录
+        for r in all_rows:
+            if r["id"] != master_id:
+                conn.execute("DELETE FROM mcc WHERE id=?", (r["id"],))
+
+    # 初始化无 shared_user_ids 的记录
+    conn.execute("UPDATE mcc SET shared_user_ids='[]' WHERE shared_user_ids IS NULL")
+
+    # 创建唯一索引
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mcc_mcc_id_unique ON mcc(mcc_id)")
+
+    # 标记迁移完成
+    conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_mcc_dedup','1')")
+    conn.commit()
 
 
 def _migrate_if_needed(conn: sqlite3.Connection):
