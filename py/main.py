@@ -1457,8 +1457,6 @@ def products_merge():
     })
 
 
-@app.route("/api/products/<int:pid>/runners", methods=["PUT"])
-@jwt_required()
 def _assign_mcc_to_users(db, mcc_id, user_ids):
     """将 MCC（含上级链）分配给指定用户列表。"""
     for uid in user_ids:
@@ -1496,6 +1494,8 @@ def _link_mcc_chain_to_user(db, mcc_id, uid, visited=None):
         _link_mcc_chain_to_user(db, row["parent_mcc_id"], uid, visited)
 
 
+@app.route("/api/products/<int:pid>/runners", methods=["PUT"])
+@jwt_required()
 def products_update_runners(pid):
     """更新产品的 runner 列表。新增 runner 时自动分配产品 MCC。"""
     data = request.get_json(silent=True) or {}
