@@ -1324,6 +1324,9 @@ def products_create():
             if user_id not in runners:
                 runners.append(user_id)
                 db.execute("UPDATE products SET runner_ids=? WHERE id=?", (_json.dumps(runners), pid))
+                # 自动分配产品 MCC 给当前用户
+                if mcc_id:
+                    _assign_mcc_to_users(db, mcc_id, [user_id])
     else:
         runner_ids = _json.dumps([user_id]) if user_id else "[]"
         db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -1456,8 +1459,45 @@ def products_merge():
 
 @app.route("/api/products/<int:pid>/runners", methods=["PUT"])
 @jwt_required()
+def _assign_mcc_to_users(db, mcc_id, user_ids):
+    """将 MCC（含上级链）分配给指定用户列表。"""
+    for uid in user_ids:
+        _link_mcc_chain_to_user(db, mcc_id, uid)
+
+
+def _link_mcc_chain_to_user(db, mcc_id, uid, visited=None):
+    """递归将用户加入 MCC 及其所有上级的 shared_user_ids。"""
+    if visited is None:
+        visited = set()
+    if mcc_id in visited:
+        return
+    visited.add(mcc_id)
+    row = db.execute(
+        "SELECT id, owner_id, shared_user_ids, parent_mcc_id FROM mcc WHERE id=?",
+        (mcc_id,)
+    ).fetchone()
+    if not row:
+        return
+    if row["owner_id"] == uid:
+        pass  # 已是 owner，不需要在 shared 中
+    else:
+        try:
+            shared = json.loads(row["shared_user_ids"] or "[]")
+        except Exception:
+            shared = []
+        if uid not in shared:
+            shared.append(uid)
+            db.execute(
+                "UPDATE mcc SET shared_user_ids=? WHERE id=?",
+                (json.dumps(shared), row["id"])
+            )
+    # 递归处理上级
+    if row["parent_mcc_id"]:
+        _link_mcc_chain_to_user(db, row["parent_mcc_id"], uid, visited)
+
+
 def products_update_runners(pid):
-    """更新产品的 runner 列表。"""
+    """更新产品的 runner 列表。新增 runner 时自动分配产品 MCC。"""
     data = request.get_json(silent=True) or {}
     runner_ids = data.get("runner_ids")  # list of user IDs
 
@@ -1465,16 +1505,31 @@ def products_update_runners(pid):
         return jsonify({"success": False, "error": "请提供 runner_ids 列表"}), 400
 
     db = _yt_db()
-    existing = db.execute("SELECT id FROM products WHERE id=?", (pid,)).fetchone()
+    existing = db.execute(
+        "SELECT id, runner_ids, mcc_id FROM products WHERE id=?", (pid,)
+    ).fetchone()
     if not existing:
         db.close()
         return jsonify({"success": False, "error": "产品不存在"}), 404
 
+    # 计算新增的 runner
+    try:
+        old_runners = json.loads(existing["runner_ids"] or "[]")
+    except Exception:
+        old_runners = []
+    new_runners = [uid for uid in runner_ids if uid not in old_runners]
+
+    # 更新 runner_ids
     db.execute("UPDATE products SET runner_ids=? WHERE id=?",
-               (_json.dumps(runner_ids), pid))
+               (json.dumps(runner_ids), pid))
+
+    # 自动分配产品 MCC 给新增的 runner
+    product_mcc_id = existing["mcc_id"]
+    if product_mcc_id and new_runners:
+        _assign_mcc_to_users(db, product_mcc_id, new_runners)
+
     db.commit()
     db.close()
-
     return jsonify({"success": True, "runner_ids": runner_ids})
 
 
@@ -1672,7 +1727,7 @@ def _guess_series(text, link):
 
 # ---------- 账户管理 API ----------
 
-def _mcc_to_dict(r, db=None):
+def _mcc_to_dict(r, db=None, current_user_id=None):
     d = dict(r)
     if db:
         d["direct_count"] = db.execute(
@@ -1682,6 +1737,7 @@ def _mcc_to_dict(r, db=None):
     else:
         d["direct_count"] = 0
         d["total_accounts"] = 0
+    d["is_owner"] = (current_user_id is not None and r.get("owner_id") == current_user_id)
     return d
 
 def _mcc_recursive_account_ids(mcc_id):
@@ -1900,7 +1956,8 @@ def mcc_list():
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
-    where = ["m.owner_id = ?"]; params = [user_id]
+    where = ["(m.owner_id = ? OR m.shared_user_ids LIKE '%' || ? || '%')"]
+    params = [user_id, user_id]
     if search:
         where.append("(m.name LIKE ? OR m.mcc_id LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -1919,7 +1976,7 @@ def mcc_list():
     if where:
         count_sql += " WHERE " + " AND ".join(where)
     total = db.execute(count_sql, params).fetchone()[0]
-    mcc_list_data = [_mcc_to_dict(r, db) for r in rows]
+    mcc_list_data = [_mcc_to_dict(r, db, user_id) for r in rows]
     db.close()
     return jsonify({"success": True, "mcc_list": mcc_list_data, "total": total})
 
@@ -1930,8 +1987,8 @@ def mcc_options():
     user_id = int(get_jwt_identity())
     db = _yt_db()
     rows = db.execute(
-        "SELECT id, name, mcc_id FROM mcc WHERE owner_id=? ORDER BY name",
-        (user_id,)
+        "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids LIKE '%' || ? || '%') ORDER BY name",
+        (user_id, user_id)
     ).fetchall()
     db.close()
     return jsonify({"success": True, "options": [dict(r) for r in rows]})
@@ -1946,23 +2003,58 @@ def mcc_create():
     mcc_id = (data.get("mcc_id") or "").strip()
     if not name or not mcc_id:
         return jsonify({"success": False, "error": "MCC 名称和 ID 不能为空"}), 400
+
+    db = _yt_db()
+
+    # 检查 mcc_id 是否已存在（按 Google Ads manager ID 字符串）
+    existing = db.execute(
+        "SELECT m.*, u.display_name, u.username FROM mcc m "
+        "LEFT JOIN users u ON m.owner_id = u.id "
+        "WHERE m.mcc_id=?", (mcc_id,)
+    ).fetchone()
+
+    if existing:
+        ed = dict(existing)
+        owner_name = ed.get("display_name") or ed.get("username") or "未知"
+        # 检查当前用户是否已经在 shared 中或为 owner
+        try:
+            shared = json.loads(ed.get("shared_user_ids") or "[]")
+        except Exception:
+            shared = []
+        if ed["owner_id"] == user_id or user_id in shared:
+            db.close()
+            return jsonify({"success": False, "error": "该 MCC 已关联到您的账户"}), 409
+        # 存在但用户不在 shared 中 — 返回现有 MCC 信息等前端确认
+        db.close()
+        return jsonify({
+            "success": True,
+            "exists": True,
+            "existing_mcc": {
+                "id": ed["id"],
+                "name": ed["name"],
+                "mcc_id": ed["mcc_id"]
+            },
+            "owner_name": owner_name
+        })
+
     # 验证上级 MCC 存在
     parent_mcc_id = data.get("parent_mcc_id") or None
     if parent_mcc_id:
-        db = _yt_db()
         parent_row = db.execute("SELECT id FROM mcc WHERE id=?", (int(parent_mcc_id),)).fetchone()
-        db.close()
         if not parent_row:
+            db.close()
             return jsonify({"success": False, "error": "上级 MCC 不存在"}), 400
-    db = _yt_db()
+
     import datetime
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
         db.execute(
-            "INSERT INTO mcc(name,mcc_id,level,parent_mcc_id,created_at,updated_at,owner_id) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO mcc(name,mcc_id,level,parent_mcc_id,shared_user_ids,created_at,updated_at,owner_id) "
+            "VALUES(?,?,?,?,?,?,?,?)",
             (name, mcc_id,
              (data.get("level") or "").strip(),
              parent_mcc_id,
+             json.dumps([user_id]),
              now, now, user_id))
         db.commit()
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -1976,8 +2068,16 @@ def mcc_create():
 @app.route("/api/mcc/<int:mid>", methods=["PUT"])
 @jwt_required()
 def mcc_update(mid):
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     db = _yt_db()
+    mcc_row = db.execute("SELECT owner_id FROM mcc WHERE id=?", (mid,)).fetchone()
+    if not mcc_row:
+        db.close()
+        return jsonify({"success": False, "error": "MCC 不存在"}), 404
+    if mcc_row["owner_id"] != user_id:
+        db.close()
+        return jsonify({"success": False, "error": "只有创建者才能编辑此 MCC"}), 403
     # 循环引用检测：新 parent_mcc_id 不能是当前 MCC 的子孙
     if "parent_mcc_id" in data and data["parent_mcc_id"]:
         new_parent = int(data["parent_mcc_id"])
@@ -2006,6 +2106,14 @@ def mcc_update(mid):
 def mcc_delete(mid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
+    # 检查 ownership
+    mcc_row = db.execute("SELECT owner_id FROM mcc WHERE id=?", (mid,)).fetchone()
+    if not mcc_row:
+        db.close()
+        return jsonify({"success": False, "error": "MCC 不存在"}), 404
+    if mcc_row["owner_id"] != user_id:
+        db.close()
+        return jsonify({"success": False, "error": "只有创建者才能删除此 MCC"}), 403
     # 检查是否有子 MCC
     children = db.execute("SELECT COUNT(*) FROM mcc WHERE parent_mcc_id=?", (mid,)).fetchone()[0]
     if children > 0:
@@ -2016,7 +2124,7 @@ def mcc_delete(mid):
     if acct_count > 0:
         db.close()
         return jsonify({"success": False, "error": f"该 MCC 下有 {acct_count} 个直接关联账户，请先解除关联"}), 400
-    db.execute("DELETE FROM mcc WHERE id=? AND owner_id=?", (mid, user_id))
+    db.execute("DELETE FROM mcc WHERE id=?", (mid,))
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -2033,6 +2141,14 @@ def mcc_batch_delete():
     skipped = []
     deleted = 0
     for mid in ids:
+        # Owner 检查
+        mcc_row = db.execute("SELECT owner_id FROM mcc WHERE id=?", (mid,)).fetchone()
+        if not mcc_row:
+            skipped.append({"id": mid, "reason": "MCC 不存在"})
+            continue
+        if mcc_row["owner_id"] != user_id:
+            skipped.append({"id": mid, "reason": "非创建者，无法删除"})
+            continue
         children = db.execute("SELECT COUNT(*) FROM mcc WHERE parent_mcc_id=?", (mid,)).fetchone()[0]
         if children > 0:
             skipped.append({"id": mid, "reason": f"有 {children} 个子 MCC"})
@@ -2041,10 +2157,57 @@ def mcc_batch_delete():
         if acct_count > 0:
             skipped.append({"id": mid, "reason": f"有 {acct_count} 个关联账户"})
             continue
-        db.execute("DELETE FROM mcc WHERE id=? AND owner_id=?", (mid, user_id))
+        db.execute("DELETE FROM mcc WHERE id=?", (mid,))
         deleted += 1
     db.commit(); db.close()
     return jsonify({"success": True, "deleted": deleted, "skipped": skipped})
+
+
+@app.route("/api/mcc/<int:mid>/link", methods=["POST"])
+@jwt_required()
+def mcc_link(mid):
+    """将当前用户关联到已有 MCC（含上级链）。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+
+    mcc = db.execute("SELECT * FROM mcc WHERE id=?", (mid,)).fetchone()
+    if not mcc:
+        db.close()
+        return jsonify({"success": False, "error": "MCC 不存在"}), 404
+
+    def _link_user_to_mcc(mcc_id, uid, visited=None):
+        """递归将用户加入 MCC 及其所有上级的 shared_user_ids。"""
+        if visited is None:
+            visited = set()
+        if mcc_id in visited:
+            return
+        visited.add(mcc_id)
+        row = db.execute(
+            "SELECT id, owner_id, shared_user_ids, parent_mcc_id FROM mcc WHERE id=?",
+            (mcc_id,)
+        ).fetchone()
+        if not row:
+            return
+        if row["owner_id"] == uid:
+            pass
+        else:
+            try:
+                shared = json.loads(row["shared_user_ids"] or "[]")
+            except Exception:
+                shared = []
+            if uid not in shared:
+                shared.append(uid)
+                db.execute(
+                    "UPDATE mcc SET shared_user_ids=? WHERE id=?",
+                    (json.dumps(shared), row["id"])
+                )
+        if row["parent_mcc_id"]:
+            _link_user_to_mcc(row["parent_mcc_id"], uid, visited)
+
+    _link_user_to_mcc(mid, user_id)
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "message": "MCC 已关联到您的账户"})
 
 
 @app.route("/api/mcc/<int:mid>/detail", methods=["GET"])
