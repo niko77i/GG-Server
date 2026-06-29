@@ -1737,7 +1737,7 @@ def _mcc_to_dict(r, db=None, current_user_id=None):
     else:
         d["direct_count"] = 0
         d["total_accounts"] = 0
-    d["is_owner"] = (current_user_id is not None and r.get("owner_id") == current_user_id)
+    d["is_owner"] = (current_user_id is not None and r["owner_id"] == current_user_id)
     return d
 
 def _mcc_recursive_account_ids(mcc_id):
