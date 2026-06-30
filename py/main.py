@@ -2848,7 +2848,7 @@ def users_names():
     """返回所有用户的 id/username/display_name，供 runner 选择器使用。"""
     db = database.get_db()
     rows = db.execute(
-        "SELECT id, username, display_name FROM users WHERE role != 'hidden' ORDER BY id"
+        "SELECT id, username, display_name FROM users WHERE role NOT IN ('hidden','user') ORDER BY id"
     ).fetchall()
     db.close()
     return jsonify({"success": True, "users": [dict(r) for r in rows]})
