@@ -57,6 +57,7 @@
         placeholder="添加 runner..."
         size="small"
         style="width:200px;"
+        filterable
         @change="addRunner"
       >
         <el-option
