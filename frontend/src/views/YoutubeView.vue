@@ -492,7 +492,7 @@ const importEff = ref('')
 const importProd = ref('')
 const importReview = ref('能过审')
 const importTime = ref('')           // 视频时间，格式 YYYY-MM-DD HH:mm
-const importIsPublic = ref(false)     // false=私有, true=公开
+const importIsPublic = ref(true)      // 默认公开
 const importing = ref(false)
 const importResult = ref('')
 
@@ -511,7 +511,7 @@ async function doImport() {
     product_name: importProd.value,
     review_status: importReview.value,
     imported_at: importTime.value || undefined,
-    is_public: importIsPublic.value ? 1 : 0,
+    is_public: canChooseScope.value ? (importIsPublic.value ? 1 : 0) : 1,
   })
   importResult.value = `导入 ${res.imported} 个，重复 ${(res.duplicates || []).length} 个`
   importUrls.value = ''
