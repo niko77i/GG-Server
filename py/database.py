@@ -125,6 +125,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             content TEXT NOT NULL,
             owner_id INTEGER REFERENCES users(id),
             effectiveness TEXT DEFAULT '',
+            is_public INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_copywritings_region ON copywritings(region);
@@ -253,6 +254,8 @@ def _ensure_schema(conn: sqlite3.Connection):
         conn.execute("UPDATE copywritings SET owner_id = 1 WHERE owner_id IS NULL")
     if "effectiveness" not in cwcols:
         conn.execute("ALTER TABLE copywritings ADD COLUMN effectiveness TEXT DEFAULT ''")
+    if "is_public" not in cwcols:
+        conn.execute("ALTER TABLE copywritings ADD COLUMN is_public INTEGER DEFAULT 0")
 
     # 迁移：users 表补 custom_name（2026-06-27 自定义后缀）
     ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]

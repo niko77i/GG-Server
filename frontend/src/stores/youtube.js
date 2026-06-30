@@ -10,6 +10,7 @@ export const useYoutubeStore = defineStore('youtube', {
     videoDates: {},
     copywritings: [],
     copywritingCounts: {},
+    cwScope: 'private',
   }),
 
   actions: {
@@ -28,7 +29,9 @@ export const useYoutubeStore = defineStore('youtube', {
 
     // 文案管理
     async loadCopywritings(region = '') {
-      const res = await copywritingApi.list(region ? { region } : {})
+      const params = { scope: this.cwScope }
+      if (region) params.region = region
+      const res = await copywritingApi.list(params)
       this.copywritings = res.items
       this.copywritingCounts = res.counts
     },

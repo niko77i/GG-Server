@@ -135,6 +135,10 @@
     <!-- ===== 文案展示 ===== -->
     <div v-show="activeTab === 'copywriting'" class="yt-view-tab">
       <div style="flex-shrink:0;display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center;">
+        <el-radio-group v-if="authStore.isAdmin" v-model="store.cwScope" @change="loadCopywritings" size="small">
+          <el-radio-button value="public">公用</el-radio-button>
+          <el-radio-button value="private">私有</el-radio-button>
+        </el-radio-group>
         <el-button size="small" @click="cwToggleSelectAll">☑ 全选</el-button>
         <el-button size="small" @click="cwInvertSelection">↔ 反选</el-button>
         <el-button size="small" type="danger" @click="cwDeleteSelected">🗑 删除选中</el-button>
@@ -244,6 +248,14 @@
         <el-select v-model="cwImportEff" placeholder="成效（可选）" size="small" clearable style="width:100%;margin-bottom:12px;">
           <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e || '(空)'" :value="e" />
         </el-select>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+          <span style="font-size:13px;color:#606266;">可见范围：</span>
+          <el-radio-group v-if="canChooseScope" v-model="cwImportPublic" size="small">
+            <el-radio-button :value="false">🔒 私有</el-radio-button>
+            <el-radio-button :value="true">🌐 公开</el-radio-button>
+          </el-radio-group>
+          <el-tag v-else size="small" type="info">🌐 公开</el-tag>
+        </div>
         <el-input v-model="cwImportText" type="textarea" :rows="8" placeholder="每行一条文案，空行自动跳过" />
         <el-button type="primary" @click="cwDoImport" :loading="cwImporting" style="margin-top:12px;">导入文案</el-button>
         <div v-if="cwImportResult" style="margin-top:8px;font-size:12px;">{{ cwImportResult }}</div>
@@ -398,8 +410,11 @@ async function loadVideos() {
 }
 
 onMounted(async () => {
-  // 普通用户只能看公开视频
-  if (!authStore.isAdmin) store.filters.scope = 'public'
+  // 普通用户只能看公开视频和公开文案
+  if (!authStore.isAdmin) {
+    store.filters.scope = 'public'
+    store.cwScope = 'public'
+  }
   await store.loadTags()
   store.loadDates(store.filters)
   await loadVideos()
@@ -545,6 +560,7 @@ async function saveConfig() {
 const cwTableRef = ref(null)
 const cwSelected = ref([])
 const cwImportText = ref('')
+const cwImportPublic = ref(false)  // 默认私有（管理员覆盖），普通用户强制公开
 const cwImportRegion = ref('通用')
 const cwImportEff = ref('')
 const cwImporting = ref(false)
@@ -717,7 +733,10 @@ async function cwDoImport() {
   if (!text) return
   cwImporting.value = true
   try {
-    const res = await store.importCopywritings({ text, region: cwImportRegion.value, effectiveness: cwImportEff.value })
+    const res = await store.importCopywritings({
+      text, region: cwImportRegion.value, effectiveness: cwImportEff.value,
+      is_public: canChooseScope.value ? (cwImportPublic.value ? 1 : 0) : 1,
+    })
     cwImportResult.value = `导入 ${res.imported} 条`
     cwImportText.value = ''
     loadCopywritings()

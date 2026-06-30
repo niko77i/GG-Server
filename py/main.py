@@ -2632,6 +2632,7 @@ def copywriting_import():
     text = (data.get("text") or "").strip()
     region = (data.get("region") or "通用").strip()
     effectiveness = (data.get("effectiveness") or "").strip()
+    is_public = data.get("is_public", 0)
     if not text:
         return jsonify({"success": False, "error": "请输入文案内容"}), 400
 
@@ -2642,8 +2643,8 @@ def copywriting_import():
     db = _yt_db()
     for line in lines:
         db.execute(
-            "INSERT INTO copywritings(region, content, owner_id, effectiveness) VALUES(?,?,?,?)",
-            (region, line, user_id, effectiveness)
+            "INSERT INTO copywritings(region, content, owner_id, effectiveness, is_public) VALUES(?,?,?,?,?)",
+            (region, line, user_id, effectiveness, is_public)
         )
     db.commit(); db.close()
     return jsonify({"success": True, "imported": len(lines)})
@@ -2654,21 +2655,26 @@ def copywriting_import():
 def copywriting_list():
     user_id = int(get_jwt_identity())
     region = request.args.get("region", "").strip()
+    scope = request.args.get("scope", "private").strip()
     db = _yt_db()
 
-    if region:
-        rows = db.execute(
-            "SELECT * FROM copywritings WHERE owner_id=? AND region=? "
-            "ORDER BY CASE effectiveness WHEN '成效' THEN 0 ELSE 1 END, created_at DESC",
-            (user_id, region)
-        ).fetchall()
+    where = []; params = []
+    if scope == "public":
+        where.append("cw.is_public = 1")
+    elif scope == "private":
+        where.append("cw.owner_id = ?"); params.append(user_id)
     else:
-        rows = db.execute(
-            "SELECT * FROM copywritings WHERE owner_id=? "
-            "ORDER BY CASE effectiveness WHEN '成效' THEN 0 ELSE 1 END, created_at DESC",
-            (user_id,)
-        ).fetchall()
+        where.append("(cw.is_public = 1 OR cw.owner_id = ?)"); params.append(user_id)
 
+    if region:
+        where.append("cw.region = ?"); params.append(region)
+
+    sql = "SELECT cw.* FROM copywritings cw"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY CASE cw.effectiveness WHEN '成效' THEN 0 ELSE 1 END, cw.created_at DESC"
+
+    rows = db.execute(sql, params).fetchall()
     items = [dict(r) for r in rows]
     counts = {}
     for item in items:
