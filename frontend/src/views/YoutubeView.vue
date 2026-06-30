@@ -14,7 +14,7 @@
     <div v-show="activeTab === 'view'" class="yt-view-tab">
       <div style="flex-shrink:0;">
         <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
-          <el-radio-group v-model="store.filters.scope" @change="loadVideos" size="small">
+          <el-radio-group v-if="authStore.isAdmin" v-model="store.filters.scope" @change="loadVideos" size="small">
             <el-radio-button value="public">公用</el-radio-button>
             <el-radio-button value="private">私有</el-radio-button>
           </el-radio-group>
@@ -398,8 +398,10 @@ async function loadVideos() {
 }
 
 onMounted(async () => {
+  // 普通用户只能看公开视频
+  if (!authStore.isAdmin) store.filters.scope = 'public'
   await store.loadTags()
-  store.loadDates(store.filters) // 预加载视频日期分布，供日期选择器标记
+  store.loadDates(store.filters)
   await loadVideos()
   cfgRegions.value = (store.tags.regions || []).join('\n')
   cfgFrames.value = (store.tags.frame_types || []).join('\n')
