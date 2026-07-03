@@ -28,7 +28,7 @@
       <div v-if="scrapeResults.length" style="margin-top:12px;">
         <div v-if="scrapeSummary" style="padding:8px 12px;background:#ecfdf5;border-radius:6px;margin-bottom:8px;font-size:12px;">{{ scrapeSummary }}</div>
         <div v-for="r in scrapeResults" :key="r.url"
-          style="padding:6px 10px;border-radius:4px;margin-bottom:3px;font-size:12px;display:flex;align-items:center;gap:8px;background:rgba(0,0,0,0.02);border-left:3px solid;"
+          class="scrape-result-row"
           :style="{ borderColor: r.error ? '#dc2626' : r.image_count ? '#059669' : '#0891b2' }">
           <span>{{ r.loading ? '⏳' : r.error ? '❌' : '✅' }}</span>
           <span style="flex:1;">{{ r.package_name || r.url }}<template v-if="r.image_count"> — {{ r.image_count }} 张</template></span>
@@ -746,6 +746,13 @@ function onFontChange(fontId) {
 .section h3 { margin: 0 0 12px 0; font-size: 15px; }
 .sub-section { background: #fafafa; border-radius: 6px; padding: 10px 12px; overflow: hidden; overflow-wrap: break-word; }
 .sub-section :deep(.el-checkbox__label) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; display: inline-block; vertical-align: middle; }
+.scrape-result-row {
+  padding: 6px 10px; border-radius: 4px; margin-bottom: 3px; font-size: 12px;
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(0,0,0,0.02); border-left: 3px solid;
+  transition: background .15s;
+}
+.scrape-result-row:hover { background: rgba(8,145,178,.08); }
 .img-card { border: 2px solid transparent; border-radius: 8px; cursor: pointer; transition: all .15s; }
 .img-card:hover { border-color: #0891b2; }
 .img-card.selected { border-color: #0891b2; background: rgba(8,145,178,.08); }

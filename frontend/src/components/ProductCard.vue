@@ -68,8 +68,8 @@
         <span style="font-size:11px;color:#888;">已选 {{ checkedIds.length }} 个</span>
       </div>
       <div v-for="pkg in filteredPackages" :key="pkg.id"
-        style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f5f5f5;font-size:12px;"
-        :style="normalizeStatus(pkg.status) === 'paused' ? 'opacity:0.6;' : normalizeStatus(pkg.status) === 'dropped' ? 'opacity:0.4;text-decoration:line-through;' : ''">
+        class="pkg-row"
+        :class="{ 'pkg-row--paused': normalizeStatus(pkg.status) === 'paused', 'pkg-row--dropped': normalizeStatus(pkg.status) === 'dropped' }">
         <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;overflow:hidden;">
           <input type="checkbox" :value="pkg.id" v-model="checkedIds" @click.stop style="width:auto;flex-shrink:0;" />
           <span style="font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer;"
@@ -249,4 +249,12 @@ watch(editPkgModal, async (pkg) => {
 
 <style scoped>
 .is-paused { opacity: 0.88; }
+.pkg-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid #f5f5f5; font-size: 12px;
+  transition: background .15s;
+}
+.pkg-row:hover { background: rgba(8,145,178,.06); }
+.pkg-row--paused { opacity: 0.6; }
+.pkg-row--dropped { opacity: 0.4; text-decoration: line-through; }
 </style>
