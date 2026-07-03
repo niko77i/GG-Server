@@ -11,6 +11,9 @@
       <el-form-item label="地区">
         <el-input v-model="form.region" />
       </el-form-item>
+      <el-form-item label="客户">
+        <el-input v-model="form.customer" placeholder="产品所属客户" />
+      </el-form-item>
       <el-form-item label="所属 MCC">
         <el-select v-model="form.mcc_id" clearable placeholder="（未分配）" style="width:100%;" filterable>
           <el-option v-for="m in mccOptions" :key="m.id" :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
@@ -32,17 +35,17 @@ const props = defineProps({ visible: Boolean, editId: [Number, null], mccOptions
 const emit = defineEmits(['update:visible', 'saved'])
 const store = useProductStore()
 const saving = ref(false)
-const form = reactive({ product_name: '', kpi: '', region: '', mcc_id: '' })
+const form = reactive({ product_name: '', kpi: '', region: '', customer: '', mcc_id: '' })
 
 function init() {
   if (props.editId) {
     const p = store.products.find(p => p.id === props.editId)
     if (p) Object.assign(form, {
       product_name: p.product_name || '', kpi: p.kpi || '',
-      region: p.region || '', mcc_id: p.mcc_id || '',
+      region: p.region || '', customer: p.customer || '', mcc_id: p.mcc_id || '',
     })
   } else {
-    Object.assign(form, { product_name: '', kpi: '', region: '', mcc_id: '' })
+    Object.assign(form, { product_name: '', kpi: '', region: '', customer: '', mcc_id: '' })
   }
 }
 

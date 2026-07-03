@@ -5,6 +5,7 @@
       <div style="margin-bottom:12px;">
         <strong>{{ product.product_name }}</strong> &nbsp;
         KPI: {{ product.kpi || '-' }} &nbsp; 地区: {{ product.region || '-' }} &nbsp;
+        客户: {{ product.customer || '-' }} &nbsp;
         MCC: {{ product.mcc_name ? product.mcc_name + ' (' + product.mcc_code + ')' : '未分配' }}
       </div>
 
@@ -86,9 +87,11 @@
               :key="a.id"
               closable
               @close="confirmRemoveAsset(a)"
+              @click="playVideo(a)"
               size="small"
               type="warning"
               effect="plain"
+              style="cursor:pointer;"
             >
               {{ a.title || a.id }}
             </el-tag>
@@ -114,6 +117,28 @@
       <el-button @click="$emit('update:visible', false)">关闭</el-button>
     </template>
   </el-dialog>
+
+  <!-- 视频播放弹窗 -->
+  <el-dialog
+    :model-value="!!playingVideo"
+    @update:model-value="playingVideo = null"
+    :title="playingVideo?.title || '视频播放'"
+    width="720px"
+    destroy-on-close
+  >
+    <div v-if="playingVideo" style="position:relative;padding-top:56.25%;">
+      <iframe
+        :src="'https://www.youtube.com/embed/' + playingVideo.id + '?autoplay=1'"
+        style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;border-radius:8px;"
+        allow="autoplay; encrypted-media"
+        allowfullscreen
+      />
+    </div>
+    <template #footer>
+      <el-button @click="playingVideo = null">关闭</el-button>
+      <el-button type="primary" @click="copy(playingVideo?.id)">📋 复制链接</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
@@ -135,6 +160,17 @@ const newRunnerId = ref(null)
 const assets = ref([])
 const assetUrlInput = ref('')
 const addingAsset = ref(false)
+const playingVideo = ref(null)
+
+function playVideo(asset) {
+  playingVideo.value = { id: asset.id, title: asset.title || asset.id }
+}
+
+function copy(id) {
+  if (!id) return
+  const url = `https://www.youtube.com/watch?v=${id}`
+  copyToClipboard(url).then(() => ElMessage.success('已复制链接 ✓'))
+}
 
 const assetGroups = computed(() => {
   const map = {}

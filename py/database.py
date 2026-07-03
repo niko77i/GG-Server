@@ -138,6 +138,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             region TEXT,
             status TEXT DEFAULT '',
             mcc_id INTEGER REFERENCES mcc(id),
+            customer TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
 
@@ -291,6 +292,8 @@ def _ensure_schema(conn: sqlite3.Connection):
         conn.execute("UPDATE products SET runner_ids = '[1]' WHERE runner_ids IS NULL OR runner_ids = '[]'")
     if "is_archived" not in pcols:
         conn.execute("ALTER TABLE products ADD COLUMN is_archived INTEGER DEFAULT 0")
+    if "customer" not in pcols:
+        conn.execute("ALTER TABLE products ADD COLUMN customer TEXT DEFAULT ''")
 
     # 迁移：copywritings 表补 owner_id/effectiveness（2026-06-27 文案私有化）
     cwcols = [r[1] for r in conn.execute("PRAGMA table_info(copywritings)").fetchall()]

@@ -1589,6 +1589,7 @@ def products_create():
     kpi = (data.get("kpi") or "").strip()
     region = (data.get("region") or "").strip()
     mcc_id = data.get("mcc_id") or None
+    customer = (data.get("customer") or "").strip()
     packages = data.get("packages") or []
     if not product_name:
         return jsonify({"success": False, "error": "产品名不能为空"}), 400
@@ -1623,8 +1624,8 @@ def products_create():
                     _assign_mcc_to_users(db, mcc_id, [user_id])
     else:
         runner_ids = _json.dumps([user_id]) if user_id else "[]"
-        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?)",
-                   (product_name, kpi, region, mcc_id, user_id, runner_ids, now))
+        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,customer,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                   (product_name, kpi, region, mcc_id, customer, user_id, runner_ids, now))
         pid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     for p in packages:
         pkg_name = p.get("package_name","")
@@ -1649,7 +1650,7 @@ def products_update(pid):
     data = request.get_json(silent=True) or {}
     db = _yt_db()
 
-    for f in ["product_name", "kpi", "region", "status", "mcc_id"]:
+    for f in ["product_name", "kpi", "region", "status", "mcc_id", "customer"]:
         if f in data:
             db.execute(f"UPDATE products SET {f}=? WHERE id=?", (data[f], pid))
     db.commit(); db.close()
