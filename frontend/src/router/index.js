@@ -56,6 +56,11 @@ const routes = [
     meta: { title: '数据分析' }
   },
   {
+    path: '/data-manage',
+    component: () => import('../views/DataManageView.vue'),
+    meta: { title: '数据管理' }
+  },
+  {
     path: '/admin/users',
     component: () => import('../views/UserManageView.vue'),
     meta: { admin: true, title: '用户管理' }
