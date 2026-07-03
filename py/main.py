@@ -4261,11 +4261,11 @@ def ad_reports_batch_delete():
 
     db = _yt_db()
     placeholders = ",".join(["?"] * len(ids))
-    db.execute(
+    cur = db.execute(
         f"DELETE FROM ad_reports WHERE id IN ({placeholders}) AND user_id=?",
         list(ids) + [user_id]
     )
-    deleted = db.changes()
+    deleted = cur.rowcount
     db.commit()
     db.close()
     return jsonify({"success": True, "deleted": deleted})

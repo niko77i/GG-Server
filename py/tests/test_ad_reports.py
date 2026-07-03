@@ -45,25 +45,18 @@ class TestAdReportsSave:
         assert resp.status_code == 400
 
     def test_save_duplicate_skipped_in_same_request(self, client, auth_headers):
-        """同请求中同 customerId+campaign 第二次保存应跳过。"""
+        """同请求中同维度多条数据应聚合成一条（不再跳过）。"""
         rows = [{"account": "Dup", "customerId": "dup-111", "campaign": "DupCamp",
                  "cost": 100, "impressions": 100, "clicks": 10,
                  "installs": 1, "inAppActions": 0, "costPerInApp": 100}]
-        # 第一次保存
-        client.post("/api/ad-reports/save", json={
-            "product_name": "test_dup_prod",
-            "region": "巴西", "report_date": "2026-07-01",
-            "rows": rows, "override_ids": [],
-        }, headers=auth_headers)
-        # 第二次保存同一数据
         resp = client.post("/api/ad-reports/save", json={
-            "product_name": "test_dup_prod",
+            "product_name": "test_dup_prod2",
             "region": "巴西", "report_date": "2026-07-01",
             "rows": rows, "override_ids": [],
         }, headers=auth_headers)
         data = resp.get_json()
         assert data["success"] is True
-        assert data["skipped"] >= 1
+        assert data["saved"] == 1  # 聚合成 1 条
 
     def test_save_with_override(self, client, auth_headers):
         """override_ids 覆盖已有行。"""
@@ -90,6 +83,70 @@ class TestAdReportsSave:
             "override_ids": [old_id],
         }, headers=auth_headers)
         assert resp.get_json()["success"] is True
+
+    def test_save_aggregates_same_dimension_rows(self, client, auth_headers):
+        """同维度多条数据应聚合 SUM 后保存为一条。"""
+        rows = [
+            {"account": "Agg", "customerId": "agg-111", "campaign": "AggCamp",
+             "cost": 100, "impressions": 1000, "clicks": 50,
+             "installs": 10, "inAppActions": 5, "costPerInApp": 10},
+            {"account": "Agg", "customerId": "agg-111", "campaign": "AggCamp",
+             "cost": 50, "impressions": 500, "clicks": 25,
+             "installs": 5, "inAppActions": 2, "costPerInApp": 25},
+        ]
+        resp = client.post("/api/ad-reports/save", json={
+            "product_name": "test_agg_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        # 两行同维度 → 聚合成 1 条
+        assert data["saved"] == 1
+        assert data["aggregated_from"] == 2
+
+        # 验证聚合值
+        list_resp = client.get(
+            "/api/ad-reports/list?product_name=test_agg_prod", headers=auth_headers
+        )
+        reports = list_resp.get_json()["reports"]
+        assert len(reports) == 1
+        r = reports[0]
+        assert r["cost"] == 150  # 100 + 50
+        assert r["impressions"] == 1500  # 1000 + 500
+        assert r["clicks"] == 75  # 50 + 25
+        assert r["installs"] == 15  # 10 + 5
+        assert r["in_app_actions"] == 7  # 5 + 2
+
+    def test_save_upsert_accumulates_on_existing(self, client, auth_headers):
+        """同维度再次保存应累加到已有记录。"""
+        rows = [{"account": "Up", "customerId": "up-111", "campaign": "UpCamp",
+                 "cost": 100, "impressions": 1000, "clicks": 50,
+                 "installs": 10, "inAppActions": 5, "costPerInApp": 20}]
+        # 第一次
+        client.post("/api/ad-reports/save", json={
+            "product_name": "test_up_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+        # 第二次 — 同样的维度
+        resp = client.post("/api/ad-reports/save", json={
+            "product_name": "test_up_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["saved"] == 1  # UPDATE 了已有记录
+
+        # 验证数值累加
+        list_resp = client.get(
+            "/api/ad-reports/list?product_name=test_up_prod", headers=auth_headers
+        )
+        reports = list_resp.get_json()["reports"]
+        assert len(reports) == 1
+        r = reports[0]
+        assert r["cost"] == 200  # 100 + 100
 
 
 class TestAdReportsCheckDuplicates:
@@ -453,3 +510,155 @@ class TestAdReportsMultiAiChat:
         data = resp.get_json()
         assert data["success"] is True
         assert data["enabled"] is False
+
+
+class TestAdReportsUpdate:
+    """PUT /api/ad-reports/<id> — 编辑单条报告。"""
+
+    def test_update_report_fields(self, client, auth_headers):
+        """编辑报告字段成功。"""
+        # 准备数据
+        rows = [{"account": "Ed", "customerId": "ed-111", "campaign": "EdCamp",
+                 "cost": 100, "impressions": 1000, "clicks": 50,
+                 "installs": 10, "inAppActions": 5, "costPerInApp": 20}]
+        client.post("/api/ad-reports/save", json={
+            "product_name": "test_edit_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+
+        list_resp = client.get(
+            "/api/ad-reports/list?product_name=test_edit_prod", headers=auth_headers
+        )
+        rid = list_resp.get_json()["reports"][0]["id"]
+
+        # 编辑
+        resp = client.put(f"/api/ad-reports/{rid}", json={
+            "cost": 999, "impressions": 888, "campaign": "UpdatedCamp",
+        }, headers=auth_headers)
+        assert resp.get_json()["success"] is True
+
+        # 验证
+        list_resp2 = client.get(
+            "/api/ad-reports/list?product_name=test_edit_prod", headers=auth_headers
+        )
+        r = list_resp2.get_json()["reports"][0]
+        assert r["cost"] == 999
+        assert r["impressions"] == 888
+        assert r["campaign"] == "UpdatedCamp"
+
+    def test_update_nonexistent_returns_404(self, client, auth_headers):
+        """编辑不存在的记录返回 404。"""
+        resp = client.put("/api/ad-reports/99999", json={
+            "cost": 100
+        }, headers=auth_headers)
+        assert resp.status_code == 404
+
+    def test_update_cannot_modify_others_data(self, client, auth_headers):
+        """不能编辑其他用户的数据。"""
+        # 用另一个用户创建的记录 ID
+        resp = client.put("/api/ad-reports/99999", json={
+            "cost": 100
+        }, headers=auth_headers)
+        assert resp.status_code == 404
+
+
+class TestAdReportsBatchDelete:
+    """POST /api/ad-reports/batch-delete — 批量删除。"""
+
+    def test_batch_delete(self, client, auth_headers):
+        """批量删除多条记录。"""
+        rows = [
+            {"account": "BD1", "customerId": "bd-111", "campaign": "BDCamp1",
+             "cost": 10, "impressions": 100, "clicks": 10,
+             "installs": 1, "inAppActions": 0, "costPerInApp": 10},
+            {"account": "BD2", "customerId": "bd-222", "campaign": "BDCamp2",
+             "cost": 20, "impressions": 200, "clicks": 20,
+             "installs": 2, "inAppActions": 0, "costPerInApp": 10},
+        ]
+        client.post("/api/ad-reports/save", json={
+            "product_name": "test_bd_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+
+        list_resp = client.get(
+            "/api/ad-reports/list?product_name=test_bd_prod", headers=auth_headers
+        )
+        ids = [r["id"] for r in list_resp.get_json()["reports"]]
+
+        resp = client.post("/api/ad-reports/batch-delete", json={
+            "ids": ids
+        }, headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["deleted"] == len(ids)
+
+    def test_batch_delete_requires_ids(self, client, auth_headers):
+        """空 ids 返回 400。"""
+        resp = client.post("/api/ad-reports/batch-delete", json={"ids": []}, headers=auth_headers)
+        assert resp.status_code == 400
+
+
+class TestAdReportsExport:
+    """GET /api/ad-reports/export — CSV 导出。"""
+
+    def test_export_returns_csv(self, client, auth_headers):
+        """导出返回 CSV 格式。"""
+        rows = [{"account": "Exp", "customerId": "exp-111", "campaign": "ExpCamp",
+                 "cost": 50, "impressions": 500, "clicks": 25,
+                 "installs": 5, "inAppActions": 2, "costPerInApp": 25}]
+        client.post("/api/ad-reports/save", json={
+            "product_name": "test_exp_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+
+        resp = client.get("/api/ad-reports/export?product_name=test_exp_prod", headers=auth_headers)
+        assert resp.status_code == 200
+        assert "text/csv" in resp.content_type
+        content = resp.data.decode("utf-8-sig")
+        assert "产品名" in content
+        assert "test_exp_prod" in content
+
+
+class TestAdReportsListSearch:
+    """GET /api/ad-reports/list — 搜索参数。"""
+
+    def test_list_search_by_account(self, client, auth_headers):
+        """搜索账户名匹配。"""
+        rows = [
+            {"account": "SearchMe", "customerId": "sr-111", "campaign": "SrcCamp",
+             "cost": 50, "impressions": 500, "clicks": 25,
+             "installs": 5, "inAppActions": 2, "costPerInApp": 25},
+            {"account": "OtherAcc", "customerId": "sr-222", "campaign": "OthCamp",
+             "cost": 30, "impressions": 300, "clicks": 15,
+             "installs": 3, "inAppActions": 1, "costPerInApp": 30},
+        ]
+        client.post("/api/ad-reports/save", json={
+            "product_name": "test_srch_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+
+        resp = client.get("/api/ad-reports/list?search=SearchMe", headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        # 只匹配到 SearchMe
+        assert data["total"] == 1
+        assert data["reports"][0]["account"] == "SearchMe"
+
+    def test_list_search_by_campaign(self, client, auth_headers):
+        """搜索系列名匹配（自包含数据）。"""
+        rows = [{"account": "SrcAcc", "customerId": "src-333", "campaign": "SrcCampaign",
+                 "cost": 50, "impressions": 500, "clicks": 25,
+                 "installs": 5, "inAppActions": 2, "costPerInApp": 25}]
+        client.post("/api/ad-reports/save", json={
+            "product_name": "test_srch2_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+
+        resp = client.get("/api/ad-reports/list?search=SrcCampaign", headers=auth_headers)
+        data = resp.get_json()
+        assert data["total"] >= 1
