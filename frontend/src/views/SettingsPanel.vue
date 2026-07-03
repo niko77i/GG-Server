@@ -27,7 +27,29 @@
         <span v-if="msg" style="margin-left:8px;font-size:11px;color:#059669;">{{ msg }}</span>
       </el-tab-pane>
 
-      <!-- Tab 2: 数据管理 -->
+      <!-- Tab 2: 地区时区 -->
+      <el-tab-pane label="地区时区" name="region">
+        <p style="color:#888;margin-bottom:12px;">地区对应的时区，产品数据分析时使用</p>
+        <el-table :data="regionList" size="small" border stripe style="max-width:450px;">
+          <el-table-column prop="name" label="地区" width="120" />
+          <el-table-column label="时区" min-width="200">
+            <template #default="{ row }">
+              <el-select v-model="row._editTz" placeholder="选择时区" size="small" style="width:100%;" filterable @change="v => saveRegionTz(row, v)">
+                <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+              </el-select>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
+          <el-input v-model="newRegionName" placeholder="新地区名" size="small" style="flex:1;" />
+          <el-select v-model="newRegionTz" placeholder="时区" size="small" style="width:170px;" filterable>
+            <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+          </el-select>
+          <el-button size="small" type="primary" @click="addRegion">新增</el-button>
+        </div>
+      </el-tab-pane>
+
+      <!-- Tab 3: 数据管理 -->
       <el-tab-pane label="数据管理" name="data">
         <el-row :gutter="20">
           <!-- 导出区 -->
@@ -102,6 +124,7 @@ import { useAccountStore } from '@/stores/accounts'
 import { dataApi } from '@/api/data'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import api from '@/api/client'
 
 const store = useAccountStore()
 const saving = ref(false)
@@ -120,13 +143,58 @@ const importing = ref(false)
 const importFile = ref(null)
 const importHistory = ref([])
 
+// 地区时区
+const regionList = ref([])
+const newRegionName = ref('')
+const newRegionTz = ref('')
+function _buildTimezoneOptions() {
+  const tzs = []
+  for (let i = -12; i <= 12; i++) {
+    const sign = i > 0 ? '+' : ''
+    tzs.push(`UTC${sign}${i}`)
+  }
+  tzs.push('UTC+5:30', 'UTC+8:45', 'UTC-3:30')
+  return tzs
+}
+const timezoneOptions = _buildTimezoneOptions()
+
 onMounted(async () => {
   await store.loadSettings()
   form.account_statuses = (store.settings.account_statuses || []).join('\n')
   form.account_agents = (store.settings.account_agents || []).join('\n')
   form.mcc_levels = (store.settings.mcc_levels || []).join('\n')
   loadImportHistory()
+  loadRegions()
 })
+
+// 地区时区
+async function loadRegions() {
+  try {
+    const res = await api.get('/regions/list')
+    regionList.value = (res.regions || []).map(r => ({ ...r, _editTz: r.timezone }))
+  } catch { regionList.value = [] }
+}
+
+async function saveRegionTz(row, tz) {
+  try {
+    await api.put(`/regions/${row.id}`, { timezone: tz })
+    row.timezone = tz
+    ElMessage.success(`「${row.name}」时区已更新`)
+  } catch { ElMessage.error('更新失败'); row._editTz = row.timezone }
+}
+
+async function addRegion() {
+  const name = newRegionName.value.trim()
+  const tz = newRegionTz.value
+  if (!name) { ElMessage.warning('请输入地区名'); return }
+  try {
+    const res = await api.post('/regions/create', { name, timezone: tz })
+    regionList.value.push({ id: res.id, name, timezone: tz, _editTz: tz })
+    newRegionName.value = ''
+    newRegionTz.value = ''
+    ElMessage.success('地区已添加')
+  } catch (e) { ElMessage.error('添加失败: ' + (e.message || '')) }
+}
 
 async function save() {
   saving.value = true

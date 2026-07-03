@@ -7,13 +7,20 @@
           <span :style="{ width:'8px',height:'8px',borderRadius:'50%',background: product.status ? '#dc2626' : '#059669' }"></span>
           <strong>{{ product.product_name }}</strong>
           <el-tag v-if="product.kpi" size="small" type="warning">{{ product.kpi }}</el-tag>
-          <el-tag v-if="product.region" size="small" type="primary">{{ product.region }}</el-tag>
+          <el-tooltip v-if="product.region" placement="top">
+            <template #content>时区：{{ regionTimezone[product.region] || '未设置' }}</template>
+            <el-tag size="small" type="primary">{{ product.region }}</el-tag>
+          </el-tooltip>
           <el-tag v-if="product.mcc_name" size="small" type="info">🏢 {{ product.mcc_name }}</el-tag>
           <el-tooltip v-if="parsedRunnerIds.length" placement="top">
             <template #content>
               <div v-for="rid in parsedRunnerIds" :key="rid">{{ getRunnerName(rid) }}</div>
             </template>
             <el-tag size="small" type="info">🏃 {{ parsedRunnerIds.length }}人</el-tag>
+          </el-tooltip>
+          <el-tooltip v-if="product.asset_count > 0" placement="top">
+            <template #content>点击复制成效素材链接</template>
+            <el-tag size="small" type="warning" effect="dark" style="cursor:pointer;" @click.stop="copyAssets">🎬 {{ product.asset_count }}</el-tag>
           </el-tooltip>
           <el-tooltip content="复制系列名时的后缀" placement="top">
             <el-input
@@ -97,7 +104,11 @@ import { ElMessageBox, ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 import api from '@/api/client'
 
-const props = defineProps({ product: Object, selected: { type: Boolean, default: false } })
+const props = defineProps({
+  product: Object,
+  selected: { type: Boolean, default: false },
+  regionTimezone: { type: Object, default: () => ({}) },
+})
 const emit = defineEmits(['edit', 'detail', 'add-pkg', 'del', 'toggle-pause', 'refresh', 'select'])
 const store = useProductStore()
 const expanded = ref(false)
@@ -124,6 +135,17 @@ watch(() => props.product?.id, () => {
 function getRunnerName(rid) {
   const u = allUsers.value.find(u => u.id === rid)
   return u ? (u.display_name || u.username) : 'User #' + rid
+}
+
+async function copyAssets() {
+  try {
+    const res = await api.get(`/products/${props.product.id}/assets`)
+    const assets = res.assets || []
+    if (!assets.length) { ElMessage.warning('暂无成效素材'); return }
+    const links = assets.map(a => `https://www.youtube.com/watch?v=${a.id}`).join('\n')
+    await copyToClipboard(links)
+    ElMessage.success(`已复制 ${assets.length} 个成效素材链接`)
+  } catch { ElMessage.error('获取成效素材失败') }
 }
 
 const parsedRunnerIds = computed(() => {

@@ -21,6 +21,9 @@
           <el-select v-model="store.filters.uploader_id" @change="loadVideos" placeholder="全部上传者" clearable size="small" style="flex:1;min-width:110px;">
             <el-option v-for="(info, id) in store.counts.uploader" :key="id" :label="info.display_name + ' (' + info.cnt + ')'" :value="Number(id)" />
           </el-select>
+          <el-select v-if="authStore.isAdmin" v-model="assetFilterProduct" @change="applyAssetFilter" placeholder="成效素材产品" clearable size="small" style="flex:1;min-width:130px;">
+            <el-option v-for="p in assetProductOptions" :key="p" :label="p" :value="p" />
+          </el-select>
           <el-select v-model="store.filters.region" @change="loadVideos" placeholder="全部地区" clearable size="small" style="flex:1;min-width:110px;">
             <el-option v-for="r in store.tags.regions" :key="r" :label="r + ' (' + (store.counts.region?.[r] || 0) + ')'" :value="r" />
           </el-select>
@@ -89,6 +92,12 @@
                     <el-tag size="small" v-if="row.product_name" type="info">{{ row.product_name }}</el-tag>
                     <el-tag size="small" v-if="row.review_status" :type="row.review_status === '不能过审' ? 'danger' : 'success'">{{ row.review_status }}</el-tag>
                     <el-tag size="small" type="warning" v-if="row.owner_display_name" effect="plain">{{ row.owner_display_name }}</el-tag>
+                    <el-tooltip v-if="productAssetMap[row.id] && productAssetMap[row.id].length" placement="top">
+                      <template #content>
+                        <div v-for="pname in productAssetMap[row.id]" :key="pname">{{ pname }}</div>
+                      </template>
+                      <el-tag size="small" type="warning" effect="dark">🎬 {{ productAssetMap[row.id].length }}</el-tag>
+                    </el-tooltip>
                     <span v-if="copiedIds[row.id]" style="font-size:10px;color:#059669;">已复制</span>
                     <span class="video-time">{{ row.imported_at }}</span>
                   </div>
@@ -343,6 +352,7 @@ import { useAuthStore } from '@/stores/auth'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 import { translateApi } from '@/api/youtube'
+import api from '@/api/client'
 
 const router = useRouter()
 const route = useRoute()
@@ -365,6 +375,9 @@ const playingTitle = ref('')
 const ytPage = ref(1)
 const ytPageSize = ref(20)
 const ytTableRef = ref(null)
+const productAssetMap = ref({})
+const assetFilterProduct = ref('')
+const assetProductOptions = ref([])
 const copiedIds = ref(JSON.parse(localStorage.getItem('ytCopied')||'{}'))
 const copiedCount = computed(()=>Object.keys(copiedIds.value).length)
 
@@ -373,9 +386,17 @@ function invertSelection(){const t=ytTableRef.value;if(!t)return;const sel=new S
 function selectUncopied(){const t=ytTableRef.value;if(!t)return;pagedVideos.value.forEach(v=>t.toggleRowSelection(v,!!(!copiedIds.value[v.id])))}
 
 const filteredVideos = computed(() => {
-  if (!searchText.value) return store.videos
+  let list = store.videos
+  // 成效素材产品筛选
+  if (assetFilterProduct.value) {
+    list = list.filter(v => {
+      const pnames = productAssetMap.value[v.id] || []
+      return pnames.includes(assetFilterProduct.value)
+    })
+  }
+  if (!searchText.value) return list
   const q = searchText.value.toLowerCase()
-  return store.videos.filter(v => (v.title || '').toLowerCase().includes(q) || (v.id || '').toLowerCase().includes(q))
+  return list.filter(v => (v.title || '').toLowerCase().includes(q) || (v.id || '').toLowerCase().includes(q))
 })
 
 const pagedVideos = computed(() => {
@@ -406,7 +427,28 @@ function onDateChange(val) {
 async function loadVideos() {
   ytPage.value = 1
   await store.loadVideos()
-  store.loadDates(store.filters) // 同步刷新日期标记（与当前筛选联动）
+  store.loadDates(store.filters)
+  loadProductAssetMap()
+}
+
+async function loadProductAssetMap() {
+  const ids = store.videos.map(v => v.id)
+  if (!ids.length) { productAssetMap.value = {}; return }
+  try {
+    const res = await api.get('/youtube/product-assets', { params: { video_ids: ids.join(',') } })
+    productAssetMap.value = res.mapping || {}
+  } catch { productAssetMap.value = {} }
+}
+
+async function loadAssetProductOptions() {
+  try {
+    const res = await api.get('/youtube/asset-products')
+    assetProductOptions.value = res.products || []
+  } catch { assetProductOptions.value = [] }
+}
+
+function applyAssetFilter() {
+  ytPage.value = 1
 }
 
 onMounted(async () => {
@@ -418,6 +460,7 @@ onMounted(async () => {
   await store.loadTags()
   store.loadDates(store.filters)
   await loadVideos()
+  loadAssetProductOptions()
   cfgRegions.value = (store.tags.regions || []).join('\n')
   cfgFrames.value = (store.tags.frame_types || []).join('\n')
   cfgEffs.value = (store.tags.effectiveness || []).filter(Boolean).join('\n')

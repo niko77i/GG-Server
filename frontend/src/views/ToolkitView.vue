@@ -19,6 +19,7 @@
         <div style="display:flex;gap:8px;margin-top:8px;">
           <el-button type="primary" @click="zbProcess">🚀 一键解析并生成所有报表</el-button>
           <el-button @click="zbExportExcel" :disabled="!zbRaw.length">📥 导出全部为 Excel</el-button>
+          <el-button v-if="!zbYanghu" type="success" @click="zbSaveDialogVisible = true" :disabled="!zbRaw.length">💾 保存到数据库</el-button>
         </div>
         <div v-if="zbError" style="color:#dc2626;margin-top:8px;">{{ zbError }}</div>
       </div>
@@ -30,11 +31,30 @@
             <el-button link size="small" @click="copyTable('zbRaw')">📋 一键复制</el-button>
           </h3>
           <el-table :data="zbRaw" size="small" border stripe max-height="300" :id="'zbTableRaw'">
-            <el-table-column prop="account" label="账号" /><el-table-column prop="customerId" label="客户ID" />
-            <el-table-column prop="campaign" label="广告系列" />
-            <el-table-column prop="cost" label="费用"><template #default="{row}">{{ row.cost.toFixed(2) }}</template></el-table-column>
-            <el-table-column prop="impressions" label="展示次数"><template #default="{row}">{{ row.impressions.toLocaleString() }}</template></el-table-column>
-            <el-table-column prop="clicks" label="点击次数"><template #default="{row}">{{ row.clicks.toLocaleString() }}</template></el-table-column>
+            <el-table-column prop="account" label="账号" min-width="110" />
+            <el-table-column prop="customerId" label="客户ID" min-width="120" />
+            <el-table-column prop="campaign" label="广告系列" min-width="160" show-overflow-tooltip />
+            <el-table-column prop="campaignStatus" label="状态" min-width="70">
+              <template #default="{row}">{{ row.campaignStatus || '-' }}</template>
+            </el-table-column>
+            <el-table-column prop="cost" label="费用" min-width="80">
+              <template #default="{row}">{{ row.cost.toFixed(2) }}</template>
+            </el-table-column>
+            <el-table-column prop="impressions" label="展示次数" min-width="80">
+              <template #default="{row}">{{ row.impressions.toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column prop="clicks" label="点击次数" min-width="80">
+              <template #default="{row}">{{ row.clicks.toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column prop="installs" label="安装次数" min-width="80">
+              <template #default="{row}">{{ (row.installs || 0).toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column prop="inAppActions" label="应用内操作" min-width="100">
+              <template #default="{row}">{{ row.inAppActions ?? '-' }}</template>
+            </el-table-column>
+            <el-table-column prop="costPerInApp" label="每次操作费用" min-width="110">
+              <template #default="{row}">{{ row.costPerInApp ?? '-' }}</template>
+            </el-table-column>
           </el-table>
         </div>
 
@@ -106,11 +126,117 @@
         <div style="background:#f5f7fa;padding:12px;border-radius:8px;margin-top:8px;white-space:pre-wrap;font-size:14px;line-height:1.6;">{{ tlResult }}</div>
       </div>
     </div>
+
+    <!-- 保存弹窗 -->
+    <el-dialog v-model="zbSaveDialogVisible" title="💾 保存做表数据" width="95%" top="3vh" @open="onSaveDialogOpen">
+      <el-form :inline="true" label-width="80px">
+        <el-form-item label="产品名" required>
+          <el-select v-model="zbSaveProduct" placeholder="搜索并选择产品..." filterable style="width:200px;" :loading="zbSaveProductsLoading" @change="onProductSelect">
+            <el-option v-for="p in zbSaveProducts" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '')" :value="p.product_name" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="地区" required>
+          <el-input v-model="zbSaveRegion" placeholder="地区" style="width:120px;" />
+        </el-form-item>
+        <el-form-item label="日期">
+          <el-date-picker v-model="zbSaveDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" style="width:150px;" />
+        </el-form-item>
+      </el-form>
+      <div style="margin-top:8px;">
+        <div style="font-weight:600;margin-bottom:6px;">📋 待保存数据 ({{ saveRows.length }} 条)</div>
+        <el-table :data="saveRows" size="small" border stripe max-height="380">
+          <el-table-column prop="account" label="账号" min-width="100" />
+          <el-table-column prop="customerId" label="客户ID" min-width="120" />
+          <el-table-column prop="campaign" label="广告系列" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="cost" label="费用" min-width="80">
+            <template #default="{row}">{{ row.cost.toFixed(2) }}</template>
+          </el-table-column>
+          <el-table-column prop="impressions" label="展示" min-width="80">
+            <template #default="{row}">{{ (row.impressions || 0).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column prop="clicks" label="点击" min-width="70">
+            <template #default="{row}">{{ (row.clicks || 0).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column prop="installs" label="安装" min-width="70">
+            <template #default="{row}">{{ (row.installs || 0).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column prop="inAppActions" label="应用内操作" min-width="100">
+            <template #default="{row}">{{ row.inAppActions ?? '-' }}</template>
+          </el-table-column>
+          <el-table-column prop="costPerInApp" label="每次操作费用" min-width="110">
+            <template #default="{row}">{{ row.costPerInApp ?? '-' }}</template>
+          </el-table-column>
+          <el-table-column label="操作" min-width="60" fixed="right">
+            <template #default="{ $index }">
+              <el-button link size="small" type="danger" @click="removeSaveRow($index)">🗑 删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="zbSaveDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="zbDoSave" :loading="zbSaving">💾 保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 重复数据对比弹窗 -->
+    <el-dialog v-model="zbDupDialogVisible" title="⚠️ 发现重复数据" width="960px" top="5vh" :close-on-click-modal="false">
+      <p style="color:#dc2626;margin-bottom:12px;">
+        以下 {{ duplicateItems.length }} 条数据已存在（同产品+同客户ID+同系列）。请逐条选择保留旧数据还是用新数据覆盖。再次点击可取消选择。
+      </p>
+      <div v-for="(item, idx) in duplicateItems" :key="idx"
+        style="display:flex;gap:12px;margin-bottom:12px;padding:8px;border:1px solid #e5e7eb;border-radius:8px;"
+        :style="{ opacity: item.resolved ? 0.45 : 1 }">
+        <!-- 左侧：旧数据 -->
+        <div style="flex:1;background:#fef2f2;padding:10px;border-radius:6px;" :style="item.decision === 'keep-old' ? { border: '2px solid #22c55e' } : {}">
+          <div style="font-weight:600;margin-bottom:4px;">📋 旧数据 (ID: {{ item.existing.id }})</div>
+          <div style="font-size:12px;line-height:1.7;">
+            <div>客户ID: {{ item.existing.customer_id }}</div>
+            <div>系列: {{ item.existing.campaign }}</div>
+            <div>费用: {{ item.existing.cost }}</div>
+            <div>展示: {{ item.existing.impressions?.toLocaleString() }}</div>
+            <div>点击: {{ item.existing.clicks?.toLocaleString() }}</div>
+            <div v-if="item.existing.installs">安装: {{ item.existing.installs?.toLocaleString() }}</div>
+            <div>日期: {{ item.existing.report_date }}</div>
+          </div>
+          <el-button size="small" :type="item.decision === 'keep-old' ? 'primary' : 'default'"
+            :disabled="item.resolved && item.decision !== 'keep-old'"
+            @click="resolveDuplicate(idx, 'keep-old')" style="margin-top:6px;">
+            {{ item.decision === 'keep-old' ? '✓ 已选保留旧数据（再次点击取消）' : '保留旧数据' }}
+          </el-button>
+        </div>
+        <!-- 右侧：新数据 -->
+        <div style="flex:1;background:#f0fdf4;padding:10px;border-radius:6px;" :style="item.decision === 'keep-new' ? { border: '2px solid #22c55e' } : {}">
+          <div style="font-weight:600;margin-bottom:4px;">🆕 新数据</div>
+          <div style="font-size:12px;line-height:1.7;">
+            <div>账号: {{ item.incoming.account || '-' }}</div>
+            <div>客户ID: {{ item.incoming.customerId }}</div>
+            <div>系列: {{ item.incoming.campaign }}</div>
+            <div>费用: {{ item.incoming.cost }}</div>
+            <div>展示: {{ (item.incoming.impressions || 0).toLocaleString() }}</div>
+            <div>点击: {{ (item.incoming.clicks || 0).toLocaleString() }}</div>
+            <div v-if="item.incoming.installs">安装: {{ (item.incoming.installs || 0).toLocaleString() }}</div>
+          </div>
+          <el-button size="small" :type="item.decision === 'keep-new' ? 'success' : 'default'"
+            :disabled="item.resolved && item.decision !== 'keep-new'"
+            @click="resolveDuplicate(idx, 'keep-new')" style="margin-top:6px;">
+            {{ item.decision === 'keep-new' ? '✓ 已选用新数据覆盖（再次点击取消）' : '用新数据覆盖' }}
+          </el-button>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="zbDupDialogVisible = false">取消保存</el-button>
+        <el-button type="primary" @click="zbConfirmSave" :loading="zbSaving"
+          :disabled="duplicateItems.some(d => !d.resolved)">
+          确认保存 ({{ duplicateItems.filter(d => d.resolved).length }}/{{ duplicateItems.length }})
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useVideoStore } from '@/stores/video'
 import { browseApi } from '@/api/browse'
@@ -118,6 +244,7 @@ import { isLocalhost } from '@/utils/env'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 import { translateApi } from '@/api/youtube'
+import api from '@/api/client'
 
 const router = useRouter()
 const route = useRoute()
@@ -138,6 +265,112 @@ const zbRaw = ref([])
 const zbZuobiao = ref([])
 const zbKehu = ref([])
 const zbError = ref('')
+
+// ========== 保存到数据库相关状态 ==========
+const zbSaveDialogVisible = ref(false)
+const zbSaveProduct = ref('')
+const zbSaveRegion = ref('')
+const zbSaveDate = ref('')  // 前一天
+const zbSaveProducts = ref([])
+const zbSaveProductsLoading = ref(false)
+const zbSaving = ref(false)
+const saveRows = ref([])  // 待保存的行（从 zbRaw 复制，允许删除）
+const zbDupDialogVisible = ref(false)
+const duplicateItems = ref([])
+
+// 默认日期：前一天
+function _yesterday() {
+  const d = new Date(Date.now() - 86400000)
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+}
+
+async function onSaveDialogOpen() {
+  zbSaveDate.value = _yesterday()
+  saveRows.value = [...zbRaw.value]
+  // 加载产品
+  zbSaveProductsLoading.value = true
+  try {
+    const res = await api.get('/ad-reports/products')
+    zbSaveProducts.value = res.products || []
+  } catch { zbSaveProducts.value = [] }
+  zbSaveProductsLoading.value = false
+}
+
+function onProductSelect(pname) {
+  if (!pname) return
+  const p = zbSaveProducts.value.find(x => x.product_name === pname)
+  if (p && p.region) zbSaveRegion.value = p.region
+}
+
+function removeSaveRow(idx) {
+  saveRows.value.splice(idx, 1)
+}
+
+async function zbDoSave() {
+  if (!zbSaveProduct.value) { ElMessage.warning('请选择产品'); return }
+  if (!zbSaveRegion.value) { ElMessage.warning('请填写地区'); return }
+  if (!saveRows.value.length) { ElMessage.warning('没有可保存的数据'); return }
+  zbSaving.value = true
+  try {
+    const checkRes = await api.post('/ad-reports/check-duplicates', {
+      product_name: zbSaveProduct.value,
+      region: zbSaveRegion.value,
+      report_date: zbSaveDate.value,
+      rows: saveRows.value,
+    })
+    if (checkRes.duplicates && checkRes.duplicates.length) {
+      duplicateItems.value = checkRes.duplicates.map(d => ({ ...d, resolved: false, decision: null }))
+      zbSaveDialogVisible.value = false
+      zbDupDialogVisible.value = true
+    } else {
+      const saveRes = await api.post('/ad-reports/save', {
+        product_name: zbSaveProduct.value,
+        region: zbSaveRegion.value,
+        report_date: zbSaveDate.value,
+        rows: saveRows.value,
+        override_ids: [],
+      })
+      ElMessage.success(`保存成功！已保存 ${saveRes.saved} 条`)
+      zbSaveDialogVisible.value = false
+    }
+  } catch (e) { ElMessage.error('保存失败: ' + (e.message || '未知错误')) }
+  zbSaving.value = false
+}
+
+function resolveDuplicate(idx, decision) {
+  const item = duplicateItems.value[idx]
+  if (item.decision === decision) {
+    // 再次点击同一按钮 → 取消选择
+    item.resolved = false
+    item.decision = null
+  } else {
+    item.resolved = true
+    item.decision = decision
+  }
+  // 触发响应式
+  duplicateItems.value = [...duplicateItems.value]
+}
+
+async function zbConfirmSave() {
+  const unresolved = duplicateItems.value.filter(d => !d.resolved)
+  if (unresolved.length) { ElMessage.warning('请处理所有重复数据'); return }
+  zbSaving.value = true
+  try {
+    const overrideIds = duplicateItems.value
+      .filter(d => d.decision === 'keep-new')
+      .map(d => d.existing.id)
+    const saveRes = await api.post('/ad-reports/save', {
+      product_name: zbSaveProduct.value,
+      region: zbSaveRegion.value,
+      report_date: zbSaveDate.value,
+      rows: saveRows.value,
+      override_ids: overrideIds,
+    })
+    ElMessage.success(`保存成功！已保存 ${saveRes.saved} 条，跳过 ${saveRes.skipped || 0} 条`)
+    zbDupDialogVisible.value = false
+  } catch (e) { ElMessage.error('保存失败: ' + (e.message || '未知错误')) }
+  zbSaving.value = false
+}
 
 function zbProcess() {
   zbError.value = ''

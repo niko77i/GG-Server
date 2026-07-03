@@ -68,6 +68,47 @@
           :disabled="runnerIds.includes(u.id)"
         />
       </el-select>
+
+      <!-- 成效素材 -->
+      <el-divider />
+      <h4>🎬 成效素材</h4>
+      <div v-if="assetGroups.length">
+        <div v-for="group in assetGroups" :key="group.userId" style="margin-bottom:8px;">
+          <div style="font-size:12px;color:#666;margin-bottom:4px;display:flex;align-items:center;gap:6px;">
+            📌 {{ group.userName }} ({{ group.items.length }}个)
+            <el-button link size="small" type="primary" @click="copyUserAssets(group)">
+              📋 复制
+            </el-button>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <el-tag
+              v-for="a in group.items"
+              :key="a.id"
+              closable
+              @close="confirmRemoveAsset(a)"
+              size="small"
+              type="warning"
+              effect="plain"
+            >
+              {{ a.title || a.id }}
+            </el-tag>
+          </div>
+        </div>
+      </div>
+      <div v-if="!assetGroups.length" style="color:#999;font-size:12px;margin-bottom:8px;">
+        暂无成效素材
+      </div>
+      <div style="display:flex;gap:6px;">
+        <el-input
+          v-model="assetUrlInput"
+          type="textarea"
+          :rows="2"
+          placeholder="粘贴 YouTube 链接，每行一个，回车或点添加..."
+          size="small"
+          style="flex:1;"
+        />
+        <el-button size="small" type="primary" @click="addAsset" :loading="addingAsset" style="align-self:flex-end;">添加</el-button>
+      </div>
     </div>
     <template #footer>
       <el-button @click="$emit('update:visible', false)">关闭</el-button>
@@ -80,7 +121,8 @@ import { ref, computed } from 'vue'
 import { useProductStore } from '@/stores/products'
 import { productsApi } from '@/api/products'
 import api from '@/api/client'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { copyToClipboard } from '@/utils/clipboard'
 
 const props = defineProps({ visible: Boolean, prodId: Number })
 const emit = defineEmits(['update:visible', 'saved'])
@@ -88,6 +130,21 @@ const store = useProductStore()
 const product = ref(null)
 const availableUsers = ref([])
 const newRunnerId = ref(null)
+
+// 成效素材
+const assets = ref([])
+const assetUrlInput = ref('')
+const addingAsset = ref(false)
+
+const assetGroups = computed(() => {
+  const map = {}
+  for (const a of assets.value) {
+    const uid = a.added_by || 0
+    if (!map[uid]) map[uid] = { userId: uid, userName: a.added_by_name || `User #${uid}`, items: [] }
+    map[uid].items.push(a)
+  }
+  return Object.values(map)
+})
 
 const runnerIds = computed(() => {
   if (!product.value) return []
@@ -103,6 +160,7 @@ async function load() {
     const res = await store.loadProductDetail(props.prodId)
     product.value = res.product
     await loadUsers()
+    await loadAssets()
   }
 }
 
@@ -111,6 +169,57 @@ async function loadUsers() {
     const res = await api.get('/users/names')
     availableUsers.value = res.users || []
   } catch { availableUsers.value = [] }
+}
+
+async function loadAssets() {
+  if (!product.value) return
+  try {
+    const res = await api.get(`/products/${product.value.id}/assets`)
+    assets.value = res.assets || []
+  } catch { assets.value = [] }
+}
+
+async function addAsset() {
+  const text = assetUrlInput.value.trim()
+  if (!text || !product.value) return
+  // 支持多行，每行一个链接
+  const urls = text.split(/[\n\r]+/).map(l => l.trim()).filter(Boolean)
+  if (!urls.length) return
+  addingAsset.value = true
+  try {
+    const res = await api.post(`/products/${product.value.id}/assets`, {
+      urls,
+      region: product.value.region || '通用',
+      product_name: product.value.product_name || '',
+    })
+    if (res.imported > 0) ElMessage.success(`已添加 ${res.imported} 个成效素材`)
+    if (res.duplicates?.length) ElMessage.warning(`${res.duplicates.length} 个已存在，已跳过`)
+    assetUrlInput.value = ''
+    await loadAssets()
+  } catch (e) { ElMessage.error('添加失败: ' + (e.message || '')) }
+  addingAsset.value = false
+}
+
+async function copyUserAssets(group) {
+  const links = group.items.map(a => `https://www.youtube.com/watch?v=${a.id}`).join('\n')
+  await copyToClipboard(links)
+  ElMessage.success(`已复制 ${group.userName} 的 ${group.items.length} 个成效素材链接`)
+}
+
+async function confirmRemoveAsset(asset) {
+  if (!product.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除成效素材「${asset.title || asset.id}」吗？`,
+      '确认删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch { return }
+  try {
+    await api.delete(`/products/${product.value.id}/assets/${asset.id}`)
+    assets.value = assets.value.filter(a => a.id !== asset.id)
+    ElMessage.success('已移除')
+  } catch { ElMessage.error('移除失败') }
 }
 
 function getUserName(rid) {

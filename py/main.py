@@ -1088,6 +1088,86 @@ def _extract_youtube_id(url: str):
     return m.group(1) if m else None
 
 
+def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effectiveness="",
+                         product_name="", review_status="能过审", imported_at="",
+                         user_id=0, is_public=0):
+    """批量导入 YouTube 视频。先批量查库 → 并行 oEmbed → 批量 INSERT。
+    返回 (imported: int, duplicates: list, results: list of (vid, title, is_new))"""
+    import datetime as _dt
+    import requests as _requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not urls:
+        return 0, [], []
+
+    # 1. 解析所有 video_id
+    parsed = []
+    for url in urls:
+        url = url.strip()
+        if not url:
+            continue
+        vid = _extract_youtube_id(url)
+        if vid:
+            parsed.append(vid)
+
+    if not parsed:
+        return 0, [], []
+
+    # 2. 批量查库：哪些已存在
+    placeholders = ",".join(["?"] * len(parsed))
+    existing_rows = db.execute(
+        f"SELECT id, title FROM videos WHERE id IN ({placeholders})", parsed
+    ).fetchall()
+    existing_ids = {r["id"] for r in existing_rows}
+    existing_titles = {r["id"]: r["title"] for r in existing_rows}
+
+    duplicates = [{"id": vid, "title": existing_titles.get(vid, vid)} for vid in parsed if vid in existing_ids]
+    new_vids = [vid for vid in parsed if vid not in existing_ids]
+
+    # 3. 并行 oEmbed 获取标题（只有新视频需要）
+    titles = {}
+    if new_vids:
+        def _fetch_title(vid):
+            try:
+                r = _requests.get(
+                    f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json",
+                    timeout=8
+                )
+                if r.status_code == 200:
+                    return vid, r.json().get("title", vid)
+            except Exception:
+                pass
+            return vid, vid
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(_fetch_title, vid): vid for vid in new_vids}
+            for future in as_completed(futures):
+                vid, title = future.result()
+                titles[vid] = title
+
+    # 4. 批量 INSERT 新视频
+    ts = imported_at if imported_at else _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    imported = 0
+    results = []
+    for vid in parsed:
+        if vid in existing_ids:
+            results.append((vid, existing_titles.get(vid, vid), False))
+        else:
+            title = titles.get(vid, vid)
+            db.execute(
+                "INSERT INTO videos(id,url,title,region,frame_type,effectiveness,"
+                "product_name,review_status,imported_at,owner_id,is_public) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (vid, f"https://www.youtube.com/watch?v={vid}", title, region,
+                 frame_type, effectiveness, product_name, review_status,
+                 ts, user_id, is_public)
+            )
+            imported += 1
+            results.append((vid, title, True))
+
+    return imported, duplicates, results
+
+
 @app.route("/api/youtube/import", methods=["POST"])
 @jwt_required()
 def youtube_import():
@@ -1105,40 +1185,11 @@ def youtube_import():
         return jsonify({"success": False, "error": "请输入至少一个链接"}), 400
 
     db = _yt_db()
-    imported = 0
-    duplicates = []
-    import datetime
-    import requests as _req
-
-    # 时间：用户指定优先，否则用当前时间
-    if imported_at:
-        ts = imported_at
-    else:
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    for url in urls:
-        url = url.strip()
-        if not url: continue
-        vid = _extract_youtube_id(url)
-        if not vid: continue
-        existing = db.execute("SELECT * FROM videos WHERE id=?", (vid,)).fetchone()
-        if existing:
-            duplicates.append(dict(existing))
-            continue
-        title = vid
-        try:
-            r = _req.get(f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json", timeout=8)
-            if r.status_code == 200:
-                title = r.json().get("title", vid)
-        except Exception: pass
-
-        db.execute("INSERT INTO videos(id,url,title,region,frame_type,effectiveness,product_name,review_status,imported_at,owner_id,is_public) "
-                   "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                   (vid, f"https://www.youtube.com/watch?v={vid}", title, region, frame_type,
-                    effectiveness, product_name, review_status,
-                    ts, user_id, is_public))
-        imported += 1
-
+    imported, duplicates, _ = _batch_import_videos(
+        db, urls, region=region, frame_type=frame_type, effectiveness=effectiveness,
+        product_name=product_name, review_status=review_status, imported_at=imported_at,
+        user_id=user_id, is_public=is_public
+    )
     db.commit(); db.close()
     return jsonify({"success": True, "imported": imported, "duplicates": duplicates})
 
@@ -1484,6 +1535,10 @@ def products_list():
             ).fetchone()[0]
         else:
             prod["related_account_count"] = 0
+        # 成效素材数
+        prod["asset_count"] = db.execute(
+            "SELECT COUNT(*) FROM product_assets WHERE product_id=?", (r["id"],)
+        ).fetchone()[0]
         products.append(prod)
     regions = [r["region"] for r in db.execute(
         "SELECT DISTINCT region FROM products WHERE region!='' AND (is_archived IS NULL OR is_archived = 0) ORDER BY region"
@@ -2055,7 +2110,12 @@ def accounts_list():
     for r in db.execute("SELECT status, COUNT(*) as cnt FROM accounts WHERE owner_id=? GROUP BY status", (user_id,)).fetchall():
         s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
     # 筛选下拉数据
-    mcc_options = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc WHERE owner_id=? ORDER BY name", (user_id,)).fetchall()]
+    uid_str = str(user_id)
+    mcc_options = [dict(r) for r in db.execute(
+        "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids=? OR "
+        "shared_user_ids LIKE ? OR shared_user_ids LIKE ? OR shared_user_ids LIKE ?) ORDER BY name",
+        (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
+    ).fetchall()]
     agents = [r["agent"] for r in db.execute("SELECT DISTINCT agent FROM accounts WHERE agent!='' AND owner_id=? ORDER BY agent", (user_id,)).fetchall()]
     db.close()
     return jsonify({"success": True, "accounts": accounts, "total": total, "mcc_options": mcc_options, "agents": agents, "status_counts": status_counts})
@@ -3567,6 +3627,832 @@ def _start_weekly_cleanup():
 
     t = threading.Thread(target=_cleanup, daemon=True)
     t.start()
+
+
+# ============================================================
+#  产品成效素材 API
+# ============================================================
+
+@app.route("/api/products/<int:pid>/assets", methods=["GET"])
+@jwt_required()
+def product_assets_list(pid):
+    """获取产品下所有成效素材（按 added_by 分组顺序）。"""
+    db = _yt_db()
+    rows = db.execute("""
+        SELECT v.*, pa.added_by, pa.added_at, u.display_name AS added_by_name
+        FROM product_assets pa
+        JOIN videos v ON pa.video_id = v.id
+        LEFT JOIN users u ON pa.added_by = u.id
+        WHERE pa.product_id = ?
+        ORDER BY pa.added_by, pa.added_at DESC
+    """, (pid,)).fetchall()
+    db.close()
+    return jsonify({"success": True, "assets": [dict(r) for r in rows]})
+
+
+@app.route("/api/products/<int:pid>/assets", methods=["POST"])
+@jwt_required()
+def product_assets_add(pid):
+    """向产品添加成效素材（批量导入 YouTube 视频 + 建立关联）。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    urls = data.get("urls") or []
+    region = (data.get("region") or "通用").strip()
+    frame_type = (data.get("frame_type") or "非融帧").strip()
+    effectiveness = (data.get("effectiveness") or "").strip()
+    product_name = (data.get("product_name") or "").strip()
+    review_status = (data.get("review_status") or "能过审").strip()
+
+    if not urls:
+        return jsonify({"success": False, "error": "请输入至少一个链接"}), 400
+
+    # 检查产品是否存在
+    db = _yt_db()
+    prod = db.execute("SELECT id, product_name, region FROM products WHERE id=?", (pid,)).fetchone()
+    if not prod:
+        db.close()
+        return jsonify({"success": False, "error": "产品不存在"}), 404
+
+    # 使用产品名（如果未指定）
+    pname = product_name or prod["product_name"] or ""
+
+    # 批量导入视频到 videos 表
+    imported, duplicates, results = _batch_import_videos(
+        db, urls, region=region, frame_type=frame_type, effectiveness=effectiveness,
+        product_name=pname, review_status=review_status, user_id=user_id, is_public=0
+    )
+
+    # 建立 product_assets 关联
+    asset_imported = 0
+    asset_dupes = []
+    for vid, title, _ in results:
+        existing = db.execute(
+            "SELECT id FROM product_assets WHERE product_id=? AND video_id=?",
+            (pid, vid)
+        ).fetchone()
+        if existing:
+            asset_dupes.append({"id": vid, "title": title})
+        else:
+            db.execute(
+                "INSERT INTO product_assets(product_id, video_id, added_by) VALUES(?,?,?)",
+                (pid, vid, user_id)
+            )
+            asset_imported += 1
+
+    db.commit(); db.close()
+    return jsonify({
+        "success": True,
+        "imported": asset_imported,
+        "duplicates": asset_dupes
+    })
+
+
+@app.route("/api/products/<int:pid>/assets/<video_id>", methods=["DELETE"])
+@jwt_required()
+def product_assets_delete(pid, video_id):
+    """移除产品的成效素材关联（不删除 videos 表中的视频）。"""
+    db = _yt_db()
+    db.execute("DELETE FROM product_assets WHERE product_id=? AND video_id=?", (pid, video_id))
+    db.commit(); db.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/youtube/asset-products", methods=["GET"])
+@jwt_required()
+def youtube_asset_products():
+    """返回有成效素材的产品名列表（用于筛选下拉框）。"""
+    db = _yt_db()
+    rows = db.execute("""
+        SELECT DISTINCT p.product_name
+        FROM product_assets pa
+        JOIN products p ON pa.product_id = p.id
+        ORDER BY p.product_name
+    """).fetchall()
+    db.close()
+    return jsonify({"success": True, "products": [r["product_name"] for r in rows]})
+
+
+@app.route("/api/youtube/product-assets", methods=["GET"])
+@jwt_required()
+def youtube_product_assets():
+    """批量查询视频关联的产品名（全表扫描，不限用户/可见性）。"""
+    ids_str = request.args.get("video_ids", "").strip()
+    if not ids_str:
+        return jsonify({"success": True, "mapping": {}})
+    video_ids = [v.strip() for v in ids_str.split(",") if v.strip()]
+    if not video_ids:
+        return jsonify({"success": True, "mapping": {}})
+
+    db = _yt_db()
+    placeholders = ",".join(["?"] * len(video_ids))
+    rows = db.execute(
+        f"SELECT pa.video_id, p.product_name FROM product_assets pa "
+        f"JOIN products p ON pa.product_id = p.id "
+        f"WHERE pa.video_id IN ({placeholders})",
+        video_ids
+    ).fetchall()
+    db.close()
+
+    mapping = {}
+    for r in rows:
+        vid = r["video_id"]
+        pname = r["product_name"]
+        if vid not in mapping:
+            mapping[vid] = []
+        if pname not in mapping[vid]:
+            mapping[vid].append(pname)
+
+    return jsonify({"success": True, "mapping": mapping})
+
+
+# ============================================================
+#  做表数据保存 + 分析 API
+# ============================================================
+
+@app.route("/api/ad-reports/products", methods=["GET"])
+@jwt_required()
+def ad_reports_products():
+    """返回当前用户有权限的产品（用于保存弹窗下拉）。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    rows = db.execute("""
+        SELECT DISTINCT p.id, p.product_name, p.region
+        FROM products p
+        WHERE (p.is_archived IS NULL OR p.is_archived = 0)
+          AND (p.status IS NULL OR p.status = '' OR p.status = '0')
+          AND (p.owner_id = ? OR p.runner_ids LIKE '%' || ? || '%')
+        ORDER BY p.product_name
+    """, (user_id, str(user_id))).fetchall()
+    db.close()
+    return jsonify({"success": True, "products": [dict(r) for r in rows]})
+
+
+@app.route("/api/ad-reports/check-duplicates", methods=["POST"])
+@jwt_required()
+def ad_reports_check_duplicates():
+    """检查即将保存的数据中哪些行与已有数据重复。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    product_name = (data.get("product_name") or "").strip()
+    report_date = (data.get("report_date") or "").strip()
+    rows = data.get("rows") or []
+
+    if not product_name or not rows:
+        return jsonify({"success": True, "duplicates": []})
+
+    db = _yt_db()
+    duplicates = []
+    for incoming in rows:
+        customer_id = str(incoming.get("customerId", "")).strip()
+        campaign = str(incoming.get("campaign", "")).strip()
+        if not customer_id or not campaign:
+            continue
+        existing = db.execute(
+            "SELECT * FROM ad_reports WHERE user_id=? AND product_name=? "
+            "AND customer_id=? AND campaign=? AND report_date=?",
+            (user_id, product_name, customer_id, campaign, report_date)
+        ).fetchone()
+        if existing:
+            duplicates.append({
+                "existing": dict(existing),
+                "incoming": incoming
+            })
+    db.close()
+    return jsonify({"success": True, "duplicates": duplicates})
+
+
+def _auto_link_mcc_and_accounts(db, user_id, product_name, region, rows):
+    """保存数据时自动关联 MCC、账户、地区时区。"""
+    # 1. 查询产品 MCC
+    prod = db.execute(
+        "SELECT mcc_id, region FROM products WHERE product_name=? LIMIT 1",
+        (product_name,)
+    ).fetchone()
+    mcc_id = prod["mcc_id"] if prod else None
+    prod_region = (prod["region"] if prod else "") or region
+
+    # 2. 地区写入 regions（如不存在）
+    if prod_region:
+        existing_region = db.execute(
+            "SELECT id FROM regions WHERE name=?", (prod_region,)
+        ).fetchone()
+        if not existing_region:
+            # 尝试用预设时区
+            from database import _DEFAULT_TIMEZONES
+            tz = _DEFAULT_TIMEZONES.get(prod_region, "")
+            db.execute(
+                "INSERT OR IGNORE INTO regions(name, timezone) VALUES(?,?)",
+                (prod_region, tz)
+            )
+
+    # 3. MCC 关联用户
+    if mcc_id:
+        mcc = db.execute(
+            "SELECT id, owner_id, shared_user_ids, mcc_id FROM mcc WHERE id=?",
+            (mcc_id,)
+        ).fetchone()
+        if mcc:
+            try:
+                shared = json.loads(mcc["shared_user_ids"] or "[]")
+            except Exception:
+                shared = []
+            if user_id != mcc["owner_id"] and user_id not in shared:
+                shared.append(user_id)
+                db.execute(
+                    "UPDATE mcc SET shared_user_ids=? WHERE id=?",
+                    (json.dumps(shared), mcc["id"])
+                )
+
+            # 4. 广告账户自动创建（从 rows 提取 account→name, customerId→account_id）
+            seen_accounts = set()
+            for row in rows:
+                account_name = str(row.get("account", "")).strip()
+                account_id = str(row.get("customerId", "")).strip()
+                if not account_name or not account_id:
+                    continue
+                key = (account_id, mcc_id)
+                if key in seen_accounts:
+                    continue
+                seen_accounts.add(key)
+                existing_acc = db.execute(
+                    "SELECT id, mcc_id FROM accounts WHERE account_id=?",
+                    (account_id,)
+                ).fetchone()
+                if not existing_acc:
+                    db.execute(
+                        "INSERT OR IGNORE INTO accounts(name, account_id, mcc_id, owner_id) "
+                        "VALUES(?,?,?,?)",
+                        (account_name, account_id, mcc_id, user_id)
+                    )
+                elif existing_acc["mcc_id"] != mcc_id and mcc_id:
+                    # 同 account_id 但不同 mcc_id：更新 mcc
+                    db.execute(
+                        "UPDATE accounts SET mcc_id=? WHERE account_id=?",
+                        (mcc_id, account_id)
+                    )
+
+
+@app.route("/api/ad-reports/save", methods=["POST"])
+@jwt_required()
+def ad_reports_save():
+    """保存做表数据（含自动关联 MCC/账户/时区）。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    product_name = (data.get("product_name") or "").strip()
+    region = (data.get("region") or "").strip()
+    report_date = (data.get("report_date") or "").strip()
+    rows = data.get("rows") or []
+    override_ids = data.get("override_ids") or []
+
+    if not product_name:
+        return jsonify({"success": False, "error": "请选择产品"}), 400
+    if not region:
+        return jsonify({"success": False, "error": "请填写地区"}), 400
+    if not report_date:
+        return jsonify({"success": False, "error": "请选择日期"}), 400
+    if not rows:
+        return jsonify({"success": False, "error": "没有数据"}), 400
+
+    db = _yt_db()
+
+    # 自动关联 MCC / 账户 / 时区
+    _auto_link_mcc_and_accounts(db, user_id, product_name, region, rows)
+    db.commit()  # 提交自动关联的写入
+
+    # 处理覆盖：删除被选定覆盖的旧行
+    override_set = set(override_ids)
+    if override_set:
+        placeholders = ",".join(["?"] * len(override_set))
+        db.execute(
+            f"DELETE FROM ad_reports WHERE id IN ({placeholders}) AND user_id=?",
+            list(override_set) + [user_id]
+        )
+
+    # 插入新行（去重：跳过同用户+产品+客户ID+系列的已有行）
+    saved = 0
+    skipped = 0
+    for row in rows:
+        customer_id = str(row.get("customerId", "")).strip()
+        campaign = str(row.get("campaign", "")).strip()
+        if not customer_id or not campaign:
+            continue
+
+        # 检查是否已存在（不在 override_ids 中的重复行跳过）
+        existing = db.execute(
+            "SELECT id FROM ad_reports WHERE user_id=? AND product_name=? "
+            "AND customer_id=? AND campaign=? AND report_date=?",
+            (user_id, product_name, customer_id, campaign, report_date)
+        ).fetchone()
+        if existing and existing["id"] not in override_set:
+            skipped += 1
+            continue
+
+        db.execute(
+            "INSERT INTO ad_reports(user_id, product_name, region, report_date, "
+            "account, customer_id, campaign, cost, impressions, clicks, installs, "
+            "in_app_actions, cost_per_in_app) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                user_id, product_name, region, report_date,
+                str(row.get("account", "")).strip() if row.get("account") else "",
+                customer_id, campaign,
+                float(row.get("cost", 0) or 0),
+                int(row.get("impressions", 0) or 0),
+                int(row.get("clicks", 0) or 0),
+                int(row.get("installs", 0) or 0),
+                float(row.get("inAppActions", 0) or 0),
+                float(row.get("costPerInApp", 0) or 0),
+            )
+        )
+        saved += 1
+
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "saved": saved, "skipped": skipped})
+
+
+@app.route("/api/ad-reports/list", methods=["GET"])
+@jwt_required()
+def ad_reports_list():
+    """列出当前用户的做表数据。"""
+    user_id = int(get_jwt_identity())
+    product_name = request.args.get("product_name", "").strip()
+    report_date = request.args.get("report_date", "").strip()
+    from_date = request.args.get("from_date", "").strip()
+    to_date = request.args.get("to_date", "").strip()
+    page = int(request.args.get("page", 1))
+    size = int(request.args.get("size", 50))
+
+    db = _yt_db()
+    where = ["user_id=?"]; params = [user_id]
+    if product_name:
+        where.append("product_name=?"); params.append(product_name)
+    if report_date:
+        where.append("report_date=?"); params.append(report_date)
+    if from_date:
+        where.append("report_date >= ?"); params.append(from_date)
+    if to_date:
+        where.append("report_date <= ?"); params.append(to_date)
+
+    total = db.execute(
+        f"SELECT COUNT(*) FROM ad_reports WHERE {' AND '.join(where)}", params
+    ).fetchone()[0]
+
+    offset = (page - 1) * size
+    rows = db.execute(
+        f"SELECT * FROM ad_reports WHERE {' AND '.join(where)} "
+        f"ORDER BY saved_at DESC LIMIT ? OFFSET ?",
+        params + [size, offset]
+    ).fetchall()
+
+    # 聚合的产品和地区列表
+    products = [r[0] for r in db.execute(
+        "SELECT DISTINCT product_name FROM ad_reports WHERE user_id=? ORDER BY product_name",
+        (user_id,)
+    ).fetchall()]
+    regions = [r[0] for r in db.execute(
+        "SELECT DISTINCT region FROM ad_reports WHERE user_id=? AND region!='' ORDER BY region",
+        (user_id,)
+    ).fetchall()]
+
+    db.close()
+    return jsonify({
+        "success": True,
+        "reports": [dict(r) for r in rows],
+        "total": total,
+        "products": products,
+        "regions": regions
+    })
+
+
+@app.route("/api/ad-reports/<int:report_id>", methods=["DELETE"])
+@jwt_required()
+def ad_reports_delete(report_id):
+    """删除单条报告（仅 owner）。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    db.execute("DELETE FROM ad_reports WHERE id=? AND user_id=?", (report_id, user_id))
+    db.commit(); db.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/ad-reports/dashboard", methods=["GET"])
+@jwt_required()
+def ad_reports_dashboard():
+    """仪表盘概览：聚合指标 + 环比 + 异常检测。"""
+    user_id = int(get_jwt_identity())
+    product_name = request.args.get("product_name", "").strip()
+    region = request.args.get("region", "").strip()
+    from_date = request.args.get("from_date", "").strip()
+    to_date = request.args.get("to_date", "").strip()
+
+    db = _yt_db()
+    where = ["user_id=?"]; params = [user_id]
+    if product_name:
+        where.append("product_name=?"); params.append(product_name)
+    if region:
+        where.append("region=?"); params.append(region)
+    if from_date:
+        where.append("report_date >= ?"); params.append(from_date)
+    if to_date:
+        where.append("report_date <= ?"); params.append(to_date)
+
+    where_clause = " AND ".join(where)
+
+    # 当前周期
+    current = db.execute(
+        f"SELECT SUM(cost) AS total_cost, SUM(impressions) AS total_impressions, "
+        f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, "
+        f"SUM(in_app_actions) AS total_in_app, "
+        f"AVG(cost_per_in_app) AS avg_cpi, "
+        f"COUNT(*) AS row_count "
+        f"FROM ad_reports WHERE {where_clause}", params
+    ).fetchone()
+
+    # 查产品 KPI
+    product_kpi = None
+    if product_name:
+        prod = db.execute(
+            "SELECT kpi FROM products WHERE product_name=? LIMIT 1", (product_name,)
+        ).fetchone()
+        if prod and prod["kpi"]:
+            try:
+                product_kpi = float(prod["kpi"])
+            except (ValueError, TypeError):
+                pass
+
+    avg_cpi = round(current["avg_cpi"] or 0, 2)
+    summary = {
+        "total_cost": round(current["total_cost"] or 0, 2),
+        "total_impressions": current["total_impressions"] or 0,
+        "total_clicks": current["total_clicks"] or 0,
+        "total_installs": current["total_installs"] or 0,
+        "total_in_app": round(current["total_in_app"] or 0, 2),
+        "avg_cpi": avg_cpi,
+        "avg_ctr": round((current["total_clicks"] or 0) / max(current["total_impressions"] or 1, 1), 4),
+        "avg_cvr": round((current["total_installs"] or 0) / max(current["total_clicks"] or 1, 1), 4),
+        "product_kpi": product_kpi,
+        "kpi_met": (product_kpi is not None and avg_cpi <= product_kpi),
+    }
+
+    # 异常检测：每个系列近3天 vs 前7天均值
+    anomalies = []
+    all_campaigns = db.execute(
+        f"SELECT DISTINCT campaign FROM ad_reports WHERE {where_clause} ORDER BY campaign",
+        params
+    ).fetchall()
+
+    for c in all_campaigns:
+        cname = c["campaign"]
+        cparams = params + [cname]
+        cwhere = f"{where_clause} AND campaign=?"
+        stats = db.execute(
+            f"SELECT report_date, SUM(cost) AS day_cost, SUM(installs) AS day_installs, "
+            f"AVG(cost_per_in_app) AS day_cpi "
+            f"FROM ad_reports WHERE {cwhere} "
+            f"GROUP BY report_date ORDER BY report_date DESC",
+            cparams
+        ).fetchall()
+
+        if len(stats) < 3:
+            continue
+        # 最近3天
+        recent = stats[:3]
+        # 前7天（排除最近3天）
+        older = stats[3:10]
+        if not older:
+            continue
+
+        avg_recent_cost = sum(s["day_cost"] for s in recent) / len(recent)
+        avg_older_cost = sum(s["day_cost"] for s in older) / len(older)
+        avg_recent_installs = sum(s["day_installs"] for s in recent) / len(recent)
+        avg_older_installs = sum(s["day_installs"] for s in older) / len(older)
+        avg_recent_cpi = sum(s["day_cpi"] for s in recent) / len(recent)
+        avg_older_cpi = sum(s["day_cpi"] for s in older) / len(older)
+
+        # 花费暴涨 > 50% 但安装下降
+        if avg_older_cost > 0 and avg_recent_cost > avg_older_cost * 1.5 and avg_recent_installs < avg_older_installs:
+            anomalies.append({
+                "campaign": cname, "date": recent[0]["report_date"],
+                "type": "cost_spike",
+                "detail": f"花费暴涨{round((avg_recent_cost/avg_older_cost - 1)*100)}%，安装下降{round((1 - avg_recent_installs/max(avg_older_installs, 1))*100)}%"
+            })
+        # CPI 飙升 > 30%
+        if avg_older_cpi > 0 and avg_recent_cpi > avg_older_cpi * 1.3:
+            anomalies.append({
+                "campaign": cname, "date": recent[0]["report_date"],
+                "type": "cpi_spike",
+                "detail": f"CPI 飙升至 ${round(avg_recent_cpi, 2)}（均值 ${round(avg_older_cpi, 2)}）"
+            })
+
+    # 环比计算：比较前一个等长周期
+    period_compare = {}
+    if from_date and to_date:
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            fd = _dt.strptime(from_date, "%Y-%m-%d")
+            td = _dt.strptime(to_date, "%Y-%m-%d")
+            days = (td - fd).days + 1
+            prev_from = (fd - _td(days=days)).strftime("%Y-%m-%d")
+            prev_to = (fd - _td(days=1)).strftime("%Y-%m-%d")
+
+            prev_where = "user_id=?"
+            prev_params = [user_id]
+            if product_name:
+                prev_where += " AND product_name=?"
+                prev_params.append(product_name)
+            if region:
+                prev_where += " AND region=?"
+                prev_params.append(region)
+            prev_where += " AND report_date >= ? AND report_date <= ?"
+            prev_params += [prev_from, prev_to]
+
+            prev = db.execute(
+                f"SELECT SUM(cost) AS total_cost, SUM(installs) AS total_installs, "
+                f"AVG(cost_per_in_app) AS avg_cpi "
+                f"FROM ad_reports WHERE {prev_where}", prev_params
+            ).fetchone()
+
+            if prev and prev["total_cost"]:
+                period_compare["cost_change_pct"] = round(
+                    ((summary["total_cost"] - prev["total_cost"]) / prev["total_cost"]) * 100
+                )
+                period_compare["installs_change_pct"] = round(
+                    ((summary["total_installs"] - prev["total_installs"]) / max(prev["total_installs"], 1)) * 100
+                )
+                if prev["avg_cpi"]:
+                    period_compare["cpi_change_pct"] = round(
+                        ((summary["avg_cpi"] - prev["avg_cpi"]) / prev["avg_cpi"]) * 100
+                    )
+        except Exception:
+            pass
+
+    # 成效素材关联数
+    asset_count = 0
+    if product_name:
+        asset_count = db.execute("""
+            SELECT COUNT(*) FROM product_assets pa
+            JOIN products p ON pa.product_id = p.id
+            WHERE p.product_name = ?
+        """, (product_name,)).fetchone()[0]
+
+    db.close()
+    return jsonify({
+        "success": True,
+        "summary": summary,
+        "period_compare": period_compare,
+        "anomalies": anomalies,
+        "asset_count": asset_count
+    })
+
+
+@app.route("/api/ad-reports/trends", methods=["GET"])
+@jwt_required()
+def ad_reports_trends():
+    """趋势数据：按日期聚合指定指标。"""
+    user_id = int(get_jwt_identity())
+    product_name = request.args.get("product_name", "").strip()
+    region = request.args.get("region", "").strip()
+    from_date = request.args.get("from_date", "").strip()
+    to_date = request.args.get("to_date", "").strip()
+    metric = request.args.get("metric", "cpi").strip()
+    group_by = request.args.get("group_by", "product_name").strip()  # product_name or campaign
+
+    db = _yt_db()
+    where = ["user_id=?"]; params = [user_id]
+    if product_name:
+        where.append("product_name=?"); params.append(product_name)
+    if region:
+        where.append("region=?"); params.append(region)
+    if from_date:
+        where.append("report_date >= ?"); params.append(from_date)
+    if to_date:
+        where.append("report_date <= ?"); params.append(to_date)
+
+    where_clause = " AND ".join(where)
+
+    # 指标映射
+    metric_sql = {
+        "cost": "SUM(cost)",
+        "installs": "SUM(installs)",
+        "impressions": "SUM(impressions)",
+        "clicks": "SUM(clicks)",
+        "cpi": "AVG(cost_per_in_app)",
+        "ctr": "CAST(SUM(clicks) AS REAL) / MAX(SUM(impressions), 1)",
+        "cvr": "CAST(SUM(installs) AS REAL) / MAX(SUM(clicks), 1)",
+    }.get(metric, "AVG(cost_per_in_app)")
+
+    group_col = "product_name" if group_by == "product_name" else "campaign"
+
+    rows = db.execute(
+        f"SELECT {group_col} AS name, report_date, {metric_sql} AS value "
+        f"FROM ad_reports WHERE {where_clause} "
+        f"GROUP BY {group_col}, report_date ORDER BY report_date",
+        params
+    ).fetchall()
+
+    # 按系列分组
+    series_map = {}
+    for r in rows:
+        name = r["name"]
+        if name not in series_map:
+            series_map[name] = []
+        series_map[name].append({"date": r["report_date"], "value": round(r["value"], 4)})
+
+    db.close()
+    return jsonify({
+        "success": True,
+        "series": [{"name": k, "data": v} for k, v in series_map.items()]
+    })
+
+
+@app.route("/api/ad-reports/compare", methods=["GET"])
+@jwt_required()
+def ad_reports_compare():
+    """产品/系列聚合对比。"""
+    user_id = int(get_jwt_identity())
+    group_by = request.args.get("group_by", "product_name").strip()
+    from_date = request.args.get("from_date", "").strip()
+    to_date = request.args.get("to_date", "").strip()
+    sort_by = request.args.get("sort_by", "cpi").strip()
+
+    db = _yt_db()
+    where = ["user_id=?"]; params = [user_id]
+    if from_date:
+        where.append("report_date >= ?"); params.append(from_date)
+    if to_date:
+        where.append("report_date <= ?"); params.append(to_date)
+
+    where_clause = " AND ".join(where)
+    group_col = "product_name" if group_by == "product_name" else "campaign"
+
+    sort_map = {
+        "cpi": "avg_cpi ASC",
+        "cost": "total_cost DESC",
+        "installs": "total_installs DESC",
+        "ctr": "ctr DESC",
+        "cvr": "cvr DESC",
+    }
+    order = sort_map.get(sort_by, "avg_cpi ASC")
+
+    rows = db.execute(
+        f"SELECT {group_col} AS name, "
+        f"SUM(cost) AS total_cost, SUM(impressions) AS total_impressions, "
+        f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, "
+        f"AVG(cost_per_in_app) AS avg_cpi, "
+        f"CAST(SUM(clicks) AS REAL) / MAX(SUM(impressions), 1) AS ctr, "
+        f"CAST(SUM(installs) AS REAL) / MAX(SUM(clicks), 1) AS cvr "
+        f"FROM ad_reports WHERE {where_clause} "
+        f"GROUP BY {group_col} ORDER BY {order}",
+        params
+    ).fetchall()
+
+    db.close()
+    return jsonify({
+        "success": True,
+        "items": [dict(r) for r in rows]
+    })
+
+
+@app.route("/api/ad-reports/cross-user", methods=["GET"])
+@jwt_required()
+def ad_reports_cross_user():
+    """跨用户对比：同产品不同用户的聚合数据。"""
+    user_id = int(get_jwt_identity())
+    product_name = request.args.get("product_name", "").strip()
+    from_date = request.args.get("from_date", "").strip()
+    to_date = request.args.get("to_date", "").strip()
+
+    if not product_name:
+        return jsonify({"success": False, "error": "请指定产品"}), 400
+
+    db = _yt_db()
+    where = ["product_name=?"]; params = [product_name]
+    if from_date:
+        where.append("report_date >= ?"); params.append(from_date)
+    if to_date:
+        where.append("report_date <= ?"); params.append(to_date)
+
+    where_clause = " AND ".join(where)
+
+    rows = db.execute(
+        f"SELECT ar.user_id, u.display_name, u.username, "
+        f"SUM(ar.cost) AS total_cost, SUM(ar.installs) AS total_installs, "
+        f"AVG(ar.cost_per_in_app) AS avg_cpi, "
+        f"COUNT(DISTINCT ar.report_date) AS report_days "
+        f"FROM ad_reports ar "
+        f"LEFT JOIN users u ON ar.user_id = u.id "
+        f"WHERE {where_clause} "
+        f"GROUP BY ar.user_id ORDER BY avg_cpi ASC",
+        params
+    ).fetchall()
+
+    db.close()
+    return jsonify({
+        "success": True,
+        "users": [dict(r) for r in rows]
+    })
+
+
+@app.route("/api/ad-reports/dates", methods=["GET"])
+@jwt_required()
+def ad_reports_dates():
+    """返回筛选条件下有数据的日期列表，供日期选择器标记使用。"""
+    user_id = int(get_jwt_identity())
+    product_name = request.args.get("product_name", "").strip()
+    region = request.args.get("region", "").strip()
+
+    db = _yt_db()
+    where = ["user_id=?"]; params = [user_id]
+    if product_name:
+        where.append("product_name=?"); params.append(product_name)
+    if region:
+        where.append("region=?"); params.append(region)
+
+    rows = db.execute(
+        f"SELECT report_date, COUNT(*) AS cnt FROM ad_reports "
+        f"WHERE {' AND '.join(where)} GROUP BY report_date ORDER BY report_date",
+        params
+    ).fetchall()
+    db.close()
+    dates = {r["report_date"]: r["cnt"] for r in rows}
+    return jsonify({"success": True, "dates": dates})
+
+
+@app.route("/api/ad-reports/analyze", methods=["POST"])
+@jwt_required()
+def ad_reports_analyze():
+    """AI 分析（可配置开关）。"""
+    # 检查配置
+    db = _yt_db()
+    ai_config_row = db.execute(
+        "SELECT value FROM config WHERE key='ai_analysis'"
+    ).fetchone()
+    db.close()
+
+    ai_enabled = False
+    ai_provider = "atlas"
+    if ai_config_row:
+        try:
+            ai_config = json.loads(ai_config_row["value"])
+            ai_enabled = ai_config.get("enabled", False)
+            ai_provider = ai_config.get("provider", "atlas")
+        except Exception:
+            pass
+
+    if not ai_enabled:
+        return jsonify({"success": True, "enabled": False, "answer": "AI 分析未启用，请联系管理员在系统配置中开启。"})
+
+    # TODO: 接入现有 AI 服务（atlas/doubao 等）
+    return jsonify({
+        "success": True,
+        "enabled": True,
+        "answer": "AI 分析功能已启用，正在接入 AI 服务中...",
+        "provider": ai_provider
+    })
+
+
+# ============================================================
+#  地区时区管理 API
+# ============================================================
+
+@app.route("/api/regions/list", methods=["GET"])
+@jwt_required()
+def regions_list_api():
+    """获取所有地区+时区。"""
+    result = database.regions_list()
+    return jsonify({"success": True, "regions": result})
+
+
+@app.route("/api/regions/<int:region_id>", methods=["PUT"])
+@jwt_required()
+def regions_update_api(region_id):
+    """更新地区时区。"""
+    data = request.get_json(silent=True) or {}
+    timezone = (data.get("timezone") or "").strip()
+    database.regions_update(region_id, timezone)
+    return jsonify({"success": True})
+
+
+@app.route("/api/regions/create", methods=["POST"])
+@jwt_required()
+def regions_create_api():
+    """新增地区。"""
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    timezone = (data.get("timezone") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "地区名不能为空"}), 400
+    rid = database.regions_create(name, timezone)
+    return jsonify({"success": True, "id": rid})
+
+
+@app.route("/api/regions/<int:region_id>", methods=["DELETE"])
+@jwt_required()
+def regions_delete_api(region_id):
+    """删除地区。"""
+    database.regions_delete(region_id)
+    return jsonify({"success": True})
 
 
 if __name__ == "__main__":

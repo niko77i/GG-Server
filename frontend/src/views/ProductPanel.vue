@@ -36,6 +36,7 @@
       <ProductCard
         v-for="p in store.products" :key="p.id"
         :product="p"
+        :region-timezone="regionTimezone"
         :selected="selectedIds.includes(p.id)"
         @select="toggleSelect(p.id)"
         @edit="showProductModal($event)"
@@ -94,7 +95,18 @@ const addPkgVisible = ref(false); const addPkgProdId = ref(null)
 
 let searchTimer = null
 
-onMounted(() => { load(); loadRunnerUsers() })
+const regionTimezone = ref({})
+
+onMounted(() => { load(); loadRunnerUsers(); loadRegionTimezone() })
+
+async function loadRegionTimezone() {
+  try {
+    const res = await api.get('/regions/list')
+    const map = {}
+    for (const r of (res.regions || [])) { map[r.name] = r.timezone }
+    regionTimezone.value = map
+  } catch {}
+}
 
 function runnerParam() {
   return runnerUserId.value ? String(runnerUserId.value) : runnerFilter.value

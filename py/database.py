@@ -151,6 +151,51 @@ def _ensure_schema(conn: sqlite3.Connection):
             created_at TEXT DEFAULT (datetime('now','localtime')),
             FOREIGN KEY(product_id) REFERENCES products(id)
         );
+
+        -- 产品成效素材关联
+        CREATE TABLE IF NOT EXISTS product_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL REFERENCES products(id),
+            video_id TEXT NOT NULL REFERENCES videos(id),
+            added_by INTEGER REFERENCES users(id),
+            added_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(product_id, video_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_product_assets_product ON product_assets(product_id);
+        CREATE INDEX IF NOT EXISTS idx_product_assets_video ON product_assets(video_id);
+
+        -- 做表数据保存（广告投放报告）
+        CREATE TABLE IF NOT EXISTS ad_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            product_name TEXT NOT NULL,
+            region TEXT NOT NULL,
+            report_date TEXT NOT NULL,
+            account TEXT NOT NULL DEFAULT '',
+            customer_id TEXT NOT NULL DEFAULT '',
+            campaign TEXT NOT NULL DEFAULT '',
+            cost REAL DEFAULT 0,
+            impressions INTEGER DEFAULT 0,
+            clicks INTEGER DEFAULT 0,
+            installs INTEGER DEFAULT 0,
+            in_app_actions REAL DEFAULT 0,
+            cost_per_in_app REAL DEFAULT 0,
+            saved_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ad_reports_user_product_date
+            ON ad_reports(user_id, product_name, report_date);
+        CREATE INDEX IF NOT EXISTS idx_ad_reports_dedup
+            ON ad_reports(user_id, product_name, customer_id, campaign, report_date);
+        CREATE INDEX IF NOT EXISTS idx_ad_reports_date ON ad_reports(report_date);
+
+        -- 地区与时区管理
+        CREATE TABLE IF NOT EXISTS regions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            timezone TEXT NOT NULL DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+
         -- 用户表
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,6 +314,26 @@ def _ensure_schema(conn: sqlite3.Connection):
                  ("product_names", '["p222","93ok"]'),
                  ("review_statuses", '["能过审","不能过审"]')]:
         conn.execute("INSERT OR IGNORE INTO tags(key,value) VALUES(?,?)", (k, v))
+
+    # 迁移：ad_reports 表补 account 列
+    ar_cols = [r[1] for r in conn.execute("PRAGMA table_info(ad_reports)").fetchall()]
+    if ar_cols and "account" not in ar_cols:
+        conn.execute("ALTER TABLE ad_reports ADD COLUMN account TEXT NOT NULL DEFAULT ''")
+
+    # 迁移：更新 ad_reports 去重索引（加入 report_date）
+    ar_migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_ad_reports_dedup_v2'"
+    ).fetchone()
+    if not ar_migrated and ar_cols:
+        conn.execute("DROP INDEX IF EXISTS idx_ad_reports_dedup")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ad_reports_dedup "
+            "ON ad_reports(user_id, product_name, customer_id, campaign, report_date)"
+        )
+        conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_ad_reports_dedup_v2','1')")
+
+    # 初始化地区时区（从 tags 同步已有地区，预设常见时区）
+    _init_regions(conn)
 
     # 迁移：现有数据归属 developer（2026-06-26 数据隔离）
     data_migrated = conn.execute(
@@ -725,3 +790,99 @@ def font_mark_used(font_id: str):
     recent.insert(0, font_id)
     recent = recent[:20]
     config_set("font_recent", json.dumps(recent))
+
+
+# ---- 地区时区 ----
+
+# 预设时区映射（初始化用，用户后续可自行编辑）
+_DEFAULT_TIMEZONES = {
+    "巴西": "UTC-3",
+    "菲律宾": "UTC+8",
+    "孟加拉": "UTC+6",
+    "印尼": "UTC+7",
+    "东南亚通用": "UTC+7",
+    "通用": "UTC+8",
+    "美国": "UTC-5",
+    "印度": "UTC+5:30",
+    "巴基斯坦": "UTC+5",
+    "尼日利亚": "UTC+1",
+    "墨西哥": "UTC-6",
+    "日本": "UTC+9",
+    "韩国": "UTC+9",
+    "泰国": "UTC+7",
+    "越南": "UTC+7",
+    "土耳其": "UTC+3",
+    "埃及": "UTC+2",
+    "英国": "UTC+0",
+    "德国": "UTC+1",
+    "法国": "UTC+1",
+    "西班牙": "UTC+1",
+    "意大利": "UTC+1",
+    "俄罗斯": "UTC+3",
+    "澳大利亚": "UTC+10",
+    "加拿大": "UTC-5",
+    "阿根廷": "UTC-3",
+    "哥伦比亚": "UTC-5",
+    "秘鲁": "UTC-5",
+    "智利": "UTC-4",
+}
+
+
+def _init_regions(conn: sqlite3.Connection):
+    """初始化 regions 表：从 tags 同步已有地区，预设时区。"""
+    existing = set(r[0] for r in conn.execute("SELECT name FROM regions").fetchall())
+    if existing:
+        return  # 已有数据，不覆盖
+
+    # 从 tags 表读取已有地区列表
+    tag_row = conn.execute("SELECT value FROM tags WHERE key='regions'").fetchone()
+    if tag_row:
+        try:
+            region_list = json.loads(tag_row["value"])
+        except Exception:
+            region_list = []
+    else:
+        region_list = []
+
+    for name in region_list:
+        if not name or name in existing:
+            continue
+        tz = _DEFAULT_TIMEZONES.get(name, "")
+        conn.execute(
+            "INSERT OR IGNORE INTO regions(name, timezone) VALUES(?,?)", (name, tz)
+        )
+        existing.add(name)
+
+
+def regions_list() -> list[dict]:
+    """返回所有地区及其时区。"""
+    db = get_db()
+    rows = db.execute("SELECT * FROM regions ORDER BY name").fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+def regions_update(region_id: int, timezone: str):
+    """更新地区时区。"""
+    db = get_db()
+    db.execute("UPDATE regions SET timezone=? WHERE id=?", (timezone, region_id))
+    db.commit()
+    db.close()
+
+
+def regions_create(name: str, timezone: str = "") -> int:
+    """新增地区，返回 id。"""
+    db = get_db()
+    db.execute("INSERT INTO regions(name, timezone) VALUES(?,?)", (name, timezone))
+    db.commit()
+    row = db.execute("SELECT id FROM regions WHERE name=?", (name,)).fetchone()
+    db.close()
+    return row["id"] if row else 0
+
+
+def regions_delete(region_id: int):
+    """删除地区。"""
+    db = get_db()
+    db.execute("DELETE FROM regions WHERE id=?", (region_id,))
+    db.commit()
+    db.close()

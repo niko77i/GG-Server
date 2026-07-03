@@ -51,6 +51,11 @@ const routes = [
     ]
   },
   {
+    path: '/analysis',
+    component: () => import('../views/AnalysisView.vue'),
+    meta: { title: '数据分析' }
+  },
+  {
     path: '/admin/users',
     component: () => import('../views/UserManageView.vue'),
     meta: { admin: true, title: '用户管理' }
