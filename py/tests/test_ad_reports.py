@@ -315,3 +315,141 @@ class TestAdReportsAnalyze:
         data = resp.get_json()
         assert data["success"] is True
         assert data["enabled"] is False
+
+
+class TestAdReportsMultiAnalysis:
+    """GET /api/ad-reports/multi-analysis — 多维自由分析。"""
+
+    def _seed_data(self, client, auth_headers):
+        """准备测试数据：两个账户、两个campaign、同一产品。"""
+        rows = [
+            {"account": "账户A", "customerId": "111-222-3333", "campaign": "Camp-X",
+             "cost": 500, "impressions": 10000, "clicks": 500,
+             "installs": 80, "inAppActions": 200, "costPerInApp": 2.5},
+            {"account": "账户A", "customerId": "111-222-3333", "campaign": "Camp-Y",
+             "cost": 300, "impressions": 6000, "clicks": 200,
+             "installs": 40, "inAppActions": 150, "costPerInApp": 2.0},
+            {"account": "账户B", "customerId": "444-555-6666", "campaign": "Camp-X",
+             "cost": 800, "impressions": 15000, "clicks": 600,
+             "installs": 120, "inAppActions": 200, "costPerInApp": 4.0},
+            {"account": "账户B", "customerId": "444-555-6666", "campaign": "Camp-Y",
+             "cost": 200, "impressions": 4000, "clicks": 150,
+             "installs": 30, "inAppActions": 100, "costPerInApp": 2.0},
+        ]
+        client.post("/api/ad-reports/save", json={
+            "product_name": "test_multi_prod",
+            "region": "巴西", "report_date": "2026-07-01",
+            "rows": rows, "override_ids": [],
+        }, headers=auth_headers)
+
+    def test_multi_analysis_group_by_account(self, client, auth_headers):
+        """按账户分组返回正确的聚合数据。"""
+        self._seed_data(client, auth_headers)
+        resp = client.get(
+            "/api/ad-reports/multi-analysis?x_axis=cost&y_axis=cpi&group_by=account&product_name=test_multi_prod",
+            headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert len(data["points"]) == 2  # 账户A, 账户B
+        names = {p["name"] for p in data["points"]}
+        assert "账户A" in names
+        assert "账户B" in names
+        # 每个点应有必需的字段
+        for p in data["points"]:
+            assert "x" in p
+            assert "y" in p
+            assert "detail" in p
+            assert "total_cost" in p["detail"]
+            assert "avg_cpi" in p["detail"]
+
+    def test_multi_analysis_group_by_campaign(self, client, auth_headers):
+        """按campaign分组返回正确的聚合数据。"""
+        self._seed_data(client, auth_headers)
+        resp = client.get(
+            "/api/ad-reports/multi-analysis?x_axis=cost&y_axis=cpi&group_by=campaign&product_name=test_multi_prod",
+            headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert len(data["points"]) == 2  # Camp-X, Camp-Y
+
+    def test_multi_analysis_returns_stats(self, client, auth_headers):
+        """返回统计信息：均值、中位数、相关系数。"""
+        self._seed_data(client, auth_headers)
+        resp = client.get(
+            "/api/ad-reports/multi-analysis?x_axis=cost&y_axis=cpi&group_by=account&product_name=test_multi_prod",
+            headers=auth_headers)
+        data = resp.get_json()
+        assert "stats" in data
+        s = data["stats"]
+        assert "x_avg" in s
+        assert "y_avg" in s
+        assert "correlation" in s
+        assert "sample_count" in s
+        assert s["sample_count"] == 2
+
+    def test_multi_analysis_returns_insights(self, client, auth_headers):
+        """返回规则引擎生成的分析结论。"""
+        self._seed_data(client, auth_headers)
+        resp = client.get(
+            "/api/ad-reports/multi-analysis?x_axis=cost&y_axis=cpi&group_by=account&product_name=test_multi_prod",
+            headers=auth_headers)
+        data = resp.get_json()
+        assert "insights" in data
+        assert isinstance(data["insights"], list)
+
+    def test_multi_analysis_with_size_by(self, client, auth_headers):
+        """气泡大小参数正确传递并计算。"""
+        self._seed_data(client, auth_headers)
+        resp = client.get(
+            "/api/ad-reports/multi-analysis?x_axis=cost&y_axis=cpi&size_by=ctr&group_by=account&product_name=test_multi_prod",
+            headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        for p in data["points"]:
+            assert "size" in p
+            assert p["size"] >= 0
+
+    def test_multi_analysis_without_size_by(self, client, auth_headers):
+        """不传size_by时气泡大小仍存在（默认值）。"""
+        self._seed_data(client, auth_headers)
+        resp = client.get(
+            "/api/ad-reports/multi-analysis?x_axis=cost&y_axis=cpi&group_by=account&product_name=test_multi_prod",
+            headers=auth_headers)
+        data = resp.get_json()
+        for p in data["points"]:
+            assert "size" in p
+
+    def test_multi_analysis_different_metrics(self, client, auth_headers):
+        """不同指标组合（ctr vs cvr）正常工作。"""
+        self._seed_data(client, auth_headers)
+        resp = client.get(
+            "/api/ad-reports/multi-analysis?x_axis=ctr&y_axis=cvr&group_by=campaign&product_name=test_multi_prod",
+            headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert len(data["points"]) == 2
+
+    def test_multi_analysis_empty_when_no_data(self, client, auth_headers):
+        """无数据时返回空points + 空insights。"""
+        resp = client.get(
+            "/api/ad-reports/multi-analysis?x_axis=cost&y_axis=cpi&group_by=account&product_name=nonexistent_xyz",
+            headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["points"] == []
+        assert data["insights"] == []
+
+
+class TestAdReportsMultiAiChat:
+    """POST /api/ad-reports/multi-ai-chat — AI 对话分析。"""
+
+    def test_ai_chat_disabled_by_default(self, client, auth_headers):
+        """默认未启用AI时返回提示。"""
+        resp = client.post("/api/ad-reports/multi-ai-chat", json={
+            "question": "哪些账户需要优化？",
+            "context": {"product_name": "test", "points": []},
+            "history": [],
+        }, headers=auth_headers)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["enabled"] is False

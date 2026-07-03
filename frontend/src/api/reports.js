@@ -10,5 +10,8 @@ export const reportsApi = {
   trends:        (params) => api.get('/ad-reports/trends', { params }),
   compare:       (params) => api.get('/ad-reports/compare', { params }),
   crossUser:     (params) => api.get('/ad-reports/cross-user', { params }),
+  multiAnalysis: (params) => api.get('/ad-reports/multi-analysis', { params }),
+  multiAnalysisPost: (body) => api.post('/ad-reports/multi-analysis', body),
+  multiAiChat:   (body) => api.post('/ad-reports/multi-ai-chat', body),
   analyze:       (body) => api.post('/ad-reports/analyze', body),
 }

@@ -23,6 +23,7 @@ import json
 import auth
 import data_service
 import datetime
+import requests
 from functools import wraps
 # google_ads_service 按需加载，不打包进 EXE
 
@@ -2573,6 +2574,45 @@ def account_settings_save():
     return jsonify({"success": True})
 
 
+@app.route("/api/config/ai", methods=["GET"])
+@jwt_required()
+def config_ai_get():
+    """读取 AI 分析配置（按用户隔离）。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    row = db.execute(f"SELECT value FROM config WHERE key='ai_analysis_{user_id}'").fetchone()
+    db.close()
+    if row:
+        try:
+            cfg = json.loads(row["value"])
+        except Exception:
+            cfg = {"enabled": False, "provider": "volcano", "model": "deepseek-v4-flash", "api_key": "", "endpoint": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"}
+    else:
+        cfg = {"enabled": False, "provider": "volcano", "model": "deepseek-v4-flash", "api_key": "", "endpoint": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"}
+    return jsonify({"success": True, "config": cfg})
+
+
+@app.route("/api/config/ai", methods=["POST"])
+@jwt_required()
+def config_ai_save():
+    """保存 AI 分析配置（按用户隔离）。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    cfg = {
+        "enabled": bool(data.get("enabled", False)),
+        "provider": data.get("provider", "volcano"),
+        "model": data.get("model", "deepseek-v4-flash"),
+        "api_key": data.get("api_key", ""),
+        "endpoint": data.get("endpoint", "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"),
+    }
+    db = _yt_db()
+    db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+               (f"ai_analysis_{user_id}", json.dumps(cfg, ensure_ascii=False)))
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+
 # ---------- 文件浏览 API ----------
 
 
@@ -3960,7 +4000,7 @@ def ad_reports_save():
                 float(row.get("cost", 0) or 0),
                 int(row.get("impressions", 0) or 0),
                 int(row.get("clicks", 0) or 0),
-                int(row.get("installs", 0) or 0),
+                float(row.get("installs", 0) or 0),
                 float(row.get("inAppActions", 0) or 0),
                 float(row.get("costPerInApp", 0) or 0),
             )
@@ -4065,7 +4105,6 @@ def ad_reports_dashboard():
         f"SELECT SUM(cost) AS total_cost, SUM(impressions) AS total_impressions, "
         f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, "
         f"SUM(in_app_actions) AS total_in_app, "
-        f"AVG(cost_per_in_app) AS avg_cpi, "
         f"COUNT(*) AS row_count "
         f"FROM ad_reports WHERE {where_clause}", params
     ).fetchone()
@@ -4082,16 +4121,23 @@ def ad_reports_dashboard():
             except (ValueError, TypeError):
                 pass
 
-    avg_cpi = round(current["avg_cpi"] or 0, 2)
+    total_cost = current["total_cost"] or 0
+    total_impressions = current["total_impressions"] or 0
+    total_clicks = current["total_clicks"] or 0
+    total_installs = current["total_installs"] or 0
+    total_in_app = current["total_in_app"] or 0
+    avg_cpi = round(total_cost / max(total_in_app, 1), 2)
+    avg_ctr = round(total_clicks / max(total_impressions, 1), 4)
+    avg_cvr = round(total_installs / max(total_clicks, 1), 4)
     summary = {
-        "total_cost": round(current["total_cost"] or 0, 2),
-        "total_impressions": current["total_impressions"] or 0,
-        "total_clicks": current["total_clicks"] or 0,
-        "total_installs": current["total_installs"] or 0,
-        "total_in_app": round(current["total_in_app"] or 0, 2),
+        "total_cost": round(total_cost, 2),
+        "total_impressions": total_impressions,
+        "total_clicks": total_clicks,
+        "total_installs": total_installs,
+        "total_in_app": round(total_in_app, 2),
         "avg_cpi": avg_cpi,
-        "avg_ctr": round((current["total_clicks"] or 0) / max(current["total_impressions"] or 1, 1), 4),
-        "avg_cvr": round((current["total_installs"] or 0) / max(current["total_clicks"] or 1, 1), 4),
+        "avg_ctr": avg_ctr,
+        "avg_cvr": avg_cvr,
         "product_kpi": product_kpi,
         "kpi_met": (product_kpi is not None and avg_cpi <= product_kpi),
     }
@@ -4109,7 +4155,7 @@ def ad_reports_dashboard():
         cwhere = f"{where_clause} AND campaign=?"
         stats = db.execute(
             f"SELECT report_date, SUM(cost) AS day_cost, SUM(installs) AS day_installs, "
-            f"AVG(cost_per_in_app) AS day_cpi "
+            f"SUM(in_app_actions) AS day_in_app "
             f"FROM ad_reports WHERE {cwhere} "
             f"GROUP BY report_date ORDER BY report_date DESC",
             cparams
@@ -4124,12 +4170,16 @@ def ad_reports_dashboard():
         if not older:
             continue
 
-        avg_recent_cost = sum(s["day_cost"] for s in recent) / len(recent)
-        avg_older_cost = sum(s["day_cost"] for s in older) / len(older)
-        avg_recent_installs = sum(s["day_installs"] for s in recent) / len(recent)
-        avg_older_installs = sum(s["day_installs"] for s in older) / len(older)
-        avg_recent_cpi = sum(s["day_cpi"] for s in recent) / len(recent)
-        avg_older_cpi = sum(s["day_cpi"] for s in older) / len(older)
+        avg_recent_cost = sum(s["day_cost"] or 0 for s in recent) / len(recent)
+        avg_older_cost = sum(s["day_cost"] or 0 for s in older) / len(older)
+        avg_recent_installs = sum(s["day_installs"] or 0 for s in recent) / len(recent)
+        avg_older_installs = sum(s["day_installs"] or 0 for s in older) / len(older)
+        recent_cost_sum = sum(s["day_cost"] or 0 for s in recent)
+        recent_in_app_sum = sum(s["day_in_app"] or 0 for s in recent)
+        older_cost_sum = sum(s["day_cost"] or 0 for s in older)
+        older_in_app_sum = sum(s["day_in_app"] or 0 for s in older)
+        avg_recent_cpi = recent_cost_sum / max(recent_in_app_sum, 1)
+        avg_older_cpi = older_cost_sum / max(older_in_app_sum, 1)
 
         # 花费暴涨 > 50% 但安装下降
         if avg_older_cost > 0 and avg_recent_cost > avg_older_cost * 1.5 and avg_recent_installs < avg_older_installs:
@@ -4170,7 +4220,7 @@ def ad_reports_dashboard():
 
             prev = db.execute(
                 f"SELECT SUM(cost) AS total_cost, SUM(installs) AS total_installs, "
-                f"AVG(cost_per_in_app) AS avg_cpi "
+                f"SUM(in_app_actions) AS total_in_app "
                 f"FROM ad_reports WHERE {prev_where}", prev_params
             ).fetchone()
 
@@ -4181,12 +4231,36 @@ def ad_reports_dashboard():
                 period_compare["installs_change_pct"] = round(
                     ((summary["total_installs"] - prev["total_installs"]) / max(prev["total_installs"], 1)) * 100
                 )
-                if prev["avg_cpi"]:
+                prev_total_in_app = prev["total_in_app"] or 0
+                prev_avg_cpi = round((prev["total_cost"] or 0) / max(prev_total_in_app, 1), 2)
+                if prev_avg_cpi:
                     period_compare["cpi_change_pct"] = round(
-                        ((summary["avg_cpi"] - prev["avg_cpi"]) / prev["avg_cpi"]) * 100
+                        ((summary["avg_cpi"] - prev_avg_cpi) / prev_avg_cpi) * 100
                     )
         except Exception:
             pass
+
+    # 按 campaign 分组统计
+    campaign_stats = db.execute(
+        f"SELECT campaign, "
+        f"SUM(cost) AS total_cost, SUM(installs) AS total_installs, "
+        f"SUM(impressions) AS total_impressions, SUM(clicks) AS total_clicks, "
+        f"SUM(in_app_actions) AS total_in_app "
+        f"FROM ad_reports WHERE {where_clause} "
+        f"GROUP BY campaign ORDER BY total_cost DESC",
+        params
+    ).fetchall()
+    campaigns = [{
+        "campaign": r["campaign"] or "未命名",
+        "total_cost": round(r["total_cost"] or 0, 2),
+        "total_installs": round(r["total_installs"] or 0, 2),
+        "total_impressions": r["total_impressions"] or 0,
+        "total_clicks": r["total_clicks"] or 0,
+        "total_in_app": round(r["total_in_app"] or 0, 2),
+        "avg_cpi": round((r["total_cost"] or 0) / max(r["total_in_app"] or 1, 1), 2),
+        "ctr": round((r["total_clicks"] or 0) / max(r["total_impressions"] or 1, 1), 4),
+        "cvr": round((r["total_installs"] or 0) / max(r["total_clicks"] or 1, 1), 4),
+    } for r in campaign_stats]
 
     # 成效素材关联数
     asset_count = 0
@@ -4203,6 +4277,7 @@ def ad_reports_dashboard():
         "summary": summary,
         "period_compare": period_compare,
         "anomalies": anomalies,
+        "campaigns": campaigns,
         "asset_count": asset_count
     })
 
@@ -4232,33 +4307,38 @@ def ad_reports_trends():
 
     where_clause = " AND ".join(where)
 
-    # 指标映射
-    metric_sql = {
-        "cost": "SUM(cost)",
-        "installs": "SUM(installs)",
-        "impressions": "SUM(impressions)",
-        "clicks": "SUM(clicks)",
-        "cpi": "AVG(cost_per_in_app)",
-        "ctr": "CAST(SUM(clicks) AS REAL) / MAX(SUM(impressions), 1)",
-        "cvr": "CAST(SUM(installs) AS REAL) / MAX(SUM(clicks), 1)",
-    }.get(metric, "AVG(cost_per_in_app)")
-
     group_col = "product_name" if group_by == "product_name" else "campaign"
 
     rows = db.execute(
-        f"SELECT {group_col} AS name, report_date, {metric_sql} AS value "
+        f"SELECT {group_col} AS name, report_date, "
+        f"SUM(cost) AS total_cost, SUM(installs) AS total_installs, "
+        f"SUM(impressions) AS total_impressions, SUM(clicks) AS total_clicks, "
+        f"SUM(in_app_actions) AS total_in_app "
         f"FROM ad_reports WHERE {where_clause} "
         f"GROUP BY {group_col}, report_date ORDER BY report_date",
         params
     ).fetchall()
 
-    # 按系列分组
+    # Python 计算指标值
+    def _compute_metric(r, m):
+        if m == "cost": return r["total_cost"] or 0
+        if m == "installs": return r["total_installs"] or 0
+        if m == "impressions": return r["total_impressions"] or 0
+        if m == "clicks": return r["total_clicks"] or 0
+        if m == "cpi":
+            return (r["total_cost"] or 0) / max(r["total_in_app"] or 1, 1)
+        if m == "ctr":
+            return (r["total_clicks"] or 0) / max(r["total_impressions"] or 1, 1)
+        if m == "cvr":
+            return (r["total_installs"] or 0) / max(r["total_clicks"] or 1, 1)
+        return (r["total_cost"] or 0) / max(r["total_in_app"] or 1, 1)  # 默认 CPI
+
     series_map = {}
     for r in rows:
         name = r["name"]
         if name not in series_map:
             series_map[name] = []
-        series_map[name].append({"date": r["report_date"], "value": round(r["value"], 4)})
+        series_map[name].append({"date": r["report_date"], "value": round(_compute_metric(r, metric), 4)})
 
     db.close()
     return jsonify({
@@ -4287,31 +4367,54 @@ def ad_reports_compare():
     where_clause = " AND ".join(where)
     group_col = "product_name" if group_by == "product_name" else "campaign"
 
-    sort_map = {
-        "cpi": "avg_cpi ASC",
-        "cost": "total_cost DESC",
-        "installs": "total_installs DESC",
-        "ctr": "ctr DESC",
-        "cvr": "cvr DESC",
-    }
-    order = sort_map.get(sort_by, "avg_cpi ASC")
-
     rows = db.execute(
         f"SELECT {group_col} AS name, "
         f"SUM(cost) AS total_cost, SUM(impressions) AS total_impressions, "
         f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, "
-        f"AVG(cost_per_in_app) AS avg_cpi, "
-        f"CAST(SUM(clicks) AS REAL) / MAX(SUM(impressions), 1) AS ctr, "
-        f"CAST(SUM(installs) AS REAL) / MAX(SUM(clicks), 1) AS cvr "
+        f"SUM(in_app_actions) AS total_in_app "
         f"FROM ad_reports WHERE {where_clause} "
-        f"GROUP BY {group_col} ORDER BY {order}",
+        f"GROUP BY {group_col}",
         params
     ).fetchall()
+
+    # Python 计算派生指标
+    items = []
+    for r in rows:
+        cost = r["total_cost"] or 0
+        impressions = r["total_impressions"] or 0
+        clicks = r["total_clicks"] or 0
+        installs = r["total_installs"] or 0
+        in_app = r["total_in_app"] or 0
+        items.append({
+            "name": r["name"],
+            "total_cost": round(cost, 2),
+            "total_impressions": impressions,
+            "total_clicks": clicks,
+            "total_installs": installs,
+            "total_in_app": in_app,
+            "avg_cpi": round(cost / max(in_app, 1), 2),
+            "ctr": round(clicks / max(impressions, 1), 4),
+            "cvr": round(installs / max(clicks, 1), 4),
+        })
+
+    # Python 排序
+    sort_key = sort_by if sort_by in ("cost", "installs") else ("cpi" if sort_by == "cpi" else sort_by)
+    reverse = sort_by != "cpi"  # cpi 默认升序，其余降序
+    if sort_key == "cpi":
+        items.sort(key=lambda x: x["avg_cpi"], reverse=False)
+    elif sort_key == "cost":
+        items.sort(key=lambda x: x["total_cost"], reverse=True)
+    elif sort_key == "installs":
+        items.sort(key=lambda x: x["total_installs"], reverse=True)
+    elif sort_key == "ctr":
+        items.sort(key=lambda x: x["ctr"], reverse=True)
+    elif sort_key == "cvr":
+        items.sort(key=lambda x: x["cvr"], reverse=True)
 
     db.close()
     return jsonify({
         "success": True,
-        "items": [dict(r) for r in rows]
+        "items": items
     })
 
 
@@ -4339,20 +4442,508 @@ def ad_reports_cross_user():
     rows = db.execute(
         f"SELECT ar.user_id, u.display_name, u.username, "
         f"SUM(ar.cost) AS total_cost, SUM(ar.installs) AS total_installs, "
-        f"AVG(ar.cost_per_in_app) AS avg_cpi, "
+        f"SUM(ar.in_app_actions) AS total_in_app, "
         f"COUNT(DISTINCT ar.report_date) AS report_days "
         f"FROM ad_reports ar "
         f"LEFT JOIN users u ON ar.user_id = u.id "
         f"WHERE {where_clause} "
-        f"GROUP BY ar.user_id ORDER BY avg_cpi ASC",
+        f"GROUP BY ar.user_id",
         params
     ).fetchall()
+
+    users = []
+    for r in rows:
+        cost = r["total_cost"] or 0
+        in_app = r["total_in_app"] or 0
+        users.append({
+            "user_id": r["user_id"],
+            "display_name": r["display_name"],
+            "username": r["username"],
+            "total_cost": round(cost, 2),
+            "total_installs": r["total_installs"] or 0,
+            "total_in_app": in_app,
+            "avg_cpi": round(cost / max(in_app, 1), 2),
+            "report_days": r["report_days"],
+        })
+
+    users.sort(key=lambda u: u["avg_cpi"])
 
     db.close()
     return jsonify({
         "success": True,
-        "users": [dict(r) for r in rows]
+        "users": users
     })
+
+
+@app.route("/api/ad-reports/multi-analysis", methods=["GET"])
+@jwt_required()
+def ad_reports_multi_analysis():
+    """多维自由分析：任意指标 X/Y 轴 + 任意分组维度 + 统计 + 规则引擎结论。"""
+    user_id = int(get_jwt_identity())
+    x_axis = request.args.get("x_axis", "cost").strip()
+    y_axis = request.args.get("y_axis", "cpi").strip()
+    size_by = request.args.get("size_by", "").strip()
+    group_by = request.args.get("group_by", "account").strip()
+    product_name = request.args.get("product_name", "").strip()
+    campaign = request.args.get("campaign", "").strip()
+    account = request.args.get("account", "").strip()
+    region = request.args.get("region", "").strip()
+    from_date = request.args.get("from_date", "").strip()
+    to_date = request.args.get("to_date", "").strip()
+    split_by_date = request.args.get("split_by_date", "0").strip() == "1"
+
+    # 分组列映射
+    group_col_map = {
+        "product_name": "product_name",
+        "campaign": "campaign",
+        "account": "account",
+        "customer_id": "customer_id",
+    }
+    group_col = group_col_map.get(group_by, "account")
+
+    # 指标标签
+    metric_labels = {
+        "cost": "花费", "cpi": "CPI", "ctr": "CTR", "cvr": "CVR",
+        "installs": "安装", "impressions": "展示", "clicks": "点击",
+    }
+
+    db = _yt_db()
+    where = ["user_id=?"]; params = [user_id]
+    if product_name:
+        where.append("product_name=?"); params.append(product_name)
+    if campaign:
+        where.append("campaign=?"); params.append(campaign)
+    if account:
+        where.append("account=?"); params.append(account)
+    if region:
+        where.append("region=?"); params.append(region)
+    if from_date:
+        where.append("report_date >= ?"); params.append(from_date)
+    if to_date:
+        where.append("report_date <= ?"); params.append(to_date)
+    where_clause = " AND ".join(where)
+
+    if split_by_date:
+        sql = (
+            f"SELECT {group_col} AS name, report_date, "
+            f"SUM(cost) AS total_cost, SUM(impressions) AS total_impressions, "
+            f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, "
+            f"SUM(in_app_actions) AS total_in_app "
+            f"FROM ad_reports WHERE {where_clause} "
+            f"GROUP BY {group_col}, report_date ORDER BY report_date"
+        )
+    else:
+        sql = (
+            f"SELECT {group_col} AS name, "
+            f"SUM(cost) AS total_cost, SUM(impressions) AS total_impressions, "
+            f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, "
+            f"SUM(in_app_actions) AS total_in_app "
+            f"FROM ad_reports WHERE {where_clause} "
+            f"GROUP BY {group_col} ORDER BY total_cost DESC"
+        )
+    rows = db.execute(sql, params).fetchall()
+    db.close()
+
+    # 计算派生指标
+    def _calc_cpi(cost, in_app):
+        return round(cost / max(in_app, 1), 4)
+    def _calc_ctr(clicks, impr):
+        return round(clicks / max(impr, 1), 4)
+    def _calc_cvr(installs, clicks):
+        return round(installs / max(clicks, 1), 4)
+
+    def _get_metric_val(d, m):
+        m = m.lower()
+        if m == "cost": return d["total_cost"] or 0
+        if m == "installs": return d["total_installs"] or 0
+        if m == "impressions": return d["total_impressions"] or 0
+        if m == "clicks": return d["total_clicks"] or 0
+        if m == "cpi": return _calc_cpi(d["total_cost"] or 0, d["total_in_app"] or 0)
+        if m == "ctr": return _calc_ctr(d["total_clicks"] or 0, d["total_impressions"] or 0)
+        if m == "cvr": return _calc_cvr(d["total_installs"] or 0, d["total_clicks"] or 0)
+        return d["total_cost"] or 0
+
+    # 构建点数据
+    points = []
+    for r in rows:
+        cost = r["total_cost"] or 0
+        impr = r["total_impressions"] or 0
+        clicks = r["total_clicks"] or 0
+        installs = r["total_installs"] or 0
+        in_app = r["total_in_app"] or 0
+        cpi = _calc_cpi(cost, in_app)
+        ctr = _calc_ctr(clicks, impr)
+        cvr = _calc_cvr(installs, clicks)
+        detail = {
+            "total_cost": round(cost, 2),
+            "total_installs": installs,
+            "total_in_app": in_app,
+            "avg_cpi": cpi,
+            "ctr": ctr,
+            "cvr": cvr,
+            "total_impressions": impr,
+            "total_clicks": clicks,
+        }
+        sz = _get_metric_val({
+            "total_cost": cost, "total_installs": installs,
+            "total_impressions": impr, "total_clicks": clicks,
+            "total_in_app": in_app,
+        }, size_by) if size_by else 1.0
+        rd = r["report_date"] if split_by_date else ""
+        pt_name = r["name"] if not split_by_date else f"{r['name']} ({rd})"
+        points.append({
+            "name": pt_name,
+            "group": group_by,
+            "x": _get_metric_val({
+                "total_cost": cost, "total_installs": installs,
+                "total_impressions": impr, "total_clicks": clicks,
+                "total_in_app": in_app,
+            }, x_axis),
+            "y": _get_metric_val({
+                "total_cost": cost, "total_installs": installs,
+                "total_impressions": impr, "total_clicks": clicks,
+                "total_in_app": in_app,
+            }, y_axis),
+            "size": round(sz, 6) if sz else 1.0,
+            "x_label": metric_labels.get(x_axis, x_axis),
+            "y_label": metric_labels.get(y_axis, y_axis),
+            "detail": detail,
+        })
+
+    # 统计计算
+    n = len(points)
+    stats = {"sample_count": n, "x_label": metric_labels.get(x_axis, x_axis),
+             "y_label": metric_labels.get(y_axis, y_axis)}
+    if n > 0:
+        xs = [p["x"] for p in points]
+        ys = [p["y"] for p in points]
+        x_avg = round(sum(xs) / n, 4)
+        y_avg = round(sum(ys) / n, 4)
+        xs_sorted = sorted(xs)
+        ys_sorted = sorted(ys)
+        x_median = round(xs_sorted[n // 2], 4) if n % 2 else round((xs_sorted[n // 2 - 1] + xs_sorted[n // 2]) / 2, 4)
+        y_median = round(ys_sorted[n // 2], 4) if n % 2 else round((ys_sorted[n // 2 - 1] + ys_sorted[n // 2]) / 2, 4)
+        stats["x_avg"] = x_avg
+        stats["x_median"] = x_median
+        stats["y_avg"] = y_avg
+        stats["y_median"] = y_median
+        # Pearson 相关系数
+        if n >= 2:
+            mean_x = sum(xs) / n
+            mean_y = sum(ys) / n
+            cov = sum((xs[i] - mean_x) * (ys[i] - mean_y) for i in range(n))
+            std_x = (sum((x - mean_x) ** 2 for x in xs) ** 0.5)
+            std_y = (sum((y - mean_y) ** 2 for y in ys) ** 0.5)
+            if std_x > 0 and std_y > 0:
+                stats["correlation"] = round(cov / (std_x * std_y), 4)
+            else:
+                stats["correlation"] = 0
+        else:
+            stats["correlation"] = 0
+    else:
+        stats.update({"x_avg": 0, "x_median": 0, "y_avg": 0, "y_median": 0, "correlation": 0})
+
+    # 规则引擎 insight
+    insights = []
+    if n > 0:
+        x_label = metric_labels.get(x_axis, x_axis)
+        y_label = metric_labels.get(y_axis, y_axis)
+        total_cost = sum(p["detail"]["total_cost"] for p in points)
+        avg_y = stats.get("y_avg", 0)
+        r_val = stats.get("correlation", 0)
+
+        for p in points:
+            # CPI 异常高：CPI > 均值 * 1.5 且 y_axis 是 cpi
+            if y_axis == "cpi" and avg_y > 0 and p["y"] > avg_y * 1.5:
+                pct = round((p["y"] - avg_y) / avg_y * 100)
+                insights.append(f"{p['name']} 的 CPI(${p['y']}) 高于均值(${avg_y}) {pct}%，位于异常区，建议排查投放策略")
+            # 花费集中
+            if total_cost > 0 and p["detail"]["total_cost"] > total_cost * 0.6:
+                insights.append(f"{p['name']} 消耗了 {round(p['detail']['total_cost']/total_cost*100)}% 的预算，需关注投入产出比")
+            # 高花费低 CTR
+            if x_axis == "cost" and n > 1:
+                avg_cost = stats.get("x_avg", 0)
+                avg_ctr_val = sum(pt["detail"]["ctr"] for pt in points) / n
+                if p["x"] > avg_cost * 1.5 and p["detail"]["ctr"] < avg_ctr_val:
+                    insights.append(f"{p['name']} 花费高(${p['detail']['total_cost']})但 CTR({round(p['detail']['ctr']*100,2)}%)低于均值，可能存在投放效率问题")
+
+        # 相关性结论
+        if abs(r_val) > 0.1:
+            r_desc = "强" if abs(r_val) > 0.6 else ("中等" if abs(r_val) > 0.3 else "弱")
+            direction = "正相关" if r_val > 0 else "负相关"
+            insights.append(f"{x_label}与{y_label}呈{r_desc}{direction}(r={r_val})")
+
+    return jsonify({
+        "success": True,
+        "points": points,
+        "stats": stats,
+        "insights": insights,
+    })
+
+
+@app.route("/api/ad-reports/multi-analysis", methods=["POST"])
+@jwt_required()
+def ad_reports_multi_analysis_post():
+    """多维分析 POST：支持 extra_rows 临时数据对比。"""
+    user_id = int(get_jwt_identity())
+    body = request.get_json(silent=True) or {}
+    params = body.get("params", {})
+    extra_rows = body.get("extra_rows", [])
+
+    x_axis = params.get("x_axis", "cost").strip()
+    y_axis = params.get("y_axis", "cpi").strip()
+    size_by = params.get("size_by", "").strip()
+    group_by = params.get("group_by", "account").strip()
+    product_name = params.get("product_name", "").strip()
+    campaign = params.get("campaign", "").strip()
+    account = params.get("account", "").strip()
+    region = params.get("region", "").strip()
+    from_date = params.get("from_date", "").strip()
+    to_date = params.get("to_date", "").strip()
+    split_by_date = params.get("split_by_date", "0") == "1"
+
+    group_col_map = {
+        "product_name": "product_name", "campaign": "campaign",
+        "account": "account", "customer_id": "customer_id",
+    }
+    group_col = group_col_map.get(group_by, "account")
+
+    metric_labels = {
+        "cost": "花费", "cpi": "CPI", "ctr": "CTR", "cvr": "CVR",
+        "installs": "安装", "impressions": "展示", "clicks": "点击",
+    }
+
+    def _agg_rows(rows, grp_col, split_date):
+        """将行列表按 grp_col 聚合（纯 Python），返回聚合计列表。"""
+        from collections import defaultdict
+        groups = defaultdict(lambda: {"total_cost": 0, "total_impressions": 0, "total_clicks": 0,
+                                       "total_installs": 0, "total_in_app": 0})
+        for r in rows:
+            if isinstance(r, dict):
+                name = r.get(grp_col, "")
+                rd = r.get("report_date", "")
+            else:
+                name = r[grp_col] if grp_col in r.keys() else ""
+                rd = r["report_date"] if "report_date" in r.keys() else ""
+            key = (name, rd) if split_date else name
+            groups[key]["name"] = name
+            groups[key]["total_cost"] += float(r.get("cost", 0)) if isinstance(r, dict) else (r["cost"] or 0)
+            groups[key]["total_impressions"] += int(r.get("impressions", 0)) if isinstance(r, dict) else (r["impressions"] or 0)
+            groups[key]["total_clicks"] += int(r.get("clicks", 0)) if isinstance(r, dict) else (r["clicks"] or 0)
+            groups[key]["total_installs"] += float(r.get("installs", 0)) if isinstance(r, dict) else (r["installs"] or 0)
+            groups[key]["total_in_app"] += float(r.get("inAppActions", 0)) if isinstance(r, dict) else (r["in_app_actions"] or 0)
+        result = []
+        for k, v in groups.items():
+            entry = dict(v)
+            if split_date:
+                entry["report_date"] = k[1]
+            result.append(entry)
+        return result
+
+    def _build_points(agg_rows, src_label):
+        pts = []
+        for r in agg_rows:
+            cost = r.get("total_cost", 0) or 0
+            impr = r.get("total_impressions", 0) or 0
+            clicks = r.get("total_clicks", 0) or 0
+            installs = r.get("total_installs", 0) or 0
+            in_app = r.get("total_in_app", 0) or 0
+            cpi = round(cost / max(in_app, 1), 4)
+            ctr = round(clicks / max(impr, 1), 4)
+            cvr = round(installs / max(clicks, 1), 4)
+            detail = {"total_cost": round(cost, 2), "total_installs": installs, "total_in_app": in_app,
+                      "avg_cpi": cpi, "ctr": ctr, "cvr": cvr, "total_impressions": impr, "total_clicks": clicks}
+            def _mv(d, m):
+                m = m.lower()
+                if m == "cost": return d["total_cost"] or 0
+                if m == "installs": return d["total_installs"] or 0
+                if m == "impressions": return d["total_impressions"] or 0
+                if m == "clicks": return d["total_clicks"] or 0
+                if m == "cpi": return round(d["total_cost"] / max(d["total_in_app"], 1), 4)
+                if m == "ctr": return round(d["total_clicks"] / max(d["total_impressions"], 1), 4)
+                if m == "cvr": return round(d["total_installs"] / max(d["total_clicks"], 1), 4)
+                return d["total_cost"] or 0
+            sz = _mv({"total_cost": cost, "total_installs": installs, "total_impressions": impr,
+                       "total_clicks": clicks, "total_in_app": in_app}, size_by) if size_by else 1.0
+            rd = r.get("report_date", "")
+            pt_name = r.get("name", "") if not split_by_date else f"{r.get('name','')} ({rd})"
+            pts.append({"name": pt_name, "group": group_by, "source": src_label,
+                        "x": _mv({"total_cost": cost, "total_installs": installs, "total_impressions": impr,
+                                   "total_clicks": clicks, "total_in_app": in_app}, x_axis),
+                        "y": _mv({"total_cost": cost, "total_installs": installs, "total_impressions": impr,
+                                   "total_clicks": clicks, "total_in_app": in_app}, y_axis),
+                        "size": round(sz, 6) if sz else 1.0,
+                        "x_label": metric_labels.get(x_axis, x_axis),
+                        "y_label": metric_labels.get(y_axis, y_axis),
+                        "detail": detail})
+        return pts
+
+    def _compute_stats(all_pts):
+        n = len(all_pts)
+        s = {"sample_count": n, "x_label": metric_labels.get(x_axis, x_axis),
+             "y_label": metric_labels.get(y_axis, y_axis)}
+        if n > 0:
+            xs = [p["x"] for p in all_pts]; ys = [p["y"] for p in all_pts]
+            s["x_avg"] = round(sum(xs) / n, 4); s["y_avg"] = round(sum(ys) / n, 4)
+            sxs = sorted(xs); sys = sorted(ys)
+            s["x_median"] = round(sxs[n // 2], 4) if n % 2 else round((sxs[n // 2 - 1] + sxs[n // 2]) / 2, 4)
+            s["y_median"] = round(sys[n // 2], 4) if n % 2 else round((sys[n // 2 - 1] + sys[n // 2]) / 2, 4)
+            if n >= 2:
+                mx = sum(xs) / n; my = sum(ys) / n
+                cov = sum((xs[i] - mx) * (ys[i] - my) for i in range(n))
+                sx = (sum((x - mx) ** 2 for x in xs) ** 0.5)
+                sy = (sum((y - my) ** 2 for y in ys) ** 0.5)
+                s["correlation"] = round(cov / (sx * sy), 4) if sx > 0 and sy > 0 else 0
+            else:
+                s["correlation"] = 0
+        else:
+            s.update({"x_avg": 0, "x_median": 0, "y_avg": 0, "y_median": 0, "correlation": 0})
+        return s
+
+    def _gen_insights(all_pts, stats):
+        ins = []
+        n = len(all_pts)
+        if n > 0:
+            x_label = metric_labels.get(x_axis, x_axis)
+            y_label = metric_labels.get(y_axis, y_axis)
+            total_cost = sum(p["detail"]["total_cost"] for p in all_pts)
+            avg_y = stats.get("y_avg", 0)
+            r_val = stats.get("correlation", 0)
+            for p in all_pts:
+                if y_axis == "cpi" and avg_y > 0 and p["y"] > avg_y * 1.5:
+                    pct = round((p["y"] - avg_y) / avg_y * 100)
+                    ins.append(f"{p['name']} 的 CPI(${p['y']}) 高于均值(${avg_y}) {pct}%，位于异常区")
+                if total_cost > 0 and p["detail"]["total_cost"] > total_cost * 0.6:
+                    ins.append(f"{p['name']} 消耗了 {round(p['detail']['total_cost']/total_cost*100)}% 的预算")
+                if x_axis == "cost" and n > 1:
+                    avg_cost = stats.get("x_avg", 0)
+                    avg_ctr_v = sum(pt["detail"]["ctr"] for pt in all_pts) / n
+                    if p["x"] > avg_cost * 1.5 and p["detail"]["ctr"] < avg_ctr_v:
+                        ins.append(f"{p['name']} 花费高但 CTR 低于均值")
+            if abs(r_val) > 0.1:
+                r_desc = "强" if abs(r_val) > 0.6 else ("中等" if abs(r_val) > 0.3 else "弱")
+                direction = "正相关" if r_val > 0 else "负相关"
+                ins.append(f"{x_label}与{y_label}呈{r_desc}{direction}(r={r_val})")
+        return ins
+
+    # 查询历史数据
+    db = _yt_db()
+    where = ["user_id=?"]; wparams = [user_id]
+    if product_name: where.append("product_name=?"); wparams.append(product_name)
+    if campaign: where.append("campaign=?"); wparams.append(campaign)
+    if account: where.append("account=?"); wparams.append(account)
+    if region: where.append("region=?"); wparams.append(region)
+    if from_date: where.append("report_date >= ?"); wparams.append(from_date)
+    if to_date: where.append("report_date <= ?"); wparams.append(to_date)
+    wc = " AND ".join(where)
+
+    if split_by_date:
+        sql = (f"SELECT {group_col} AS name, report_date, SUM(cost) AS total_cost, SUM(impressions) AS total_impressions, "
+               f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, SUM(in_app_actions) AS total_in_app "
+               f"FROM ad_reports WHERE {wc} GROUP BY {group_col}, report_date ORDER BY report_date")
+    else:
+        sql = (f"SELECT {group_col} AS name, SUM(cost) AS total_cost, SUM(impressions) AS total_impressions, "
+               f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, SUM(in_app_actions) AS total_in_app "
+               f"FROM ad_reports WHERE {wc} GROUP BY {group_col} ORDER BY total_cost DESC")
+    hist_rows = db.execute(sql, wparams).fetchall()
+    db.close()
+
+    hist_agg = [dict(r) for r in hist_rows]
+    hist_points = _build_points(hist_agg, "历史")
+
+    # 聚合 extra_rows
+    new_points = []
+    if extra_rows:
+        new_agg = _agg_rows(extra_rows, group_col, split_by_date)
+        new_points = _build_points(new_agg, "新增")
+
+    all_pts = hist_points + new_points
+    stats = _compute_stats(all_pts)
+    insights = _gen_insights(all_pts, stats)
+
+    return jsonify({
+        "success": True,
+        "historical": hist_points,
+        "new": new_points,
+        "points": all_pts,
+        "stats": stats,
+        "insights": insights,
+    })
+
+
+@app.route("/api/ad-reports/multi-ai-chat", methods=["POST"])
+@jwt_required()
+def ad_reports_multi_ai_chat():
+    """多维分析 AI 对话：带数据上下文的智能问答。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    ai_config_row = db.execute(
+        f"SELECT value FROM config WHERE key='ai_analysis_{user_id}'"
+    ).fetchone()
+    db.close()
+
+    ai_enabled = False
+    if ai_config_row:
+        try:
+            ai_config = json.loads(ai_config_row["value"])
+            ai_enabled = ai_config.get("enabled", False)
+        except Exception:
+            pass
+
+    if not ai_enabled:
+        return jsonify({"success": True, "enabled": False, "answer": "AI 分析未启用，请联系管理员在系统配置中开启。"})
+
+    question = (request.get_json(silent=True) or {}).get("question", "").strip()
+    context = (request.get_json(silent=True) or {}).get("context", {})
+    history = (request.get_json(silent=True) or {}).get("history", [])
+
+    if not question:
+        return jsonify({"success": True, "enabled": True, "answer": "请输入问题。"})
+
+    # 构建 prompt
+    context_summary = ""
+    if context:
+        pts = context.get("points", [])
+        stats = context.get("stats", {})
+        if pts:
+            context_summary = f"\n当前分析数据（共{len(pts)}个分组）：\n"
+            for p in pts:
+                d = p.get("detail", {})
+                context_summary += f"- {p.get('name','?')}: 花费${d.get('total_cost',0)}, CPI${d.get('avg_cpi',0)}, CTR{round(d.get('ctr',0)*100,2)}%, CVR{round(d.get('cvr',0)*100,2)}%, 安装{d.get('total_installs',0)}\n"
+            if stats:
+                context_summary += f"\n统计：{stats.get('x_label','X')}均值={stats.get('x_avg','?')}, {stats.get('y_label','Y')}均值={stats.get('y_avg','?')}, 相关系数r={stats.get('correlation','?')}\n"
+
+    try:
+        ai_config = json.loads(ai_config_row["value"])
+        provider = ai_config.get("provider", "volcano")
+        model = ai_config.get("model", "deepseek-v4-flash")
+        api_key = ai_config.get("api_key", "")
+        endpoint = ai_config.get("endpoint", "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions")
+
+        # 拼完整 endpoint URL
+        chat_url = endpoint
+        messages = [
+            {"role": "system", "content": "你是一个广告投放数据分析师，帮助用户分析广告投放数据，找出优化机会。请用中文回答，简洁明确，给出可执行的建议。"},
+        ]
+        for h in history[-10:]:  # 最近10轮对话
+            messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+        messages.append({"role": "user", "content": f"以下是我的广告数据：{context_summary}\n问题：{question}"})
+
+        resp = requests.post(
+            chat_url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "max_tokens": 1024},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            body = resp.json()
+            answer = body.get("choices", [{}])[0].get("message", {}).get("content", "AI 未返回有效回复")
+        else:
+            answer = f"AI 服务返回错误({resp.status_code}): {resp.text[:300]}"
+    except Exception as e:
+        answer = f"AI 服务调用失败: {str(e)[:200]}"
+
+    return jsonify({"success": True, "enabled": True, "answer": answer})
 
 
 @app.route("/api/ad-reports/dates", methods=["GET"])
@@ -4383,11 +4974,12 @@ def ad_reports_dates():
 @app.route("/api/ad-reports/analyze", methods=["POST"])
 @jwt_required()
 def ad_reports_analyze():
-    """AI 分析（可配置开关）。"""
+    """AI 分析（可配置开关，按用户隔离）。"""
+    user_id = int(get_jwt_identity())
     # 检查配置
     db = _yt_db()
     ai_config_row = db.execute(
-        "SELECT value FROM config WHERE key='ai_analysis'"
+        f"SELECT value FROM config WHERE key='ai_analysis_{user_id}'"
     ).fetchone()
     db.close()
 
@@ -4404,11 +4996,75 @@ def ad_reports_analyze():
     if not ai_enabled:
         return jsonify({"success": True, "enabled": False, "answer": "AI 分析未启用，请联系管理员在系统配置中开启。"})
 
-    # TODO: 接入现有 AI 服务（atlas/doubao 等）
+    body = request.get_json(silent=True) or {}
+    question = body.get("question", "").strip()
+    filters = body.get("filters", {})
+
+    if not question:
+        return jsonify({"success": True, "enabled": True, "answer": "请输入问题。"})
+
+    # 收集当前筛选条件下的数据摘要
+    db2 = _yt_db()
+    where = ["user_id=?"]; params = [user_id]
+    if filters.get("product_name"):
+        where.append("product_name=?"); params.append(filters["product_name"])
+    if filters.get("region"):
+        where.append("region=?"); params.append(filters["region"])
+    if filters.get("from_date"):
+        where.append("report_date >= ?"); params.append(filters["from_date"])
+    if filters.get("to_date"):
+        where.append("report_date <= ?"); params.append(filters["to_date"])
+    where_clause = " AND ".join(where)
+
+    summary_row = db2.execute(
+        f"SELECT SUM(cost) AS tc, SUM(impressions) AS ti, SUM(clicks) AS tcl, "
+        f"SUM(installs) AS tins, SUM(in_app_actions) AS tia, COUNT(*) AS cnt "
+        f"FROM ad_reports WHERE {where_clause}", params
+    ).fetchone()
+    db2.close()
+
+    context_summary = ""
+    if summary_row and summary_row["cnt"]:
+        tc = summary_row["tc"] or 0
+        tcl = summary_row["tcl"] or 0
+        tins = summary_row["tins"] or 0
+        tia = summary_row["tia"] or 0
+        ti = summary_row["ti"] or 0
+        avg_cpi = round(tc / max(tia, 1), 2)
+        avg_ctr = round(tcl / max(ti, 1) * 100, 2)
+        context_summary = (
+            f"数据摘要：总花费${tc}，总展示{ti}，总点击{tcl}，"
+            f"总安装{tins}，总应用内操作{tia}，"
+            f"平均CPI${avg_cpi}，平均CTR{avg_ctr}%。"
+        )
+
+    try:
+        model = ai_config.get("model", "deepseek-v4-flash")
+        api_key = ai_config.get("api_key", "")
+        endpoint = ai_config.get("endpoint", "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions")
+        chat_url = endpoint
+        messages = [
+            {"role": "system", "content": "你是一个广告投放数据分析师，帮助用户分析广告投放数据，找出优化机会。请用中文回答，简洁明确，给出可执行的建议。"},
+            {"role": "user", "content": f"{context_summary}\n问题：{question}"},
+        ]
+        resp = requests.post(
+            chat_url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "max_tokens": 1024},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            body_resp = resp.json()
+            answer = body_resp.get("choices", [{}])[0].get("message", {}).get("content", "AI 未返回有效回复")
+        else:
+            answer = f"AI 服务返回错误({resp.status_code}): {resp.text[:300]}"
+    except Exception as e:
+        answer = f"AI 服务调用失败: {str(e)[:200]}"
+
     return jsonify({
         "success": True,
         "enabled": True,
-        "answer": "AI 分析功能已启用，正在接入 AI 服务中...",
+        "answer": answer,
         "provider": ai_provider
     })
 
@@ -4460,6 +5116,14 @@ if __name__ == "__main__":
     host = "0.0.0.0"
     port = 5001
     _start_weekly_cleanup()
+    # 全局 500 处理器，开发时返回详细错误
+    @app.errorhandler(500)
+    def _internal_error(e):
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[500 ERROR] {tb}", file=sys.stderr)
+        return jsonify({"success": False, "error": str(e), "trace": tb[-2000:]}), 500
+
     print(f"服务已启动: http://{host}:{port}")
     print("在浏览器中打开上方地址即可使用。")
     # 自动打开浏览器

@@ -243,6 +243,7 @@ import { browseApi } from '@/api/browse'
 import { isLocalhost } from '@/utils/env'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
+import { parseAdsData } from '@/utils/adsParser'
 import { translateApi } from '@/api/youtube'
 import api from '@/api/client'
 
@@ -375,85 +376,14 @@ async function zbConfirmSave() {
 function zbProcess() {
   zbError.value = ''
   zbRaw.value = []; zbZuobiao.value = []; zbKehu.value = []
-  const input = zbInput.value.trim()
-  if (!input) { zbError.value = '请输入数据'; return }
   try {
-    const lines = input.split(/\r?\n/).map(l => l.trim()).filter(l => l)
-    const starts = []; lines.forEach((l, i) => { if (l === '添加过滤条件') starts.push(i) })
-    if (!starts.length) throw new Error('未找到"添加过滤条件"')
-    const startIdx = starts[starts.length - 1]
-    const endIdx = lines.indexOf('Total')
-    if (endIdx < 0) throw new Error('未找到"Total"')
-    if (startIdx >= endIdx) throw new Error('数据顺序异常')
-
-    const isYanghu = zbYanghu.value
-    let step, costIdx, imprIdx, clickIdx
-    if (isYanghu) {
-      // 养户模式：7 列 — 账号/客户ID/广告系列/广告系列状态/费用/展示次数/点击次数
-      step = 7; costIdx = 4; imprIdx = 5; clickIdx = 6
-    } else {
-      const includeCampaignId = zbIncludeCampaignId.value
-      step = includeCampaignId ? 11 : 10
-      costIdx = includeCampaignId ? 5 : 4
-      imprIdx = includeCampaignId ? 6 : 5
-      clickIdx = includeCampaignId ? 7 : 6
-    }
-
-    const validLines = lines.slice(startIdx + 1, endIdx)
-    const rows = []
-    for (let i = 0; i < validLines.length; i += step) {
-      const row = validLines.slice(i, i + step)
-      if (row.length === step && /^\d{3}-\d{3}-\d{4}$/.test(row[1]) && row[costIdx].includes('US$')) {
-        rows.push(row)
-      }
-    }
-    if (!rows.length) throw new Error('未找到有效数据（请确认费用列是否包含 "US$"）')
-
-    if (isYanghu) {
-      // 养户：7 列提取
-      zbRaw.value = rows.map(r => ({
-        account: r[0], customerId: r[1],
-        campaign: r[2].replace(/-[^-]*$/, '').trim(),
-        campaignStatus: r[3] || '',
-        cost: parseFloat(r[costIdx].replace(/[^0-9.-]+/g, '')) || 0,
-        impressions: parseInt(r[imprIdx].replace(/[^0-9]/g, '')) || 0,
-        clicks: parseInt(r[clickIdx].replace(/[^0-9]/g, '')) || 0,
-      })).filter(d => d.cost > 0)
-    } else {
-      // 普通模式：完整提取（含安装次数/应用内操作等）
-      const installIdx = zbIncludeCampaignId.value ? 8 : 7
-      const inAppIdx = zbIncludeCampaignId.value ? 9 : 8
-      const cpiIdx = zbIncludeCampaignId.value ? 10 : 9
-      zbRaw.value = rows.map(r => ({
-        account: r[0], customerId: r[1],
-        campaign: r[2].replace(/-[^-]*$/, '').trim(),
-        campaignStatus: r[3] || '',
-        cost: parseFloat(r[costIdx].replace(/[^0-9.-]+/g, '')) || 0,
-        impressions: parseInt(r[imprIdx].replace(/[^0-9]/g, '')) || 0,
-        clicks: parseInt(r[clickIdx].replace(/[^0-9]/g, '')) || 0,
-        installs: parseInt((r[installIdx] || '').replace(/[^0-9]/g, '')) || 0,
-        inAppActions: parseFloat((r[inAppIdx] || '').replace(/[^0-9.]/g, '')) || 0,
-        costPerInApp: parseFloat((r[cpiIdx] || '').replace(/[^0-9.]/g, '')) || 0,
-      })).filter(d => d.cost > 0)
-    }
-
-    // 做表数据：按客户ID+广告系列聚合费用
-    const zbMap = new Map()
-    zbRaw.value.forEach(d => {
-      const key = d.customerId + '|||' + d.campaign
-      if (!zbMap.has(key)) zbMap.set(key, { account: d.account, customerId: d.customerId, cost: d.cost, campaign: d.campaign })
-      else zbMap.get(key).cost += d.cost
+    const { raw, zuobiao, kehu } = parseAdsData(zbInput.value, {
+      isYanghu: zbYanghu.value,
+      includeCampaignId: zbIncludeCampaignId.value,
     })
-    zbZuobiao.value = Array.from(zbMap.values()).filter(d => d.cost > 0)
-
-    // 客户表：按广告系列聚合
-    const khMap = new Map()
-    zbRaw.value.forEach(d => {
-      if (!khMap.has(d.campaign)) khMap.set(d.campaign, { campaign: d.campaign, cost: 0, impressions: 0, clicks: 0 })
-      const item = khMap.get(d.campaign)
-      item.cost += d.cost; item.impressions += d.impressions; item.clicks += d.clicks
-    })
-    zbKehu.value = Array.from(khMap.values()).filter(d => d.cost > 0)
+    zbRaw.value = raw
+    zbZuobiao.value = zuobiao
+    zbKehu.value = kehu
   } catch(e) { zbError.value = e.message }
 }
 
