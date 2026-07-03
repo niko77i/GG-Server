@@ -8,7 +8,7 @@ _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
     sys.path.insert(0, _current_dir)
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 
 from scraper import scrape_images, scrape_logo, ScrapeError
@@ -47,11 +47,15 @@ else:
         _FRONTEND_DIR = os.path.dirname(_current_dir)  # 回退到旧前端文件
     _DATA_ROOT = os.path.dirname(_current_dir)
 
+_SCRAPE_DEFAULT_DIR = os.path.join(_DATA_ROOT, "temp", "scraped_images")
+_MUSIC_DIR = os.path.join(_DATA_ROOT, "temp", "music")
+
 app = Flask(__name__, static_folder=_FRONTEND_DIR, static_url_path="")
 CORS(app)
 
 # --- 请求日志 ---
 import time as _time
+import threading
 
 @app.before_request
 def _log_request():
@@ -144,20 +148,24 @@ def health():
 
 
 @app.route("/api/scrape", methods=["POST"])
+@jwt_required()
 def scrape():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"success": False, "error": "请求体不能为空"}), 400
 
     url = data.get("url", "").strip()
     save_dir = data.get("save_dir", "").strip()
+    if not save_dir:
+        user = auth.get_user_by_id(user_id)
+        dn = (user.get("display_name") or user.get("username") or f"user_{user_id}").strip()
+        save_dir = os.path.join(_SCRAPE_DEFAULT_DIR, dn)
     # 新增参数：是否按 Google Ads 规格放大图片（默认 true，向后兼容）
     include_ads_images = data.get("include_ads_images", True)
 
     if not url:
         return jsonify({"success": False, "error": "URL 不能为空"}), 400
-    if not save_dir:
-        return jsonify({"success": False, "error": "保存路径不能为空"}), 400
 
     # 1. 提取包名
     try:
@@ -266,6 +274,106 @@ def scrape():
     return jsonify(response)
 
 
+@app.route("/api/scrape/download", methods=["GET"])
+def scrape_download():
+    """将爬取的图片目录打包为 zip 下载。"""
+    path = request.args.get("path", "").strip()
+    if not path or not os.path.isdir(path):
+        return jsonify({"success": False, "error": "目录不存在"}), 404
+    pkg_name = os.path.basename(path)
+
+    import zipfile
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(path):
+            for fn in files:
+                fp = os.path.join(root, fn)
+                arcname = os.path.relpath(fp, path)
+                zf.write(fp, arcname)
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip", as_attachment=True,
+                     download_name=f"{pkg_name}.zip")
+
+
+@app.route("/api/scrape/packages", methods=["GET"])
+@jwt_required()
+def scrape_packages():
+    """列出已爬取包。管理员可传 user_dn 查看其他用户的包。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    is_admin = user and user["role"] in ("developer", "admin")
+    user_dn = request.args.get("user_dn", "").strip()
+    if user_dn and is_admin:
+        dn = user_dn
+    else:
+        dn = (user.get("display_name") or user.get("username") or f"user_{user_id}").strip()
+    user_dir = os.path.join(_SCRAPE_DEFAULT_DIR, dn)
+    packages = []
+    if os.path.isdir(user_dir):
+        for name in sorted(os.listdir(user_dir)):
+            p = os.path.join(user_dir, name)
+            if os.path.isdir(p) and name != "ai":
+                pngs = [f for f in os.listdir(p) if f.lower().endswith('.png') and os.path.isfile(os.path.join(p, f))]
+                if pngs:
+                    packages.append({"name": name, "path": p, "image_count": len(pngs)})
+    return jsonify({"success": True, "packages": packages})
+
+
+@app.route("/api/scrape/users", methods=["GET"])
+@jwt_required()
+def scrape_users():
+    """列出所有有爬取数据的用户（管理员用）。"""
+    users = []
+    if os.path.isdir(_SCRAPE_DEFAULT_DIR):
+        for dn in sorted(os.listdir(_SCRAPE_DEFAULT_DIR)):
+            p = os.path.join(_SCRAPE_DEFAULT_DIR, dn)
+            if os.path.isdir(p) and dn != "ai":
+                pkg_count = sum(1 for n in os.listdir(p) if os.path.isdir(os.path.join(p, n)) and n != "ai")
+                users.append({"display_name": dn, "package_count": pkg_count})
+    return jsonify({"success": True, "users": users})
+
+
+@app.route("/api/scrape/upload-images", methods=["POST"])
+@jwt_required()
+def scrape_upload_images():
+    """上传图片到用户专属目录，用于视频生成。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    dn = (user.get("display_name") or user.get("username") or f"user_{user_id}").strip()
+    files = request.files.getlist("files")
+    if not files or all(not f.filename for f in files):
+        return jsonify({"success": False, "error": "未选择文件"}), 400
+
+    import datetime as _dt
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    upload_dir = os.path.join(_SCRAPE_DEFAULT_DIR, dn, f"_upload_{ts}")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    images = []
+    from PIL import Image as _PILImage
+    for f in files:
+        if not f.filename:
+            continue
+        ext = os.path.splitext(f.filename)[1].lower()
+        if ext not in ('.png', '.jpg', '.jpeg', '.webp', '.bmp'):
+            continue
+        # 统一保存为 PNG
+        safe_name = f.filename.rsplit('.', 1)[0].replace(' ', '_').replace('\\', '_').replace('/', '_')
+        fp = os.path.join(upload_dir, f"{safe_name}.png")
+        try:
+            img = _PILImage.open(f.stream)
+            img = img.convert("RGBA")
+            img.save(fp, "PNG")
+            images.append({"filename": f"{safe_name}.png", "path": fp.replace("\\", "/"),
+                           "width": img.width, "height": img.height})
+        except Exception as e:
+            print(f"[Upload] 跳过 {f.filename}: {e}")
+
+    return jsonify({"success": True, "saved_path": upload_dir.replace("\\", "/"),
+                    "image_count": len(images), "images": images})
+
+
 # ---------- 视频 API ----------
 
 
@@ -350,6 +458,7 @@ def serve_image():
 
 
 @app.route("/api/video/generate", methods=["POST"])
+@jwt_required()
 def video_generate():
     """提交视频生成任务（后台线程执行）。"""
     data = request.get_json(silent=True)
@@ -477,6 +586,53 @@ def video_progress():
     elif task.status == "error":
         resp["error"] = task.message
     return jsonify(resp)
+
+
+@app.route("/api/video/download", methods=["GET"])
+def video_download():
+    """下载已生成的视频文件。"""
+    path = request.args.get("path", "").strip()
+    if not path or not os.path.isfile(path):
+        return jsonify({"success": False, "error": "文件不存在"}), 404
+    return send_file(path, as_attachment=True)
+
+
+@app.route("/api/video/music-list", methods=["GET"])
+def video_music_list():
+    """列出服务器上可用的背景音乐。"""
+    os.makedirs(_MUSIC_DIR, exist_ok=True)
+    files = []
+    for fn in sorted(os.listdir(_MUSIC_DIR)):
+        if fn.lower().endswith(('.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac')):
+            fp = os.path.join(_MUSIC_DIR, fn)
+            files.append({"name": fn, "path": fp})
+    return jsonify({"success": True, "files": files})
+
+
+@app.route("/api/video/upload-music", methods=["POST"])
+def video_upload_music():
+    """上传背景音乐到服务器。"""
+    os.makedirs(_MUSIC_DIR, exist_ok=True)
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"success": False, "error": "未选择文件"}), 400
+    filename = f.filename
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ('.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac'):
+        return jsonify({"success": False, "error": "不支持的音频格式"}), 400
+    fp = os.path.join(_MUSIC_DIR, filename)
+    f.save(fp)
+    return jsonify({"success": True, "name": filename, "path": fp})
+
+
+@app.route("/api/audio", methods=["GET"])
+def serve_audio():
+    """音频流服务，供前端预览播放。"""
+    path = request.args.get("path", "").strip()
+    if not path or not os.path.isfile(path):
+        return "", 404
+    mt = "audio/mpeg" if path.lower().endswith('.mp3') else "audio/wav"
+    return send_file(path, mimetype=mt)
 
 
 # ---------- 音频替换 API ----------
@@ -682,16 +838,18 @@ def _scan_fonts_dir() -> list[dict]:
     ]
     for fid, name, path in sys_fonts:
         if os.path.isfile(path):
-            fonts.append({"id": fid, "name": name, "source": "system"})
+            fonts.append({"id": fid, "name": name, "path": path, "source": "system"})
 
     # 用户导入的字体
     if os.path.isdir(_FONTS_DIR):
         for f in sorted(os.listdir(_FONTS_DIR)):
             if f.lower().endswith((".ttf", ".otf", ".ttc", ".woff", ".woff2")):
                 fid = os.path.splitext(f)[0]
+                fp = os.path.join(_FONTS_DIR, f)
                 fonts.append({
                     "id": fid,
                     "name": fid.replace("_", " ").title(),
+                    "path": fp.replace("\\", "/"),
                     "source": "user",
                 })
 
@@ -884,6 +1042,34 @@ def fonts_import():
     return jsonify({"success": True, "imported": imported, "fonts": _scan_fonts_dir()})
 
 
+@app.route("/api/fonts/upload", methods=["POST"])
+def fonts_upload():
+    """上传字体文件（不限制本机）。"""
+    os.makedirs(_FONTS_DIR, exist_ok=True)
+    files = request.files.getlist("files")
+    if not files or all(not f.filename for f in files):
+        return jsonify({"success": False, "error": "未选择文件"}), 400
+    imported = 0
+    for f in files:
+        if not f.filename: continue
+        ext = os.path.splitext(f.filename)[1].lower()
+        if ext not in ('.ttf', '.otf', '.ttc', '.woff', '.woff2'): continue
+        dst = os.path.join(_FONTS_DIR, f.filename)
+        if not os.path.isfile(dst):
+            f.save(dst)
+        imported += 1
+    return jsonify({"success": True, "imported": imported, "fonts": _scan_fonts_dir()})
+
+
+@app.route("/api/font-file", methods=["GET"])
+def serve_font_file():
+    """提供字体文件，供前端 CSS 预览加载。"""
+    path = request.args.get("path", "").strip()
+    if not path or not os.path.isfile(path):
+        return "", 404
+    mt = "font/ttf" if path.lower().endswith('.ttf') else "font/otf"
+    return send_file(path, mimetype=mt)
+
 
 # ---------- YouTube 视频管理 API (SQLite) ----------
 
@@ -1063,6 +1249,31 @@ def youtube_dates():
     return jsonify({"success": True, "dates": dates})
 
 
+def _can_modify(user_id, table, item_id):
+    """检查用户是否有权编辑/删除某项。
+    admin/developer 始终有权限；
+    普通用户只能操作自己的项或 is_public=1 的项。
+    返回 (can: bool, error: str|None)
+    """
+    user = auth.get_user_by_id(user_id)
+    if user and user["role"] in ("developer", "admin"):
+        return True, None
+    db = _yt_db()
+    try:
+        row = db.execute(
+            f"SELECT owner_id, is_public FROM {table} WHERE id=?", (item_id,)
+        ).fetchone()
+        if not row:
+            return False, "记录不存在"
+        if row["owner_id"] == user_id:
+            return True, None
+        if row["is_public"] == 1:
+            return True, None
+        return False, "无权限：仅可操作自己的或公开的内容"
+    finally:
+        db.close()
+
+
 @app.route("/api/youtube/delete", methods=["POST"])
 @jwt_required()
 def youtube_delete():
@@ -1071,18 +1282,31 @@ def youtube_delete():
     ids = data.get("ids") or []
     if not ids: return jsonify({"success": False, "error": "未指定视频"}), 400
     db = _yt_db()
-    for vid in ids: db.execute("DELETE FROM videos WHERE id=? AND owner_id=?", (vid, user_id))
+    user = auth.get_user_by_id(user_id)
+    is_admin = user and user["role"] in ("developer", "admin")
+    deleted = 0
+    for vid in ids:
+        if is_admin:
+            cur = db.execute("DELETE FROM videos WHERE id=?", (vid,))
+        else:
+            cur = db.execute("DELETE FROM videos WHERE id=? AND (owner_id=? OR is_public=1)", (vid, user_id))
+        deleted += cur.rowcount
     db.commit(); db.close()
-    return jsonify({"success": True})
+    return jsonify({"success": True, "deleted": deleted})
 
 
 @app.route("/api/youtube/edit", methods=["POST"])
 @jwt_required()
 def youtube_edit():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     vid = (data.get("id") or "").strip()
     if not vid: return jsonify({"success": False, "error": "未指定视频ID"}), 400
     db = _yt_db()
+    can, err = _can_modify(user_id, "videos", vid)
+    if not can:
+        db.close()
+        return jsonify({"success": False, "error": err}), 403
     for f in ["region", "frame_type", "effectiveness", "product_name", "review_status", "is_public"]:
         if f in data: db.execute(f"UPDATE videos SET {f}=? WHERE id=?", (data[f], vid))
     db.commit()
@@ -1094,6 +1318,7 @@ def youtube_edit():
 @app.route("/api/youtube/batch-edit", methods=["POST"])
 @jwt_required()
 def youtube_batch_edit():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
     field = (data.get("field") or "").strip()
@@ -1103,11 +1328,21 @@ def youtube_batch_edit():
     if field not in ("region", "frame_type", "effectiveness", "product_name", "review_status", "is_public"):
         return jsonify({"success": False, "error": "无效字段"}), 400
     db = _yt_db()
+    user = auth.get_user_by_id(user_id)
+    is_admin = user and user["role"] in ("developer", "admin")
+    updated = 0
     for vid in ids:
-        db.execute(f"UPDATE videos SET {field}=? WHERE id=?", (value, vid))
+        if is_admin:
+            cur = db.execute(f"UPDATE videos SET {field}=? WHERE id=?", (value, vid))
+        else:
+            cur = db.execute(
+                f"UPDATE videos SET {field}=? WHERE id=? AND (owner_id=? OR is_public=1)",
+                (value, vid, user_id)
+            )
+        updated += cur.rowcount
     db.commit()
     db.close()
-    return jsonify({"success": True, "updated": len(ids)})
+    return jsonify({"success": True, "updated": updated})
 
 
 @app.route("/api/youtube/tags", methods=["GET"])
@@ -2510,10 +2745,23 @@ def _multi_file_dialog(title="选择文件"):
 
 
 
+def _can_browse():
+    """检查用户是否有权触发文件对话框（本机访问或管理员）。"""
+    if _is_local_request():
+        return True
+    try:
+        user_id = int(get_jwt_identity())
+    except Exception:
+        return False
+    user = auth.get_user_by_id(user_id)
+    return user and user["role"] in ("developer", "admin")
+
+
 @app.route("/api/browse-file", methods=["POST"])
+@jwt_required(optional=True)
 def browse_file():
     """打开本地文件选择对话框，返回选中路径。"""
-    if not _is_local_request():
+    if not _can_browse():
         return jsonify({"success": False, "error": "仅允许本机访问"}), 403
     data = request.get_json(silent=True) or {}
     file_type = data.get("type", "all")
@@ -2533,9 +2781,10 @@ def browse_file():
 
 
 @app.route("/api/browse-save", methods=["POST"])
+@jwt_required(optional=True)
 def browse_save():
     """打开文件保存对话框。"""
-    if not _is_local_request():
+    if not _can_browse():
         return jsonify({"success": False, "error": "仅允许本机访问"}), 403
     data = request.get_json(silent=True) or {}
     initial_dir = data.get("initial_dir") or None
@@ -2546,9 +2795,10 @@ def browse_save():
 
 
 @app.route("/api/browse-folder", methods=["POST"])
+@jwt_required(optional=True)
 def browse_folder():
     """打开文件夹选择对话框。"""
-    if not _is_local_request():
+    if not _can_browse():
         return jsonify({"success": False, "error": "仅允许本机访问"}), 403
     data = request.get_json(silent=True) or {}
     initial_dir = data.get("initial_dir") or None
@@ -2688,11 +2938,16 @@ def copywriting_list():
 @app.route("/api/copywriting/edit", methods=["POST"])
 @jwt_required()
 def copywriting_edit():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     cid = data.get("id")
     if not cid:
         return jsonify({"success": False, "error": "未指定文案ID"}), 400
     db = _yt_db()
+    can, err = _can_modify(user_id, "copywritings", cid)
+    if not can:
+        db.close()
+        return jsonify({"success": False, "error": err}), 403
     for f in ["region", "content", "effectiveness"]:
         if f in data:
             db.execute(f"UPDATE copywritings SET {f}=? WHERE id=?", (data[f], cid))
@@ -2705,20 +2960,29 @@ def copywriting_edit():
 @app.route("/api/copywriting/delete", methods=["POST"])
 @jwt_required()
 def copywriting_delete():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
     if not ids:
         return jsonify({"success": False, "error": "未指定文案"}), 400
     db = _yt_db()
+    user = auth.get_user_by_id(user_id)
+    is_admin = user and user["role"] in ("developer", "admin")
+    deleted = 0
     for cid in ids:
-        db.execute("DELETE FROM copywritings WHERE id=?", (cid,))
+        if is_admin:
+            cur = db.execute("DELETE FROM copywritings WHERE id=?", (cid,))
+        else:
+            cur = db.execute("DELETE FROM copywritings WHERE id=? AND (owner_id=? OR is_public=1)", (cid, user_id))
+        deleted += cur.rowcount
     db.commit(); db.close()
-    return jsonify({"success": True, "deleted": len(ids)})
+    return jsonify({"success": True, "deleted": deleted})
 
 
 @app.route("/api/copywriting/batch-edit", methods=["POST"])
 @jwt_required()
 def copywriting_batch_edit():
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
     region = (data.get("region") or "").strip()
@@ -2728,13 +2992,32 @@ def copywriting_batch_edit():
     if not region and effectiveness is None:
         return jsonify({"success": False, "error": "请选择地区或成效标签"}), 400
     db = _yt_db()
+    user = auth.get_user_by_id(user_id)
+    is_admin = user and user["role"] in ("developer", "admin")
+    updated = 0
     for cid in ids:
-        if region:
-            db.execute("UPDATE copywritings SET region=? WHERE id=?", (region, cid))
-        if effectiveness is not None:
-            db.execute("UPDATE copywritings SET effectiveness=? WHERE id=?", (effectiveness, cid))
+        if is_admin:
+            if region:
+                db.execute("UPDATE copywritings SET region=? WHERE id=?", (region, cid))
+            if effectiveness is not None:
+                db.execute("UPDATE copywritings SET effectiveness=? WHERE id=?", (effectiveness, cid))
+            updated += 1
+        else:
+            cur = None
+            if region:
+                cur = db.execute(
+                    "UPDATE copywritings SET region=? WHERE id=? AND (owner_id=? OR is_public=1)",
+                    (region, cid, user_id)
+                )
+            if effectiveness is not None:
+                cur = db.execute(
+                    "UPDATE copywritings SET effectiveness=? WHERE id=? AND (owner_id=? OR is_public=1)",
+                    (effectiveness, cid, user_id)
+                )
+            if cur and cur.rowcount > 0:
+                updated += 1
     db.commit(); db.close()
-    return jsonify({"success": True, "updated": len(ids)})
+    return jsonify({"success": True, "updated": updated})
 
 
 # ---------- 翻译 API ----------
@@ -3254,9 +3537,42 @@ def admin_data_export(uid):
     )
 
 
+def _start_weekly_cleanup():
+    """每周日 24:00 清理爬取图片和生成视频（音乐库保留）。"""
+    import datetime as _dt
+    import shutil as _shutil
+
+    def _cleanup():
+        while True:
+            now = _dt.datetime.now()
+            # 计算下个周日 00:00
+            days_until_sunday = (6 - now.weekday()) % 7
+            if days_until_sunday == 0:
+                # 今天是周日，看是否已过 24:00
+                pass
+            next_sunday = now.replace(hour=0, minute=0, second=0, microsecond=0) + _dt.timedelta(days=(days_until_sunday or 7))
+            wait = (next_sunday - now).total_seconds()
+            if wait > 0:
+                _time.sleep(wait)
+
+            # 清理 scraped_images（含 ai 子目录）
+            for d in [_SCRAPE_DEFAULT_DIR]:
+                if os.path.isdir(d):
+                    _shutil.rmtree(d)
+                    os.makedirs(d, exist_ok=True)
+            # 恢复 ai 子目录
+            ai_dir = os.path.join(_SCRAPE_DEFAULT_DIR, "ai")
+            os.makedirs(ai_dir, exist_ok=True)
+            print(f"[Cleanup] 已清理爬取图片和视频: {_dt.datetime.now()}")
+
+    t = threading.Thread(target=_cleanup, daemon=True)
+    t.start()
+
+
 if __name__ == "__main__":
     host = "0.0.0.0"
     port = 5001
+    _start_weekly_cleanup()
     print(f"服务已启动: http://{host}:{port}")
     print("在浏览器中打开上方地址即可使用。")
     # 自动打开浏览器

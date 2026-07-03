@@ -71,13 +71,13 @@
       <el-form-item label="🎬 原视频">
         <div style="display:flex;gap:6px;">
           <el-input v-model="audioVideoPath" placeholder="F:\video\test.mp4" style="flex:1;" />
-          <el-button @click="doBrowseFile('video')" style="width:44px;">📂</el-button>
+          <el-button v-if="isLocalhost()" @click="doBrowseFile('video')" style="width:44px;">📂</el-button>
         </div>
       </el-form-item>
       <el-form-item label="🎶 新音频源（音频或视频）">
         <div style="display:flex;gap:6px;">
           <el-input v-model="audioSourcePath" placeholder="F:\music\bg.mp3 或 F:\video\source.mp4" style="flex:1;" />
-          <el-button @click="doBrowseFile('audio')" style="width:44px;">📂</el-button>
+          <el-button v-if="isLocalhost()" @click="doBrowseFile('audio')" style="width:44px;">📂</el-button>
         </div>
         <span class="hint">支持 .mp3/.wav/.aac/.m4a 等音频，或 .mp4 等视频（自动提取音频）</span>
       </el-form-item>
@@ -114,6 +114,7 @@ import { ref, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useVideoStore } from '@/stores/video'
 import { browseApi } from '@/api/browse'
+import { isLocalhost } from '@/utils/env'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 import { translateApi } from '@/api/youtube'

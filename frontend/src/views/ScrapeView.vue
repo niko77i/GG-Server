@@ -10,14 +10,14 @@
 
       <el-form-item label="保存路径">
         <div style="display:flex;gap:6px;">
-          <el-input v-model="saveDir" placeholder="例如：F:\images\google_ads\" style="flex:1;" />
-          <el-button @click="browseFolder" style="width:44px;">📂</el-button>
+          <el-input v-model="saveDir" :placeholder="isLocalhost() ? '例如：F:\\images\\google_ads\\' : '留空则使用服务器默认目录'" style="flex:1;" />
+          <el-button v-if="isLocalhost()" @click="browseFolder" style="width:44px;">📂</el-button>
         </div>
       </el-form-item>
 
       <el-checkbox v-model="includeAds" style="margin-bottom:16px;">按 Google Ads 规格放大图片</el-checkbox>
 
-      <el-button type="primary" @click="startScrape" :loading="scraping" :disabled="!urls || !saveDir">
+      <el-button type="primary" @click="startScrape" :loading="scraping" :disabled="!urls">
         开始爬取
       </el-button>
     </el-form>
@@ -37,6 +37,7 @@
           <template v-if="r.from_cache"> 📂本地</template>
         </span>
         <span v-if="r.error" style="color:#dc2626;"> — {{ r.error }}</span>
+        <el-button v-if="!r.error && r.saved_path" link size="small" @click="downloadImages(r)">📥 下载图片</el-button>
         <el-button v-if="!r.error && r.saved_path" link size="small" type="primary" @click="bridgeToVideo(r.saved_path)">🎬 生成视频</el-button>
       </div>
     </div>
@@ -48,6 +49,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { scrapeApi } from '@/api/scrape'
 import { browseApi } from '@/api/browse'
+import { isLocalhost } from '@/utils/env'
 import { ElMessage } from 'element-plus'
 
 const router = useRouter()
@@ -96,6 +98,10 @@ async function startScrape() {
     const pkg = results.value.find(r => !r.error && r.saved_path)
     if (pkg) bridgeToVideo(pkg.saved_path)
   }
+}
+
+function downloadImages(r) {
+  window.open('/api/scrape/download?path=' + encodeURIComponent(r.saved_path), '_blank')
 }
 
 function bridgeToVideo(dirPath) {

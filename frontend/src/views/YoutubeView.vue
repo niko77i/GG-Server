@@ -103,7 +103,7 @@
                   </template>
                   <div style="display:flex;flex-direction:column;gap:2px;">
                     <el-button link size="small" @click.stop="copyLink(row.id)" style="justify-content:flex-start;">📋 复制链接</el-button>
-                    <el-button link size="small" type="primary" @click.stop="openEdit(row)" style="justify-content:flex-start;">✏️ 编辑</el-button>
+                    <el-button v-if="canModifyVideo(row)" link size="small" type="primary" @click.stop="openEdit(row)" style="justify-content:flex-start;">✏️ 编辑</el-button>
                   </div>
                 </el-popover>
               </template>
@@ -169,8 +169,8 @@
                     :type="cwTransMap[row.id]?.expanded ? 'primary' : 'default'">
                     {{ cwTransMap[row.id]?.expanded ? '翻译 ▲' : '翻译' }}
                   </el-button>
-                  <el-button link size="small" @click.stop="cwOpenEdit(row)">✏️</el-button>
-                  <el-button link size="small" type="danger" @click.stop="cwDeleteOne(row)">🗑</el-button>
+                  <el-button v-if="canModifyCopywriting(row)" link size="small" @click.stop="cwOpenEdit(row)">✏️</el-button>
+                  <el-button v-if="canModifyCopywriting(row)" link size="small" type="danger" @click.stop="cwDeleteOne(row)">🗑</el-button>
                 </span>
               </div>
               <div v-if="cwTransMap[row.id]?.expanded" class="cw-trans-inline">
@@ -433,6 +433,8 @@ function playVideo(row) {
   playingTitle.value = row.title
 }
 
+function canModifyVideo(row) { return authStore.isAdmin || row.owner_id === authStore.user?.id || row.is_public }
+function canModifyCopywriting(row) { return authStore.isAdmin || row.owner_id === authStore.user?.id || row.is_public }
 function copyLink(id){const url=`https://www.youtube.com/watch?v=${id}`;copyToClipboard(url).then(()=>{ElMessage.success('已复制 ✓');copiedIds.value={...copiedIds.value,[id]:Date.now()};localStorage.setItem('ytCopied',JSON.stringify(copiedIds.value))})}
 function clearCopied(){copiedIds.value={};localStorage.removeItem('ytCopied');ElMessage.success('已清除复制记录')}
 function handleRowAction(cmd, row) { if (cmd === 'copy') copyLink(row.id); else if (cmd === 'edit') openEdit(row) }

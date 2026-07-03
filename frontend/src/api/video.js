@@ -11,5 +11,11 @@ export const videoApi = {
   audioReplace:(body) => api.post('/audio-replace', body),
   fontsList:   ()     => api.get('/fonts/list'),
   fontsImport: (body) => api.post('/fonts/import', body),
+  fontsUpload: (formData) => api.post('/fonts/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
   fontsMarkUsed:(body)=> api.post('/fonts/mark-used', body),
+  packages:    (userDn) => api.get('/scrape/packages' + (userDn ? '?user_dn=' + encodeURIComponent(userDn) : '')),
+  scrapeUsers:   ()     => api.get('/scrape/users'),
+  uploadImages:  (formData) => api.post('/scrape/upload-images', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  musicList:   ()     => api.get('/video/music-list'),
+  uploadMusic: (formData) => api.post('/video/upload-music', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
 }

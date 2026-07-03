@@ -8,12 +8,17 @@
 
         <!-- 选择目录 -->
         <el-form-item label="📂 选择图片目录">
-          <div style="display:flex;gap:8px;">
+          <div v-if="isLocalhost()" style="display:flex;gap:8px;">
             <el-input v-model="videoDir" placeholder="例如：F:\images\google_ads\com.spotify.music" style="flex:1;min-width:0;" />
             <el-button @click="browseFolder" style="width:44px;">📂</el-button>
             <el-button type="primary" @click="scanDir" :loading="scanning">🔍 扫描</el-button>
           </div>
-          <span class="hint">选择已爬取的包名文件夹（包含 PNG 图片和 包logo 子目录）</span>
+          <div v-else style="display:flex;gap:8px;">
+            <el-select v-model="selectedPkg" placeholder="选择已爬取包" @change="onPkgSelect" style="flex:1;" filterable>
+              <el-option v-for="p in remotePackages" :key="p.path" :label="`${p.name} (${p.image_count}张)`" :value="p.path" />
+            </el-select>
+          </div>
+          <span class="hint">{{ isLocalhost() ? '选择已爬取的包名文件夹（包含 PNG 图片和 包logo 子目录）' : '选择已爬取的包，自动扫描图片' }}</span>
         </el-form-item>
 
         <!-- 图片列表 -->
@@ -90,7 +95,7 @@
         <el-form-item label="🖼️ 背景图片（可选）">
           <div style="display:flex;gap:6px;">
             <el-input v-model="bgImage" placeholder="留空则使用纯色背景" style="flex:1;min-width:0;" />
-            <el-button @click="browseBgImage" style="width:44px;">📂</el-button>
+            <el-button v-if="isLocalhost()" @click="browseBgImage" style="width:44px;">📂</el-button>
           </div>
         </el-form-item>
 
@@ -124,13 +129,30 @@
             <el-option label="擦除" value="wiperight" /><el-option label="无" value="none" />
           </el-select></el-form-item>
           <el-form-item label="输出分辨率"><el-select v-model="resolution" size="small" style="width:100%;"><el-option label="9:16 竖屏" value="1080:1920" /><el-option label="1:1 方形" value="1080:1080" /></el-select></el-form-item>
-          <el-form-item label="背景音乐（可选.mp3）">
-            <div style="display:flex;gap:4px;"><el-input v-model="musicPath" size="small" placeholder="F:\music\bg.mp3" style="flex:1;min-width:0;" /><el-button @click="browseMusic" size="small" style="width:36px;flex-shrink:0;">📂</el-button></div>
+          <el-form-item label="背景音乐（可选）">
+            <div v-if="isLocalhost()" style="display:flex;gap:4px;">
+              <el-input v-model="musicPath" size="small" placeholder="F:\music\bg.mp3" style="flex:1;min-width:0;" />
+              <el-button @click="browseMusic" size="small" style="width:36px;flex-shrink:0;">📂</el-button>
+            </div>
+            <div v-else>
+              <div style="display:flex;gap:6px;align-items:center;">
+                <el-select v-model="musicPath" placeholder="选音乐或留空" clearable size="small" style="flex:1;" @change="onMusicSelect">
+                  <el-option v-for="m in musicFiles" :key="m.path" :label="m.name" :value="m.path" />
+                </el-select>
+                <el-button v-if="isPlaying" @click="stopMusic" size="small">⏹</el-button>
+              </div>
+              <div style="display:flex;gap:6px;margin-top:6px;">
+                <input type="file" accept=".mp3,.wav,.aac,.m4a,.ogg,.flac" @change="onMusicFileChange" ref="musicFileInput" style="display:none;" />
+                <el-button size="small" @click="$refs.musicFileInput.click()">选择文件</el-button>
+                <el-button size="small" type="primary" @click="uploadMusic" :loading="uploadingMusic">上传</el-button>
+              </div>
+              <audio ref="audioPlayer" style="display:none;" />
+            </div>
           </el-form-item>
         </div>
 
-        <!-- 输出路径 -->
-        <el-form-item label="输出路径">
+        <!-- 输出路径（远程隐藏，自动生成） -->
+        <el-form-item v-if="isLocalhost()" label="输出路径">
           <div style="display:flex;gap:6px;">
             <el-input v-model="outputPath" placeholder="例如：F:\output\video.mp4" @blur="outputPath = ensureMp4(outputPath)" style="flex:1;min-width:0;" />
             <el-button @click="browseSave" style="width:44px;">📂</el-button>
@@ -147,7 +169,7 @@
             <el-select v-model="textFont" size="small" style="flex:1;" @change="updateFontPreview">
               <el-option v-for="f in fonts" :key="f.id" :label="f.name" :value="f.id" />
             </el-select>
-            <el-button size="small" @click="importFont" style="width:36px;">📂</el-button>
+            <el-button v-if="isLocalhost()" size="small" @click="importFont" style="width:36px;">📂</el-button>
           </div>
           <span class="hint" style="font-size:11px;color:#888;">每条随机浮现 2-3 秒，淡入淡出 + 阴影描边</span>
         </el-form-item>
@@ -170,6 +192,7 @@
         <div v-if="progressMsg" style="margin-top:16px;">
           <el-progress :percentage="Math.round(progressPct * 100)" />
           <span style="font-size:12px;color:#888;">{{ progressMsg }}</span>
+          <el-button v-if="generatedPath && !generating" link size="small" type="primary" @click="downloadVideo" style="margin-left:8px;">📥 下载视频</el-button>
         </div>
       </div>
 
@@ -200,6 +223,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useVideoStore } from '@/stores/video'
 import { videoApi } from '@/api/video'
 import { browseApi } from '@/api/browse'
+import { isLocalhost } from '@/utils/env'
 import { ElMessage } from 'element-plus'
 
 const store = useVideoStore()
@@ -247,6 +271,7 @@ const fonts = ref([])
 // 进度
 const progressMsg = ref('')
 const progressPct = ref(0)
+const generatedPath = ref('')
 const generating = ref(false)
 let pollTimer = null
 
@@ -257,10 +282,33 @@ const taskQueue = ref([])
 const history = ref({})
 const activeHistoryId = ref(null)
 
+// 远程用户
+const remotePackages = ref([])
+const selectedPkg = ref('')
+const musicFiles = ref([])
+const selectedMusicFile = ref(null)
+const uploadingMusic = ref(false)
+const isPlaying = ref(false)
+const audioPlayer = ref(null)
+const musicFileInput = ref(null)
+
 onMounted(async () => {
   await store.loadFonts()
   fonts.value = store.fonts || []
   await loadHistory()
+  // 远程用户加载包列表和音乐列表
+  if (!isLocalhost()) {
+    loadRemotePackages()
+    loadMusicList()
+  }
+  // 检查是否有从爬取页面传来的目录
+  const bridgeDir = sessionStorage.getItem('bridgeVideoDir')
+  if (bridgeDir) {
+    videoDir.value = bridgeDir
+    if (!isLocalhost()) selectedPkg.value = bridgeDir
+    sessionStorage.removeItem('bridgeVideoDir')
+    await scanDir()
+  }
 })
 
 async function loadHistory() {
@@ -332,19 +380,68 @@ async function scanDir() {
   scanning.value = false
 }
 
-// 接收来自爬取页面的目录跳转
-onMounted(async () => {
-  await store.loadFonts()
-  fonts.value = store.fonts || []
-  await loadHistory()
-  // 检查是否有从爬取页面传来的目录
-  const bridgeDir = sessionStorage.getItem('bridgeVideoDir')
-  if (bridgeDir) {
-    videoDir.value = bridgeDir
-    sessionStorage.removeItem('bridgeVideoDir')
-    await scanDir()
-  }
-})
+// 远程——加载包列表
+async function loadRemotePackages() {
+  try {
+    const res = await videoApi.packages()
+    remotePackages.value = res.packages || []
+  } catch(e) { /* 静默 */ }
+}
+
+// 远程——加载音乐列表
+async function loadMusicList() {
+  try {
+    const res = await videoApi.musicList()
+    musicFiles.value = res.files || []
+  } catch(e) { /* 静默 */ }
+}
+
+// 远程——选择包后自动扫描
+async function onPkgSelect(path) {
+  if (!path) return
+  videoDir.value = path
+  await scanDir()
+}
+
+// 远程——选音乐后自动播放
+function onMusicSelect(path) {
+  stopMusic()
+  if (!path) return
+  const audio = audioPlayer.value
+  if (!audio) return
+  audio.src = '/api/audio?path=' + encodeURIComponent(path)
+  audio.play().then(() => { isPlaying.value = true }).catch(() => {})
+  audio.onended = () => { isPlaying.value = false }
+  audio.onerror = () => { isPlaying.value = false }
+}
+
+// 远程——停止音乐
+function stopMusic() {
+  const audio = audioPlayer.value
+  if (audio) { audio.pause(); audio.currentTime = 0 }
+  isPlaying.value = false
+}
+
+// 远程——文件选择
+function onMusicFileChange(e) {
+  selectedMusicFile.value = e.target.files?.[0] || null
+}
+
+// 远程——上传音乐
+async function uploadMusic() {
+  if (!selectedMusicFile.value) { ElMessage.warning('请先选择文件'); return }
+  uploadingMusic.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', selectedMusicFile.value)
+    await videoApi.uploadMusic(formData)
+    ElMessage.success('上传成功')
+    selectedMusicFile.value = null
+    if (musicFileInput.value) musicFileInput.value.value = ''
+    await loadMusicList()
+  } catch(e) { ElMessage.error('上传失败: ' + (e.message || '未知错误')) }
+  uploadingMusic.value = false
+}
 
 // 选择图片
 function toggleImg(filename) {
@@ -404,7 +501,8 @@ async function doGenerate(settings) {
       progressMsg.value = p.message || '处理中...'
       if (p.status === 'completed') {
         clearInterval(pollTimer); generating.value = false
-        progressMsg.value = '✅ 完成: ' + (p.output || '')
+        generatedPath.value = p.output?.path || ''
+        progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
         ElMessage.success('视频生成完成')
         // 自动保存设置到历史
         autoSaveHistory()
@@ -412,6 +510,12 @@ async function doGenerate(settings) {
       if (p.status === 'error') { clearInterval(pollTimer); generating.value = false; progressMsg.value = '❌ ' + (p.message || '未知错误'); ElMessage.error(p.message) }
     }, 2000)
   } catch(e) { generating.value = false; ElMessage.error(e.message) }
+}
+
+function downloadVideo() {
+  if (generatedPath.value) {
+    window.open('/api/video/download?path=' + encodeURIComponent(generatedPath.value), '_blank')
+  }
 }
 
 async function autoSaveHistory() {

@@ -55,8 +55,7 @@ const detailOpen = ref(true); const activeSection = ref('accounts')
 const navItems = [
   { key: 'accounts', icon: '🏢', label: '账户管理', admin: true, sections: [{ title: '账户', items: [{ icon:'📦',label:'产品管理',path:'/accounts/products'},{ icon:'👤',label:'广告账户',path:'/accounts/ads'},{ icon:'🏢',label:'MCC管理',path:'/accounts/mcc'}]},{ title:'系统', items:[{ icon:'⚙',label:'设置',path:'/accounts/settings'}]}]},
   { key: 'youtube', icon: '📺', label: '视频管理', sections: [{ title: '视频', items: [{ icon:'▶',label:'视频展示',path:'/youtube/view'},{ icon:'📝',label:'文案展示',path:'/youtube/copywriting'},{ icon:'➕',label:'导入视频或文案',path:'/youtube/import'},{ icon:'🏷',label:'标签配置',path:'/youtube/config'}]}]},
-  { key: 'scrape', icon: '📥', label: '图片爬取', sections: [{ title: '爬取', items: [{ icon:'🖼',label:'爬取图片',path:'/scrape'}]}]},
-  { key: 'video', icon: '🎬', label: 'AI视频生成', sections: [{ title: '视频', items: [{ icon:'🎬',label:'视频生成',path:'/video'}]}]},
+  { key: 'media', icon: '🎬', label: '媒体工具', sections: [{ title: '媒体', items: [{ icon:'🖼',label:'爬取&视频',path:'/media'}]}]},
   { key: 'toolkit', icon: '🧰', label: '工具集', sections: [{ title: '工具', items: [{ icon:'📊',label:'做表数据',path:'/toolkit/zuobiao'},{ icon:'🎵',label:'音频替换',path:'/toolkit/audio'},{ icon:'🌐',label:'翻译工具',path:'/toolkit/translate'}]}]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'⚙️',label:'用户管理',path:'/admin/users'}]}]},
 ]

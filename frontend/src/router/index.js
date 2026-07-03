@@ -39,8 +39,7 @@ const routes = [
       { path: 'config', component: () => import('../views/YoutubeView.vue'), meta: { title: '标签配置' } },
     ]
   },
-  { path: '/scrape', component: () => import('../views/ScrapeView.vue'), meta: { title: '图片爬取' } },
-  { path: '/video', component: () => import('../views/VideoView.vue'), meta: { title: 'AI 视频生成' } },
+  { path: '/media', component: () => import('../views/MediaView.vue'), meta: { title: '媒体工具' } },
   {
     path: '/toolkit',
     component: () => import('../views/ToolkitView.vue'),
