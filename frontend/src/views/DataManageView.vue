@@ -23,6 +23,20 @@
         >
           <template #prefix><span>🔍</span></template>
         </el-input>
+        <!-- 列选择器 -->
+        <el-popover placement="bottom-start" :width="220" trigger="click">
+          <template #reference>
+            <el-button>📊 列显示</el-button>
+          </template>
+          <div class="column-selector">
+            <el-checkbox
+              v-for="col in allColumns" :key="col.prop"
+              :model-value="visibleColumns.includes(col.prop)"
+              :label="col.prop"
+              @change="(checked) => toggleColumn(col.prop, checked)"
+            >{{ col.label }}</el-checkbox>
+          </div>
+        </el-popover>
       </div>
       <div class="filter-right">
         <el-button @click="loadData">🔄 刷新</el-button>
@@ -40,26 +54,15 @@
       @selection-change="onSelectionChange" @sort-change="onSortChange"
     >
       <el-table-column type="selection" width="45" />
-      <el-table-column prop="product_name" label="产品" width="110" sortable="custom" />
-      <el-table-column prop="report_date" label="日期" width="110" sortable="custom" />
-      <el-table-column prop="region" label="地区" width="70" sortable="custom" />
-      <el-table-column prop="account" label="账户" width="120" sortable="custom" />
-      <el-table-column prop="customer_id" label="客户ID" width="130" sortable="custom" />
-      <el-table-column prop="campaign" label="广告系列" width="140" sortable="custom" />
-      <el-table-column prop="cost" label="花费" width="100" sortable="custom" align="right">
-        <template #default="{ row }">${{ formatNum(row.cost) }}</template>
-      </el-table-column>
-      <el-table-column prop="impressions" label="展示" width="90" sortable="custom" align="right">
-        <template #default="{ row }">{{ formatNum(row.impressions) }}</template>
-      </el-table-column>
-      <el-table-column prop="clicks" label="点击" width="80" sortable="custom" align="right">
-        <template #default="{ row }">{{ formatNum(row.clicks) }}</template>
-      </el-table-column>
-      <el-table-column prop="installs" label="安装" width="80" sortable="custom" align="right">
-        <template #default="{ row }">{{ formatNum(row.installs) }}</template>
-      </el-table-column>
-      <el-table-column prop="in_app_actions" label="应用内操作" width="105" sortable="custom" align="right">
-        <template #default="{ row }">{{ formatNum(row.in_app_actions) }}</template>
+      <el-table-column
+        v-for="col in visibleColumnDefs" :key="col.prop"
+        :prop="col.prop" :label="col.label" :min-width="col.minWidth"
+        :sortable="col.sortable ? 'custom' : false" :align="col.align || 'left'"
+      >
+        <template v-if="col.format" #default="{ row }">
+          <template v-if="col.format === 'cost'">${{ formatNum(row[col.prop]) }}</template>
+          <template v-else>{{ formatNum(row[col.prop]) }}</template>
+        </template>
       </el-table-column>
       <el-table-column label="操作" width="140" fixed="right">
         <template #default="{ row }">
@@ -132,9 +135,72 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { reportsApi } from '../api/reports'
+
+// 全部可选列定义
+const COL_STORAGE_KEY = 'gg_data_manage_columns'
+
+const allColumns = [
+  { prop: 'product_name', label: '产品', minWidth: 100 },
+  { prop: 'report_date', label: '日期', minWidth: 100 },
+  { prop: 'region', label: '地区', minWidth: 70 },
+  { prop: 'account', label: '账户', minWidth: 110 },
+  { prop: 'customer_id', label: '客户ID', minWidth: 120 },
+  { prop: 'campaign', label: '广告系列', minWidth: 130 },
+  { prop: 'cost', label: '花费', minWidth: 90, align: 'right', format: 'cost' },
+  { prop: 'impressions', label: '展示', minWidth: 80, align: 'right', format: 'number' },
+  { prop: 'clicks', label: '点击', minWidth: 70, align: 'right', format: 'number' },
+  { prop: 'installs', label: '安装', minWidth: 70, align: 'right', format: 'number' },
+  { prop: 'in_app_actions', label: '应用内操作', minWidth: 100, align: 'right', format: 'number' },
+]
+
+// 从 localStorage 恢复列可见性
+function loadColumnPrefs() {
+  try {
+    const saved = localStorage.getItem(COL_STORAGE_KEY)
+    if (saved) {
+      const arr = JSON.parse(saved)
+      if (Array.isArray(arr) && arr.length > 0) return arr
+    }
+  } catch (e) { /* ignore */ }
+  // 默认全部可见
+  return allColumns.map(c => c.prop)
+}
+
+function saveColumnPrefs() {
+  localStorage.setItem(COL_STORAGE_KEY, JSON.stringify(visibleColumns.value))
+}
+
+// 可见列 prop 列表
+const visibleColumns = ref(loadColumnPrefs())
+
+// 根据 visibleColumns 过滤后的列定义（保持 allColumns 的顺序）
+const visibleColumnDefs = computed(() =>
+  allColumns.filter(c => visibleColumns.value.includes(c.prop))
+)
+
+function toggleColumn(prop, checked) {
+  if (checked) {
+    // 按 allColumns 顺序插入
+    const idx = allColumns.findIndex(c => c.prop === prop)
+    const current = [...visibleColumns.value]
+    const insertAt = current.findIndex(p => {
+      const ci = allColumns.findIndex(c => c.prop === p)
+      return ci > idx
+    })
+    if (insertAt === -1) {
+      current.push(prop)
+    } else {
+      current.splice(insertAt, 0, prop)
+    }
+    visibleColumns.value = current
+  } else {
+    visibleColumns.value = visibleColumns.value.filter(p => p !== prop)
+  }
+  saveColumnPrefs()
+}
 
 // 筛选状态
 const filterProduct = ref('')
@@ -183,7 +249,6 @@ async function loadData() {
     total.value = data.total || 0
     products.value = data.products || []
 
-    // 客户端排序
     if (sortProp.value) applyClientSort()
   } catch (e) {
     ElMessage.error('加载数据失败：' + (e.response?.data?.error || e.message))
@@ -258,7 +323,6 @@ async function handleSave() {
   saving.value = true
   try {
     if (editingId.value) {
-      // 编辑 → PUT
       await reportsApi.update(editingId.value, {
         product_name: form.product_name.trim(),
         report_date: form.report_date,
@@ -274,7 +338,6 @@ async function handleSave() {
       })
       ElMessage.success('保存成功')
     } else {
-      // 新增 → POST save
       await reportsApi.save({
         product_name: form.product_name.trim(),
         region: form.region.trim() || '未指定',
@@ -382,4 +445,9 @@ onMounted(() => {
 .filter-right { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 .pagination-wrap { display: flex; justify-content: flex-end; margin-top: 16px; }
+
+.column-selector {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 300px; overflow-y: auto;
+}
 </style>
