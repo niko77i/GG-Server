@@ -3969,47 +3969,100 @@ def ad_reports_save():
             list(override_set) + [user_id]
         )
 
-    # 插入新行（去重：跳过同用户+产品+客户ID+系列的已有行）
-    saved = 0
-    skipped = 0
+    # === 聚合步骤（新增）：按 (report_date, product_name, account, customer_id, campaign) SUM ===
+    raw_count = len(rows)
+    aggregated = {}
     for row in rows:
+        account = str(row.get("account", "")).strip()
         customer_id = str(row.get("customerId", "")).strip()
         campaign = str(row.get("campaign", "")).strip()
         if not customer_id or not campaign:
             continue
 
-        # 检查是否已存在（不在 override_ids 中的重复行跳过）
-        existing = db.execute(
-            "SELECT id FROM ad_reports WHERE user_id=? AND product_name=? "
-            "AND customer_id=? AND campaign=? AND report_date=?",
-            (user_id, product_name, customer_id, campaign, report_date)
-        ).fetchone()
-        if existing and existing["id"] not in override_set:
-            skipped += 1
-            continue
+        key = (report_date, product_name, account, customer_id, campaign)
+        if key not in aggregated:
+            aggregated[key] = {
+                "account": account,
+                "customer_id": customer_id,
+                "campaign": campaign,
+                "cost": float(row.get("cost", 0) or 0),
+                "impressions": int(row.get("impressions", 0) or 0),
+                "clicks": int(row.get("clicks", 0) or 0),
+                "installs": float(row.get("installs", 0) or 0),
+                "in_app_actions": float(row.get("inAppActions", 0) or 0),
+                "cost_per_in_app": float(row.get("costPerInApp", 0) or 0),
+            }
+        else:
+            existing = aggregated[key]
+            existing["cost"] += float(row.get("cost", 0) or 0)
+            existing["impressions"] += int(row.get("impressions", 0) or 0)
+            existing["clicks"] += int(row.get("clicks", 0) or 0)
+            existing["installs"] += float(row.get("installs", 0) or 0)
+            existing["in_app_actions"] += float(row.get("inAppActions", 0) or 0)
+            existing["cost_per_in_app"] += float(row.get("costPerInApp", 0) or 0)
 
-        db.execute(
-            "INSERT INTO ad_reports(user_id, product_name, region, report_date, "
-            "account, customer_id, campaign, cost, impressions, clicks, installs, "
-            "in_app_actions, cost_per_in_app) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                user_id, product_name, region, report_date,
-                str(row.get("account", "")).strip() if row.get("account") else "",
-                customer_id, campaign,
-                float(row.get("cost", 0) or 0),
-                int(row.get("impressions", 0) or 0),
-                int(row.get("clicks", 0) or 0),
-                float(row.get("installs", 0) or 0),
-                float(row.get("inAppActions", 0) or 0),
-                float(row.get("costPerInApp", 0) or 0),
+    # === upsert 逻辑（替换原有 skip 逻辑）===
+    saved = 0
+    skipped = 0
+    for key, agg_row in aggregated.items():
+        _rdate, _pname, account, customer_id, campaign = key
+
+        # 查询是否已有同维度记录
+        existing = db.execute(
+            "SELECT id, cost, impressions, clicks, installs, in_app_actions, cost_per_in_app "
+            "FROM ad_reports WHERE user_id=? AND product_name=? "
+            "AND account=? AND customer_id=? AND campaign=? AND report_date=?",
+            (user_id, product_name, account, customer_id, campaign, report_date)
+        ).fetchone()
+
+        if existing and existing["id"] not in override_set:
+            # 已存在 → UPDATE 累加
+            db.execute(
+                "UPDATE ad_reports SET "
+                "cost = cost + ?, impressions = impressions + ?, clicks = clicks + ?, "
+                "installs = installs + ?, in_app_actions = in_app_actions + ?, "
+                "cost_per_in_app = cost_per_in_app + ?, saved_at = datetime('now','localtime') "
+                "WHERE id=?",
+                (agg_row["cost"], agg_row["impressions"], agg_row["clicks"],
+                 agg_row["installs"], agg_row["in_app_actions"], agg_row["cost_per_in_app"],
+                 existing["id"])
             )
-        )
-        saved += 1
+            saved += 1
+        elif existing and existing["id"] in override_set:
+            # 旧记录已被 override 删除 → INSERT 新记录
+            db.execute(
+                "INSERT INTO ad_reports(user_id, product_name, region, report_date, "
+                "account, customer_id, campaign, cost, impressions, clicks, installs, "
+                "in_app_actions, cost_per_in_app) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (user_id, product_name, region, report_date,
+                 account, customer_id, campaign,
+                 agg_row["cost"], agg_row["impressions"], agg_row["clicks"],
+                 agg_row["installs"], agg_row["in_app_actions"], agg_row["cost_per_in_app"])
+            )
+            saved += 1
+        else:
+            # 不存在 → INSERT
+            db.execute(
+                "INSERT INTO ad_reports(user_id, product_name, region, report_date, "
+                "account, customer_id, campaign, cost, impressions, clicks, installs, "
+                "in_app_actions, cost_per_in_app) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (user_id, product_name, region, report_date,
+                 account, customer_id, campaign,
+                 agg_row["cost"], agg_row["impressions"], agg_row["clicks"],
+                 agg_row["installs"], agg_row["in_app_actions"], agg_row["cost_per_in_app"])
+            )
+            saved += 1
 
     db.commit()
     db.close()
-    return jsonify({"success": True, "saved": saved, "skipped": skipped})
+    return jsonify({
+        "success": True,
+        "saved": saved,
+        "skipped": skipped,
+        "aggregated_from": raw_count
+    })
 
 
 @app.route("/api/ad-reports/list", methods=["GET"])
