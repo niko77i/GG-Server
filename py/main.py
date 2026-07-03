@@ -4119,6 +4119,58 @@ def ad_reports_list():
     })
 
 
+@app.route("/api/ad-reports/<int:report_id>", methods=["PUT"])
+@jwt_required()
+def ad_reports_update(report_id):
+    """编辑单条报告（仅 owner）。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+
+    db = _yt_db()
+
+    # 确认记录存在且属于当前用户
+    existing = db.execute(
+        "SELECT id FROM ad_reports WHERE id=? AND user_id=?",
+        (report_id, user_id)
+    ).fetchone()
+    if not existing:
+        db.close()
+        return jsonify({"success": False, "error": "记录不存在或无权操作"}), 404
+
+    # 允许更新的字段
+    updatable = [
+        "product_name", "region", "report_date", "account",
+        "customer_id", "campaign", "cost", "impressions",
+        "clicks", "installs", "in_app_actions"
+    ]
+    sets = []
+    params = []
+    for field in updatable:
+        if field in data:
+            val = data[field]
+            if field in ("cost", "installs", "in_app_actions"):
+                val = float(val) if val != "" else 0.0
+            elif field in ("impressions", "clicks"):
+                val = int(val) if val != "" else 0
+            else:
+                val = str(val).strip() if val else ""
+            sets.append(f"{field}=?")
+            params.append(val)
+
+    if not sets:
+        db.close()
+        return jsonify({"success": False, "error": "没有可更新的字段"}), 400
+
+    params.append(report_id)
+    db.execute(
+        f"UPDATE ad_reports SET {', '.join(sets)}, saved_at=datetime('now','localtime') WHERE id=?",
+        params
+    )
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+
 @app.route("/api/ad-reports/<int:report_id>", methods=["DELETE"])
 @jwt_required()
 def ad_reports_delete(report_id):
