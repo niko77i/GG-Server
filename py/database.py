@@ -178,7 +178,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             cost REAL DEFAULT 0,
             impressions INTEGER DEFAULT 0,
             clicks INTEGER DEFAULT 0,
-            installs INTEGER DEFAULT 0,
+            installs REAL DEFAULT 0,
             in_app_actions REAL DEFAULT 0,
             cost_per_in_app REAL DEFAULT 0,
             saved_at TEXT DEFAULT (datetime('now','localtime'))

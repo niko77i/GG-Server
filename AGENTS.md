@@ -283,6 +283,8 @@ GG-Server/
 
 ## 设计文档索引
 
+> **文档更新规则**：每次新增或修改设计文档后，必须同步更新此索引。
+
 ### 共享功能设计文档
 - [图片爬取](docs/superpowers/specs/image-scraping-design.md)
 - [AI 视频生成](docs/superpowers/specs/ai-video-generation-design.md)
@@ -294,12 +296,21 @@ GG-Server/
 - [文案管理](docs/superpowers/specs/2026-06-15-copywriting-management-design.md)
 - [审核状态筛选](docs/superpowers/specs/2026-06-16-review-status-filter-design.md)
 - [日期选择器与视频标记](docs/superpowers/specs/2026-06-21-date-picker-video-markers-design.md)
+- [脏数据解析](docs/superpowers/specs/2026-06-28-dirty-data-parsing-design.md)
 
 ### GG-Server 独立设计文档
 - [GG-Server 多人协作版](docs/superpowers/specs/2026-06-23-gg-server-design.md)
 - [数据迁移方案](docs/superpowers/specs/2026-06-26-data-migration-design.md)
 - [用户管理改进](docs/superpowers/specs/2026-06-27-user-management-improvements-design.md)
 - [视频上传者标签筛选](docs/superpowers/specs/2026-06-27-video-uploader-label-filter-design.md)
+- [MCC 共享用户](docs/superpowers/specs/2026-06-29-mcc-shared-users-design.md)
+- [视频文案权限修复](docs/superpowers/specs/2026-07-01-video-copywriting-permission-fix-design.md)
+- [爬取远程下载](docs/superpowers/specs/2026-07-01-scrape-remote-download-design.md)
+- [视频远程 UI](docs/superpowers/specs/2026-07-01-video-remote-ui-design.md)
+- [统一媒体页面](docs/superpowers/specs/2026-07-01-unified-media-page-design.md)
+- [媒体上传](docs/superpowers/specs/2026-07-01-media-upload-design.md)
+- [产品客户字段](docs/superpowers/specs/2026-07-03-product-customer-field-design.md)
+- [数据分析板块](docs/superpowers/specs/2026-07-03-data-analysis-design.md)
 
 ## 启动方式
 
@@ -350,5 +361,7 @@ npm run dev
 - **任何前端改动后，必须提醒我 `npm run build` 重新构建**
 - **任何后端代码（py/main.py 等）修改后，必须提醒我重启 Flask 服务才能生效**
 - **每次改完 bug 或完成需求后，提醒我提交 git**
+- **每次新的文档都要建立索引**
+- /test-driven-development  使用这个测试新需求
 - SQLite 数据库自动建表 + 迁移，位于 `temp/app.db`
 - 本项目是 ImageCrawling 的独立副本，修改不影响原项目
