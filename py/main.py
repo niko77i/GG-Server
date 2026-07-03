@@ -4074,6 +4074,7 @@ def ad_reports_list():
     report_date = request.args.get("report_date", "").strip()
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
+    search = request.args.get("search", "").strip()
     page = int(request.args.get("page", 1))
     size = int(request.args.get("size", 50))
 
@@ -4087,6 +4088,12 @@ def ad_reports_list():
         where.append("report_date >= ?"); params.append(from_date)
     if to_date:
         where.append("report_date <= ?"); params.append(to_date)
+    if search:
+        where.append(
+            "(account LIKE ? OR campaign LIKE ? OR customer_id LIKE ?)"
+        )
+        like_val = f"%{search}%"
+        params.extend([like_val, like_val, like_val])
 
     total = db.execute(
         f"SELECT COUNT(*) FROM ad_reports WHERE {' AND '.join(where)}", params
@@ -4117,6 +4124,65 @@ def ad_reports_list():
         "products": products,
         "regions": regions
     })
+
+
+@app.route("/api/ad-reports/export", methods=["GET"])
+@jwt_required()
+def ad_reports_export():
+    """导出做表数据为 CSV。"""
+    import csv
+    import io
+
+    user_id = int(get_jwt_identity())
+    product_name = request.args.get("product_name", "").strip()
+    from_date = request.args.get("from_date", "").strip()
+    to_date = request.args.get("to_date", "").strip()
+    search = request.args.get("search", "").strip()
+
+    db = _yt_db()
+    where = ["user_id=?"]; params = [user_id]
+    if product_name:
+        where.append("product_name=?"); params.append(product_name)
+    if from_date:
+        where.append("report_date >= ?"); params.append(from_date)
+    if to_date:
+        where.append("report_date <= ?"); params.append(to_date)
+    if search:
+        like_val = f"%{search}%"
+        where.append(
+            "(account LIKE ? OR campaign LIKE ? OR customer_id LIKE ?)"
+        )
+        params.extend([like_val, like_val, like_val])
+
+    rows = db.execute(
+        f"SELECT product_name, report_date, region, account, customer_id, "
+        f"campaign, cost, impressions, clicks, installs, in_app_actions "
+        f"FROM ad_reports WHERE {' AND '.join(where)} ORDER BY saved_at DESC",
+        params
+    ).fetchall()
+    db.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "产品名", "日期", "地区", "账户名", "客户ID", "广告系列",
+        "花费", "展示", "点击", "安装", "应用内操作"
+    ])
+    for r in rows:
+        writer.writerow(list(r))
+
+    csv_content = output.getvalue()
+    output.close()
+
+    from flask import Response
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=ad_reports_export.csv",
+            "Content-Type": "text/csv; charset=utf-8-sig",
+        }
+    )
 
 
 @app.route("/api/ad-reports/<int:report_id>", methods=["PUT"])
