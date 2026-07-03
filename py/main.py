@@ -4021,11 +4021,12 @@ def ad_reports_save():
                 "UPDATE ad_reports SET "
                 "cost = cost + ?, impressions = impressions + ?, clicks = clicks + ?, "
                 "installs = installs + ?, in_app_actions = in_app_actions + ?, "
-                "cost_per_in_app = cost_per_in_app + ?, saved_at = datetime('now','localtime') "
+                "cost_per_in_app = cost_per_in_app + ?, region = ?, "
+                "saved_at = datetime('now','localtime') "
                 "WHERE id=?",
                 (agg_row["cost"], agg_row["impressions"], agg_row["clicks"],
                  agg_row["installs"], agg_row["in_app_actions"], agg_row["cost_per_in_app"],
-                 existing["id"])
+                 region, existing["id"])
             )
             saved += 1
         elif existing and existing["id"] in override_set:
@@ -4215,9 +4216,9 @@ def ad_reports_update(report_id):
         if field in data:
             val = data[field]
             if field in ("cost", "installs", "in_app_actions"):
-                val = float(val) if val != "" else 0.0
+                val = float(val or 0)
             elif field in ("impressions", "clicks"):
-                val = int(val) if val != "" else 0
+                val = int(val or 0)
             else:
                 val = str(val).strip() if val else ""
             sets.append(f"{field}=?")

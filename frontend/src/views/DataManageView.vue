@@ -178,7 +178,7 @@ async function loadData() {
     }
     if (searchKeyword.value) params.search = searchKeyword.value
 
-    const { data } = await reportsApi.list(params)
+    const data = await reportsApi.list(params)
     reports.value = data.reports || []
     total.value = data.total || 0
     products.value = data.products || []
@@ -342,8 +342,8 @@ async function handleExport() {
     }
     if (searchKeyword.value) params.search = searchKeyword.value
 
-    const response = await reportsApi.export(params)
-    const url = window.URL.createObjectURL(new Blob([response.data], { type: 'text/csv;charset=utf-8-sig' }))
+    const blob = await reportsApi.export(params)
+    const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
     link.download = 'ad_reports_export.csv'
