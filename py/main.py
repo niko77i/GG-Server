@@ -4182,6 +4182,29 @@ def ad_reports_delete(report_id):
     return jsonify({"success": True})
 
 
+@app.route("/api/ad-reports/batch-delete", methods=["POST"])
+@jwt_required()
+def ad_reports_batch_delete():
+    """批量删除报告（仅 owner）。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    ids = data.get("ids") or []
+
+    if not ids or not isinstance(ids, list):
+        return jsonify({"success": False, "error": "请提供要删除的 ID 列表"}), 400
+
+    db = _yt_db()
+    placeholders = ",".join(["?"] * len(ids))
+    db.execute(
+        f"DELETE FROM ad_reports WHERE id IN ({placeholders}) AND user_id=?",
+        list(ids) + [user_id]
+    )
+    deleted = db.changes()
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "deleted": deleted})
+
+
 @app.route("/api/ad-reports/dashboard", methods=["GET"])
 @jwt_required()
 def ad_reports_dashboard():
