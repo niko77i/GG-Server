@@ -167,6 +167,40 @@
 
 > 注：如果后续需要流式输出，可改为 SSE。首版先做非流式。
 
+### 3.4 新增端点：`POST /api/ad-reports/multi-analysis`
+
+支持临时数据对比的 POST 版本。GET 只能查历史数据，POST 可以传入 `extra_rows` 做历史+新增对比。
+
+**请求体**：
+```json
+{
+  "params": { "x_axis": "cost", "y_axis": "cpi", "group_by": "account", ... },
+  "extra_rows": [
+    { "account": "xxx", "customerId": "xxx", "campaign": "xxx", "cost": 100, "impressions": 1000, ... }
+  ]
+}
+```
+
+**后端逻辑**：
+1. 用 `params` 查询历史数据并聚合（同 GET 逻辑）
+2. 用 `extra_rows` 在 Python 内存中按 `group_by` 维度聚合
+3. 计算 combined stats（历史+新增合并）
+4. 返回 `{ historical: [...points], new: [...points], points: [...all], stats, insights }`
+
+**注意**：`extra_rows` 只用于临时分析，不写入数据库。
+
+### 3.5 数据清洗工具函数
+
+从 ToolkitView 的 `zbProcess` 提取纯函数到 `frontend/src/utils/adsParser.js`：
+
+```js
+export function parseAdsData(rawText, { isYanghu = false, includeCampaignId = false } = {}) {
+  // 返回 { raw: [...], zuobiao: [...], kehu: [...] }
+}
+```
+
+ToolkitView 和多维分析共用此函数。
+
 ## 4. 前端设计
 
 ### 4.1 新增 Tab
@@ -270,16 +304,18 @@
 
 ### 5.3 配置存储
 
-在 `config` 表中存储 `ai_analysis` key，JSON 格式：
+在 `config` 表中按用户隔离存储，key 格式为 `ai_analysis_{user_id}`，JSON 格式：
 ```json
 {
   "enabled": true,
   "provider": "volcano",
   "model": "deepseek-v4-flash",
   "api_key": "<用户提供的key>",
-  "endpoint": "https://ark.cn-beijing.volces.com/api/coding"
+  "endpoint": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"
 }
 ```
+
+提供 `GET/POST /api/config/ai` 端点供前端读写。AI 分析 tab 内可直接配置，无需手动操作数据库。
 
 ### 5.4 错误处理
 
@@ -291,17 +327,19 @@
 
 | 文件 | 变更类型 | 说明 |
 |------|---------|------|
-| `py/main.py` | 修改 | 新增 `multi-analysis` 端点 + `multi-ai-chat` 端点；补全 `analyze` 端点 LLM 调用 |
-| `py/ai_service.py` | 修改（可选） | 新增 `VolcanoChatProvider` 类，或直接在 main.py 用 requests 调用 |
-| `frontend/src/views/AnalysisView.vue` | 修改 | 新增多维分析 tab + 散点图 + 对话区域 + 明细表 |
-| `frontend/src/api/reports.js` | 修改 | 新增 `multiAnalysis()` 和 `multiAiChat()` 两个 API 方法 |
-| `docs/superpowers/specs/2026-07-03-data-analysis-design.md` | 参考 | 更新设计文档，记录新增 tab |
+| `py/main.py` | 修改 | 新增 `GET/POST multi-analysis` + `multi-ai-chat` 端点；补全 `analyze` 端点 LLM 调用；新增 `config/ai` 端点 |
+| `frontend/src/views/AnalysisView.vue` | 修改 | 新增多维分析 tab（散点图+粘贴对比+双色图表+AI结论+对话+明细表） |
+| `frontend/src/views/ToolkitView.vue` | 修改 | 改用共享的数据解析函数 `parseAdsData` |
+| `frontend/src/utils/adsParser.js` | **新建** | 从 ToolkitView 提取的共享数据清洗函数 |
+| `frontend/src/api/reports.js` | 修改 | 新增 `multiAnalysis()`, `multiAnalysisPost()`, `multiAiChat()` |
+| `py/tests/test_ad_reports.py` | 修改 | 新增 9 个多维分析测试 |
 
 ## 7. 验证方式
 
-1. **后端 API 测试**：用 curl/pytest 调用 `GET /api/ad-reports/multi-analysis`，验证不同参数组合返回正确的聚合数据和统计值
-2. **前端散点图**：切换不同 X/Y 轴/分组维度，确认图表正确渲染
-3. **规则引擎兜底**：AI 未启用时，确认 insights 正确生成
-4. **AI 对话**：启用 AI 后，发送问题确认能正常返回分析结论
-5. **维度切换**：修改任何维度参数，确认图表和结论同步更新
-6. **与现有功能隔离**：确认仪表盘/趋势/对比 tab 功能不受影响
+1. **后端 API 测试**：27 个 pytest 全部通过
+2. **前端散点图**：切换不同 X/Y 轴/分组维度，图表正确渲染
+3. **按天拆分**：勾选后每个点=一天数据，散点图正确显示
+4. **粘贴对比**：粘贴原始数据 → 解析 → 加入对比 → 散点图显示蓝色(历史)+红色(新增)
+5. **规则引擎**：无 AI 时自动显示异常值、相关性等结论
+6. **AI 解读**：点击按钮后正确调用火山方舟 deepseek-v4-flash
+7. **AI 配置**：按用户隔离，AI分析tab内直接配置
