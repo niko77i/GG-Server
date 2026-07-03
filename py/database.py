@@ -335,6 +335,25 @@ def _ensure_schema(conn: sqlite3.Connection):
         )
         conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_ad_reports_dedup_v2','1')")
 
+    # 迁移：ad_reports 去重索引 v3 — 从 UNIQUE 降级为普通 INDEX（支持聚合 upsert）
+    ar_migrated_v3 = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_ad_reports_dedup_v3'"
+    ).fetchone()
+    if not ar_migrated_v3:
+        # 检查当前索引是否 UNIQUE
+        idx_info = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_ad_reports_dedup'"
+        ).fetchone()
+        if idx_info and 'UNIQUE' in (idx_info[0] or '').upper():
+            conn.execute("DROP INDEX IF EXISTS idx_ad_reports_dedup")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ad_reports_dedup "
+                "ON ad_reports(user_id, product_name, customer_id, campaign, report_date)"
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_ad_reports_dedup_v3','1')"
+        )
+
     # 初始化地区时区（从 tags 同步已有地区，预设常见时区）
     _init_regions(conn)
 
