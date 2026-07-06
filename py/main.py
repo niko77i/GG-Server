@@ -4082,7 +4082,11 @@ def ad_reports_list():
     db = _yt_db()
     where = ["user_id=?"]; params = [user_id]
     if product_name:
-        where.append("product_name=?"); params.append(product_name)
+        names = [n.strip() for n in product_name.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append("product_name=?"); params.append(names[0])
+        else:
+            where.append(f"product_name IN ({','.join(['?']*len(names))})"); params.extend(names)
     if report_date:
         where.append("report_date=?"); params.append(report_date)
     if from_date:
@@ -4108,14 +4112,30 @@ def ad_reports_list():
     ).fetchall()
 
     # 聚合的产品和地区列表
-    products = [r[0] for r in db.execute(
-        "SELECT DISTINCT product_name FROM ad_reports WHERE user_id=? ORDER BY product_name",
-        (user_id,)
-    ).fetchall()]
-    regions = [r[0] for r in db.execute(
-        "SELECT DISTINCT region FROM ad_reports WHERE user_id=? AND region!='' ORDER BY region",
-        (user_id,)
-    ).fetchall()]
+    # 选地区 → 展示有做表数据的产品；选产品 → 展示产品的配置地区
+    region_filter = request.args.get("region", "").strip()
+    product_filter = request.args.get("product_name", "").strip()
+    uid_str = str(user_id)
+    if region_filter:
+        products = [r[0] for r in db.execute(
+            "SELECT DISTINCT product_name FROM ad_reports WHERE user_id=? AND region=? ORDER BY product_name",
+            (user_id, region_filter)
+        ).fetchall()]
+    else:
+        products = [r[0] for r in db.execute(
+            "SELECT DISTINCT product_name FROM ad_reports WHERE user_id=? ORDER BY product_name",
+            (user_id,)
+        ).fetchall()]
+    if product_filter:
+        regions = [r[0] for r in db.execute(
+            "SELECT DISTINCT region FROM products WHERE product_name=? AND region!='' AND (owner_id=? OR runner_ids LIKE ?) ORDER BY region",
+            (product_filter, user_id, f"%{uid_str}%")
+        ).fetchall()]
+    else:
+        regions = [r[0] for r in db.execute(
+            "SELECT DISTINCT region FROM ad_reports WHERE user_id=? AND region!='' ORDER BY region",
+            (user_id,)
+        ).fetchall()]
 
     db.close()
     return jsonify({
@@ -4143,7 +4163,11 @@ def ad_reports_export():
     db = _yt_db()
     where = ["user_id=?"]; params = [user_id]
     if product_name:
-        where.append("product_name=?"); params.append(product_name)
+        names = [n.strip() for n in product_name.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append("product_name=?"); params.append(names[0])
+        else:
+            where.append(f"product_name IN ({','.join(['?']*len(names))})"); params.extend(names)
     if from_date:
         where.append("report_date >= ?"); params.append(from_date)
     if to_date:
@@ -4285,7 +4309,11 @@ def ad_reports_dashboard():
     db = _yt_db()
     where = ["user_id=?"]; params = [user_id]
     if product_name:
-        where.append("product_name=?"); params.append(product_name)
+        names = [n.strip() for n in product_name.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append("product_name=?"); params.append(names[0])
+        else:
+            where.append(f"product_name IN ({','.join(['?']*len(names))})"); params.extend(names)
     if region:
         where.append("region=?"); params.append(region)
     if from_date:
@@ -4492,7 +4520,12 @@ def ad_reports_trends():
     db = _yt_db()
     where = ["user_id=?"]; params = [user_id]
     if product_name:
-        where.append("product_name=?"); params.append(product_name)
+        names = [n.strip() for n in product_name.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append("product_name=?"); params.append(names[0])
+        else:
+            placeholders = ",".join(["?"] * len(names))
+            where.append(f"product_name IN ({placeholders})"); params.extend(names)
     if region:
         where.append("region=?"); params.append(region)
     if from_date:
@@ -4547,6 +4580,8 @@ def ad_reports_trends():
 def ad_reports_compare():
     """产品/系列聚合对比。"""
     user_id = int(get_jwt_identity())
+    product_name = request.args.get("product_name", "").strip()
+    region = request.args.get("region", "").strip()
     group_by = request.args.get("group_by", "product_name").strip()
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
@@ -4554,6 +4589,14 @@ def ad_reports_compare():
 
     db = _yt_db()
     where = ["user_id=?"]; params = [user_id]
+    if product_name:
+        names = [n.strip() for n in product_name.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append("product_name=?"); params.append(names[0])
+        else:
+            where.append(f"product_name IN ({','.join(['?']*len(names))})"); params.extend(names)
+    if region:
+        where.append("region=?"); params.append(region)
     if from_date:
         where.append("report_date >= ?"); params.append(from_date)
     if to_date:
@@ -4626,7 +4669,13 @@ def ad_reports_cross_user():
         return jsonify({"success": False, "error": "请指定产品"}), 400
 
     db = _yt_db()
-    where = ["product_name=?"]; params = [product_name]
+    where = ["1=1"]
+    names = [n.strip() for n in product_name.split(",") if n.strip()]
+    params = []
+    if len(names) == 1:
+        where.append("product_name=?"); params.append(names[0])
+    else:
+        where.append(f"product_name IN ({','.join(['?']*len(names))})"); params.extend(names)
     if from_date:
         where.append("report_date >= ?"); params.append(from_date)
     if to_date:
@@ -4704,12 +4753,15 @@ def ad_reports_multi_analysis():
 
     db = _yt_db()
     where = ["user_id=?"]; params = [user_id]
-    if product_name:
-        where.append("product_name=?"); params.append(product_name)
-    if campaign:
-        where.append("campaign=?"); params.append(campaign)
-    if account:
-        where.append("account=?"); params.append(account)
+    def _append_multi(col, val):
+        names = [n.strip() for n in val.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append(f"{col}=?"); params.append(names[0])
+        elif names:
+            where.append(f"{col} IN ({','.join(['?']*len(names))})"); params.extend(names)
+    if product_name: _append_multi("product_name", product_name)
+    if campaign: _append_multi("campaign", campaign)
+    if account: _append_multi("account", account)
     if region:
         where.append("region=?"); params.append(region)
     if from_date:
@@ -4737,6 +4789,25 @@ def ad_reports_multi_analysis():
             f"GROUP BY {group_col} ORDER BY total_cost DESC"
         )
     rows = db.execute(sql, params).fetchall()
+    # 筛选选项（联动：产品→包名→账户）
+    def _multi_where(where_list, params_list, col, val):
+        names = [n.strip() for n in val.split(",") if n.strip()]
+        if len(names) == 1: where_list.append(f"{col}=?"); params_list.append(names[0])
+        elif names: where_list.append(f"{col} IN ({','.join(['?']*len(names))})"); params_list.extend(names)
+    cam_where = ["user_id=? AND campaign!=''"]; cam_p = [user_id]
+    if product_name: _multi_where(cam_where, cam_p, "product_name", product_name)
+    if region: cam_where.append("region=?"); cam_p.append(region)
+    if account: _multi_where(cam_where, cam_p, "account", account)
+    campaign_options = [r[0] for r in db.execute(
+        f"SELECT DISTINCT campaign FROM ad_reports WHERE {' AND '.join(cam_where)} ORDER BY campaign", cam_p
+    ).fetchall()]
+    acc_where = ["user_id=? AND account!=''"]; acc_p = [user_id]
+    if product_name: _multi_where(acc_where, acc_p, "product_name", product_name)
+    if region: acc_where.append("region=?"); acc_p.append(region)
+    if campaign: _multi_where(acc_where, acc_p, "campaign", campaign)
+    account_options = [r[0] for r in db.execute(
+        f"SELECT DISTINCT account FROM ad_reports WHERE {' AND '.join(acc_where)} ORDER BY account", acc_p
+    ).fetchall()]
     db.close()
 
     # 计算派生指标
@@ -4873,6 +4944,8 @@ def ad_reports_multi_analysis():
         "points": points,
         "stats": stats,
         "insights": insights,
+        "campaign_options": campaign_options,
+        "account_options": account_options,
     })
 
 
@@ -5024,9 +5097,15 @@ def ad_reports_multi_analysis_post():
     # 查询历史数据
     db = _yt_db()
     where = ["user_id=?"]; wparams = [user_id]
-    if product_name: where.append("product_name=?"); wparams.append(product_name)
-    if campaign: where.append("campaign=?"); wparams.append(campaign)
-    if account: where.append("account=?"); wparams.append(account)
+    def _append_multi2(col, val):
+        names = [n.strip() for n in val.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append(f"{col}=?"); wparams.append(names[0])
+        elif names:
+            where.append(f"{col} IN ({','.join(['?']*len(names))})"); wparams.extend(names)
+    if product_name: _append_multi2("product_name", product_name)
+    if campaign: _append_multi2("campaign", campaign)
+    if account: _append_multi2("account", account)
     if region: where.append("region=?"); wparams.append(region)
     if from_date: where.append("report_date >= ?"); wparams.append(from_date)
     if to_date: where.append("report_date <= ?"); wparams.append(to_date)
@@ -5041,6 +5120,25 @@ def ad_reports_multi_analysis_post():
                f"SUM(clicks) AS total_clicks, SUM(installs) AS total_installs, SUM(in_app_actions) AS total_in_app "
                f"FROM ad_reports WHERE {wc} GROUP BY {group_col} ORDER BY total_cost DESC")
     hist_rows = db.execute(sql, wparams).fetchall()
+    # 筛选选项（联动：产品→包名→账户, 支持多值）
+    def _multi_where_post(where_list, params_list, col, val):
+        names = [n.strip() for n in val.split(",") if n.strip()]
+        if len(names) == 1: where_list.append(f"{col}=?"); params_list.append(names[0])
+        elif names: where_list.append(f"{col} IN ({','.join(['?']*len(names))})"); params_list.extend(names)
+    cam_where = ["user_id=? AND campaign!=''"]; cam_p = [user_id]
+    if product_name: _multi_where_post(cam_where, cam_p, "product_name", product_name)
+    if region: cam_where.append("region=?"); cam_p.append(region)
+    if account: _multi_where_post(cam_where, cam_p, "account", account)
+    campaign_options = [r[0] for r in db.execute(
+        f"SELECT DISTINCT campaign FROM ad_reports WHERE {' AND '.join(cam_where)} ORDER BY campaign", cam_p
+    ).fetchall()]
+    acc_where = ["user_id=? AND account!=''"]; acc_p = [user_id]
+    if product_name: _multi_where_post(acc_where, acc_p, "product_name", product_name)
+    if region: acc_where.append("region=?"); acc_p.append(region)
+    if campaign: _multi_where_post(acc_where, acc_p, "campaign", campaign)
+    account_options = [r[0] for r in db.execute(
+        f"SELECT DISTINCT account FROM ad_reports WHERE {' AND '.join(acc_where)} ORDER BY account", acc_p
+    ).fetchall()]
     db.close()
 
     hist_agg = [dict(r) for r in hist_rows]
@@ -5063,6 +5161,8 @@ def ad_reports_multi_analysis_post():
         "points": all_pts,
         "stats": stats,
         "insights": insights,
+        "campaign_options": campaign_options,
+        "account_options": account_options,
     })
 
 
@@ -5152,7 +5252,11 @@ def ad_reports_dates():
     db = _yt_db()
     where = ["user_id=?"]; params = [user_id]
     if product_name:
-        where.append("product_name=?"); params.append(product_name)
+        names = [n.strip() for n in product_name.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append("product_name=?"); params.append(names[0])
+        else:
+            where.append(f"product_name IN ({','.join(['?']*len(names))})"); params.extend(names)
     if region:
         where.append("region=?"); params.append(region)
 

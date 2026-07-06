@@ -7,9 +7,12 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 
-# 运行时数据（数据库、日志等）
-temp/
-*.db
+# 运行时临时数据（可重新生成）
+temp/scraped_images/
+temp/backups/
+temp/video_set/
+temp/*.bak.*
+temp/server.*
 
 # 配置敏感信息（含密码）
 config/config.json

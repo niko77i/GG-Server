@@ -7,6 +7,9 @@ import os
 import sqlite3
 import json
 import datetime
+import threading
+
+_schema_lock = threading.Lock()
 
 
 def _db_path() -> str:
@@ -33,8 +36,9 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    _ensure_schema(conn)
-    _migrate_if_needed(conn)
+    with _schema_lock:
+        _ensure_schema(conn)
+        _migrate_if_needed(conn)
     return conn
 
 

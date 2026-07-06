@@ -4,7 +4,7 @@
 
     <!-- 筛选栏 -->
     <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
-      <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:160px;" filterable @change="refreshAll">
+      <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:200px;" filterable multiple collapse-tags @change="onGlobalProductChange">
         <el-option v-for="p in filterProducts" :key="p" :label="p" :value="p" />
       </el-select>
       <el-select v-model="filterRegion" placeholder="全部地区" clearable style="width:140px;" @change="refreshAll">
@@ -109,7 +109,10 @@
 
         <!-- 趋势 -->
         <el-tab-pane label="📈 趋势" name="trends">
-          <div style="margin-bottom:8px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+          <div style="margin-bottom:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+            <el-select v-model="trendProducts" placeholder="选择产品（可多选）" style="width:300px;" multiple clearable filterable collapse-tags @change="loadTrends">
+              <el-option v-for="p in trendProductOptions" :key="p" :label="p" :value="p" />
+            </el-select>
             <span>指标：<el-radio-group v-model="trendMetric" size="small" @change="loadTrends">
               <el-radio-button value="cpi">CPI</el-radio-button>
               <el-radio-button value="cost">花费</el-radio-button>
@@ -120,8 +123,17 @@
               <el-radio-button value="campaign">按包</el-radio-button>
               <el-radio-button value="product_name">按产品</el-radio-button>
             </el-radio-group></span>
+            <span v-if="trendLoading" style="font-size:12px;color:#909399;">加载中...</span>
           </div>
-          <div v-if="trendSeries.length" ref="trendChart" style="width:100%;height:360px;"></div>
+          <div v-if="trendSeries.length" ref="trendChart" style="width:100%;height:340px;"></div>
+          <div v-if="trendSeries.length" style="display:flex;gap:6px 16px;flex-wrap:wrap;padding:8px 0 0 60px;">
+            <span v-for="s in trendSeries" :key="s.name" style="display:flex;align-items:center;gap:4px;font-size:11px;color:#666;cursor:pointer;"
+              @click="toggleTrendSeries(s.name)"
+              :style="{ opacity: trendHidden[s.name] ? 0.4 : 1 }">
+              <span style="width:8px;height:8px;border-radius:50%;display:inline-block;" :style="{ background: trendColor(s.name) }"></span>
+              {{ s.name }}
+            </span>
+          </div>
           <el-empty v-else description="暂无趋势数据" />
         </el-tab-pane>
 
@@ -241,11 +253,15 @@
                 <el-option label="产品" value="product_name" />
                 <el-option label="包/系列" value="campaign" />
               </el-select>
-              <el-select v-model="multiFilterProduct" style="width:130px;" size="small" clearable placeholder="全部产品" filterable @change="loadMultiAnalysis">
-                <el-option v-for="p in filterProducts" :key="p" :label="p" :value="p" />
+              <el-select v-model="multiFilterProduct" style="width:180px;" size="small" clearable placeholder="全部产品" filterable multiple collapse-tags @change="onMultiProductChange">
+                <el-option v-for="p in multiProductOptions" :key="p" :label="p" :value="p" />
               </el-select>
-              <el-input v-model="multiFilterCampaign" style="width:130px;" size="small" clearable placeholder="包名筛选" @change="loadMultiAnalysis" />
-              <el-input v-model="multiFilterAccount" style="width:130px;" size="small" clearable placeholder="账户筛选" @change="loadMultiAnalysis" />
+              <el-select v-model="multiFilterCampaign" style="width:150px;" size="small" clearable placeholder="包名筛选" filterable @change="onMultiCampaignChange">
+                <el-option v-for="c in multiCampaignOptions" :key="c" :label="c" :value="c" />
+              </el-select>
+              <el-select v-model="multiFilterAccount" style="width:150px;" size="small" clearable placeholder="账户筛选" filterable @change="loadMultiAnalysis">
+                <el-option v-for="a in multiAccountOptions" :key="a" :label="a" :value="a" />
+              </el-select>
               <el-checkbox v-model="multiSplitDate" size="small" @change="loadMultiAnalysis">按天拆分</el-checkbox>
               <el-button size="small" @click="loadMultiAnalysis">🔄 刷新</el-button>
             </div>
@@ -444,7 +460,7 @@ import * as echarts from 'echarts'
 import { parseAdsData } from '@/utils/adsParser'
 
 const activeTab = ref('dashboard')
-const filterProduct = ref('')
+const filterProduct = ref([])
 const filterRegion = ref('')
 const filterDateRange = ref(null)
 const filterProducts = ref([])
@@ -463,10 +479,39 @@ function dateCellClass(date) {
 const dashboardData = ref(null)
 
 // 趋势
+const trendProducts = ref([])
+const trendProductOptions = computed(() => {
+  // 全局选了产品则趋势下拉只显示那些产品
+  if (filterProduct.value.length) return filterProduct.value
+  return filterProducts.value
+})
 const trendMetric = ref('cpi')
 const trendGroupBy = ref('campaign')
 const trendSeries = ref([])
+const trendLoading = ref(false)
 const trendChart = ref(null)
+const trendHidden = ref({})
+const trendPalette = ['#5470c6','#91cc75','#fac858','#ee6666','#73c0de','#3ba272','#fc8452','#9a60b4','#ea7ccc','#48b8d0',
+  '#d48265','#6e7074','#ca8622','#bda29a','#546570','#c4ccd3','#f6c7b6','#61a0a8','#d48265']
+
+function trendColor(name) {
+  const idx = trendSeries.value.findIndex(s => s.name === name)
+  return trendPalette[idx % trendPalette.length]
+}
+function toggleTrendSeries(name) {
+  trendHidden.value = { ...trendHidden.value, [name]: !trendHidden.value[name] }
+  renderTrendChart()
+}
+
+function onMultiProductChange() {
+  multiFilterCampaign.value = ''
+  multiFilterAccount.value = ''
+  loadMultiAnalysis()
+}
+function onMultiCampaignChange() {
+  multiFilterAccount.value = ''
+  loadMultiAnalysis()
+}
 
 // 对比
 const compareGroupBy = ref('product_name')
@@ -491,15 +536,21 @@ const multiMetrics = [
   { label: '展示', value: 'impressions' },
   { label: '点击', value: 'clicks' },
 ]
+const multiProductOptions = computed(() => {
+  if (filterProduct.value.length) return filterProduct.value
+  return filterProducts.value
+})
 const multiXAxis = ref('cost')
 const multiYAxis = ref('cpi')
 const multiSizeBy = ref('')
 const multiGroupBy = ref('account')
-const multiFilterProduct = ref('')
+const multiFilterProduct = ref([])
 const multiFilterCampaign = ref('')
 const multiFilterAccount = ref('')
 const multiSplitDate = ref(false)
 const multiPoints = ref([])
+const multiCampaignOptions = ref([])
+const multiAccountOptions = ref([])
 const multiStats = ref(null)
 const multiInsights = ref([])
 const multiLoaded = ref(false)
@@ -529,13 +580,20 @@ const multiNewPoints = ref([])
 // 筛选参数
 function filterParams() {
   const p = {}
-  if (filterProduct.value) p.product_name = filterProduct.value
+  const prodArr = Array.isArray(filterProduct.value) ? filterProduct.value : (filterProduct.value ? [filterProduct.value] : [])
+  if (prodArr.length) p.product_name = prodArr.join(',')
   if (filterRegion.value) p.region = filterRegion.value
   if (filterDateRange.value) {
     p.from_date = filterDateRange.value[0]
     p.to_date = filterDateRange.value[1]
   }
   return p
+}
+
+function onGlobalProductChange() {
+  multiFilterCampaign.value = ''
+  multiFilterAccount.value = ''
+  refreshAll()
 }
 
 async function refreshAll() {
@@ -561,32 +619,59 @@ async function loadDashboard() {
 }
 
 async function loadTrends() {
+  trendHidden.value = {}
+  trendLoading.value = true
   try {
-    const res = await reportsApi.trends({ ...filterParams(), metric: trendMetric.value, group_by: trendGroupBy.value })
+    const params = { metric: trendMetric.value, group_by: trendGroupBy.value }
+    if (trendProducts.value.length) params.product_name = trendProducts.value.join(',')
+    if (filterRegion.value) params.region = filterRegion.value
+    if (filterDateRange.value) {
+      params.from_date = filterDateRange.value[0]
+      params.to_date = filterDateRange.value[1]
+    }
+    const res = await reportsApi.trends(params)
     trendSeries.value = res.series || []
     await nextTick()
-    renderTrendChart()
+    if (trendSeries.value.length) renderTrendChart()
   } catch { trendSeries.value = [] }
+  trendLoading.value = false
 }
 
 function renderTrendChart() {
   if (!trendChart.value || !trendSeries.value.length) return
-  let chart = trendChart.value._echart
+  const container = trendChart.value
+  // 确保容器有尺寸
+  if (container.clientWidth === 0 || container.clientHeight === 0) return
+  let chart = container._echart
   if (!chart) {
-    chart = echarts.init(trendChart.value)
-    trendChart.value._echart = chart
+    chart = echarts.init(container)
+    container._echart = chart
   }
+  // 收集所有日期，去重排序
+  const allDates = [...new Set(trendSeries.value.flatMap(s => s.data.map(d => d.date)))].sort()
+  // 每个系列按日期对齐，缺失日期填 null；跳过隐藏的系列
+  const visibleSeries = trendSeries.value.filter(s => !trendHidden.value[s.name])
+  const series = visibleSeries.map(s => {
+    const dateMap = Object.fromEntries(s.data.map(d => [d.date, d.value]))
+    return {
+      name: s.name,
+      type: 'line',
+      data: allDates.map(d => dateMap[d] ?? null),
+      smooth: true,
+      connectNulls: true,
+    }
+  })
+  chart.clear()
   chart.setOption({
     tooltip: { trigger: 'axis' },
-    legend: { data: trendSeries.value.map(s => s.name), bottom: 0 },
-    grid: { left: 60, right: 30, top: 20, bottom: 30 },
-    xAxis: { type: 'category', data: [...new Set(trendSeries.value.flatMap(s => s.data.map(d => d.date)))].sort() },
+    grid: { left: 60, right: 30, top: 20, bottom: 20 },
+    color: ['#5470c6','#91cc75','#fac858','#ee6666','#73c0de','#3ba272','#fc8452','#9a60b4','#ea7ccc','#48b8d0',
+            '#d48265','#6e7074','#ca8622','#bda29a','#546570','#c4ccd3','#f6c7b6','#61a0a8','#d48265'],
+    xAxis: { type: 'category', data: allDates },
     yAxis: { type: 'value' },
-    series: trendSeries.value.map(s => ({
-      name: s.name, type: 'line', data: s.data.map(d => d.value),
-      smooth: true,
-    })),
-  }, true)
+    series,
+  })
+  chart.resize()
 }
 
 async function loadCompare() {
@@ -597,7 +682,7 @@ async function loadCompare() {
 }
 
 async function loadCrossUser() {
-  if (!filterProduct.value) { crossUserData.value = []; return }
+  if (!filterProduct.value.length) { crossUserData.value = []; return }
   try {
     const res = await reportsApi.crossUser({ ...filterParams() })
     crossUserData.value = res.users || []
@@ -667,7 +752,10 @@ async function askAI() {
 // 初始化加载筛选选项
 async function loadFilterOptions() {
   try {
-    const res = await reportsApi.list({ size: 1 })
+    const params = { size: 1 }
+    if (filterRegion.value) params.region = filterRegion.value
+    if (filterProduct.value.length) params.product_name = filterProduct.value.join(',')
+    const res = await reportsApi.list(params)
     filterProducts.value = res.products || []
     filterRegions.value = res.regions || []
   } catch {}
@@ -680,11 +768,41 @@ onMounted(() => {
   checkAIEnabled()
 })
 
-// 切换到趋势 tab 时加载
+// 地区变化时刷新产品列表 + 联动多维分析
+watch(filterRegion, () => {
+  trendProducts.value = []
+  multiFilterCampaign.value = ''
+  multiFilterAccount.value = ''
+  loadFilterOptions()
+  if (activeTab.value === 'multi') loadMultiAnalysis()
+})
+
+// 产品变化时刷新地区列表 + 联动多维分析
+watch(filterProduct, () => {
+  multiFilterCampaign.value = ''
+  multiFilterAccount.value = ''
+  loadFilterOptions()
+  if (activeTab.value === 'multi') {
+    multiFilterProduct.value = filterProduct.value.length ? [...filterProduct.value] : []
+    loadMultiAnalysis()
+  }
+})
+
 watch(activeTab, (tab) => {
-  if (tab === 'trends') loadTrends()
+  if (tab === 'trends') {
+    // 趋势页未选产品则用全局筛选的产品
+    if (!trendProducts.value.length && filterProduct.value.length) {
+      trendProducts.value = [...filterProduct.value]
+    }
+    if (trendProducts.value.length) loadTrends()
+  }
   if (tab === 'compare') loadCompare()
-  if (tab === 'multi') loadMultiAnalysis()
+  if (tab === 'multi') {
+    if (!multiFilterProduct.value.length && filterProduct.value.length) {
+      multiFilterProduct.value = filterProduct.value[0]
+    }
+    loadMultiAnalysis()
+  }
   if (tab === 'crossUser') loadCrossUser()
   if (tab === 'ai') checkAIEnabled()
 })
@@ -719,7 +837,7 @@ async function onCompareToggle(on) {
   try {
     const params = { ...filterParams(), x_axis: multiXAxis.value, y_axis: multiYAxis.value, group_by: multiGroupBy.value }
     if (multiSizeBy.value) params.size_by = multiSizeBy.value
-    if (multiFilterProduct.value) params.product_name = multiFilterProduct.value
+    if (multiFilterProduct.value) params.product_name = multiFilterProduct.value.join(',')
     if (multiFilterCampaign.value) params.campaign = multiFilterCampaign.value
     if (multiFilterAccount.value) params.account = multiFilterAccount.value
     if (multiSplitDate.value) params.split_by_date = '1'
@@ -727,6 +845,8 @@ async function onCompareToggle(on) {
     multiHistPoints.value = res.historical || []
     multiNewPoints.value = res.new || []
     multiPoints.value = res.points || []
+    multiCampaignOptions.value = res.campaign_options || []
+    multiAccountOptions.value = res.account_options || []
     multiStats.value = res.stats || null
     multiInsights.value = res.insights || []
     multiLoaded.value = true
@@ -747,12 +867,14 @@ async function loadMultiAnalysis() {
   try {
     const params = { ...filterParams(), x_axis: multiXAxis.value, y_axis: multiYAxis.value, group_by: multiGroupBy.value }
     if (multiSizeBy.value) params.size_by = multiSizeBy.value
-    if (multiFilterProduct.value) params.product_name = multiFilterProduct.value
+    if (multiFilterProduct.value) params.product_name = multiFilterProduct.value.join(',')
     if (multiFilterCampaign.value) params.campaign = multiFilterCampaign.value
     if (multiFilterAccount.value) params.account = multiFilterAccount.value
     if (multiSplitDate.value) params.split_by_date = '1'
     const res = await reportsApi.multiAnalysis(params)
     multiPoints.value = res.points || []
+    multiCampaignOptions.value = res.campaign_options || []
+    multiAccountOptions.value = res.account_options || []
     multiStats.value = res.stats || null
     multiInsights.value = res.insights || []
     multiAiMessages.value = []
@@ -762,6 +884,8 @@ async function loadMultiAnalysis() {
     renderScatterChart()
   } catch {
     multiPoints.value = []
+    multiCampaignOptions.value = []
+    multiAccountOptions.value = []
     multiStats.value = null
     multiInsights.value = []
     multiLoaded.value = true
