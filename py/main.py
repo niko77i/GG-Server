@@ -1101,14 +1101,16 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
     if not urls:
         return 0, [], []
 
-    # 1. 解析所有 video_id
+    # 1. 解析所有 video_id（去重，保留顺序）
+    seen = set()
     parsed = []
     for url in urls:
         url = url.strip()
         if not url:
             continue
         vid = _extract_youtube_id(url)
-        if vid:
+        if vid and vid not in seen:
+            seen.add(vid)
             parsed.append(vid)
 
     if not parsed:
@@ -1662,6 +1664,7 @@ def products_update(pid):
 def products_delete(pid):
     db = _yt_db()
 
+    db.execute("DELETE FROM product_assets WHERE product_id=?", (pid,))
     db.execute("DELETE FROM packages WHERE product_id=?", (pid,))
     db.execute("DELETE FROM products WHERE id=?", (pid,))
     db.commit(); db.close()

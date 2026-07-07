@@ -13,6 +13,8 @@ temp/backups/
 temp/video_set/
 temp/*.bak.*
 temp/server.*
+temp/*.db-shm
+temp/*.db-wal
 
 # 配置敏感信息（含密码）
 config/config.json
