@@ -9,7 +9,9 @@
         <el-input v-model="form.kpi" />
       </el-form-item>
       <el-form-item label="地区">
-        <el-input v-model="form.region" />
+        <el-select v-model="form.region" filterable clearable placeholder="选择地区" style="width:100%;">
+          <el-option v-for="r in regionOptions" :key="r.name" :label="r.name" :value="r.name" />
+        </el-select>
       </el-form-item>
       <el-form-item label="客户">
         <el-input v-model="form.customer" placeholder="产品所属客户" />
@@ -30,14 +32,24 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { useProductStore } from '@/stores/products'
+import api from '@/api/client'
 
 const props = defineProps({ visible: Boolean, editId: [Number, null], mccOptions: Array })
 const emit = defineEmits(['update:visible', 'saved'])
 const store = useProductStore()
 const saving = ref(false)
+const regionOptions = ref([])
 const form = reactive({ product_name: '', kpi: '', region: '', customer: '', mcc_id: '' })
 
+async function loadRegions() {
+  try {
+    const res = await api.get('/regions/list')
+    regionOptions.value = res.regions || []
+  } catch { regionOptions.value = [] }
+}
+
 function init() {
+  loadRegions()
   if (props.editId) {
     const p = store.products.find(p => p.id === props.editId)
     if (p) Object.assign(form, {

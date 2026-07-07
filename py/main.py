@@ -2112,6 +2112,7 @@ def accounts_list():
     mcc_id = request.args.get("mcc_id", "").strip()
     status = request.args.get("status", "").strip()
     agent = request.args.get("agent", "").strip()
+    timezone = request.args.get("timezone", "").strip()
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
@@ -2125,6 +2126,8 @@ def accounts_list():
         where.append("a.status = ?"); params.append(status)
     if agent:
         where.append("a.agent LIKE ?"); params.append(f"%{agent}%")
+    if timezone:
+        where.append("a.timezone = ?"); params.append(timezone)
     sql = "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code FROM accounts a LEFT JOIN mcc m ON a.mcc_id=m.id"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -2156,8 +2159,9 @@ def accounts_list():
         (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
     ).fetchall()]
     agents = [r["agent"] for r in db.execute("SELECT DISTINCT agent FROM accounts WHERE agent!='' AND owner_id=? ORDER BY agent", (user_id,)).fetchall()]
+    timezone_options = [r["timezone"] for r in db.execute("SELECT DISTINCT timezone FROM accounts WHERE timezone!='' AND owner_id=? ORDER BY timezone", (user_id,)).fetchall()]
     db.close()
-    return jsonify({"success": True, "accounts": accounts, "total": total, "mcc_options": mcc_options, "agents": agents, "status_counts": status_counts})
+    return jsonify({"success": True, "accounts": accounts, "total": total, "mcc_options": mcc_options, "agents": agents, "timezone_options": timezone_options, "status_counts": status_counts})
 
 
 @app.route("/api/accounts/create", methods=["POST"])

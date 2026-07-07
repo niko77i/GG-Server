@@ -5,8 +5,8 @@
       <el-form-item label="账号名称" required>
         <el-input v-model="form.name" />
       </el-form-item>
-      <el-form-item label="账号 ID" required :description="editId ? '不可修改' : ''">
-        <el-input v-model="form.account_id" :disabled="!!editId" />
+      <el-form-item label="账号 ID" required :description="editId ? '不可修改' : ''" :error="accountIdError">
+        <el-input v-model="form.account_id" :disabled="!!editId" placeholder="XXX-XXX-XXXX" @blur="formatAccountId" @input="accountIdError=''" />
       </el-form-item>
       <el-form-item label="所属 MCC">
         <el-select v-model="form.mcc_id" clearable filterable placeholder="（未分配）" style="width:100%;">
@@ -14,7 +14,9 @@
         </el-select>
       </el-form-item>
       <el-form-item label="时区">
-        <el-input v-model="form.timezone" />
+        <el-select v-model="form.timezone" filterable clearable placeholder="选择时区" style="width:100%;">
+          <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+        </el-select>
       </el-form-item>
       <el-form-item label="代理" required>
         <el-select v-model="form.agent" filterable allow-create placeholder="输入或选择" style="width:100%;">
@@ -50,7 +52,45 @@ const emit = defineEmits(['update:visible', 'saved'])
 const store = useAccountStore()
 const saving = ref(false)
 const mccOptions = ref([])
+const accountIdError = ref('')
 const form = reactive({ name: '', account_id: '', mcc_id: '', timezone: '', agent: '', status: '存活', acquired_date: '', death_date: '' })
+
+// Google Ads 账户 ID 格式：XXX-XXX-XXXX（10位数字，含分隔符）
+const ACCOUNT_ID_PATTERN = /^\d{3}-\d{3}-\d{4}$/
+
+function formatAccountId() {
+  const v = form.account_id.trim()
+  if (!v) return
+  // 如果已经是标准格式，不处理
+  if (ACCOUNT_ID_PATTERN.test(v)) return
+  // 如果是纯10位数字，自动格式化为 XXX-XXX-XXXX
+  const digits = v.replace(/\D/g, '')
+  if (digits.length === 10) {
+    form.account_id = `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 10)}`
+  }
+}
+
+function validateAccountId() {
+  const v = form.account_id.trim()
+  if (!v) return true // 空值由 required 检查处理
+  if (!ACCOUNT_ID_PATTERN.test(v)) {
+    accountIdError.value = '格式错误，应为 XXX-XXX-XXXX（10位数字）'
+    return false
+  }
+  return true
+}
+
+// 时区选项（与 SettingsPanel 保持一致）
+function buildTimezoneOptions() {
+  const tzs = []
+  for (let i = -12; i <= 12; i++) {
+    const sign = i > 0 ? '+' : ''
+    tzs.push(`UTC${sign}${i}`)
+  }
+  tzs.push('UTC+5:30', 'UTC+8:45', 'UTC-3:30')
+  return tzs
+}
+const timezoneOptions = buildTimezoneOptions()
 
 // 监听状态变化，自动处理死亡时间
 watch(() => form.status, (newStatus, oldStatus) => {
@@ -87,6 +127,7 @@ async function init() {
 
 async function submit() {
   if (!form.name || !form.account_id || !form.agent) { ElMessage.warning('账号名称、ID 和代理不能为空'); return }
+  if (!validateAccountId()) { ElMessage.warning('账号 ID 格式错误，应为 XXX-XXX-XXXX'); return }
   saving.value = true
   try {
     if (props.editId) {

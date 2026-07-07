@@ -30,11 +30,8 @@
         <el-select v-model="store.acFilters.agent" @change="searchAndLoad" placeholder="全部代理" style="width:130px;" clearable filterable>
           <el-option v-for="a in agentOptions" :key="a" :label="a" :value="a" />
         </el-select>
-        <el-select v-model="acSort" @change="changeSort" style="width:120px;" filterable>
-          <el-option label="MCC+时区" value="mcc_tz" />
-          <el-option label="时区优先" value="tz" />
-          <el-option label="名称排序" value="name" />
-          <el-option label="代理排序" value="agent" />
+        <el-select v-model="store.acFilters.timezone" @change="filterByTimezone" placeholder="全部时区" style="width:140px;" clearable filterable>
+          <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
         </el-select>
       </div>
     </div>
@@ -105,8 +102,8 @@ const batchStatus = ref('')
 const batchMcc = ref('')
 const mccOptions = ref([])
 const agentOptions = ref([])
+const timezoneOptions = ref([])
 const statusCounts = ref({})
-const acSort = ref('mcc_tz')
 let searchTimer = null
 
 onMounted(async () => {
@@ -116,14 +113,14 @@ onMounted(async () => {
 })
 
 async function load() {
-  store.acFilters.sort = acSort.value
   const res = await store.loadAccounts()
   mccOptions.value = res.mcc_options || []
   agentOptions.value = [...new Set([...store.settings.account_agents, ...(res.agents||[])])].filter(Boolean).sort()
+  timezoneOptions.value = res.timezone_options || []
   if (res.status_counts) statusCounts.value = res.status_counts
 }
 
-function changeSort() { store.acPage = 1; load() }
+function filterByTimezone() { store.acPage = 1; load() }
 
 const availableStatuses = computed(() => {
   const configStatuses = store.settings.account_statuses || []

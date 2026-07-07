@@ -11,7 +11,9 @@
         <el-input v-model="form.kpi" />
       </el-form-item>
       <el-form-item label="地区">
-        <el-input v-model="form.region" />
+        <el-select v-model="form.region" filterable clearable placeholder="选择地区" style="width:100%;">
+          <el-option v-for="r in regionOptions" :key="r.name" :label="r.name" :value="r.name" />
+        </el-select>
       </el-form-item>
       <el-form-item label="系列名前缀（可选）">
         <el-input v-model="form.prefix" placeholder="如 P222-A" />
@@ -54,6 +56,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useProductStore } from '@/stores/products'
 import { ElMessage } from 'element-plus'
+import api from '@/api/client'
 
 const props = defineProps({ visible: Boolean })
 const emit = defineEmits(['update:visible', 'saved'])
@@ -62,13 +65,22 @@ const saving = ref(false)
 const parsing = ref(false)
 const parsed = ref([])
 const productNames = ref([])
+const regionOptions = ref([])
 
 const form = reactive({ product_name: '', kpi: '', region: '', prefix: '', text: '' })
 
 onMounted(async () => {
   const res = await store.loadProducts()
   productNames.value = (res.products || []).map(p => ({ name: p.product_name, kpi: p.kpi, region: p.region }))
+  loadRegions()
 })
+
+async function loadRegions() {
+  try {
+    const res = await api.get('/regions/list')
+    regionOptions.value = res.regions || []
+  } catch { regionOptions.value = [] }
+}
 
 function init() {
   Object.assign(form, { product_name: '', kpi: '', region: '', prefix: '', text: '' })

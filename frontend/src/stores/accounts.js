@@ -7,7 +7,7 @@ export const useAccountStore = defineStore('accounts', {
     acTotal: 0,
     acPage: 1,
     acPageSize: 20,
-    acFilters: { search: '', status: '', mcc_id: '', agent: '' },
+    acFilters: { search: '', status: '', mcc_id: '', agent: '', timezone: '' },
     mccList: [],
     mccTotal: 0,
     mccPage: 1,
