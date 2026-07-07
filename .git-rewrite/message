@@ -1,1 +1,0 @@
-fix: add missing JWT auth, owner_id checks, and scope filtering
