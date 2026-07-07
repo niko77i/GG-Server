@@ -10,8 +10,10 @@ export const useAuthStore = defineStore('auth', {
   getters: {
     isAdmin: (state) => ['developer', 'admin'].includes(state.user?.role),
     isDeveloper: (state) => state.user?.role === 'developer',
+    isViewer: (state) => state.user?.role === 'viewer',
+    canAccessProducts: (state) => ['developer', 'admin', 'viewer'].includes(state.user?.role),
     roleLabel: (state) => {
-      const labels = { developer: '开发者', admin: '管理员', user: '用户', hidden: '已禁用' }
+      const labels = { developer: '开发者', admin: '管理员', viewer: '观察者', user: '用户', hidden: '已禁用' }
       return labels[state.user?.role] || state.user?.role || ''
     }
   },

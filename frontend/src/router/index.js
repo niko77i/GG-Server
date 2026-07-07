@@ -20,12 +20,11 @@ const routes = [
     path: '/accounts',
     component: () => import('../views/AccountsView.vue'),
     redirect: '/accounts/products',
-    meta: { admin: true },
     children: [
       { path: 'products', component: () => import('../views/ProductPanel.vue'), meta: { title: '产品管理' } },
-      { path: 'ads', component: () => import('../views/AdsAccountPanel.vue'), meta: { title: '广告账户' } },
-      { path: 'mcc', component: () => import('../views/MccPanel.vue'), meta: { title: 'MCC 管理' } },
-      { path: 'settings', component: () => import('../views/SettingsPanel.vue'), meta: { title: '设置' } },
+      { path: 'ads', component: () => import('../views/AdsAccountPanel.vue'), meta: { admin: true, title: '广告账户' } },
+      { path: 'mcc', component: () => import('../views/MccPanel.vue'), meta: { admin: true, title: 'MCC 管理' } },
+      { path: 'settings', component: () => import('../views/SettingsPanel.vue'), meta: { admin: true, title: '设置' } },
     ]
   },
   {
@@ -89,6 +88,11 @@ router.beforeEach((to, from, next) => {
   }
   if (!auth.isLoggedIn) {
     next('/login?redirect=' + encodeURIComponent(to.fullPath))
+    return
+  }
+  // viewer 只能访问 /accounts/products，不能访问其他账户子页面
+  if (auth.isViewer && to.path.startsWith('/accounts') && to.path !== '/accounts/products' && !to.path.startsWith('/accounts/products/')) {
+    next('/accounts/products')
     return
   }
   next()

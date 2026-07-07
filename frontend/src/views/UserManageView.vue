@@ -40,6 +40,7 @@
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="user" :disabled="row.role === 'user'">普通用户</el-dropdown-item>
+                  <el-dropdown-item command="viewer" :disabled="row.role === 'viewer'">观察者</el-dropdown-item>
                   <el-dropdown-item command="admin" :disabled="row.role === 'admin'">管理员</el-dropdown-item>
                   <el-dropdown-item command="hidden" :disabled="row.role === 'hidden'">禁用</el-dropdown-item>
                 </el-dropdown-menu>
@@ -76,6 +77,7 @@
         <el-form-item label="角色">
           <el-select v-model="createForm.role" style="width:100%">
             <el-option label="普通用户" value="user" />
+            <el-option label="观察者" value="viewer" />
             <el-option label="管理员" value="admin" />
           </el-select>
         </el-form-item>
@@ -165,16 +167,16 @@ function isSelf(uid) {
 function canModify(row) {
   if (isSelf(row.id)) return false
   if (authStore.isDeveloper) return true
-  // 管理员只能操作普通用户和已禁用用户，不能操作其他管理员
-  return ['user', 'hidden'].includes(row.role)
+  // 管理员只能操作普通用户、观察者和已禁用用户，不能操作其他管理员
+  return ['user', 'viewer', 'hidden'].includes(row.role)
 }
 
 function roleType(role) {
-  const m = { developer: 'danger', admin: 'warning', user: 'success', hidden: 'info' }
+  const m = { developer: 'danger', admin: 'warning', viewer: '', user: 'success', hidden: 'info' }
   return m[role] || 'info'
 }
 function roleLabel(role) {
-  const m = { developer: '开发者', admin: '管理员', user: '用户', hidden: '已禁用' }
+  const m = { developer: '开发者', admin: '管理员', viewer: '观察者', user: '用户', hidden: '已禁用' }
   return m[role] || role
 }
 

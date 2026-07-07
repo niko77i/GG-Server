@@ -4,9 +4,9 @@
     <div class="sticky-tabs" style="flex-shrink:0;">
       <el-tabs :model-value="activeTab" @update:model-value="switchTab">
         <el-tab-pane label="产品管理" name="products" />
-        <el-tab-pane label="广告账户" name="ads" />
-        <el-tab-pane label="MCC 管理" name="mcc" />
-        <el-tab-pane label="设置" name="settings" />
+        <el-tab-pane v-if="auth.isAdmin" label="广告账户" name="ads" />
+        <el-tab-pane v-if="auth.isAdmin" label="MCC 管理" name="mcc" />
+        <el-tab-pane v-if="auth.isAdmin" label="设置" name="settings" />
       </el-tabs>
     </div>
     <div style="flex:1;min-height:0;overflow-y:auto;">
@@ -18,7 +18,9 @@
 <script setup>
 import { computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
 const activeTab = computed(() => {

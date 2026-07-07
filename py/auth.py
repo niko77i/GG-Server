@@ -159,7 +159,7 @@ def toggle_user_status(user_id: int) -> dict | None:
         row = cur.fetchone()
         if not row or row["role"] == "developer":
             return None
-        new_role = "hidden" if row["role"] in ("user", "admin") else "user"
+        new_role = "hidden" if row["role"] in ("user", "admin", "viewer") else "user"
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, user_id))
         conn.commit()
         return get_user_by_id(user_id)

@@ -1476,6 +1476,16 @@ def products_list():
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
 
+    # viewer 默认查看全部产品
+    if runner == "mine":
+        try:
+            current_uid = int(get_jwt_identity())
+            current_user = auth.get_user_by_id(current_uid)
+            if current_user and current_user["role"] == "viewer":
+                runner = "all"
+        except Exception:
+            pass
+
     where = []; params = []
     if runner == "mine":
         try:
@@ -1587,6 +1597,8 @@ def products_list():
 @app.route("/api/products/create", methods=["POST"])
 @jwt_required(optional=True)
 def products_create():
+    reject = _reject_viewer()
+    if reject: return reject
     data = request.get_json(silent=True) or {}
     product_name = (data.get("product_name") or "").strip()
     kpi = (data.get("kpi") or "").strip()
@@ -1649,7 +1661,10 @@ def products_create():
 
 
 @app.route("/api/products/<int:pid>", methods=["PUT"])
+@jwt_required()
 def products_update(pid):
+    reject = _reject_viewer()
+    if reject: return reject
     data = request.get_json(silent=True) or {}
     db = _yt_db()
 
@@ -1661,7 +1676,10 @@ def products_update(pid):
 
 
 @app.route("/api/products/<int:pid>", methods=["DELETE"])
+@jwt_required()
 def products_delete(pid):
+    reject = _reject_viewer()
+    if reject: return reject
     db = _yt_db()
 
     db.execute("DELETE FROM product_assets WHERE product_id=?", (pid,))
@@ -1675,6 +1693,8 @@ def products_delete(pid):
 @jwt_required()
 def products_merge():
     """合并多个产品到主产品。"""
+    reject = _reject_viewer()
+    if reject: return reject
     data = request.get_json(silent=True) or {}
     master_id = data.get("master_id")  # 主产品 ID（保留）
     merge_ids = data.get("merge_ids") or []  # 被合并产品 ID 列表
@@ -1797,6 +1817,8 @@ def _link_mcc_chain_to_user(db, mcc_id, uid, visited=None):
 @jwt_required()
 def products_update_runners(pid):
     """更新产品的 runner 列表。新增 runner 时自动分配产品 MCC。"""
+    reject = _reject_viewer()
+    if reject: return reject
     data = request.get_json(silent=True) or {}
     runner_ids = data.get("runner_ids")  # list of user IDs
 
@@ -1880,7 +1902,10 @@ def products_detail(pid):
 
 
 @app.route("/api/products/<int:pid>/packages", methods=["POST"])
+@jwt_required()
 def products_add_package(pid):
+    reject = _reject_viewer()
+    if reject: return reject
     data = request.get_json(silent=True) or {}
     series_name = (data.get("series_name") or "").strip()
     package_name = (data.get("package_name") or "").strip()
@@ -1907,7 +1932,10 @@ def products_add_package(pid):
 
 
 @app.route("/api/products/packages/<int:pkg_id>", methods=["PUT"])
+@jwt_required()
 def products_update_package(pkg_id):
+    reject = _reject_viewer()
+    if reject: return reject
     data = request.get_json(silent=True) or {}
     db = _yt_db()
 
@@ -1919,7 +1947,10 @@ def products_update_package(pkg_id):
 
 
 @app.route("/api/products/packages/<int:pkg_id>", methods=["DELETE"])
+@jwt_required()
 def products_delete_package(pkg_id):
+    reject = _reject_viewer()
+    if reject: return reject
     db = _yt_db()
 
     db.execute("DELETE FROM packages WHERE id=?", (pkg_id,))
@@ -1928,7 +1959,10 @@ def products_delete_package(pkg_id):
 
 
 @app.route("/api/products/import-text", methods=["POST"])
+@jwt_required()
 def products_import_text():
+    reject = _reject_viewer()
+    if reject: return reject
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
     product_name = (data.get("product_name") or "").strip()
@@ -2640,7 +2674,8 @@ def _resolve_initial_dir(path: str) -> str | None:
 
 
 def _ps_file_dialog_fast(filter_str, title="选择文件", start_dir=None):
-    init = f"$d.InitialDirectory = '{start_dir.replace('/', '\\')}';" if start_dir else ""
+    _sdir = start_dir.replace('/', '\\') if start_dir else ""
+    init = f"$d.InitialDirectory = '{_sdir}';" if start_dir else ""
     ps = f'''
 Add-Type -AssemblyName System.Windows.Forms
 $d=New-Object System.Windows.Forms.OpenFileDialog
@@ -2654,7 +2689,8 @@ if($d.ShowDialog()-eq[System.Windows.Forms.DialogResult]::OK){{$d.FileName}}
     except: return None
 
 def _ps_save_dialog_fast(title="保存文件", start_dir=None):
-    init = f"$d.InitialDirectory = '{start_dir.replace('/', '\\')}';" if start_dir else ""
+    _sdir = start_dir.replace('/', '\\') if start_dir else ""
+    init = f"$d.InitialDirectory = '{_sdir}';" if start_dir else ""
     ps = f'''
 Add-Type -AssemblyName System.Windows.Forms
 $d=New-Object System.Windows.Forms.SaveFileDialog
@@ -2668,7 +2704,8 @@ if($d.ShowDialog()-eq[System.Windows.Forms.DialogResult]::OK){{$d.FileName}}
     except: return None
 
 def _ps_folder_dialog_fast(title="选择文件夹", start_dir=None):
-    init = f"$d.SelectedPath = '{start_dir.replace('/', '\\')}';" if start_dir else ""
+    _sdir = start_dir.replace('/', '\\') if start_dir else ""
+    init = f"$d.SelectedPath = '{_sdir}';" if start_dir else ""
     ps = f'''
 Add-Type -AssemblyName System.Windows.Forms
 $d=New-Object System.Windows.Forms.FolderBrowserDialog
@@ -3232,11 +3269,21 @@ def auth_custom_name_set():
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required(optional=True)
 def users_names():
-    """返回所有用户的 id/username/display_name，供 runner 选择器使用。"""
+    """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。"""
     db = database.get_db()
-    rows = db.execute(
-        "SELECT id, username, display_name FROM users WHERE role NOT IN ('hidden','user') ORDER BY id"
-    ).fetchall()
+    rows = db.execute("""
+        SELECT DISTINCT u.id, u.username, u.display_name
+        FROM users u
+        JOIN products p ON (
+            p.owner_id = u.id
+            OR p.runner_ids = '[' || u.id || ']'
+            OR p.runner_ids LIKE '[' || u.id || ',%'
+            OR p.runner_ids LIKE '%, ' || u.id || ',%'
+            OR p.runner_ids LIKE '%, ' || u.id || ']'
+        )
+        WHERE u.role != 'hidden'
+        ORDER BY u.id
+    """).fetchall()
     db.close()
     return jsonify({"success": True, "users": [dict(r) for r in rows]})
 
@@ -3257,7 +3304,7 @@ def admin_create_user():
         return jsonify(success=False, error="Username must be 4-20 characters"), 400
     if not password or len(password) < 6:
         return jsonify(success=False, error="Password must be at least 6 characters"), 400
-    if role not in ("user", "admin"):
+    if role not in ("user", "admin", "viewer"):
         return jsonify(success=False, error="Invalid role"), 400
     existing = auth.get_user_by_username(username)
     if existing:
@@ -3284,10 +3331,10 @@ def admin_list_users():
 
 
 def _can_modify_user(actor: dict, target: dict) -> bool:
-    """admin 只能操作 user/hidden，不能操作其他 admin。developer 不受限。"""
+    """admin 只能操作 user/viewer/hidden，不能操作其他 admin。developer 不受限。"""
     if actor["role"] == "developer":
         return True
-    return target["role"] in ("user", "hidden")
+    return target["role"] in ("user", "viewer", "hidden")
 
 
 @app.route("/api/admin/users/<int:uid>/role", methods=["POST"])
@@ -3306,7 +3353,7 @@ def admin_update_role(uid):
         return jsonify(success=False, error="不能操作同级管理员"), 403
     data = request.get_json()
     new_role = data.get("role", "")
-    if new_role not in ("user", "admin", "hidden"):
+    if new_role not in ("user", "admin", "viewer", "hidden"):
         return jsonify(success=False, error="Invalid role"), 400
     if auth.update_user_role(uid, new_role):
         return jsonify(success=True)
@@ -3358,6 +3405,7 @@ def admin_delete_user(uid):
         conn.execute("UPDATE copywritings SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE scrape_cache SET scraped_by = NULL WHERE scraped_by = ?", (uid,))
         conn.execute("DELETE FROM import_history WHERE user_id = ?", (uid,))
+        conn.execute("DELETE FROM ad_reports WHERE user_id = ?", (uid,))
         # 现在可以安全删除用户
         conn.execute("DELETE FROM users WHERE id = ?", (uid,))
         conn.commit()
@@ -3482,6 +3530,18 @@ def admin_required(fn):
             return jsonify({"success": False, "error": "权限不足"}), 403
         return fn(*args, **kwargs)
     return wrapper
+
+
+def _reject_viewer():
+    """如果当前用户是 viewer，返回 403 错误响应；否则返回 None。"""
+    try:
+        user_id = int(get_jwt_identity())
+    except Exception:
+        return None  # 未登录，由 @jwt_required() 处理
+    user = auth.get_user_by_id(user_id)
+    if user and user["role"] == "viewer":
+        return jsonify({"success": False, "error": "权限不足：只读用户无法执行此操作"}), 403
+    return None
 
 
 # ---------- Data Import/Export ----------
@@ -3698,6 +3758,8 @@ def product_assets_list(pid):
 @jwt_required()
 def product_assets_add(pid):
     """向产品添加成效素材（批量导入 YouTube 视频 + 建立关联）。"""
+    reject = _reject_viewer()
+    if reject: return reject
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     urls = data.get("urls") or []
@@ -3755,6 +3817,8 @@ def product_assets_add(pid):
 @jwt_required()
 def product_assets_delete(pid, video_id):
     """移除产品的成效素材关联（不删除 videos 表中的视频）。"""
+    reject = _reject_viewer()
+    if reject: return reject
     db = _yt_db()
     db.execute("DELETE FROM product_assets WHERE product_id=? AND video_id=?", (pid, video_id))
     db.commit(); db.close()

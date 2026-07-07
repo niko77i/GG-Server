@@ -2,8 +2,8 @@
   <div style="display:flex;flex-direction:column;height:100%;">
     <!-- 工具栏 — 固定 -->
     <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
-      <el-button type="primary" @click="showProductModal()">➕ 新增产品</el-button>
-      <el-button @click="copyVisible = true">📋 复制导入</el-button>
+      <el-button v-if="!auth.isViewer" type="primary" @click="showProductModal()">➕ 新增产品</el-button>
+      <el-button v-if="!auth.isViewer" @click="copyVisible = true">📋 复制导入</el-button>
       <el-radio-group v-model="runnerFilter" @change="onRunnerFilterChange" size="small">
         <el-radio-button value="mine">我在跑的 ({{ runnerCounts.mine ?? '...' }})</el-radio-button>
         <el-radio-button value="all">全部产品 ({{ runnerCounts.all ?? '...' }})</el-radio-button>
@@ -23,7 +23,7 @@
         <el-radio-button :value="true">已暂停</el-radio-button>
       </el-radio-group>
       <el-button
-        v-if="selectedIds.length >= 2"
+        v-if="selectedIds.length >= 2 && !auth.isViewer"
         type="warning"
         @click="mergeProducts"
       >
@@ -69,6 +69,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useAuthStore } from '@/stores/auth'
 import { useProductStore } from '@/stores/products'
 import ProductCard from '@/components/ProductCard.vue'
 import ProductModal from '@/components/ProductModal.vue'
@@ -79,10 +80,11 @@ import { ElMessageBox, ElMessage } from 'element-plus'
 import { productsApi } from '@/api/products'
 import api from '@/api/client'
 
+const auth = useAuthStore()
 const store = useProductStore()
 const regions = ref([])
 const mccOptions = ref([])
-const runnerFilter = ref('mine')
+const runnerFilter = ref(auth.isViewer ? 'all' : 'mine')
 const runnerUserId = ref(null)
 const runnerUserOptions = ref([])
 const runnerCounts = ref({ mine: '...', all: '...' })

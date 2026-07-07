@@ -61,12 +61,25 @@ const navItems = [
   { key: 'data-manage', icon: '📋', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'数据管理',path:'/data-manage'}]}]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'⚙️',label:'用户管理',path:'/admin/users'}]}]},
 ]
-  const visibleNavItems = computed(() => navItems.filter(n => !n.admin || auth.isAdmin))
+  const visibleNavItems = computed(() => navItems.filter(n => {
+    // accounts 对 admin 和 viewer 都可见
+    if (n.key === 'accounts') return auth.canAccessProducts
+    if (n.admin) return auth.isAdmin
+    return true
+  }))
 const currentNav = computed(() => navItems.find(n => n.key === activeSection.value))
 const detailTitle = computed(() => activeSection.value === 'settings' ? '设置' : (currentNav.value?.label || ''))
 const detailSections = computed(() => {
   if (activeSection.value === 'settings') return [{ title: '系统', items: [{ icon:'⚙',label:'账户设置',path:'/accounts/settings'}] }]
-  return currentNav.value?.sections || []
+  const sections = currentNav.value?.sections || []
+  // viewer 只能看到产品管理的侧边栏入口
+  if (auth.isViewer && activeSection.value === 'accounts') {
+    return sections.map(sec => ({
+      ...sec,
+      items: sec.items.filter(item => item.path === '/accounts/products')
+    })).filter(sec => sec.items.length > 0)
+  }
+  return sections
 })
 function isActive(p) { return route.path === p || route.path.startsWith(p + '/') }
 function selectTab(key) {

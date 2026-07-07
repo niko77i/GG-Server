@@ -45,12 +45,12 @@
         </div>
         <div style="display:flex;gap:4px;">
           <el-button size="small" @click.stop="$emit('detail', product.id)">📋</el-button>
-          <el-button size="small" @click.stop="$emit('toggle-pause', {id: product.id, paused: !product.status})">
+          <el-button v-if="!auth.isViewer" size="small" @click.stop="$emit('toggle-pause', {id: product.id, paused: !product.status})">
             {{ product.status ? '▶' : '⏸' }}
           </el-button>
-          <el-button size="small" @click.stop="$emit('edit', product.id)">✏️</el-button>
-          <el-button size="small" @click.stop="$emit('add-pkg', product.id)" type="success">➕包</el-button>
-          <el-button size="small" @click.stop="$emit('del', product.id)" type="danger">🗑</el-button>
+          <el-button v-if="!auth.isViewer" size="small" @click.stop="$emit('edit', product.id)">✏️</el-button>
+          <el-button v-if="!auth.isViewer" size="small" @click.stop="$emit('add-pkg', product.id)" type="success">➕包</el-button>
+          <el-button v-if="!auth.isViewer" size="small" @click.stop="$emit('del', product.id)" type="danger">🗑</el-button>
           <span style="margin-left:4px;color:#888;">{{ expanded ? '▲' : '▼' }}</span>
         </div>
       </div>
@@ -61,7 +61,7 @@
         <span style="display:flex;align-items:center;gap:6px;">
           <el-button size="small" text @click.stop="toggleAll">{{ allChecked ? '☑ 取消全选' : '☑ 全选' }}</el-button>
           <span style="font-size:11px;color:#888;">包含 {{ packages.length }} 个包</span>
-          <el-select v-if="checkedIds.length" :model-value="''" @change="v => batchStatusChange(v)" size="small" style="width:110px;" placeholder="批量改状态">
+          <el-select v-if="checkedIds.length && !auth.isViewer" :model-value="''" @change="v => batchStatusChange(v)" size="small" style="width:110px;" placeholder="批量改状态">
             <el-option label="正常" value="normal" /><el-option label="暂停" value="paused" /><el-option label="掉包" value="dropped" /><el-option label="拒登" value="rejected" />
           </el-select>
           <el-button v-if="checkedIds.length" size="small" @click.stop="batchCopyLinks" type="primary">📋 复制链接</el-button>
@@ -84,14 +84,17 @@
         </div>
         <span style="font-size:11px;color:#888;white-space:nowrap;flex-shrink:0;margin:0 8px;">{{ pkg.created_at || '' }}</span>
         <div style="display:flex;gap:4px;flex-shrink:0;">
-          <el-select :model-value="normalizeStatus(pkg.status)" @change="v => setPkgStatus(pkg.id, v)" size="small" style="width:80px;">
+          <el-select v-if="!auth.isViewer" :model-value="normalizeStatus(pkg.status)" @change="v => setPkgStatus(pkg.id, v)" size="small" style="width:80px;">
             <el-option label="正常" value="normal" />
             <el-option label="暂停" value="paused" />
             <el-option label="掉包" value="dropped" />
             <el-option label="拒登" value="rejected" />
           </el-select>
-          <el-button size="small" @click.stop="editPkg(pkg)">✏️</el-button>
-          <el-button size="small" type="danger" @click.stop="delPkg(pkg.id)">✕</el-button>
+          <span v-else style="font-size:11px;color:#888;width:80px;text-align:center;">
+            {{ { normal: '正常', paused: '暂停', dropped: '掉包', rejected: '拒登' }[normalizeStatus(pkg.status)] || normalizeStatus(pkg.status) }}
+          </span>
+          <el-button v-if="!auth.isViewer" size="small" @click.stop="editPkg(pkg)">✏️</el-button>
+          <el-button v-if="!auth.isViewer" size="small" type="danger" @click.stop="delPkg(pkg.id)">✕</el-button>
         </div>
       </div>
     </div>
@@ -100,6 +103,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
+import { useAuthStore } from '@/stores/auth'
 import { useProductStore } from '@/stores/products'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
@@ -111,6 +115,7 @@ const props = defineProps({
   regionTimezone: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['edit', 'detail', 'add-pkg', 'del', 'toggle-pause', 'refresh', 'select'])
+const auth = useAuthStore()
 const store = useProductStore()
 const expanded = ref(false)
 const checkedIds = ref([])
