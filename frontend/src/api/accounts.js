@@ -7,6 +7,10 @@ export const accountsApi = {
   delete: (id)     => api.delete(`/accounts/${id}`),
   batchDelete: (ids) => api.post('/accounts/batch-delete', { ids }),
   batchUpdate: (body) => api.post('/accounts/batch-update', body),
+  batchCreate: (body) => api.post('/accounts/batch-create', body),
+  batchLookup: (accountIds) => api.post('/accounts/batch-lookup', { account_ids: accountIds }),
+  lookup:  (accountId) => api.get('/accounts/lookup', { params: { account_id: accountId } }),
+  reassign: (id, body) => api.put(`/accounts/${id}/reassign`, body || {}),
 }
 
 export const mccApi = {

@@ -2164,6 +2164,92 @@ def accounts_list():
     return jsonify({"success": True, "accounts": accounts, "total": total, "mcc_options": mcc_options, "agents": agents, "timezone_options": timezone_options, "status_counts": status_counts})
 
 
+@app.route("/api/accounts/lookup", methods=["GET"])
+@jwt_required()
+def accounts_lookup():
+    """按 account_id 查询已有账户详情"""
+    account_id = request.args.get("account_id", "").strip()
+    if not account_id:
+        return jsonify({"success": False, "error": "缺少 account_id"}), 400
+    db = _yt_db()
+    existing = db.execute(
+        "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name "
+        "FROM accounts a "
+        "LEFT JOIN mcc m ON a.mcc_id = m.id "
+        "LEFT JOIN users u ON a.owner_id = u.id "
+        "WHERE a.account_id = ?",
+        (account_id,)
+    ).fetchone()
+    db.close()
+    if not existing:
+        return jsonify({"success": True, "found": False})
+    e = dict(existing)
+    return jsonify({
+        "success": True, "found": True,
+        "existing": {
+            "id": e["id"],
+            "name": e["name"],
+            "account_id": e["account_id"],
+            "timezone": e.get("timezone", ""),
+            "agent": e.get("agent", ""),
+            "status": e.get("status", ""),
+            "acquired_date": e.get("acquired_date", ""),
+            "mcc_id": e.get("mcc_id"),
+            "mcc_name": e.get("mcc_name", ""),
+            "mcc_code": e.get("mcc_code", ""),
+            "owner_id": e.get("owner_id"),
+            "owner_name": (e.get("display_name") or e.get("username") or "未知"),
+        }
+    })
+
+
+@app.route("/api/accounts/batch-lookup", methods=["POST"])
+@jwt_required()
+def accounts_batch_lookup():
+    """批量查询多个 account_id 是否已存在"""
+    data = request.get_json(silent=True) or {}
+    account_ids = data.get("account_ids") or []
+    if not account_ids or not isinstance(account_ids, list):
+        return jsonify({"success": False, "error": "请提供 account_ids 列表"}), 400
+
+    db = _yt_db()
+    found = []
+    found_ids = set()
+    for aid in account_ids:
+        aid = str(aid).strip()
+        if not aid:
+            continue
+        existing = db.execute(
+            "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name "
+            "FROM accounts a "
+            "LEFT JOIN mcc m ON a.mcc_id = m.id "
+            "LEFT JOIN users u ON a.owner_id = u.id "
+            "WHERE a.account_id = ?",
+            (aid,)
+        ).fetchone()
+        if existing:
+            e = dict(existing)
+            found.append({
+                "id": e["id"],
+                "name": e["name"],
+                "account_id": e["account_id"],
+                "timezone": e.get("timezone", ""),
+                "agent": e.get("agent", ""),
+                "status": e.get("status", ""),
+                "acquired_date": e.get("acquired_date", ""),
+                "mcc_id": e.get("mcc_id"),
+                "mcc_name": e.get("mcc_name", ""),
+                "mcc_code": e.get("mcc_code", ""),
+                "owner_id": e.get("owner_id"),
+                "owner_name": (e.get("display_name") or e.get("username") or "未知"),
+            })
+            found_ids.add(aid)
+
+    not_found = [aid for aid in account_ids if str(aid).strip() and str(aid).strip() not in found_ids]
+    db.close()
+    return jsonify({"success": True, "found": found, "not_found": not_found})
+
+
 @app.route("/api/accounts/create", methods=["POST"])
 @jwt_required()
 def accounts_create():
@@ -2193,12 +2279,106 @@ def accounts_create():
         return jsonify({"success": True, "id": new_id})
     except _sqlite3.IntegrityError as e:
         err_msg = str(e).lower()
-        db.close()
         if "foreign key" in err_msg:
+            db.close()
             return jsonify({"success": False, "error": f"所属 MCC 不存在，请先创建 MCC"}), 409
         if "account_id" in err_msg or "unique" in err_msg:
+            # 查询已有账户详细信息
+            existing = db.execute(
+                "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name "
+                "FROM accounts a "
+                "LEFT JOIN mcc m ON a.mcc_id = m.id "
+                "LEFT JOIN users u ON a.owner_id = u.id "
+                "WHERE a.account_id = ?",
+                (account_id,)
+            ).fetchone()
+            db.close()
+            if existing:
+                e = dict(existing)
+                return jsonify({
+                    "success": False,
+                    "error": f"账户 ID '{account_id}' 已存在",
+                    "existing": {
+                        "id": e["id"],
+                        "name": e["name"],
+                        "account_id": e["account_id"],
+                        "timezone": e.get("timezone", ""),
+                        "agent": e.get("agent", ""),
+                        "status": e.get("status", ""),
+                        "acquired_date": e.get("acquired_date", ""),
+                        "mcc_name": e.get("mcc_name", ""),
+                        "mcc_code": e.get("mcc_code", ""),
+                        "owner_id": e.get("owner_id"),
+                        "owner_name": (e.get("display_name") or e.get("username") or "未知"),
+                    }
+                }), 409
             return jsonify({"success": False, "error": f"账户 ID '{account_id}' 已存在"}), 409
+        db.close()
         return jsonify({"success": False, "error": f"数据完整性错误: {e}"}), 409
+
+
+@app.route("/api/accounts/batch-create", methods=["POST"])
+@jwt_required()
+def accounts_batch_create():
+    """批量创建账户，共用相同的字段配置"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    account_ids = data.get("account_ids") or []
+    if not account_ids or not isinstance(account_ids, list):
+        return jsonify({"success": False, "error": "请提供 account_ids 列表"}), 400
+
+    common = {
+        "name_prefix": (data.get("name_prefix") or "").strip(),
+        "mcc_id": data.get("mcc_id") or None,
+        "timezone": (data.get("timezone") or "").strip(),
+        "agent": (data.get("agent") or "").strip(),
+        "status": (data.get("status") or "存活").strip(),
+        "acquired_date": (data.get("acquired_date") or datetime.date.today().isoformat()),
+        "death_date": "",
+    }
+
+    import datetime as dt
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    db = _yt_db()
+    created = []
+    skipped = []
+
+    for aid in account_ids:
+        aid = str(aid).strip()
+        if not aid:
+            continue
+        name = (common["name_prefix"] + " " + aid).strip() if common["name_prefix"] else aid
+        try:
+            db.execute(
+                "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,status,acquired_date,death_date,created_at,updated_at,owner_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (name, aid, common["mcc_id"], common["timezone"], common["agent"],
+                 common["status"], common["acquired_date"], common["death_date"], now, now, user_id))
+            db.commit()
+            created.append(aid)
+        except _sqlite3.IntegrityError as e:
+            err_msg = str(e).lower()
+            if "account_id" in err_msg or "unique" in err_msg:
+                # 查询已有归属人
+                ex = db.execute(
+                    "SELECT u.display_name, u.username FROM accounts a "
+                    "LEFT JOIN users u ON a.owner_id = u.id WHERE a.account_id = ?",
+                    (aid,)
+                ).fetchone()
+                owner = "未知"
+                if ex:
+                    owner = ex["display_name"] or ex["username"] or "未知"
+                skipped.append({"account_id": aid, "reason": f"已存在，归属人：{owner}"})
+            else:
+                skipped.append({"account_id": aid, "reason": str(e)})
+
+    db.close()
+    return jsonify({
+        "success": True,
+        "created": len(created),
+        "created_ids": created,
+        "skipped": skipped,
+    })
 
 
 @app.route("/api/accounts/<int:aid>", methods=["PUT"])
@@ -2227,6 +2407,61 @@ def accounts_update(aid):
         return jsonify({"success": False, "error": str(e)}), 500
     finally:
         db.close()
+
+
+@app.route("/api/accounts/<int:aid>/reassign", methods=["PUT"])
+@jwt_required()
+def accounts_reassign(aid):
+    """将已有账户归属权转移给当前用户，同时可选更新其他字段"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    db = _yt_db()
+    try:
+        # 检查账户是否存在
+        existing = db.execute(
+            "SELECT a.*, u.username, u.display_name FROM accounts a "
+            "LEFT JOIN users u ON a.owner_id = u.id WHERE a.id = ?",
+            (aid,)
+        ).fetchone()
+        if not existing:
+            db.close()
+            return jsonify({"success": False, "error": "账户不存在"}), 404
+        if int(existing["owner_id"] or 0) == user_id:
+            db.close()
+            return jsonify({"success": False, "error": "该账户已属于当前用户，无需转移"}), 409
+
+        old_owner = existing["display_name"] or existing["username"] or "未知"
+
+        # 转移归属权
+        db.execute(
+            "UPDATE accounts SET owner_id = ?, updated_at = datetime('now','localtime') WHERE id = ?",
+            (user_id, aid)
+        )
+
+        # 同时更新其他可编辑字段
+        for f in ["name", "timezone", "agent", "status", "acquired_date"]:
+            if f in data and data[f] is not None:
+                db.execute(
+                    f"UPDATE accounts SET {f} = ? WHERE id = ?",
+                    (str(data[f]).strip() if isinstance(data[f], str) else data[f], aid)
+                )
+
+        # MCC 特殊处理：空字符串转 None
+        if "mcc_id" in data:
+            mcc_val = data["mcc_id"]
+            if mcc_val is None or mcc_val == 0 or mcc_val == "0" or (isinstance(mcc_val, str) and not mcc_val.strip()):
+                mcc_val = None
+            db.execute("UPDATE accounts SET mcc_id = ? WHERE id = ?", (mcc_val, aid))
+
+        db.commit()
+        db.close()
+        return jsonify({
+            "success": True,
+            "message": f"账户「{existing['name']}」已从 {old_owner} 转移至当前用户"
+        })
+    except Exception as e:
+        db.close()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/accounts/<int:aid>", methods=["DELETE"])

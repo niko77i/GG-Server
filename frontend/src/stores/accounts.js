@@ -25,6 +25,7 @@ export const useAccountStore = defineStore('accounts', {
       return res
     },
     async createAccount(body) { return accountsApi.create(body) },
+    async reassignAccount(id, body) { return accountsApi.reassign(id, body) },
     async updateAccount(id, body) { return accountsApi.update(id, body) },
     async deleteAccount(id) { await accountsApi.delete(id); return this.loadAccounts() },
     async batchDeleteAccounts(ids) { await accountsApi.batchDelete(ids); return this.loadAccounts() },

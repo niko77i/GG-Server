@@ -417,6 +417,8 @@ function dateCellClass(date) {
 
 // 搜索文本变化时重置页码
 watch(searchText, () => { ytPage.value = 1 })
+// 每页条数变化时重置页码，防止当前页码超出新总页数导致空数据
+watch(ytPageSize, () => { ytPage.value = 1 })
 
 function onDateChange(val) {
   store.filters.from_date = val ? val[0] : ''
