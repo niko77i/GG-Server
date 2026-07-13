@@ -46,6 +46,22 @@
       <el-button type="primary" size="small" :loading="savingCustomName" @click="saveCustomName">保存</el-button>
     </el-card>
 
+    <!-- 邮箱通知 -->
+    <el-card shadow="never" style="margin-bottom:16px;">
+      <template #header>
+        <span style="font-weight:600;">📧 邮箱通知</span>
+      </template>
+      <p style="font-size:12px;color:#888;margin-bottom:8px;">
+        填写 QQ 邮箱，检测到掉包时自动发邮件通知（微信可收到 QQ 邮箱提醒）
+      </p>
+      <el-form :model="emailForm" label-width="80px" size="small">
+        <el-form-item label="QQ 邮箱">
+          <el-input v-model="emailForm.email" placeholder="例如 123456@qq.com" />
+        </el-form-item>
+      </el-form>
+      <el-button type="primary" size="small" :loading="savingEmail" @click="saveEmail">保存</el-button>
+    </el-card>
+
     <!-- 修改密码 -->
     <el-card shadow="never">
       <template #header>
@@ -83,6 +99,9 @@ const savingProfile = ref(false)
 const customNameForm = ref({ custom_name: "" })
 const savingCustomName = ref(false)
 
+const emailForm = ref({ email: "" })
+const savingEmail = ref(false)
+
 const pwdForm = ref({ old_password: "", new_password: "", confirm_password: "" })
 const changingPwd = ref(false)
 
@@ -104,6 +123,11 @@ onMounted(async () => {
     const res = await api.get('/auth/custom-name')
     customNameForm.value.custom_name = res.custom_name || ''
   } catch {}
+  // 加载邮箱
+  try {
+    const res = await api.get('/auth/email')
+    emailForm.value.email = res.email || ''
+  } catch {}
 })
 
 async function saveCustomName() {
@@ -115,6 +139,18 @@ async function saveCustomName() {
     ElMessage.error('更新失败')
   } finally {
     savingCustomName.value = false
+  }
+}
+
+async function saveEmail() {
+  savingEmail.value = true
+  try {
+    await api.put('/auth/email', { email: emailForm.value.email })
+    ElMessage.success('邮箱已更新')
+  } catch (e) {
+    ElMessage.error('更新失败')
+  } finally {
+    savingEmail.value = false
   }
 }
 

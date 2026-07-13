@@ -6,6 +6,9 @@
           <input type="checkbox" :checked="selected" @click.stop="$emit('select')" style="width:auto;cursor:pointer;" />
           <span :style="{ width:'8px',height:'8px',borderRadius:'50%',background: product.status ? '#dc2626' : '#059669' }"></span>
           <strong>{{ product.product_name }}</strong>
+          <el-button size="small" type="warning" plain :loading="checkingDelist" @click.stop="checkDelist">
+            {{ checkingDelist ? '检测中...' : '🔍 是否掉包' }}
+          </el-button>
           <el-tag v-if="product.kpi" size="small" type="warning">{{ product.kpi }}</el-tag>
           <el-tooltip v-if="product.region" placement="top">
             <template #content>时区：{{ regionTimezone[product.region] || '未设置' }}</template>
@@ -70,7 +73,7 @@
       </div>
       <div v-for="pkg in filteredPackages" :key="pkg.id"
         class="pkg-row"
-        :class="{ 'pkg-row--paused': normalizeStatus(pkg.status) === 'paused', 'pkg-row--dropped': normalizeStatus(pkg.status) === 'dropped' }">
+        :class="{ 'pkg-row--paused': normalizeStatus(pkg.status) === 'paused', 'pkg-row--dropped': normalizeStatus(pkg.status) === 'dropped', 'pkg-row--delisted': pkg.is_delisted && normalizeStatus(pkg.status) !== 'dropped' }">
         <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;overflow:hidden;">
           <input type="checkbox" :value="pkg.id" v-model="checkedIds" @click.stop style="width:auto;flex-shrink:0;" />
           <span style="font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer;"
@@ -124,6 +127,7 @@ const checkedIds = ref([])
 const filterStatus = ref('all')
 const editPkgModal = ref(null)
 const productSuffix = ref(props.customName)
+const checkingDelist = ref(false)
 
 // 监听 props 变化（切换筛选时卡片复用），重置后缀
 watch(() => props.customName, (v) => {
@@ -144,6 +148,26 @@ async function copyAssets() {
     await copyToClipboard(links)
     ElMessage.success(`已复制 ${assets.length} 个成效素材链接`)
   } catch { ElMessage.error('获取成效素材失败') }
+}
+
+async function checkDelist() {
+  checkingDelist.value = true
+  try {
+    const res = await api.post(`/products/${props.product.id}/check-delist`)
+    if (res.success) {
+      const delisted = (res.results || []).filter(r => r.is_delisted)
+      if (delisted.length) {
+        ElMessage.warning(`检测到 ${delisted.length} 个包已掉包！`)
+        emit('refresh')
+      } else {
+        ElMessage.success('所有包均正常 ✓')
+      }
+    }
+  } catch {
+    ElMessage.error('检测失败，请稍后重试')
+  } finally {
+    checkingDelist.value = false
+  }
 }
 
 const parsedRunnerIds = computed(() => {
@@ -255,4 +279,5 @@ watch(editPkgModal, async (pkg) => {
 .pkg-row:hover { background: rgba(8,145,178,.06); }
 .pkg-row--paused { opacity: 0.6; }
 .pkg-row--dropped { opacity: 0.4; text-decoration: line-through; }
+.pkg-row--delisted { background: #fef2f2; border-left: 3px solid #ef4444; }
 </style>

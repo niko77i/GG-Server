@@ -1551,11 +1551,16 @@ def products_list():
     if prod_ids:
         placeholders = ",".join("?" * len(prod_ids))
         pkg_rows = db.execute(
-            f"SELECT * FROM packages WHERE product_id IN ({placeholders})", prod_ids
+            f"SELECT pkg.*, dc.is_delisted FROM packages pkg "
+            f"LEFT JOIN delist_checks dc ON pkg.id = dc.package_id "
+            f"WHERE pkg.product_id IN ({placeholders})", prod_ids
         ).fetchall()
         status_order = {"": 0, "0": 0, "rejected": 1, "paused": 2, "dropped": 3}
         for p in pkg_rows:
-            pkg_map.setdefault(p["product_id"], []).append(dict(p))
+            d = dict(p)
+            # is_delisted 可能为 None（无检测记录）
+            d["is_delisted"] = 1 if d.pop("is_delisted", None) else 0
+            pkg_map.setdefault(p["product_id"], []).append(d)
         for pkgs in pkg_map.values():
             pkgs.sort(key=lambda p: (
                 status_order.get((str(p.get("status") or "")).strip(), 0),
@@ -1997,6 +2002,190 @@ def products_delete_package(pkg_id):
     db.execute("DELETE FROM packages WHERE id=?", (pkg_id,))
     db.commit(); db.close()
     return jsonify({"success": True})
+
+
+# ---------- 掉包检测 API ----------
+
+import delist_checker
+
+@app.route("/api/products/<int:pid>/check-delist", methods=["POST"])
+@jwt_required()
+def products_check_delist(pid):
+    """手动检测产品下所有正常状态包的掉包情况。"""
+    reject = _reject_viewer()
+    if reject: return reject
+    db = _yt_db()
+
+    # 获取产品下所有正常状态的包
+    pkgs = db.execute(
+        "SELECT id, package_name, url FROM packages "
+        "WHERE product_id=? AND (status IS NULL OR status='' OR status='0' OR status='normal')",
+        (pid,)
+    ).fetchall()
+
+    if not pkgs:
+        db.close()
+        return jsonify({"success": True, "results": [], "message": "没有需要检测的包"})
+
+    pkg_list = [dict(p) for p in pkgs]
+    results = delist_checker.check_product_packages(pid, pkg_list)
+
+    # 更新/插入 delist_checks 表
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for r in results:
+        db.execute(
+            "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (r["package_id"], pid, 1 if r["is_delisted"] else 0, now, r.get("error", ""))
+        )
+
+    db.commit(); db.close()
+    return jsonify({"success": True, "results": results})
+
+
+@app.route("/api/products/delist-status", methods=["GET"])
+@jwt_required()
+def products_delist_status():
+    """获取当前用户关联产品的掉包检测状态。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+
+    uid_s = str(user_id)
+    # 查找当前用户作为 runner 的产品
+    rows = db.execute(
+        "SELECT dc.package_id, dc.product_id, dc.is_delisted, dc.checked_at, dc.error_msg, "
+        "pkg.package_name, pkg.series_name, pkg.url, pkg.status AS pkg_status, "
+        "prod.product_name "
+        "FROM delist_checks dc "
+        "JOIN packages pkg ON dc.package_id = pkg.id "
+        "JOIN products prod ON dc.product_id = prod.id "
+        "WHERE dc.is_delisted = 1 "
+        "AND (pkg.status IS NULL OR pkg.status = '' OR pkg.status = '0' OR pkg.status NOT IN ('dropped', 'paused')) "
+        "AND (prod.runner_ids = ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ?) "
+        "AND (prod.is_archived IS NULL OR prod.is_archived = 0) "
+        "ORDER BY dc.checked_at DESC",
+        (f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]")
+    ).fetchall()
+
+    delisted_packages = []
+    for r in rows:
+        d = dict(r)
+        d["is_dropped"] = (d.get("pkg_status") or "").strip() in ("dropped",)
+        delisted_packages.append(d)
+
+    db.close()
+    return jsonify({"success": True, "delisted_packages": delisted_packages})
+
+
+@app.route("/api/delist/dismiss", methods=["POST"])
+@jwt_required()
+def delist_dismiss():
+    """记录用户关闭掉包通知的时间。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    package_id = data.get("package_id")
+    if not package_id:
+        return jsonify({"success": False, "error": "缺少 package_id"}), 400
+
+    db = _yt_db()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    existing = db.execute(
+        "SELECT id, first_notified FROM delist_notifications WHERE package_id=? AND user_id=?",
+        (package_id, user_id)
+    ).fetchone()
+
+    if existing:
+        db.execute(
+            "UPDATE delist_notifications SET dismissed_at=?, reminder_count=reminder_count+1 WHERE package_id=? AND user_id=?",
+            (now, package_id, user_id)
+        )
+    else:
+        db.execute(
+            "INSERT INTO delist_notifications(package_id, user_id, first_notified, dismissed_at, reminder_count) "
+            "VALUES(?, ?, 1, ?, 0)",
+            (package_id, user_id, now)
+        )
+
+    db.commit(); db.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/delist/pending", methods=["GET"])
+@jwt_required()
+def delist_pending():
+    """获取当前用户待处理的掉包通知列表。
+
+    返回两种类型的通知：
+    - type='first': 首次通知（尚未弹出过）
+    - type='reminder': 提醒通知（已关闭超过 3 分钟，且包状态未设为 dropped）
+    """
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    uid_s = str(user_id)
+
+    # 查询当前用户作为 runner 的产品中已掉包且未 dropped 的包
+    rows = db.execute(
+        "SELECT dc.package_id, dc.product_id, dc.is_delisted, dc.checked_at, "
+        "pkg.package_name, pkg.series_name, pkg.url, pkg.status AS pkg_status, "
+        "prod.product_name, "
+        "dn.first_notified, dn.dismissed_at, dn.reminder_count "
+        "FROM delist_checks dc "
+        "JOIN packages pkg ON dc.package_id = pkg.id "
+        "JOIN products prod ON dc.product_id = prod.id "
+        "LEFT JOIN delist_notifications dn ON dc.package_id = dn.package_id AND dn.user_id = ? "
+        "WHERE dc.is_delisted = 1 "
+        "AND (pkg.status IS NULL OR pkg.status = '' OR pkg.status = '0' OR pkg.status NOT IN ('dropped', 'paused')) "
+        "AND (prod.runner_ids = ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ?) "
+        "AND (prod.is_archived IS NULL OR prod.is_archived = 0) "
+        "ORDER BY dc.checked_at DESC",
+        (user_id, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]")
+    ).fetchall()
+
+    notifications = []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for r in rows:
+        d = dict(r)
+        pkg_status = (d.get("pkg_status") or "").strip()
+        if pkg_status == "dropped":
+            continue  # 已标记为掉包的不需要通知
+
+        first_notified = d.get("first_notified") or 0
+        dismissed_at = d.get("dismissed_at")
+
+        if not first_notified:
+            # 首次通知
+            notifications.append({
+                "package_id": d["package_id"],
+                "product_id": d["product_id"],
+                "product_name": d["product_name"],
+                "package_name": d["package_name"],
+                "series_name": d["series_name"],
+                "url": d["url"],
+                "type": "first",
+            })
+        elif dismissed_at:
+            try:
+                dismissed_dt = datetime.datetime.fromisoformat(dismissed_at)
+                if dismissed_dt.tzinfo is None:
+                    dismissed_dt = dismissed_dt.replace(tzinfo=datetime.timezone.utc)
+                elapsed = (now - dismissed_dt).total_seconds()
+                if elapsed >= 180:  # 3 分钟 = 180 秒
+                    notifications.append({
+                        "package_id": d["package_id"],
+                        "product_id": d["product_id"],
+                        "product_name": d["product_name"],
+                        "package_name": d["package_name"],
+                        "series_name": d["series_name"],
+                        "url": d["url"],
+                        "type": "reminder",
+                        "reminder_count": d.get("reminder_count", 0),
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    db.close()
+    return jsonify({"success": True, "notifications": notifications})
 
 
 @app.route("/api/products/import-text", methods=["POST"])
@@ -3570,6 +3759,29 @@ def auth_custom_name_set():
     return jsonify({"success": True, "custom_name": custom_name})
 
 
+@app.route("/api/auth/email", methods=["GET"])
+@jwt_required()
+def auth_email_get():
+    user_id = int(get_jwt_identity())
+    db = database.get_db()
+    row = db.execute("SELECT email FROM users WHERE id=?", (user_id,)).fetchone()
+    db.close()
+    return jsonify({"success": True, "email": row["email"] if row else ""})
+
+
+@app.route("/api/auth/email", methods=["PUT"])
+@jwt_required()
+def auth_email_set():
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    db = database.get_db()
+    db.execute("UPDATE users SET email=? WHERE id=?", (email, user_id))
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "email": email})
+
+
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required(optional=True)
 def users_names():
@@ -4005,10 +4217,108 @@ def admin_data_export(uid):
     )
 
 
+def _run_weekly_cleanup_once():
+    """立即执行一次每周清理（清除爬取图片和生成视频，音乐库保留）。"""
+    import shutil as _shutil
+    import datetime as _dt
+    for d in [_SCRAPE_DEFAULT_DIR]:
+        if os.path.isdir(d):
+            _shutil.rmtree(d)
+            os.makedirs(d, exist_ok=True)
+    ai_dir = os.path.join(_SCRAPE_DEFAULT_DIR, "ai")
+    os.makedirs(ai_dir, exist_ok=True)
+    print(f"[Cleanup] 已清理爬取图片和视频: {_dt.datetime.now()}")
+
+
+def _run_delist_check_once():
+    """立即执行一次掉包检测，返回 {total, delisted, results}。"""
+    import delist_checker as _delist_checker
+    import email_sender as _email_sender
+    import json as _json
+
+    smtp_cfg = APP_CONFIG.get("smtp", {})
+    smtp_config = None
+    if smtp_cfg.get("host") and smtp_cfg.get("user"):
+        smtp_config = _email_sender._SmtpConfig(
+            host=smtp_cfg.get("host", "smtp.qq.com"),
+            port=int(smtp_cfg.get("port", 465)),
+            user=smtp_cfg.get("user", ""),
+            password=smtp_cfg.get("password", ""),
+            from_name=smtp_cfg.get("from_name", "GG-Server"),
+        )
+
+    db = database.get_db()
+    results = []
+    try:
+        rows = db.execute("""
+            SELECT pkg.id AS package_id, pkg.product_id, pkg.url, pkg.package_name,
+                   pkg.series_name, prod.product_name, prod.runner_ids
+            FROM packages pkg
+            JOIN products prod ON pkg.product_id = prod.id
+            WHERE (pkg.status IS NULL OR pkg.status = '' OR pkg.status = '0')
+              AND (prod.status IS NULL OR prod.status = '' OR prod.status = '0')
+              AND pkg.url IS NOT NULL AND pkg.url != ''
+              AND (prod.is_archived IS NULL OR prod.is_archived = 0)
+        """).fetchall()
+
+        if not rows:
+            return {"total": 0, "delisted": 0, "results": []}
+
+        pkgs = [dict(r) for r in rows]
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        delisted_list = []
+        for pkg in pkgs:
+            url = (pkg.get("url") or "").strip()
+            if not url:
+                continue
+            is_delisted, error = _delist_checker.check_url_delisted(url)
+            db.execute(
+                "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (pkg["package_id"], pkg["product_id"], 1 if is_delisted else 0, now, error)
+            )
+            results.append({
+                "package_id": pkg["package_id"],
+                "product_id": pkg["product_id"],
+                "package_name": pkg.get("package_name", ""),
+                "is_delisted": is_delisted,
+                "error": error,
+            })
+            if is_delisted:
+                delisted_list.append(pkg)
+
+        db.commit()
+
+        if delisted_list:
+            print(f"[DelistScheduler] 检测完成: {len(pkgs)} 个包, {len(delisted_list)} 个掉包")
+            if smtp_config:
+                for pkg in delisted_list:
+                    try:
+                        runner_ids = _json.loads(pkg.get("runner_ids", "[]"))
+                    except Exception:
+                        runner_ids = []
+                    if runner_ids:
+                        emails = _email_sender.get_runner_emails(db, runner_ids)
+                        if emails:
+                            pkg_info = {
+                                "product_name": pkg.get("product_name", ""),
+                                "series_name": pkg.get("series_name", ""),
+                                "package_name": pkg.get("package_name", ""),
+                                "url": pkg.get("url", ""),
+                            }
+                            _email_sender.send_delist_notification(smtp_config, emails, pkg_info)
+
+        return {"total": len(pkgs), "delisted": len(delisted_list), "results": results}
+    except Exception as e:
+        print(f"[DelistScheduler] 检测出错: {e}")
+        raise
+    finally:
+        db.close()
+
+
 def _start_weekly_cleanup():
     """每周日 24:00 清理爬取图片和生成视频（音乐库保留）。"""
     import datetime as _dt
-    import shutil as _shutil
 
     def _cleanup():
         while True:
@@ -4023,18 +4333,67 @@ def _start_weekly_cleanup():
             if wait > 0:
                 _time.sleep(wait)
 
-            # 清理 scraped_images（含 ai 子目录）
-            for d in [_SCRAPE_DEFAULT_DIR]:
-                if os.path.isdir(d):
-                    _shutil.rmtree(d)
-                    os.makedirs(d, exist_ok=True)
-            # 恢复 ai 子目录
-            ai_dir = os.path.join(_SCRAPE_DEFAULT_DIR, "ai")
-            os.makedirs(ai_dir, exist_ok=True)
-            print(f"[Cleanup] 已清理爬取图片和视频: {_dt.datetime.now()}")
+            _run_weekly_cleanup_once()
 
     t = threading.Thread(target=_cleanup, daemon=True)
     t.start()
+
+
+def _start_delist_scheduler():
+    """启动掉包检测定时任务：启动时立即执行一次，之后每小时执行一次。"""
+
+    def _loop():
+        # 启动时立即执行一次
+        print("[DelistScheduler] 启动，执行首次检测...")
+        try:
+            _run_delist_check_once()
+        except Exception as e:
+            print(f"[DelistScheduler] 首次检测出错: {e}")
+
+        # 之后每小时执行一次
+        while True:
+            _time.sleep(3600)  # 1 小时
+            try:
+                _run_delist_check_once()
+            except Exception as e:
+                print(f"[DelistScheduler] 定时检测出错: {e}")
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+
+
+# ============================================================
+#  定时任务手动触发 API（仅 developer 可调用）
+# ============================================================
+
+@app.route("/api/admin/trigger-weekly-cleanup", methods=["POST"])
+@jwt_required()
+def admin_trigger_weekly_cleanup():
+    """手动触发每周清理任务。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] != "developer":
+        return jsonify(success=False, error="Permission denied"), 403
+    try:
+        _run_weekly_cleanup_once()
+        return jsonify(success=True, message="每周清理已执行完成")
+    except Exception as e:
+        return jsonify(success=False, error=str(e)), 500
+
+
+@app.route("/api/admin/trigger-delist-check", methods=["POST"])
+@jwt_required()
+def admin_trigger_delist_check():
+    """手动触发掉包检测任务。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] != "developer":
+        return jsonify(success=False, error="Permission denied"), 403
+    try:
+        result = _run_delist_check_once()
+        return jsonify(success=True, **result)
+    except Exception as e:
+        return jsonify(success=False, error=str(e)), 500
 
 
 # ============================================================
@@ -5788,6 +6147,7 @@ if __name__ == "__main__":
     host = "0.0.0.0"
     port = 5001
     _start_weekly_cleanup()
+    _start_delist_scheduler()
     # 全局 500 处理器，开发时返回详细错误
     @app.errorhandler(500)
     def _internal_error(e):

@@ -250,6 +250,31 @@ def _ensure_schema(conn: sqlite3.Connection):
             error_msg TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
+
+        -- 掉包检测结果表
+        CREATE TABLE IF NOT EXISTS delist_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_id INTEGER NOT NULL UNIQUE,
+            product_id INTEGER NOT NULL,
+            is_delisted INTEGER DEFAULT 0,
+            checked_at TEXT,
+            error_msg TEXT DEFAULT '',
+            FOREIGN KEY(package_id) REFERENCES packages(id),
+            FOREIGN KEY(product_id) REFERENCES products(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_delist_checks_product ON delist_checks(product_id);
+
+        -- 掉包通知状态表（按用户跟踪通知/关闭/提醒状态）
+        CREATE TABLE IF NOT EXISTS delist_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            first_notified INTEGER DEFAULT 0,
+            dismissed_at TEXT,
+            reminder_count INTEGER DEFAULT 0,
+            UNIQUE(package_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_delist_notif_user ON delist_notifications(user_id);
     """)
 
     # 产品表迁移：补 mcc_id 和兼容 is_paused→status
@@ -320,6 +345,8 @@ def _ensure_schema(conn: sqlite3.Connection):
     ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "custom_name" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN custom_name TEXT DEFAULT ''")
+    if "email" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
 
     # 初始化默认标签
     for k, v in [("regions", '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),

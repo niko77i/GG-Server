@@ -59,7 +59,7 @@ const navItems = [
   { key: 'toolkit', icon: '🧰', label: '工具集', sections: [{ title: '工具', items: [{ icon:'📊',label:'做表数据',path:'/toolkit/zuobiao'},{ icon:'🎵',label:'音频替换',path:'/toolkit/audio'},{ icon:'🌐',label:'翻译工具',path:'/toolkit/translate'}]}]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
   { key: 'data-manage', icon: '📋', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'数据管理',path:'/data-manage'}]}]},
-  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'⚙️',label:'用户管理',path:'/admin/users'}]}]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'⚙️',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
 ]
   const visibleNavItems = computed(() => navItems.filter(n => {
     // accounts 对 admin 和 viewer 都可见
@@ -77,6 +77,13 @@ const detailSections = computed(() => {
     return sections.map(sec => ({
       ...sec,
       items: sec.items.filter(item => item.path === '/accounts/products')
+    })).filter(sec => sec.items.length > 0)
+  }
+  // 非 developer 看不到 developer 专属菜单项
+  if (!auth.isDeveloper) {
+    return sections.map(sec => ({
+      ...sec,
+      items: sec.items.filter(item => !item.developer)
     })).filter(sec => sec.items.length > 0)
   }
   return sections

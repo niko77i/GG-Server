@@ -65,6 +65,11 @@ const routes = [
     meta: { admin: true, title: '用户管理' }
   },
   {
+    path: '/admin/scheduler',
+    component: () => import('../views/SchedulerView.vue'),
+    meta: { developer: true, title: '定时任务' }
+  },
+  {
     path: '/profile',
     component: () => import('../views/UserProfileView.vue'),
     meta: { title: '个人信息' }
@@ -83,6 +88,10 @@ router.beforeEach((to, from, next) => {
     return
   }
   if (to.meta.admin && !auth.isAdmin) {
+    next('/youtube')
+    return
+  }
+  if (to.meta.developer && !auth.isDeveloper) {
     next('/youtube')
     return
   }

@@ -13,4 +13,9 @@ export const productsApi = {
   // 新增
   merge:       (body)   => api.post('/products/merge', body),
   updateRunners: (pid, body) => api.put(`/products/${pid}/runners`, body),
+  // 掉包检测
+  checkDelist:  (pid)    => api.post(`/products/${pid}/check-delist`),
+  getDelistStatus: ()    => api.get('/products/delist-status'),
+  dismissDelist: (pkgId) => api.post('/delist/dismiss', { package_id: pkgId }),
+  getPendingDelist: ()   => api.get('/delist/pending'),
 }

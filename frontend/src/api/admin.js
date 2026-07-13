@@ -21,5 +21,11 @@ export const adminApi = {
   },
   resetPassword(uid, password) {
     return api.put(`/admin/users/${uid}/password`, { password })
+  },
+  triggerWeeklyCleanup() {
+    return api.post('/admin/trigger-weekly-cleanup')
+  },
+  triggerDelistCheck() {
+    return api.post('/admin/trigger-delist-check')
   }
 }
