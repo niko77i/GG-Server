@@ -102,7 +102,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProductStore } from '@/stores/products'
 import { ElMessageBox, ElMessage } from 'element-plus'
@@ -113,6 +113,8 @@ const props = defineProps({
   product: Object,
   selected: { type: Boolean, default: false },
   regionTimezone: { type: Object, default: () => ({}) },
+  runnerUsers: { type: Array, default: () => [] },
+  customName: { type: String, default: '' },
 })
 const emit = defineEmits(['edit', 'detail', 'add-pkg', 'del', 'toggle-pause', 'refresh', 'select'])
 const auth = useAuthStore()
@@ -121,25 +123,15 @@ const expanded = ref(false)
 const checkedIds = ref([])
 const filterStatus = ref('all')
 const editPkgModal = ref(null)
-const allUsers = ref([])
-const myCustomName = ref('')
-const productSuffix = ref('')
+const productSuffix = ref(props.customName)
 
-onMounted(async () => {
-  try { const res = await api.get('/users/names'); allUsers.value = res.users || [] }
-  catch { allUsers.value = [] }
-  try { const res = await api.get('/auth/custom-name'); myCustomName.value = res.custom_name || '' }
-  catch { myCustomName.value = '' }
-  productSuffix.value = myCustomName.value
-})
-
-// 监听 props.product 变化（切换筛选时卡片复用），重置后缀
-watch(() => props.product?.id, () => {
-  productSuffix.value = myCustomName.value
+// 监听 props 变化（切换筛选时卡片复用），重置后缀
+watch(() => props.customName, (v) => {
+  productSuffix.value = v || ''
 })
 
 function getRunnerName(rid) {
-  const u = allUsers.value.find(u => u.id === rid)
+  const u = props.runnerUsers.find(u => u.id === rid)
   return u ? (u.display_name || u.username) : 'User #' + rid
 }
 

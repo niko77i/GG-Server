@@ -1531,27 +1531,49 @@ def products_list():
     if where: count_sql += " WHERE " + " AND ".join(where)
     total = db.execute(count_sql, params).fetchone()[0]
     products = []
+    # 批量查询：一次性获取所有产品的包、账户数、素材数，避免 N+1
+    prod_ids = [r["id"] for r in rows]
+    mcc_ids = list({r["mcc_id"] for r in rows if r["mcc_id"]})
+    # 包：按 product_id 分组
+    pkg_map = {}
+    if prod_ids:
+        placeholders = ",".join("?" * len(prod_ids))
+        pkg_rows = db.execute(
+            f"SELECT * FROM packages WHERE product_id IN ({placeholders})", prod_ids
+        ).fetchall()
+        status_order = {"": 0, "0": 0, "rejected": 1, "paused": 2, "dropped": 3}
+        for p in pkg_rows:
+            pkg_map.setdefault(p["product_id"], []).append(dict(p))
+        for pkgs in pkg_map.values():
+            pkgs.sort(key=lambda p: (
+                status_order.get((str(p.get("status") or "")).strip(), 0),
+                p.get("created_at") or ""
+            ))
+    # 关联账户数：按 mcc_id 分组
+    acct_map = {}
+    if mcc_ids:
+        placeholders = ",".join("?" * len(mcc_ids))
+        acct_rows = db.execute(
+            f"SELECT mcc_id, COUNT(*) AS cnt FROM accounts WHERE mcc_id IN ({placeholders}) GROUP BY mcc_id",
+            mcc_ids
+        ).fetchall()
+        for a in acct_rows:
+            acct_map[a["mcc_id"]] = a["cnt"]
+    # 成效素材数：按 product_id 分组
+    asset_map = {}
+    if prod_ids:
+        placeholders = ",".join("?" * len(prod_ids))
+        asset_rows = db.execute(
+            f"SELECT product_id, COUNT(*) AS cnt FROM product_assets WHERE product_id IN ({placeholders}) GROUP BY product_id",
+            prod_ids
+        ).fetchall()
+        for a in asset_rows:
+            asset_map[a["product_id"]] = a["cnt"]
     for r in rows:
         prod = dict(r)
-        pkgs = db.execute("SELECT * FROM packages WHERE product_id=?", (r["id"],)).fetchall()
-        # 先按状态排序（正常→拒登→暂停→掉包），同状态按导入时间升序
-        status_order = {"": 0, "0": 0, "rejected": 1, "paused": 2, "dropped": 3}
-        pkgs = sorted(pkgs, key=lambda p: (
-            status_order.get((str(p["status"] or "")).strip(), 0),
-            p["created_at"] or ""
-        ))
-        prod["packages"] = [dict(p) for p in pkgs]
-        # 关联账户数：仅统计直属（递归在详情弹窗按需加载）
-        if r["mcc_id"]:
-            prod["related_account_count"] = db.execute(
-                "SELECT COUNT(*) FROM accounts WHERE mcc_id=?", (r["mcc_id"],)
-            ).fetchone()[0]
-        else:
-            prod["related_account_count"] = 0
-        # 成效素材数
-        prod["asset_count"] = db.execute(
-            "SELECT COUNT(*) FROM product_assets WHERE product_id=?", (r["id"],)
-        ).fetchone()[0]
+        prod["packages"] = pkg_map.get(r["id"], [])
+        prod["related_account_count"] = acct_map.get(r["mcc_id"], 0) if r["mcc_id"] else 0
+        prod["asset_count"] = asset_map.get(r["id"], 0)
         products.append(prod)
     regions = [r["region"] for r in db.execute(
         "SELECT DISTINCT region FROM products WHERE region!='' AND (is_archived IS NULL OR is_archived = 0) ORDER BY region"

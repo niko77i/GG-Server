@@ -37,6 +37,8 @@
         v-for="p in store.products" :key="p.id"
         :product="p"
         :region-timezone="regionTimezone"
+        :runner-users="runnerUserOptions"
+        :custom-name="customName"
         :selected="selectedIds.includes(p.id)"
         @select="toggleSelect(p.id)"
         @edit="showProductModal($event)"
@@ -99,7 +101,16 @@ let searchTimer = null
 
 const regionTimezone = ref({})
 
-onMounted(() => { load(); loadRunnerUsers(); loadRegionTimezone() })
+const customName = ref('')
+
+onMounted(() => { load(); loadRunnerUsers(); loadRegionTimezone(); loadCustomName() })
+
+async function loadCustomName() {
+  try {
+    const res = await api.get('/auth/custom-name')
+    customName.value = res.custom_name || ''
+  } catch { customName.value = '' }
+}
 
 async function loadRegionTimezone() {
   try {
