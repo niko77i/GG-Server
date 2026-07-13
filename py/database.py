@@ -10,6 +10,8 @@ import datetime
 import threading
 
 _schema_lock = threading.Lock()
+_schema_verified = False
+_schema_verified_path = None
 
 
 def _db_path() -> str:
@@ -27,7 +29,8 @@ def _db_path() -> str:
 
 
 def get_db() -> sqlite3.Connection:
-    """获取数据库连接，自动建表 + 迁移。"""
+    """获取数据库连接，自动建表 + 迁移（仅首次检查 schema，同路径下缓存）。"""
+    global _schema_verified, _schema_verified_path
     db_path = _db_path()
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
@@ -36,9 +39,13 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    with _schema_lock:
-        _ensure_schema(conn)
-        _migrate_if_needed(conn)
+    if not _schema_verified or _schema_verified_path != db_path:
+        with _schema_lock:
+            if not _schema_verified or _schema_verified_path != db_path:
+                _ensure_schema(conn)
+                _migrate_if_needed(conn)
+                _schema_verified = True
+                _schema_verified_path = db_path
     return conn
 
 

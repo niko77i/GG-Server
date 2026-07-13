@@ -10,6 +10,7 @@ if _current_dir not in sys.path:
 
 from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
+from flask_compress import Compress
 
 from scraper import scrape_images, scrape_logo, ScrapeError
 from resizer import process_image, save_logo, ResizeError
@@ -17,6 +18,7 @@ from utils import extract_package_name, natural_sort_key
 from video_processor import VideoTask, VideoError
 from ai_service import get_provider, AIServiceError
 import database
+from cache import cache as _app_cache
 
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity, create_access_token, create_refresh_token
 import json
@@ -53,6 +55,7 @@ _MUSIC_DIR = os.path.join(_DATA_ROOT, "temp", "music")
 
 app = Flask(__name__, static_folder=_FRONTEND_DIR, static_url_path="")
 CORS(app)
+Compress(app)
 
 # --- 请求日志 ---
 import time as _time
@@ -76,8 +79,18 @@ def _log_response(response):
     print(f"[{now}] {method} {url} → {status} ({duration:.0f}ms)")
     return response
 
+
+@app.after_request
+def _add_static_cache(response):
+    """为带 hash 的前端静态资源添加长期缓存头。"""
+    if request.path.startswith('/assets/'):
+        ext = request.path.rsplit('.', 1)[-1] if '.' in request.path else ''
+        if ext in ('js', 'css', 'woff2', 'woff', 'ttf', 'png', 'svg', 'jpg', 'ico'):
+            response.cache_control.max_age = 31536000  # 1 年
+            response.cache_control.public = True
+    return response
+
 # --- GG-Server: Config ---
-import json
 _CONFIG_PATH = os.path.join(os.path.dirname(_current_dir), "config", "config.json")
 try:
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -90,7 +103,6 @@ app.config["JWT_SECRET_KEY"] = APP_CONFIG.get("secret_key", "gg-server-default-s
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = APP_CONFIG.get("jwt_expire_hours", 24) * 3600
 jwt = JWTManager(app)
 
-import auth
 try:
     auth.init_developer(APP_CONFIG)
 except Exception as e:
@@ -1575,10 +1587,17 @@ def products_list():
         prod["related_account_count"] = acct_map.get(r["mcc_id"], 0) if r["mcc_id"] else 0
         prod["asset_count"] = asset_map.get(r["id"], 0)
         products.append(prod)
-    regions = [r["region"] for r in db.execute(
-        "SELECT DISTINCT region FROM products WHERE region!='' AND (is_archived IS NULL OR is_archived = 0) ORDER BY region"
-    ).fetchall()]
-    mcc_options_for_filter = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()]
+    # 缓存低频查询结果：regions 和 mcc_options
+    regions = _app_cache.get("products:regions")
+    if regions is None:
+        regions = [r["region"] for r in db.execute(
+            "SELECT DISTINCT region FROM products WHERE region!='' AND (is_archived IS NULL OR is_archived = 0) ORDER BY region"
+        ).fetchall()]
+        _app_cache.set("products:regions", regions, ttl=120)
+    mcc_options_for_filter = _app_cache.get("products:mcc_options")
+    if mcc_options_for_filter is None:
+        mcc_options_for_filter = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()]
+        _app_cache.set("products:mcc_options", mcc_options_for_filter, ttl=120)
 
     # runner 统计（跟随 status 过滤）
     stat_clause = "1=1"
@@ -2173,15 +2192,27 @@ def accounts_list():
     status_counts = {}
     for r in db.execute("SELECT status, COUNT(*) as cnt FROM accounts WHERE owner_id=? GROUP BY status", (user_id,)).fetchall():
         s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
-    # 筛选下拉数据
+    # 筛选下拉数据（缓存低频查询结果）
     uid_str = str(user_id)
-    mcc_options = [dict(r) for r in db.execute(
-        "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids=? OR "
-        "shared_user_ids LIKE ? OR shared_user_ids LIKE ? OR shared_user_ids LIKE ?) ORDER BY name",
-        (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
-    ).fetchall()]
-    agents = [r["agent"] for r in db.execute("SELECT DISTINCT agent FROM accounts WHERE agent!='' AND owner_id=? ORDER BY agent", (user_id,)).fetchall()]
-    timezone_options = [r["timezone"] for r in db.execute("SELECT DISTINCT timezone FROM accounts WHERE timezone!='' AND owner_id=? ORDER BY timezone", (user_id,)).fetchall()]
+    mcc_cache_key = f"accounts:mcc_options:{user_id}"
+    mcc_options = _app_cache.get(mcc_cache_key)
+    if mcc_options is None:
+        mcc_options = [dict(r) for r in db.execute(
+            "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids=? OR "
+            "shared_user_ids LIKE ? OR shared_user_ids LIKE ? OR shared_user_ids LIKE ?) ORDER BY name",
+            (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
+        ).fetchall()]
+        _app_cache.set(mcc_cache_key, mcc_options, ttl=120)
+    agents_cache_key = f"accounts:agents:{user_id}"
+    agents = _app_cache.get(agents_cache_key)
+    if agents is None:
+        agents = [r["agent"] for r in db.execute("SELECT DISTINCT agent FROM accounts WHERE agent!='' AND owner_id=? ORDER BY agent", (user_id,)).fetchall()]
+        _app_cache.set(agents_cache_key, agents, ttl=120)
+    tz_cache_key = f"accounts:tz:{user_id}"
+    timezone_options = _app_cache.get(tz_cache_key)
+    if timezone_options is None:
+        timezone_options = [r["timezone"] for r in db.execute("SELECT DISTINCT timezone FROM accounts WHERE timezone!='' AND owner_id=? ORDER BY timezone", (user_id,)).fetchall()]
+        _app_cache.set(tz_cache_key, timezone_options, ttl=120)
     db.close()
     return jsonify({"success": True, "accounts": accounts, "total": total, "mcc_options": mcc_options, "agents": agents, "timezone_options": timezone_options, "status_counts": status_counts})
 
@@ -4706,24 +4737,26 @@ def ad_reports_dashboard():
     }
 
     # 异常检测：每个系列近3天 vs 前7天均值
+    # 优化：一次性查询所有 campaign 的日统计，避免 N+1 查询
     anomalies = []
-    all_campaigns = db.execute(
-        f"SELECT DISTINCT campaign FROM ad_reports WHERE {where_clause} ORDER BY campaign",
+    all_stats = db.execute(
+        f"SELECT campaign, report_date, SUM(cost) AS day_cost, "
+        f"SUM(installs) AS day_installs, SUM(in_app_actions) AS day_in_app "
+        f"FROM ad_reports WHERE {where_clause} "
+        f"GROUP BY campaign, report_date ORDER BY campaign, report_date DESC",
         params
     ).fetchall()
 
-    for c in all_campaigns:
-        cname = c["campaign"]
-        cparams = params + [cname]
-        cwhere = f"{where_clause} AND campaign=?"
-        stats = db.execute(
-            f"SELECT report_date, SUM(cost) AS day_cost, SUM(installs) AS day_installs, "
-            f"SUM(in_app_actions) AS day_in_app "
-            f"FROM ad_reports WHERE {cwhere} "
-            f"GROUP BY report_date ORDER BY report_date DESC",
-            cparams
-        ).fetchall()
+    # 按 campaign 分组
+    campaign_data = {}
+    for s in all_stats:
+        cname = s["campaign"]
+        if cname not in campaign_data:
+            campaign_data[cname] = []
+        campaign_data[cname].append({"report_date": s["report_date"], "day_cost": s["day_cost"],
+                                       "day_installs": s["day_installs"], "day_in_app": s["day_in_app"]})
 
+    for cname, stats in campaign_data.items():
         if len(stats) < 3:
             continue
         # 最近3天

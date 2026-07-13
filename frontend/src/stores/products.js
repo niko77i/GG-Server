@@ -13,6 +13,8 @@ export const useProductStore = defineStore('products', {
 
   actions: {
     async loadProducts(extra = {}) {
+      if (this._loading) return this._lastPromise
+      this._loading = true
       const params = {
         page: this.page, size: this.pageSize,
         search: this.filters.search || undefined,
@@ -21,10 +23,13 @@ export const useProductStore = defineStore('products', {
         status: this.pausedMode ? 'paused' : '',
         runner: extra.runner || undefined,
       }
-      const res = await productsApi.list(params)
-      this.products = res.products
-      this.total = res.total
-      return res
+      const promise = productsApi.list(params).then(res => {
+        this.products = res.products
+        this.total = res.total
+        return res
+      }).finally(() => { this._loading = false })
+      this._lastPromise = promise
+      return promise
     },
     async createProduct(body) { return productsApi.create(body) },
     async updateProduct(id, body) { return productsApi.update(id, body) },

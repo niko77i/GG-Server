@@ -18,11 +18,16 @@ export const useAccountStore = defineStore('accounts', {
 
   actions: {
     async loadAccounts() {
+      if (this._acLoading) return this._acLastPromise
+      this._acLoading = true
       const params = { page: this.acPage, size: this.acPageSize, ...this.acFilters }
-      const res = await accountsApi.list(params)
-      this.accounts = res.accounts
-      this.acTotal = res.total
-      return res
+      const promise = accountsApi.list(params).then(res => {
+        this.accounts = res.accounts
+        this.acTotal = res.total
+        return res
+      }).finally(() => { this._acLoading = false })
+      this._acLastPromise = promise
+      return promise
     },
     async createAccount(body) { return accountsApi.create(body) },
     async reassignAccount(id, body) { return accountsApi.reassign(id, body) },
@@ -32,10 +37,16 @@ export const useAccountStore = defineStore('accounts', {
     async batchUpdateAccounts(body) { await accountsApi.batchUpdate(body); return this.loadAccounts() },
 
     async loadMccList() {
+      if (this._mccLoading) return this._mccLastPromise
+      this._mccLoading = true
       const params = { page: this.mccPage, size: this.mccPageSize, ...this.mccFilters }
-      const res = await mccApi.list(params)
-      this.mccList = res.mcc_list
-      this.mccTotal = res.total
+      const promise = mccApi.list(params).then(res => {
+        this.mccList = res.mcc_list
+        this.mccTotal = res.total
+        return res
+      }).finally(() => { this._mccLoading = false })
+      this._mccLastPromise = promise
+      return promise
     },
     async createMcc(body) { return mccApi.create(body) },
     async updateMcc(id, body) { return mccApi.update(id, body) },

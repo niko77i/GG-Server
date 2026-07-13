@@ -15,9 +15,15 @@ export const useYoutubeStore = defineStore('youtube', {
 
   actions: {
     async loadVideos() {
-      const res = await youtubeApi.list(this.filters)
-      this.videos = res.videos
-      this.counts = res.counts
+      if (this._vLoading) return this._vLastPromise
+      this._vLoading = true
+      const promise = youtubeApi.list(this.filters).then(res => {
+        this.videos = res.videos
+        this.counts = res.counts
+        return res
+      }).finally(() => { this._vLoading = false })
+      this._vLastPromise = promise
+      return promise
     },
     async importVideos(body) { return youtubeApi.import(body) },
     async deleteVideos(ids) { await youtubeApi.delete({ ids }); return this.loadVideos() },
@@ -29,11 +35,17 @@ export const useYoutubeStore = defineStore('youtube', {
 
     // 文案管理
     async loadCopywritings(region = '') {
+      if (this._cwLoading) return this._cwLastPromise
+      this._cwLoading = true
       const params = { scope: this.cwScope }
       if (region) params.region = region
-      const res = await copywritingApi.list(params)
-      this.copywritings = res.items
-      this.copywritingCounts = res.counts
+      const promise = copywritingApi.list(params).then(res => {
+        this.copywritings = res.items
+        this.copywritingCounts = res.counts
+        return res
+      }).finally(() => { this._cwLoading = false })
+      this._cwLastPromise = promise
+      return promise
     },
     async importCopywritings(body) { return copywritingApi.import(body) },
     async editCopywriting(body) { return copywritingApi.edit(body) },
