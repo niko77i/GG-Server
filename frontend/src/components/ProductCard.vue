@@ -71,7 +71,7 @@
         </span>
         <span style="font-size:11px;color:#888;">已选 {{ checkedIds.length }} 个</span>
       </div>
-      <div v-for="pkg in filteredPackages" :key="pkg.id"
+      <div v-for="pkg in filteredPackages" :key="pkg.id" :id="'pkg-' + pkg.id"
         class="pkg-row"
         :class="{ 'pkg-row--paused': normalizeStatus(pkg.status) === 'paused', 'pkg-row--dropped': normalizeStatus(pkg.status) === 'dropped', 'pkg-row--delisted': pkg.is_delisted && normalizeStatus(pkg.status) !== 'dropped' }">
         <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;overflow:hidden;">

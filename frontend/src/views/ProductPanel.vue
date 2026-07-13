@@ -70,7 +70,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useProductStore } from '@/stores/products'
 import ProductCard from '@/components/ProductCard.vue'
@@ -83,6 +84,8 @@ import { productsApi } from '@/api/products'
 import api from '@/api/client'
 
 const auth = useAuthStore()
+const route = useRoute()
+const router = useRouter()
 const store = useProductStore()
 const regions = ref([])
 const mccOptions = ref([])
@@ -135,6 +138,26 @@ async function load() {
   mccOptions.value = res.mcc_options || []
   if (res.runner_counts) runnerCounts.value = res.runner_counts
   selectedIds.value = []
+
+  // 从通知点击跳转过来的，自动滚动到对应包
+  scrollToHighlightedPackage()
+}
+
+// 已在产品页时点击通知（路由 query 变化），同样滚动
+watch(() => route.query.highlight_pkg, () => { scrollToHighlightedPackage() })
+
+async function scrollToHighlightedPackage() {
+  const pkgId = route.query.highlight_pkg
+  if (!pkgId) return
+  router.replace({ query: {} })  // 清除 query，避免后续重复滚动
+  await nextTick()
+  const el = document.getElementById('pkg-' + pkgId)
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.style.boxShadow = '0 0 0 3px #ef4444'
+    el.style.transition = 'box-shadow 0.3s'
+    setTimeout(() => { el.style.boxShadow = '' }, 2000)
+  }
 }
 
 async function loadRunnerUsers() {

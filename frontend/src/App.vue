@@ -12,13 +12,14 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import AppSidebar from './components/AppSidebar.vue'
 import { productsApi } from './api/products'
 import { ElNotification } from 'element-plus'
 
 const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
 
 const isAuthPage = computed(() => ['/login', '/register'].includes(route.path))
@@ -32,6 +33,7 @@ onMounted(async () => {
 
 // ---------- 全局掉包通知轮询（所有页面生效） ----------
 let _delistTimer = null
+let _checking = false  // 防止并发重复弹窗
 const _notifiedPkgIds = new Set()
 
 watch(() => auth.isLoggedIn, (loggedIn) => {
@@ -58,6 +60,8 @@ function stopDelistPolling() {
 }
 
 async function checkDelistNotifications() {
+  if (_checking) return  // 上一次检查未完成，跳过
+  _checking = true
   try {
     const res = await productsApi.getPendingDelist()
     const notifications = res.notifications || []
@@ -75,17 +79,22 @@ async function checkDelistNotifications() {
 
       ElNotification({
         title,
-        message: `${productInfo}${pkgInfo}\n请将包状态设置为"掉包"`,
+        message: `${productInfo}${pkgInfo}\n请将包状态设置为"掉包"（点击跳转到对应包）`,
         type: 'warning',
         duration: 0,
         position: 'top-right',
         showClose: true,
+        onClick: () => {
+          router.push(`/accounts/products?highlight_pkg=${n.package_id}`)
+        },
         onClose: async () => {
           try { await productsApi.dismissDelist(n.package_id) } catch {}
         }
       })
     }
-  } catch {}
+  } catch {} finally {
+    _checking = false
+  }
 }
 </script>
 
