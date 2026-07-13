@@ -2320,7 +2320,7 @@ def accounts_create():
 @app.route("/api/accounts/batch-create", methods=["POST"])
 @jwt_required()
 def accounts_batch_create():
-    """批量创建账户，共用相同的字段配置"""
+    """批量创建账户，支持共用配置 + 逐账户 overrides"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     account_ids = data.get("account_ids") or []
@@ -2336,6 +2336,7 @@ def accounts_batch_create():
         "acquired_date": (data.get("acquired_date") or datetime.date.today().isoformat()),
         "death_date": "",
     }
+    overrides = data.get("overrides") or {}
 
     import datetime as dt
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -2347,13 +2348,23 @@ def accounts_batch_create():
         aid = str(aid).strip()
         if not aid:
             continue
-        name = (common["name_prefix"] + " " + aid).strip() if common["name_prefix"] else aid
+        ov = overrides.get(aid, {})
+        # 名称：overrides.name 直接用作完整名称；否则用 name_prefix + ID
+        if ov.get("name"):
+            name = ov["name"].strip()
+        else:
+            name = (common["name_prefix"] + " " + aid).strip() if common["name_prefix"] else aid
+        mcc_id = ov.get("mcc_id") if "mcc_id" in ov else common["mcc_id"]
+        timezone = ov.get("timezone") if "timezone" in ov else common["timezone"]
+        agent = ov.get("agent") if "agent" in ov else common["agent"]
+        status = ov.get("status") if "status" in ov else common["status"]
+        acquired_date = ov.get("acquired_date") if "acquired_date" in ov else common["acquired_date"]
         try:
             db.execute(
                 "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,status,acquired_date,death_date,created_at,updated_at,owner_id) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (name, aid, common["mcc_id"], common["timezone"], common["agent"],
-                 common["status"], common["acquired_date"], common["death_date"], now, now, user_id))
+                (name, aid, mcc_id, timezone, agent,
+                 status, acquired_date, common["death_date"], now, now, user_id))
             db.commit()
             created.append(aid)
         except _sqlite3.IntegrityError as e:
@@ -3425,7 +3436,8 @@ def translate_text():
 
 @jwt.invalid_token_loader
 def invalid_token_callback(reason):
-    return jsonify(success=False, error="Invalid token"), 401
+    return jsonify(success=False, error="Invalid token"), 
+
 
 @jwt.expired_token_loader
 def expired_token_callback(jwt_header, jwt_payload):

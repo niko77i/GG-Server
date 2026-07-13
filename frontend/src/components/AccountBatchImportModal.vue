@@ -121,49 +121,144 @@
         </div>
       </template>
 
-      <!-- ===== 新账户共用配置 ===== -->
+      <!-- ===== 新账户列表 + 共用默认值 ===== -->
       <template v-if="newIds.length">
-        <el-divider content-position="left" style="margin:8px 0;">新账户共用配置（{{ newIds.length }} 个）</el-divider>
-        <el-row :gutter="12">
-          <el-col :span="12">
-            <el-form-item label="名称前缀（可选）" style="margin-bottom:8px;">
-              <el-input v-model="form.name_prefix" size="small" placeholder="留空则用 ID 作名称" />
+        <el-divider content-position="left" style="margin:8px 0;">新账户（{{ newIds.length }} 个）</el-divider>
+        <el-table :data="newAccountRows" size="small" border stripe max-height="260"
+          :row-class-name="newRowClass" style="width:100%;">
+          <el-table-column prop="account_id" label="账户 ID" width="118" />
+          <el-table-column label="名称" min-width="80" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span style="font-size:12px;">{{ getNewEdit(row.account_id, 'name') }}</span>
+              <span v-if="isNewDirty(row.account_id)" style="color:#e6a23c;font-size:10px;">*</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="时区" width="75" align="center">
+            <template #default="{ row }">{{ getNewEdit(row.account_id, 'timezone') || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="代理" width="60" align="center" show-overflow-tooltip>
+            <template #default="{ row }">{{ getNewEdit(row.account_id, 'agent') || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="55" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="getNewEdit(row.account_id, 'status') === '死亡' ? 'danger' : getNewEdit(row.account_id, 'status') === '存活' ? 'success' : 'info'">
+                {{ getNewEdit(row.account_id, 'status') }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="MCC" min-width="75" show-overflow-tooltip>
+            <template #default="{ row }">{{ mccNameById(getNewEdit(row.account_id, 'mcc_id')) || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="编辑" width="48" align="center">
+            <template #default="{ row }">
+              <el-button link size="small" :type="newEditingId === row.account_id ? 'primary' : ''"
+                @click="toggleNewEdit(row.account_id)" style="padding:0;">✏️</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <!-- 新账户编辑面板 -->
+        <div v-if="newEditingId" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;margin-top:8px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <span style="font-weight:600;font-size:13px;">✏️ 编辑 {{ newEditingId }}</span>
+            <div>
+              <el-button link size="small" type="warning" @click="resetNewEdit(newEditingId)" style="margin-right:12px;">恢复默认</el-button>
+              <el-button link size="small" @click="newEditingId = null">关闭 ✕</el-button>
+            </div>
+          </div>
+          <el-row :gutter="10">
+            <el-col :span="8">
+              <el-form-item label="名称" style="margin-bottom:8px;">
+                <el-input v-model="newAccountEdits[newEditingId].name" size="small" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="时区" style="margin-bottom:8px;">
+                <el-select v-model="newAccountEdits[newEditingId].timezone" size="small" filterable style="width:100%;">
+                  <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="代理" style="margin-bottom:8px;">
+                <el-select v-model="newAccountEdits[newEditingId].agent" size="small" filterable allow-create style="width:100%;">
+                  <el-option v-for="a in store.settings.account_agents" :key="a" :label="a" :value="a" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="10">
+            <el-col :span="8">
+              <el-form-item label="状态" style="margin-bottom:0;">
+                <el-select v-model="newAccountEdits[newEditingId].status" size="small" filterable style="width:100%;">
+                  <el-option v-for="s in store.settings.account_statuses" :key="s" :label="s" :value="s" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="MCC" style="margin-bottom:0;">
+                <el-select v-model="newAccountEdits[newEditingId].mcc_id" size="small" clearable filterable style="width:100%;">
+                  <el-option v-for="m in mccOptions" :key="m.id" :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="到手时间" style="margin-bottom:0;">
+                <el-date-picker v-model="newAccountEdits[newEditingId].acquired_date" type="date" size="small"
+                  style="width:100%;" value-format="YYYY-MM-DD" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </div>
+
+        <!-- 共用默认值（折叠） -->
+        <el-collapse style="margin-top:8px;">
+          <el-collapse-item>
+            <template #title>
+              <span style="font-size:13px;color:#606266;">⚙ 共用默认值（修改后自动应用到未单独编辑的行）</span>
+            </template>
+            <el-row :gutter="12">
+              <el-col :span="12">
+                <el-form-item label="名称前缀（可选）" style="margin-bottom:8px;">
+                  <el-input v-model="defaultForm.name_prefix" size="small" placeholder="留空则用 ID 作名称" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="所属 MCC" style="margin-bottom:8px;">
+                  <el-select v-model="defaultForm.mcc_id" size="small" clearable filterable placeholder="（未分配）" style="width:100%;">
+                    <el-option v-for="m in mccOptions" :key="m.id" :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="12">
+              <el-col :span="8">
+                <el-form-item label="时区" style="margin-bottom:8px;">
+                  <el-select v-model="defaultForm.timezone" size="small" filterable clearable placeholder="选择时区" style="width:100%;">
+                    <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="代理" required style="margin-bottom:8px;">
+                  <el-select v-model="defaultForm.agent" size="small" filterable allow-create placeholder="输入或选择" style="width:100%;">
+                    <el-option v-for="a in store.settings.account_agents" :key="a" :label="a" :value="a" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="状态" style="margin-bottom:8px;">
+                  <el-select v-model="defaultForm.status" size="small" style="width:100%;" filterable>
+                    <el-option v-for="s in store.settings.account_statuses" :key="s" :label="s" :value="s" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="到手时间" style="margin-bottom:0;">
+              <el-date-picker v-model="defaultForm.acquired_date" type="date" size="small" style="width:200px;" value-format="YYYY-MM-DD" />
             </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="所属 MCC" style="margin-bottom:8px;">
-              <el-select v-model="form.mcc_id" size="small" clearable filterable placeholder="（未分配）" style="width:100%;">
-                <el-option v-for="m in mccOptions" :key="m.id" :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="时区" style="margin-bottom:8px;">
-              <el-select v-model="form.timezone" size="small" filterable clearable placeholder="选择时区" style="width:100%;">
-                <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="代理" required style="margin-bottom:8px;">
-              <el-select v-model="form.agent" size="small" filterable allow-create placeholder="输入或选择" style="width:100%;">
-                <el-option v-for="a in store.settings.account_agents" :key="a" :label="a" :value="a" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="状态" style="margin-bottom:8px;">
-              <el-select v-model="form.status" size="small" style="width:100%;" filterable>
-                <el-option v-for="s in store.settings.account_statuses" :key="s" :label="s" :value="s" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-form-item label="到手时间" style="margin-bottom:0;">
-          <el-date-picker v-model="form.acquired_date" type="date" size="small" style="width:200px;" value-format="YYYY-MM-DD" />
-        </el-form-item>
+          </el-collapse-item>
+        </el-collapse>
       </template>
     </el-form>
 
@@ -195,7 +290,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
 import { useAuthStore } from '@/stores/auth'
 import { mccApi, accountsApi } from '@/api/accounts'
@@ -290,6 +385,98 @@ const form = reactive({
   status: '存活',
   acquired_date: '',
 })
+const defaultForm = form  // 共用默认值（保持原名兼容）
+
+// ===== 新账户逐行编辑 =====
+const newAccountEdits = reactive({})   // { [account_id]: { name, timezone, agent, status, mcc_id, acquired_date } }
+const newEditingId = ref(null)         // 当前正在编辑的新账户 account_id
+
+// 新账户表格行数据
+const newAccountRows = computed(() =>
+  newIds.value.map(id => ({ account_id: id }))
+)
+
+function defaultName(aid) {
+  return defaultForm.name_prefix ? (defaultForm.name_prefix + ' ' + aid).trim() : aid
+}
+
+function getDefaultValues(aid) {
+  return {
+    name: defaultName(aid),
+    timezone: defaultForm.timezone,
+    agent: defaultForm.agent,
+    status: defaultForm.status,
+    mcc_id: defaultForm.mcc_id || '',
+    acquired_date: defaultForm.acquired_date,
+  }
+}
+
+function initNewAccountEdit(aid) {
+  if (!newAccountEdits[aid]) {
+    newAccountEdits[aid] = getDefaultValues(aid)
+  }
+}
+
+function getNewEdit(aid, field) {
+  initNewAccountEdit(aid)
+  return newAccountEdits[aid][field]
+}
+
+// 比较当前值与默认值，判断是否被手动修改过
+function isNewDirty(aid) {
+  const cur = newAccountEdits[aid]
+  if (!cur) return false
+  const def = getDefaultValues(aid)
+  return cur.name !== def.name
+    || cur.timezone !== def.timezone
+    || cur.agent !== def.agent
+    || cur.status !== def.status
+    || cur.mcc_id !== def.mcc_id
+    || cur.acquired_date !== def.acquired_date
+}
+
+function toggleNewEdit(aid) {
+  initNewAccountEdit(aid)
+  newEditingId.value = newEditingId.value === aid ? null : aid
+}
+
+function resetNewEdit(aid) {
+  newAccountEdits[aid] = getDefaultValues(aid)
+}
+
+function newRowClass({ row }) {
+  return newEditingId.value === row.account_id ? 'editing-row' : ''
+}
+
+// 将共用默认值同步到所有未单独编辑的行
+function syncDefaultsToNewAccounts() {
+  for (const aid of newIds.value) {
+    if (isNewDirty(aid)) continue
+    if (!newAccountEdits[aid]) {
+      newAccountEdits[aid] = {}
+    }
+    Object.assign(newAccountEdits[aid], getDefaultValues(aid))
+  }
+}
+
+// 监听共用默认值变化 → 同步到非 dirty 行
+watch(() => ({ ...defaultForm }), () => {
+  syncDefaultsToNewAccounts()
+})
+
+// 监听新账户 ID 列表变化 → 初始化编辑数据
+watch(newIds, (ids) => {
+  // 清理已不存在的 ID
+  const idSet = new Set(ids)
+  for (const key of Object.keys(newAccountEdits)) {
+    if (!idSet.has(key)) delete newAccountEdits[key]
+  }
+  // 初始化新 ID
+  for (const aid of ids) {
+    initNewAccountEdit(aid)
+  }
+  newEditingId.value = null
+})
 
 // ===== 已有账户编辑 =====
 function initClaimEdits(row) {
@@ -343,6 +530,7 @@ async function doLookup() {
     allFound.value = res.found || []
     claimSelection.value = []
     editingId.value = null
+    newEditingId.value = null
     for (const key of Object.keys(claimEdits)) {
       if (!allFound.value.find(e => e.account_id === key)) delete claimEdits[key]
     }
@@ -366,8 +554,10 @@ function init() {
   allFound.value = []
   claimSelection.value = []
   editingId.value = null
+  newEditingId.value = null
   result.value = null
   for (const k of Object.keys(claimEdits)) delete claimEdits[k]
+  for (const k of Object.keys(newAccountEdits)) delete newAccountEdits[k]
   loadMccOptions()
 }
 
@@ -383,7 +573,12 @@ async function submit() {
   if (!newIds.value.length && !claimSelection.value.length) {
     ElMessage.warning('没有可导入或认领的账户'); return
   }
-  if (newIds.value.length && !form.agent) {
+  // 校验：至少有一个新账户有代理（共用默认值或逐行覆盖）
+  const allAgents = [defaultForm.agent]
+  for (const aid of newIds.value) {
+    if (newAccountEdits[aid]?.agent) allAgents.push(newAccountEdits[aid].agent)
+  }
+  if (newIds.value.length && !allAgents.some(Boolean)) {
     ElMessage.warning('代理不能为空'); return
   }
   saving.value = true
@@ -394,22 +589,46 @@ async function submit() {
 
   // 1. 批量创建新账户
   if (newIds.value.length) {
+    // 构建 overrides：比较每个新账户的当前值与默认值，只传有差异的字段
+    const overrides = {}
+    for (const aid of newIds.value) {
+      if (!newAccountEdits[aid]) continue
+      const cur = newAccountEdits[aid]
+      const def = getDefaultValues(aid)
+      const diff = {}
+      if (cur.name !== def.name) diff.name = cur.name
+      if (cur.timezone !== def.timezone) diff.timezone = cur.timezone
+      if (cur.agent !== def.agent) diff.agent = cur.agent
+      if (cur.status !== def.status) diff.status = cur.status
+      if (cur.mcc_id !== def.mcc_id) diff.mcc_id = cur.mcc_id
+      if (cur.acquired_date !== def.acquired_date) diff.acquired_date = cur.acquired_date
+      if (Object.keys(diff).length) overrides[aid] = diff
+    }
     try {
       const res = await accountsApi.batchCreate({
         account_ids: newIds.value,
-        name_prefix: form.name_prefix,
-        mcc_id: form.mcc_id || null,
-        timezone: form.timezone,
-        agent: form.agent,
-        status: form.status,
-        acquired_date: form.acquired_date,
+        name_prefix: defaultForm.name_prefix,
+        mcc_id: defaultForm.mcc_id || null,
+        timezone: defaultForm.timezone,
+        agent: defaultForm.agent,
+        status: defaultForm.status,
+        acquired_date: defaultForm.acquired_date,
+        overrides: Object.keys(overrides).length ? overrides : undefined,
       })
       created = res.created || 0
       if (res.skipped) skipped.push(...res.skipped)
       if (created > 0) {
         const agents = [...(store.settings.account_agents || [])]
-        if (form.agent && !agents.includes(form.agent)) {
-          agents.push(form.agent)
+        if (defaultForm.agent && !agents.includes(defaultForm.agent)) {
+          agents.push(defaultForm.agent)
+        }
+        // 也收集 overrides 中的新代理
+        for (const ov of Object.values(overrides)) {
+          if (ov.agent && !agents.includes(ov.agent)) {
+            agents.push(ov.agent)
+          }
+        }
+        if (agents.length > (store.settings.account_agents || []).length) {
           await store.saveSettings({ account_agents: agents })
           store.settings.account_agents = agents
         }
