@@ -70,7 +70,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProductStore } from '@/stores/products'
 import ProductCard from '@/components/ProductCard.vue'
@@ -104,6 +104,10 @@ const regionTimezone = ref({})
 const customName = ref('')
 
 onMounted(() => { load(); loadRunnerUsers(); loadRegionTimezone(); loadCustomName() })
+
+// 监听手动掉包检测完成事件，自动刷新产品列表
+window.addEventListener('delist-check-completed', load)
+onUnmounted(() => { window.removeEventListener('delist-check-completed', load) })
 
 async function loadCustomName() {
   try {

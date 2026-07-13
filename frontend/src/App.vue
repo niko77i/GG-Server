@@ -39,7 +39,13 @@ watch(() => auth.isLoggedIn, (loggedIn) => {
   else stopDelistPolling()
 }, { immediate: true })
 
-onUnmounted(() => stopDelistPolling())
+onUnmounted(() => {
+  stopDelistPolling()
+  window.removeEventListener('delist-check-completed', checkDelistNotifications)
+})
+
+// 监听手动触发事件，立即执行通知检查
+window.addEventListener('delist-check-completed', checkDelistNotifications)
 
 async function startDelistPolling() {
   if (_delistTimer) return  // 已经在轮询中
@@ -56,7 +62,10 @@ async function checkDelistNotifications() {
     const res = await productsApi.getPendingDelist()
     const notifications = res.notifications || []
     for (const n of notifications) {
-      const key = `${n.package_id}-${n.type}`
+      // reminder 用 reminder_count 区分，避免重复提醒被去重
+      const key = n.type === 'reminder'
+        ? `${n.package_id}-reminder-${n.reminder_count || 0}`
+        : `${n.package_id}-first`
       if (_notifiedPkgIds.has(key)) continue
       _notifiedPkgIds.add(key)
 

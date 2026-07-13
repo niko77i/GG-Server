@@ -86,6 +86,8 @@ async function triggerDelist() {
     const res = await adminApi.triggerDelistCheck()
     delistResult.value = { success: true, ...res }
     ElMessage.success(`掉包检测完成：${res.total} 个包，${res.delisted} 个掉包`)
+    // 立即通知全局轮询和产品列表刷新
+    window.dispatchEvent(new CustomEvent('delist-check-completed'))
   } catch (e) {
     const msg = e?.response?.data?.error || e.message || '未知错误'
     delistResult.value = { success: false, error: msg }
