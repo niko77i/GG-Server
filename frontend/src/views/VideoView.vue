@@ -488,28 +488,51 @@ function getSettings() {
   }
 }
 
-async function doGenerate(settings) {
+function doGenerate(settings) {
   generating.value = true
   progressPct.value = 0
   progressMsg.value = '提交中...'
-  try {
-    const res = await store.generate(settings)
+
+  return store.generate(settings).then(res => {
     const tid = res.task_id
-    pollTimer = setInterval(async () => {
-      const p = await store.checkProgress(tid)
-      progressPct.value = p.progress || 0
-      progressMsg.value = p.message || '处理中...'
-      if (p.status === 'completed') {
-        clearInterval(pollTimer); generating.value = false
-        generatedPath.value = p.output?.path || ''
-        progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
-        ElMessage.success('视频生成完成')
-        // 自动保存设置到历史
-        autoSaveHistory()
+    return new Promise((resolve) => {
+      let done = false
+      const poll = () => {
+        if (done) return
+        store.checkProgress(tid).then(p => {
+          if (done) return
+          progressPct.value = p.progress || 0
+          progressMsg.value = p.message || '处理中...'
+          if (p.status === 'completed') {
+            done = true
+            generating.value = false
+            generatedPath.value = p.output?.path || ''
+            progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
+            ElMessage.success('视频生成完成')
+            autoSaveHistory()
+            resolve()
+          } else if (p.status === 'error') {
+            done = true
+            generating.value = false
+            progressMsg.value = '❌ ' + (p.message || '未知错误')
+            ElMessage.error(p.message || '未知错误')
+            resolve() // 错误已提示，不阻塞队列后续任务
+          } else {
+            pollTimer = setTimeout(poll, 2000)
+          }
+        }).catch(() => {
+          // 轮询请求失败不中断，继续重试
+          if (!done) pollTimer = setTimeout(poll, 2000)
+        })
       }
-      if (p.status === 'error') { clearInterval(pollTimer); generating.value = false; progressMsg.value = '❌ ' + (p.message || '未知错误'); ElMessage.error(p.message) }
-    }, 2000)
-  } catch(e) { generating.value = false; ElMessage.error(e.message) }
+      poll()
+    })
+  }).catch(e => {
+    // store.generate 提交失败（网络错误等）
+    generating.value = false
+    ElMessage.error(e.message || '提交任务失败')
+    // 不 rethrow，让 generateAll 继续处理后续任务
+  })
 }
 
 function downloadVideo() {

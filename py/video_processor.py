@@ -306,7 +306,13 @@ class VideoTask:
             current_vid = "[comp]"
 
         # ⑥ 文案浮层（最多两条，随机浮现 2-3 秒，艺术字效果）
-        texts = [t.strip() for t in (settings.get("texts") or []) if t.strip()]
+        # 兼容两种格式：text1+text2（前端发送）和 texts 数组
+        text_list = settings.get("texts") or []
+        if not text_list:
+            t1 = (settings.get("text1") or "").strip()
+            t2 = (settings.get("text2") or "").strip()
+            text_list = [t for t in [t1, t2] if t]
+        texts = [t.strip() for t in text_list if t.strip()]
         if texts:
             text_font = settings.get("text_font", "simhei")
             font_file = self._find_font(text_font)

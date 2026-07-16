@@ -18,7 +18,7 @@ export const useVideoStore = defineStore('video', {
     },
     async generate(body) { return videoApi.generate(body) },
     async checkProgress(taskId) { return videoApi.progress(taskId) },
-    async loadHistory() { const res = await videoApi.historyList(); this.history = res.packages || {}; return res },
+    async loadHistory() { const res = await videoApi.historyList(); this.history = res.users || res.packages || {}; return res },
     async saveHistory(entry) { return videoApi.historySave({ entry }) },
     async deleteHistory(pkg, indices) { return videoApi.historyDelete({ pkg, indices }) },
     async loadFonts() { const res = await videoApi.fontsList(); this.fonts = res.fonts; return res },

@@ -147,13 +147,40 @@
           </div>
         </div>
 
+        <!-- 背景设置 -->
+        <div class="sub-section" style="margin-top:8px;">
+          <el-form-item label="🖼️ 背景图片（可选）" style="margin-bottom:6px;">
+            <div style="display:flex;gap:6px;">
+              <el-input v-model="bgImage" placeholder="留空则使用纯色背景" size="small" style="flex:1;min-width:0;" />
+              <el-button v-if="isLocalhost()" @click="browseBgImage" size="small" style="width:36px;flex-shrink:0;">📂</el-button>
+            </div>
+          </el-form-item>
+          <div v-if="!bgImage" style="display:flex;gap:12px;align-items:center;">
+            <el-form-item label="背景颜色" style="margin-bottom:0;flex:1;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <el-color-picker v-model="bgColor" size="small" />
+                <el-checkbox v-model="dynamicBg" size="small">动态背景</el-checkbox>
+                <el-select v-if="dynamicBg" v-model="dynamicBgMode" size="small" style="width:100px;">
+                  <el-option label="呼吸" value="breathe" /><el-option label="波浪" value="wave" />
+                  <el-option label="律动" value="beat" /><el-option label="流光" value="flow" />
+                </el-select>
+              </div>
+            </el-form-item>
+          </div>
+        </div>
+
         <!-- 视频设置 -->
         <div class="sub-section">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
             <el-form-item label="单帧时长" style="margin-bottom:0;"><el-select v-model="frameDuration" size="small" style="width:100%;"><el-option v-for="d in [3,4,5]" :key="d" :label="d+'秒'" :value="d" /></el-select></el-form-item>
             <el-form-item label="输出分辨率" style="margin-bottom:0;"><el-select v-model="resolution" size="small" style="width:100%;"><el-option label="9:16 竖屏" value="1080:1920" /><el-option label="1:1 方形" value="1080:1080" /></el-select></el-form-item>
             <el-form-item label="转场效果" style="margin-bottom:0;"><el-select v-model="transition" size="small" style="width:100%;">
-              <el-option label="淡入淡出" value="fade" /><el-option label="滑动" value="slideright" /><el-option label="缩放" value="zoomin" /><el-option label="溶解" value="dissolve" /><el-option label="无" value="none" />
+              <el-option label="淡入淡出" value="fade" /><el-option label="黑场过渡" value="fadeblack" /><el-option label="白场过渡" value="fadewhite" />
+              <el-option label="向右滑动" value="slideright" /><el-option label="向左滑动" value="slideleft" />
+              <el-option label="向上滑动" value="slideup" /><el-option label="向下滑动" value="slidedown" />
+              <el-option label="缩放" value="zoomin" /><el-option label="溶解" value="dissolve" />
+              <el-option label="像素化" value="pixelize" /><el-option label="圆形展开" value="circleopen" /><el-option label="圆形收缩" value="circleclose" />
+              <el-option label="擦除" value="wiperight" /><el-option label="无" value="none" />
             </el-select></el-form-item>
             <el-form-item label="内容缩放" style="margin-bottom:0;"><el-select v-model="contentScale" size="small" style="width:100%;"><el-option label="70%" value="0.70" /><el-option label="82%" value="0.82" /><el-option label="92%" value="0.92" /><el-option label="100%" value="1.00" /></el-select></el-form-item>
           </div>
@@ -164,13 +191,19 @@
       <div class="sub-section" style="margin-top:12px;">
         <el-form-item label="背景音乐（可选）" style="margin-bottom:8px;">
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-            <el-select v-model="musicPath" placeholder="选音乐或留空" clearable size="small" style="flex:1;min-width:140px;" @change="onMusicSelect">
-              <el-option v-for="m in musicFiles" :key="m.path" :label="m.name" :value="m.path" />
-            </el-select>
-            <el-button v-if="isPlaying" @click="stopMusic" size="small">⏹</el-button>
-            <input type="file" accept=".mp3,.wav,.aac,.m4a,.ogg,.flac" multiple @change="onMusicFileChange" ref="musicFileInput" style="display:none;" />
-            <el-button size="small" @click="$refs.musicFileInput.click()">{{ selectedMusicFiles.length ? `已选 ${selectedMusicFiles.length} 个` : '选择文件' }}</el-button>
-            <el-button size="small" type="primary" @click="uploadMusic" :loading="uploadingMusic" :disabled="!selectedMusicFiles.length">上传</el-button>
+            <template v-if="isLocalhost()">
+              <el-input v-model="musicPath" size="small" placeholder="F:\music\bg.mp3" style="flex:1;min-width:140px;" />
+              <el-button @click="browseMusic" size="small" style="width:36px;flex-shrink:0;">📂</el-button>
+            </template>
+            <template v-else>
+              <el-select v-model="musicPath" placeholder="选音乐或留空" clearable size="small" style="flex:1;min-width:140px;" @change="onMusicSelect">
+                <el-option v-for="m in musicFiles" :key="m.path" :label="m.name" :value="m.path" />
+              </el-select>
+              <el-button v-if="isPlaying" @click="stopMusic" size="small">⏹</el-button>
+              <input type="file" accept=".mp3,.wav,.aac,.m4a,.ogg,.flac,.mp4" multiple @change="onMusicFileChange" ref="musicFileInput" style="display:none;" />
+              <el-button size="small" @click="$refs.musicFileInput.click()">{{ selectedMusicFiles.length ? `已选 ${selectedMusicFiles.length} 个` : '选择文件' }}</el-button>
+              <el-button size="small" type="primary" @click="uploadMusic" :loading="uploadingMusic" :disabled="!selectedMusicFiles.length">上传</el-button>
+            </template>
           </div>
           <audio ref="audioPlayer" style="display:none;" />
         </el-form-item>
@@ -225,7 +258,7 @@
         <el-progress :percentage="Math.round(progressPct * 100)" />
         <div style="display:flex;align-items:center;gap:8px;">
           <span style="font-size:12px;color:#888;">{{ progressMsg }}</span>
-          <el-button v-if="generatedPath && !generating" link size="small" type="primary" @click="downloadVideo">📥 下载视频</el-button>
+          <el-button v-for="(p, i) in generatedPaths" :key="i" link size="small" type="primary" @click="downloadVideo(p)">📥 下载{{ generatedPaths.length > 1 ? ' #' + (i + 1) : '' }}</el-button>
         </div>
       </div>
 
@@ -238,16 +271,25 @@
         <div style="border:1px solid #eee;border-radius:10px;padding:12px;background:#fff;">
           <h4 style="font-size:12px;margin:0 0 8px 0;">📋 历史设置（{{ historyCount }}）</h4>
           <div v-if="!historyCount" style="font-size:10px;color:#999;">暂无历史</div>
-          <div v-for="(entries, pkg) in history" :key="pkg" style="margin-bottom:8px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-              <strong style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px;">{{ pkg }}</strong>
-              <el-button link size="small" type="danger" @click="deleteHistoryPkg(pkg)" style="font-size:9px;">✕</el-button>
+          <div v-for="(pkgs, username) in history" :key="username" style="margin-bottom:8px;">
+            <div @click="toggleUserCollapse(username)"
+              style="font-size:11px;font-weight:600;color:#0891b2;padding:3px 4px;background:#f0f9ff;border-radius:3px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+              <span>👤 {{ username === '_shared' ? '📦 旧数据（无用户）' : username }}</span>
+              <span style="font-size:9px;color:#999;">{{ collapsedUsers[username] ? '▶' : '▼' }}</span>
             </div>
-            <div v-for="(e,i) in (Array.isArray(entries) ? entries : [])" :key="i"
-              style="font-size:10px;padding:3px 6px;cursor:pointer;border-radius:3px;display:flex;justify-content:space-between;align-items:center;margin-top:2px;"
-              :style="{ background: e._id === activeHistoryId ? '#e6f7ff' : 'transparent' }">
-              <span @click="applyHistory(e)" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ e.name || e._saved_at || '-' }}</span>
-              <el-button link size="small" type="danger" @click.stop="deleteHistoryEntry(pkg, i)" style="font-size:9px;">✕</el-button>
+            <div v-show="!collapsedUsers[username]">
+              <div v-for="(entries, pkg) in pkgs" :key="pkg" style="margin-bottom:6px;margin-left:4px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                  <strong style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px;">{{ pkg }}</strong>
+                  <el-button link size="small" type="danger" @click="deleteHistoryPkg(username, pkg)" style="font-size:9px;">✕</el-button>
+                </div>
+                <div v-for="(e,i) in (Array.isArray(entries) ? entries : [])" :key="i"
+                  style="font-size:10px;padding:3px 6px;cursor:pointer;border-radius:3px;display:flex;justify-content:space-between;align-items:center;margin-top:2px;"
+                  :style="{ background: e._id === activeHistoryId ? '#e6f7ff' : 'transparent' }">
+                  <span @click="applyHistory(e)" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ e.name || e._saved_at || '-' }}</span>
+                  <el-button link size="small" type="danger" @click.stop="deleteHistoryEntry(username, pkg, i)" style="font-size:9px;">✕</el-button>
+                </div>
+              </div>
             </div>
           </div>
           <el-button size="small" @click="saveHistory" style="width:100%;margin-top:6px;">💾 保存当前设置</el-button>
@@ -258,7 +300,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useVideoStore } from '@/stores/video'
 import { useAuthStore } from '@/stores/auth'
 import { videoApi } from '@/api/video'
@@ -362,15 +404,14 @@ async function scanDir() {
     images.value = res.images || []
     logo.value = res.logo
     toggleSelectAll(true)
-    if (!outputPath.value) {
-      const clean = videoDir.value.replace(/[\\/]+$/, '').replace(/\\/g, '/')
-      const parts = clean.split('/')
-      const pkg = parts[parts.length - 1]
-      const parent = parts.slice(0, -1).join('/')
-      let outPath = parent + '/ai/' + pkg + '.mp4'
-      try { const check = await videoApi.nextFilename({ output_path: outPath }); if (check.path) outPath = check.path } catch(e) {}
-      outputPath.value = outPath
-    }
+    // 每次扫描新目录都自动填充输出路径（否则切换包名时旧路径残留导致名字对不上）
+    const clean = videoDir.value.replace(/[\\/]+$/, '').replace(/\\/g, '/')
+    const parts = clean.split('/')
+    const pkg = parts[parts.length - 1]
+    const parent = parts.slice(0, -1).join('/')
+    let outPath = parent + '/ai/' + pkg + '.mp4'
+    try { const check = await videoApi.nextFilename({ output_path: outPath }); if (check.path) outPath = check.path } catch(e) {}
+    outputPath.value = outPath
   } catch(e) { ElMessage.error('扫描失败：' + (e.response?.data?.error || e.message || '未知错误')) }
   scanning.value = false
 }
@@ -447,6 +488,9 @@ const aiDuration = ref(4)
 const aiApiKey = ref('')
 const aiPrompt = ref('')
 const bgColor = ref('#f0ebe0')
+const bgImage = ref('')
+const dynamicBg = ref(false)
+const dynamicBgMode = ref('breathe')
 const contentScale = ref('0.82')
 const frameDuration = ref(3)
 const transition = ref('fade')
@@ -469,7 +513,7 @@ const musicFileInput = ref(null)
 // 进度
 const progressMsg = ref('')
 const progressPct = ref(0)
-const generatedPath = ref('')
+const generatedPaths = ref([])  // 队列生成时累积所有输出路径
 const generating = ref(false)
 let pollTimer = null
 
@@ -526,6 +570,12 @@ async function uploadMusic() {
 }
 
 // 浏览
+async function browseBgImage() {
+  try {
+    const res = await browseApi.file({ type: 'image', initial_dir: bgImage.value ? bgImage.value.substring(0, Math.max(bgImage.value.lastIndexOf('/'), bgImage.value.lastIndexOf('\\'))) : null })
+    if (res.path) bgImage.value = res.path
+  } catch(e) { ElMessage.error('选择文件失败: ' + e.message) }
+}
 async function browseMusic() {
   try {
     const res = await browseApi.file({ type: 'audio', initial_dir: musicPath.value ? musicPath.value.substring(0, Math.max(musicPath.value.lastIndexOf('/'), musicPath.value.lastIndexOf('\\'))) : null })
@@ -549,7 +599,9 @@ function getSettings() {
     settings: {
       output_path: outputPath.value, use_logo: useLogo.value, logo_position: logoPosition.value, logo_effect: logoEffect.value,
       frame_duration: frameDuration.value, transition: transition.value, resolution: resolution.value,
-      bg_color: bgColor.value, content_scale: contentScale.value,
+      bg_image: bgImage.value || undefined, bg_color: bgColor.value,
+      dynamic_bg: dynamicBg.value, dynamic_bg_mode: dynamicBgMode.value,
+      content_scale: contentScale.value,
       music_path: musicPath.value || undefined,
       text1: text1.value || undefined, text2: text2.value || undefined, text_font: textFont.value,
       overwrite: overwrite.value,
@@ -558,33 +610,56 @@ function getSettings() {
   }
 }
 
-async function doGenerate(settings) {
+function doGenerate(settings) {
   generating.value = true; progressPct.value = 0; progressMsg.value = '提交中...'
-  try {
-    const res = await videoStore.generate(settings)
-    pollTimer = setInterval(async () => {
-      const p = await videoStore.checkProgress(res.task_id)
-      progressPct.value = p.progress || 0
-      progressMsg.value = p.message || '处理中...'
-      if (p.status === 'completed') {
-        clearInterval(pollTimer); generating.value = false
-        generatedPath.value = p.output?.path || ''
-        progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
-        ElMessage.success('视频生成完成')
-        autoSaveHistory()
+
+  return videoStore.generate(settings).then(res => {
+    const tid = res.task_id
+    return new Promise((resolve) => {
+      let done = false
+      const poll = () => {
+        if (done) return
+        videoStore.checkProgress(tid).then(p => {
+          if (done) return
+          progressPct.value = p.progress || 0
+          progressMsg.value = p.message || '处理中...'
+          if (p.status === 'completed') {
+            done = true
+            generating.value = false
+            if (p.output?.path) generatedPaths.value.push(p.output.path)
+            progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
+            ElMessage.success('视频生成完成')
+            autoSaveHistory()
+            resolve()
+          } else if (p.status === 'error') {
+            done = true
+            generating.value = false
+            progressMsg.value = '❌ ' + (p.message || '未知错误')
+            ElMessage.error(p.message || '未知错误')
+            resolve()
+          } else {
+            pollTimer = setTimeout(poll, 2000)
+          }
+        }).catch(() => {
+          if (!done) pollTimer = setTimeout(poll, 2000)
+        })
       }
-      if (p.status === 'error') { clearInterval(pollTimer); generating.value = false; progressMsg.value = '❌ ' + (p.message || '未知错误'); ElMessage.error(p.message) }
-    }, 2000)
-  } catch(e) { generating.value = false; ElMessage.error(e.message) }
+      poll()
+    })
+  }).catch(e => {
+    generating.value = false
+    ElMessage.error(e.message || '提交任务失败')
+  })
 }
 
-function downloadVideo() {
-  if (generatedPath.value) window.open('/api/video/download?path=' + encodeURIComponent(generatedPath.value), '_blank')
+function downloadVideo(path) {
+  if (path) window.open('/api/video/download?path=' + encodeURIComponent(path), '_blank')
 }
 
 function ensureMp4(p) { if (!p) return p; return p.toLowerCase().endsWith('.mp4') ? p : p + '.mp4' }
 
 async function startGenerate() {
+  generatedPaths.value = []
   outputPath.value = ensureMp4(outputPath.value)
   const s = getSettings(); s.settings.output_path = outputPath.value
   if (!s.images.length) { ElMessage.warning('请选择图片'); return }
@@ -604,6 +679,7 @@ function addToQueue() {
 }
 function removeFromQueue(i) { taskQueue.value.splice(i, 1) }
 async function generateAll() {
+  generatedPaths.value = []
   for (const t of taskQueue.value) { await doGenerate(t); await new Promise(r => setTimeout(r, 1000)) }
   taskQueue.value = []
 }
@@ -613,9 +689,20 @@ const history = ref({})
 const activeHistoryId = ref(null)
 const historyCount = computed(() => {
   let n = 0
-  Object.values(history.value).forEach(v => { if (Array.isArray(v)) n += v.length })
+  Object.values(history.value).forEach(userPkgs => {
+    if (userPkgs && typeof userPkgs === 'object') {
+      Object.values(userPkgs).forEach(entries => {
+        if (Array.isArray(entries)) n += entries.length
+      })
+    }
+  })
   return n
 })
+
+const collapsedUsers = reactive({})
+function toggleUserCollapse(username) {
+  collapsedUsers[username] = !collapsedUsers[username]
+}
 
 async function loadHistory() {
   try {
@@ -628,6 +715,7 @@ function autoSaveHistory() {
   if (!videoDir.value || !images.value.length) return
   const s = getSettings()
   s.videoDir = videoDir.value
+  s.username = authStore.user?.username || authStore.user?.display_name || ''
   s.name = (logo.value ? logo.value.filename : (images.value[0]?.filename || ''))
   delete s.images
   videoStore.saveHistory(s).then(() => loadHistory()).catch(() => {})
@@ -638,6 +726,7 @@ async function saveHistory() {
   if (!images.value.length) { ElMessage.warning('请先扫描图片'); return }
   const s = getSettings()
   s.videoDir = videoDir.value
+  s.username = authStore.user?.username || authStore.user?.display_name || ''
   s.name = (logo.value ? logo.value.filename : (images.value[0]?.filename || ''))
   delete s.images
   await videoStore.saveHistory(s)
@@ -645,13 +734,19 @@ async function saveHistory() {
   ElMessage.success('已保存')
 }
 
-async function deleteHistoryEntry(pkg, index) {
-  await videoStore.deleteHistory(pkg, [index])
+function _historyKey(username, pkg) {
+  // _shared 是旧数据的分组名，实际文件在根目录下不带用户名前缀
+  if (!username || username === '_shared') return pkg
+  return `${username}/${pkg}`
+}
+
+async function deleteHistoryEntry(username, pkg, index) {
+  await videoStore.deleteHistory(_historyKey(username, pkg), [index])
   await loadHistory()
 }
 
-async function deleteHistoryPkg(pkg) {
-  await videoStore.deleteHistory(pkg, null)
+async function deleteHistoryPkg(username, pkg) {
+  await videoStore.deleteHistory(_historyKey(username, pkg), null)
   await loadHistory()
 }
 
@@ -665,6 +760,9 @@ async function applyHistory(e) {
     if (s.transition) transition.value = s.transition
     if (s.resolution) resolution.value = s.resolution
     if (s.bg_color != null) bgColor.value = s.bg_color
+    if (s.bg_image != null) bgImage.value = s.bg_image
+    if (s.dynamic_bg != null) dynamicBg.value = s.dynamic_bg
+    if (s.dynamic_bg_mode) dynamicBgMode.value = s.dynamic_bg_mode
     if (s.content_scale) contentScale.value = s.content_scale
     if (s.music_path != null) musicPath.value = s.music_path
     if (s.text_font) textFont.value = s.text_font
