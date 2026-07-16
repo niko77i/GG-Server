@@ -59,6 +59,7 @@ Compress(app)
 
 # --- 请求日志 ---
 import time as _time
+from urllib.parse import quote
 import threading
 
 @app.before_request
@@ -113,18 +114,21 @@ _video_tasks: dict[str, VideoTask] = {}
 
 
 def _get_ffmpeg_path() -> str:
-    """获取 FFmpeg 可执行文件路径。打包模式从 MEIPASS 加载，开发模式查 PATH。"""
+    """获取 FFmpeg 可执行文件路径。优先用项目自带的版本（避免系统新版兼容问题）。"""
     if _FROZEN:
         bundled = os.path.join(sys._MEIPASS, "ffmpeg.exe")
         if os.path.isfile(bundled):
             return bundled
+    # 优先用项目根目录的 ffmpeg.exe（版本已知稳定）
+    project_ffmpeg = os.path.join(os.path.dirname(_current_dir), "ffmpeg.exe")
+    if os.path.isfile(project_ffmpeg):
+        return project_ffmpeg
     import shutil
     path = shutil.which("ffmpeg")
     if path:
         return path
-    # 开发模式常见位置
+    # 其他常见位置
     for p in [
-        os.path.join(os.path.dirname(_current_dir), "ffmpeg.exe"),
         r"C:\ffmpeg\bin\ffmpeg.exe",
     ]:
         if os.path.isfile(p):
@@ -624,18 +628,41 @@ def video_music_list():
 
 @app.route("/api/video/upload-music", methods=["POST"])
 def video_upload_music():
-    """上传背景音乐到服务器。"""
+    """上传背景音乐到服务器，支持 MP4（自动提取音频）。"""
     os.makedirs(_MUSIC_DIR, exist_ok=True)
     f = request.files.get("file")
     if not f or not f.filename:
         return jsonify({"success": False, "error": "未选择文件"}), 400
     filename = f.filename
     ext = os.path.splitext(filename)[1].lower()
-    if ext not in ('.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac'):
-        return jsonify({"success": False, "error": "不支持的音频格式"}), 400
-    fp = os.path.join(_MUSIC_DIR, filename)
-    f.save(fp)
-    return jsonify({"success": True, "name": filename, "path": fp})
+    if ext not in ('.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac', '.mp4'):
+        return jsonify({"success": False, "error": "不支持的格式"}), 400
+
+    # 先保存原始文件
+    import tempfile, subprocess
+    raw_fp = os.path.join(_MUSIC_DIR, filename)
+    f.save(raw_fp)
+
+    # 如果是 MP4，提取音频
+    if ext == '.mp4':
+        name_no_ext = os.path.splitext(filename)[0]
+        out_name = name_no_ext + '.mp3'
+        out_fp = os.path.join(_MUSIC_DIR, out_name)
+        ffmpeg = _get_ffmpeg_path()
+        try:
+            subprocess.run(
+                [ffmpeg, "-y", "-i", raw_fp, "-vn", "-acodec", "libmp3lame",
+                 "-q:a", "2", out_fp],
+                capture_output=True, text=True, timeout=120,
+            )
+            # 删除原始 mp4，只保留提取的音频
+            try: os.remove(raw_fp)
+            except: pass
+            return jsonify({"success": True, "name": out_name, "path": out_fp})
+        except Exception as e:
+            return jsonify({"success": False, "error": f"音频提取失败: {str(e)}"}), 500
+
+    return jsonify({"success": True, "name": filename, "path": raw_fp})
 
 
 @app.route("/api/audio", methods=["GET"])
@@ -653,64 +680,152 @@ def serve_audio():
 
 @app.route("/api/audio-replace", methods=["POST"])
 def audio_replace():
-    """替换视频的音频轨道。"""
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"success": False, "error": "请求体不能为空"}), 400
+    """替换视频的音频轨道 — 上传视频+音频，处理后返回下载链接。"""
+    video_file = request.files.get("video")
+    audio_file = request.files.get("audio")
 
-    video_path = (data.get("video_path") or "").strip()
-    audio_source = (data.get("audio_source") or "").strip()
+    if not video_file or not video_file.filename:
+        return jsonify({"success": False, "error": "请上传原视频"}), 400
+    if not audio_file or not audio_file.filename:
+        return jsonify({"success": False, "error": "请上传音频源"}), 400
 
-    if not video_path or not os.path.isfile(video_path):
-        return jsonify({"success": False, "error": "原视频文件不存在"}), 400
-    if not audio_source or not os.path.isfile(audio_source):
-        return jsonify({"success": False, "error": "音频源文件不存在"}), 400
+    # 临时目录
+    tmp_dir = os.path.join(os.path.dirname(__file__), "..", "temp", "audio_replace")
+    os.makedirs(tmp_dir, exist_ok=True)
 
-    # 输出路径：原视频同目录，文件名拼接 Music
-    video_dir = os.path.dirname(video_path)
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    ext = os.path.splitext(video_path)[1] or ".mp4"
-    output_path = os.path.join(video_dir, f"{base_name}Music{ext}")
+    ts = int(_time.time() * 1000)
+    video_ext = os.path.splitext(video_file.filename)[1] or ".mp4"
+    audio_ext = os.path.splitext(audio_file.filename)[1] or ".mp3"
 
-    # 确保输出目录存在
-    try:
-        os.makedirs(video_dir, exist_ok=True)
-    except OSError as e:
-        return jsonify({"success": False, "error": f"无法创建输出目录: {e}"}), 500
+    video_tmp = os.path.join(tmp_dir, f"_upload_video_{ts}{video_ext}")
+    audio_tmp = os.path.join(tmp_dir, f"_upload_audio_{ts}{audio_ext}")
+    video_file.save(video_tmp)
+    audio_file.save(audio_tmp)
+
+    # 输出文件名：原视频名 + _new
+    base_name = os.path.splitext(video_file.filename)[0]
+    output_filename = f"{base_name}_new{video_ext}"
+    output_path = os.path.join(tmp_dir, output_filename)
 
     ffmpeg = _get_ffmpeg_path()
-
-    # 构建 FFmpeg 命令：替换音频轨道（FFmpeg 自动从视频提取音频）
     cmd = [
         ffmpeg, "-y",
-        "-i", video_path.replace("\\", "/"),
-        "-i", audio_source.replace("\\", "/"),
+        "-i", video_tmp.replace("\\", "/"),
+        "-i", audio_tmp.replace("\\", "/"),
         "-c:v", "copy",
         "-map", "0:v:0",
-        "-map", f"1:a:0",
+        "-map", "1:a:0",
         "-shortest",
         output_path.replace("\\", "/"),
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             err_tail = result.stderr[-300:] if result.stderr else "(无输出)"
-            return jsonify({
-                "success": False,
-                "error": f"FFmpeg 执行失败: {err_tail}",
-            }), 500
+            return jsonify({"success": False, "error": f"FFmpeg 执行失败: {err_tail}"}), 500
+
+        # 清理上传的临时文件
+        for p in (video_tmp, audio_tmp):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        size_mb = round(size_mb, 1)
+
+        # 写入历史
+        db = database.get_db()
+        db.execute(
+            "INSERT INTO audio_replace_history (video_name, audio_name, output_name, output_path, size_mb) VALUES (?,?,?,?,?)",
+            (video_file.filename, audio_file.filename, output_filename, output_path, size_mb),
+        )
+        db.commit()
+
         return jsonify({
             "success": True,
-            "output": output_path.replace("\\", "/"),
-            "size_mb": round(size_mb, 1),
+            "output": output_filename,
+            "size_mb": size_mb,
+            "download_url": f"/api/audio-replace/download?path={quote(output_path)}",
         })
     except FileNotFoundError:
-        return jsonify({"success": False, "error": "未找到 FFmpeg"}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": "FFmpeg 未安装，请先安装 FFmpeg 并确保在 PATH 中或放在项目根目录"}), 500
     except subprocess.TimeoutExpired:
-        return jsonify({"success": False, "error": "处理超时"}), 500
+        return jsonify({"success": False, "error": "处理超时（超过 10 分钟）"}), 500
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
+
+
+@app.route("/api/audio-replace/download", methods=["GET"])
+def audio_replace_download():
+    """下载替换音频后的视频文件。"""
+    path = request.args.get("path", "").strip()
+    if not path or not os.path.isfile(path):
+        return jsonify({"success": False, "error": "文件不存在"}), 404
+    return send_file(path, as_attachment=True)
+
+
+@app.route("/api/audio-replace/history", methods=["GET"])
+def audio_replace_history_list():
+    """列出音频替换历史（按时间倒序）。"""
+    db = database.get_db()
+    rows = db.execute(
+        "SELECT id, video_name, audio_name, output_name, output_path, size_mb, created_at "
+        "FROM audio_replace_history ORDER BY id DESC LIMIT 100"
+    ).fetchall()
+    items = []
+    for r in rows:
+        items.append({
+            "id": r["id"],
+            "video_name": r["video_name"],
+            "audio_name": r["audio_name"],
+            "output_name": r["output_name"],
+            "output_path": r["output_path"],
+            "size_mb": r["size_mb"],
+            "created_at": r["created_at"],
+            "file_exists": os.path.isfile(r["output_path"]),
+        })
+    return jsonify({"success": True, "items": items})
+
+
+@app.route("/api/audio-replace/history/<int:hid>", methods=["DELETE"])
+def audio_replace_history_delete(hid):
+    """删除单条历史记录（同时删除对应文件）。"""
+    db = database.get_db()
+    row = db.execute("SELECT output_path FROM audio_replace_history WHERE id = ?", (hid,)).fetchone()
+    if not row:
+        return jsonify({"success": False, "error": "记录不存在"}), 404
+    path = row["output_path"]
+    if path and os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    db.execute("DELETE FROM audio_replace_history WHERE id = ?", (hid,))
+    db.commit()
+    return jsonify({"success": True})
+
+
+@app.route("/api/audio-replace/history", methods=["DELETE"])
+def audio_replace_history_clear():
+    """清空全部历史记录（同时删除所有文件）。"""
+    db = database.get_db()
+    rows = db.execute("SELECT output_path FROM audio_replace_history").fetchall()
+    for r in rows:
+        path = r["output_path"]
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    db.execute("DELETE FROM audio_replace_history")
+    db.commit()
+    return jsonify({"success": True})
 
 
 @app.route("/api/video/next-filename", methods=["POST"])
@@ -758,48 +873,65 @@ def _load_pkg_history(pkg: str) -> list:
 
 
 def _save_pkg_history(pkg: str, entries: list):
-    os.makedirs(_VIDEO_HISTORY_DIR, exist_ok=True)
+    fp = _history_file(pkg)
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
     import json
-    with open(_history_file(pkg), "w", encoding="utf-8") as f:
+    with open(fp, "w", encoding="utf-8") as f:
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
 
 def _list_packages() -> list[str]:
+    """列出所有历史记录 key（支持 username/pkg 子目录结构）。"""
     os.makedirs(_VIDEO_HISTORY_DIR, exist_ok=True)
     pkgs = []
-    for f in sorted(os.listdir(_VIDEO_HISTORY_DIR)):
-        if f.endswith(".json"):
-            pkgs.append(f[:-5])  # 去掉 .json
-    return pkgs
+    for root, dirs, files in os.walk(_VIDEO_HISTORY_DIR):
+        for f in files:
+            if f.endswith(".json"):
+                rel = os.path.relpath(os.path.join(root, f), _VIDEO_HISTORY_DIR)
+                pkgs.append(rel[:-5].replace("\\", "/"))  # 去掉 .json，统一用 /
+    return sorted(pkgs)
 
 
 @app.route("/api/video/history/save", methods=["POST"])
 def video_history_save():
-    """保存当前视频生成设置到对应包的历史文件。"""
+    """保存当前视频生成设置到对应包的历史文件（按用户名+包名分组）。"""
     data = request.get_json(silent=True) or {}
     entry = data.get("entry") or {}
     if not entry:
         return jsonify({"success": False, "error": "无数据"}), 400
     import datetime
     entry["saved_at"] = datetime.datetime.now().strftime("%m-%d %H:%M")
-    # 按包名分组
+    # 按用户名 + 包名分组存储（_shared 不建子目录，兼容旧数据）
+    username = (entry.get("username") or "").strip()
     video_dir = (entry.get("videoDir") or "").strip()
     pkg = os.path.basename(video_dir.rstrip("/\\")) if video_dir else "_uncategorized"
-    entries = _load_pkg_history(pkg)
+    if username and username != "_shared":
+        key = f"{username}/{pkg}"
+    else:
+        key = pkg
+    entries = _load_pkg_history(key)
     entries.insert(0, entry)
     if len(entries) > 30:
         entries = entries[:30]
-    _save_pkg_history(pkg, entries)
+    _save_pkg_history(key, entries)
     return jsonify({"success": True, "pkg": pkg, "count": len(entries)})
 
 
 @app.route("/api/video/history/list", methods=["GET"])
 def video_history_list():
-    """按包名分组返回所有历史。"""
+    """按用户名 → 包名两级分组返回所有历史。"""
     result = {}
-    for pkg in _list_packages():
-        result[pkg] = _load_pkg_history(pkg)
-    return jsonify({"success": True, "packages": result})
+    for key in _list_packages():
+        entries = _load_pkg_history(key)
+        if not entries:
+            continue
+        # key 格式为 "username/pkg" 或仅 "pkg"（兼容旧数据）
+        if "/" in key:
+            username, pkg = key.split("/", 1)
+        else:
+            username, pkg = "_shared", key
+        result.setdefault(username, {})[pkg] = entries
+    return jsonify({"success": True, "users": result})
 
 
 @app.route("/api/video/history/delete", methods=["POST"])
@@ -1252,7 +1384,7 @@ def youtube_list():
     if uploader_id:
         where.append("v.owner_id = ?"); params.append(int(uploader_id))
 
-    query = "SELECT v.*, u.display_name AS owner_display_name, u.username AS owner_username FROM videos v LEFT JOIN users u ON v.owner_id = u.id"
+    query = "SELECT v.*, u.display_name AS owner_display_name, u.username AS owner_username, COALESCE(vc.total_consumption, 0) AS total_consumption FROM videos v LEFT JOIN users u ON v.owner_id = u.id LEFT JOIN (SELECT video_id, SUM(amount) AS total_consumption FROM video_consumption GROUP BY video_id) vc ON v.id = vc.video_id"
     if where: query += " WHERE " + " AND ".join(where)
     query += " ORDER BY CASE v.review_status WHEN '不能过审' THEN 1 ELSE 0 END, CASE v.effectiveness WHEN '成效' THEN 0 WHEN '一般' THEN 1 ELSE 2 END, v.imported_at DESC"
 
@@ -1388,7 +1520,7 @@ def youtube_batch_edit():
     data = request.get_json(silent=True) or {}
     ids = data.get("ids") or []
     field = (data.get("field") or "").strip()
-    value = (data.get("value") or "").strip()
+    value = str(data.get("value", "")).strip() if data.get("value") is not None else ""
     if not ids:
         return jsonify({"success": False, "error": "未指定视频ID"}), 400
     if field not in ("region", "frame_type", "effectiveness", "product_name", "review_status", "is_public"):
@@ -1398,7 +1530,13 @@ def youtube_batch_edit():
     is_admin = user and user["role"] in ("developer", "admin")
     updated = 0
     for vid in ids:
-        if is_admin:
+        if field == "is_public":
+            # 任何人（含 admin）只能改自己上传的视频的可见性
+            cur = db.execute(
+                "UPDATE videos SET is_public=? WHERE id=? AND owner_id=?",
+                (value, vid, user_id)
+            )
+        elif is_admin:
             cur = db.execute(f"UPDATE videos SET {field}=? WHERE id=?", (value, vid))
         else:
             cur = db.execute(
@@ -1409,6 +1547,250 @@ def youtube_batch_edit():
     db.commit()
     db.close()
     return jsonify({"success": True, "updated": updated})
+
+
+# ═══════════════════════════════════════════════
+# 视频消耗追踪 API
+# ═══════════════════════════════════════════════
+
+def _reject_non_admin(user_id):
+    """拒绝非 admin/developer 用户。返回 (error_response, status) 或 None。"""
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] not in ("developer", "admin"):
+        return jsonify({"success": False, "error": "仅管理员和开发者可操作"}), 403
+    return None
+
+
+@app.route("/api/youtube/<vid>/consumption", methods=["GET"])
+@jwt_required()
+def youtube_consumption_get(vid):
+    """获取视频的消耗明细（所有角色可查看）。"""
+    db = _yt_db()
+
+    # 验证视频存在且用户有权限查看
+    video = db.execute("SELECT id, title, owner_id, is_public FROM videos WHERE id=?", (vid,)).fetchone()
+    if not video:
+        db.close()
+        return jsonify({"success": False, "error": "视频不存在"}), 404
+
+    # 查询所有消耗记录
+    rows = db.execute("""
+        SELECT vc.*, u.display_name, u.username,
+               COALESCE(p.product_name, '') AS product_name
+        FROM video_consumption vc
+        JOIN users u ON vc.user_id = u.id
+        LEFT JOIN products p ON vc.product_id = p.id
+        WHERE vc.video_id = ?
+        ORDER BY vc.user_id, vc.consume_date DESC
+    """, (vid,)).fetchall()
+
+    db.close()
+
+    # 按用户分组
+    users_map = {}
+    total = 0.0
+    for r in rows:
+        record = {
+            "id": r["id"],
+            "amount": r["amount"],
+            "product_id": r["product_id"],
+            "product_name": r["product_name"],
+            "consume_date": r["consume_date"],
+            "created_at": r["created_at"],
+        }
+        total += r["amount"]
+        uid = r["user_id"]
+        if uid not in users_map:
+            users_map[uid] = {
+                "user_id": uid,
+                "display_name": r["display_name"] or r["username"],
+                "username": r["username"],
+                "total": 0.0,
+                "records": [],
+            }
+        users_map[uid]["total"] += r["amount"]
+        users_map[uid]["records"].append(record)
+
+    return jsonify({
+        "success": True,
+        "total": total,
+        "users": list(users_map.values()),
+    })
+
+
+@app.route("/api/youtube/<vid>/consumption", methods=["POST"])
+@jwt_required()
+def youtube_consumption_add(vid):
+    """新增消耗记录（仅 admin/developer，且只能给自己添加）。"""
+    user_id = int(get_jwt_identity())
+    err = _reject_non_admin(user_id)
+    if err: return err
+
+    data = request.get_json(silent=True) or {}
+    amount = data.get("amount")
+    consume_date = data.get("consume_date", "")
+    product_id = data.get("product_id")
+
+    if not amount or float(amount) <= 0:
+        return jsonify({"success": False, "error": "金额必须大于0"}), 400
+    if not consume_date:
+        return jsonify({"success": False, "error": "请选择日期"}), 400
+
+    db = _yt_db()
+    # 验证视频存在
+    video = db.execute("SELECT id FROM videos WHERE id=?", (vid,)).fetchone()
+    if not video:
+        db.close()
+        return jsonify({"success": False, "error": "视频不存在"}), 404
+
+    cur = db.execute(
+        "INSERT INTO video_consumption (video_id, user_id, product_id, amount, consume_date) VALUES (?, ?, ?, ?, ?)",
+        (vid, user_id, product_id, float(amount), consume_date)
+    )
+    record_id = cur.lastrowid
+    db.commit()
+
+    # 返回新建的记录
+    row = db.execute("""
+        SELECT vc.*, COALESCE(p.product_name, '') AS product_name
+        FROM video_consumption vc
+        LEFT JOIN products p ON vc.product_id = p.id
+        WHERE vc.id = ?
+    """, (record_id,)).fetchone()
+    db.close()
+
+    return jsonify({
+        "success": True,
+        "record": {
+            "id": row["id"],
+            "video_id": row["video_id"],
+            "user_id": row["user_id"],
+            "product_id": row["product_id"],
+            "product_name": row["product_name"],
+            "amount": row["amount"],
+            "consume_date": row["consume_date"],
+            "created_at": row["created_at"],
+        }
+    })
+
+
+@app.route("/api/youtube/<vid>/consumption/<int:cid>", methods=["PUT"])
+@jwt_required()
+def youtube_consumption_edit(vid, cid):
+    """编辑消耗记录（仅记录 owner 本人可编辑）。"""
+    user_id = int(get_jwt_identity())
+    err = _reject_non_admin(user_id)
+    if err: return err
+
+    data = request.get_json(silent=True) or {}
+    db = _yt_db()
+
+    row = db.execute(
+        "SELECT * FROM video_consumption WHERE id=? AND video_id=?",
+        (cid, vid)
+    ).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "记录不存在"}), 404
+    if row["user_id"] != user_id:
+        db.close()
+        return jsonify({"success": False, "error": "只能编辑自己的消耗记录"}), 403
+
+    amount = data.get("amount", row["amount"])
+    consume_date = data.get("consume_date", row["consume_date"])
+    product_id = data.get("product_id", row["product_id"])
+
+    db.execute(
+        "UPDATE video_consumption SET amount=?, consume_date=?, product_id=? WHERE id=?",
+        (float(amount), consume_date, product_id, cid)
+    )
+    db.commit()
+
+    updated = db.execute("""
+        SELECT vc.*, COALESCE(p.product_name, '') AS product_name
+        FROM video_consumption vc
+        LEFT JOIN products p ON vc.product_id = p.id
+        WHERE vc.id = ?
+    """, (cid,)).fetchone()
+    db.close()
+
+    return jsonify({
+        "success": True,
+        "record": {
+            "id": updated["id"],
+            "video_id": updated["video_id"],
+            "user_id": updated["user_id"],
+            "product_id": updated["product_id"],
+            "product_name": updated["product_name"],
+            "amount": updated["amount"],
+            "consume_date": updated["consume_date"],
+            "created_at": updated["created_at"],
+        }
+    })
+
+
+@app.route("/api/youtube/<vid>/consumption/<int:cid>", methods=["DELETE"])
+@jwt_required()
+def youtube_consumption_delete(vid, cid):
+    """删除消耗记录（仅记录 owner 本人可删除）。"""
+    user_id = int(get_jwt_identity())
+    err = _reject_non_admin(user_id)
+    if err: return err
+
+    db = _yt_db()
+    row = db.execute(
+        "SELECT * FROM video_consumption WHERE id=? AND video_id=?",
+        (cid, vid)
+    ).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "记录不存在"}), 404
+    if row["user_id"] != user_id:
+        db.close()
+        return jsonify({"success": False, "error": "只能删除自己的消耗记录"}), 403
+
+    db.execute("DELETE FROM video_consumption WHERE id=?", (cid,))
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/youtube/consumption/dates", methods=["GET"])
+@jwt_required()
+def youtube_consumption_dates():
+    """返回有消耗记录的日期及数量，供日期选择器标记使用。"""
+    user_id = int(get_jwt_identity())
+    scope = request.args.get("scope", "all").strip()
+
+    db = _yt_db()
+    # 按 scope 过滤可见视频
+    video_where = []
+    video_params = []
+    if scope == "public":
+        video_where.append("is_public = 1")
+    elif scope == "private":
+        video_where.append("owner_id = ?")
+        video_params.append(user_id)
+    else:
+        video_where.append("(is_public = 1 OR owner_id = ?)")
+        video_params.append(user_id)
+
+    query = """
+        SELECT vc.consume_date, COUNT(DISTINCT vc.video_id) AS cnt
+        FROM video_consumption vc
+        JOIN videos v ON vc.video_id = v.id
+        WHERE """ + " AND ".join(video_where) + """
+        GROUP BY vc.consume_date
+        ORDER BY vc.consume_date DESC
+    """
+    rows = db.execute(query, video_params).fetchall()
+    db.close()
+
+    dates = {r["consume_date"]: r["cnt"] for r in rows}
+    return jsonify({"success": True, "dates": dates})
+
+
+# ═══════════════════════════════════════════════
 
 
 @app.route("/api/youtube/tags", methods=["GET"])
@@ -1474,6 +1856,26 @@ def youtube_tags_save():
 # ---------- 产品管理 API ----------
 
 import re as _re_prod
+
+@app.route("/api/products/runner-products", methods=["GET"])
+@jwt_required()
+def runner_products():
+    """返回当前用户作为 runner 的产品列表（供消耗录入下拉框使用）。"""
+    user_id = int(get_jwt_identity())
+    db = database.get_db()
+    rows = db.execute(
+        "SELECT id, product_name, runner_ids FROM products WHERE is_archived=0 AND deleted_at='' ORDER BY product_name"
+    ).fetchall()
+    db.close()
+    # 过滤出当前用户是 runner 的产品
+    import json as _json
+    products = []
+    for r in rows:
+        runner_ids = _json.loads(r["runner_ids"] or "[]")
+        if user_id in runner_ids:
+            products.append({"id": r["id"], "product_name": r["product_name"]})
+    return jsonify({"success": True, "products": products})
+
 
 @app.route("/api/products/list", methods=["GET"])
 @jwt_required(optional=True)
@@ -1726,11 +2128,44 @@ def products_update(pid):
 def products_delete(pid):
     reject = _reject_viewer()
     if reject: return reject
+    user_id = int(get_jwt_identity())
     db = _yt_db()
 
+    # 1. 查询产品信息（含关联包列表），生成审计快照
+    prod = db.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+    if not prod:
+        db.close()
+        return jsonify({"success": False, "error": "产品不存在"}), 404
+
+    pkgs = db.execute("SELECT * FROM packages WHERE product_id=?", (pid,)).fetchall()
+    asset_count = db.execute(
+        "SELECT COUNT(*) FROM product_assets WHERE product_id=?", (pid,)
+    ).fetchone()[0]
+
+    detail = json.dumps({
+        "product": {k: prod[k] for k in prod.keys()},
+        "packages": [{k: p[k] for k in p.keys()} for p in pkgs],
+        "asset_count": asset_count,
+    }, ensure_ascii=False)
+
+    # 2. 写入审计日志
+    db.execute(
+        "INSERT INTO audit_log(user_id, action, target_type, target_id, target_name, detail) "
+        "VALUES(?, 'delete_product', 'product', ?, ?, ?)",
+        (user_id, pid, prod["product_name"] or "", detail)
+    )
+
+    # 3. 清理关联数据
+    db.execute("DELETE FROM delist_checks WHERE product_id=?", (pid,))
     db.execute("DELETE FROM product_assets WHERE product_id=?", (pid,))
     db.execute("DELETE FROM packages WHERE product_id=?", (pid,))
-    db.execute("DELETE FROM products WHERE id=?", (pid,))
+
+    # 4. 软删除产品
+    db.execute(
+        "UPDATE products SET is_archived=1, deleted_at=? WHERE id=?",
+        (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pid)
+    )
+
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -2002,6 +2437,109 @@ def products_delete_package(pkg_id):
     db.execute("DELETE FROM packages WHERE id=?", (pkg_id,))
     db.commit(); db.close()
     return jsonify({"success": True})
+
+
+# ---------- 审计日志 API ----------
+
+@app.route("/api/audit-log/list", methods=["GET"])
+@jwt_required()
+def audit_log_list():
+    """返回删除产品的审计日志列表（所有角色可查看）。"""
+    page = request.args.get("page", 1, type=int)
+    size = request.args.get("size", 20, type=int)
+    offset = (page - 1) * size
+
+    db = _yt_db()
+    total = db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    rows = db.execute("""
+        SELECT al.*, u.username, u.display_name
+        FROM audit_log al
+        JOIN users u ON al.user_id = u.id
+        ORDER BY al.created_at DESC
+        LIMIT ? OFFSET ?
+    """, (size, offset)).fetchall()
+
+    logs = []
+    for r in rows:
+        log = {
+            "id": r["id"],
+            "user_id": r["user_id"],
+            "username": r["username"],
+            "display_name": r["display_name"] or r["username"],
+            "action": r["action"],
+            "target_type": r["target_type"],
+            "target_id": r["target_id"],
+            "target_name": r["target_name"],
+            "detail": json.loads(r["detail"] or "{}"),
+            "created_at": r["created_at"],
+        }
+        logs.append(log)
+
+    db.close()
+    return jsonify({"success": True, "logs": logs, "total": total})
+
+
+@app.route("/api/audit-log/restore/<int:log_id>", methods=["POST"])
+@jwt_required()
+def audit_log_restore(log_id):
+    """从审计日志恢复已删除的产品（仅 developer 可操作）。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] != "developer":
+        return jsonify({"success": False, "error": "仅开发者可恢复产品"}), 403
+
+    db = _yt_db()
+    log = db.execute("SELECT * FROM audit_log WHERE id=? AND action='delete_product'", (log_id,)).fetchone()
+    if not log:
+        db.close()
+        return jsonify({"success": False, "error": "日志记录不存在"}), 404
+
+    detail = json.loads(log["detail"] or "{}")
+    pid = log["target_id"]
+
+    # 检查产品是否存在
+    prod = db.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+    if not prod:
+        # 产品被物理删除了，从快照重建
+        pdata = detail.get("product", {})
+        if not pdata:
+            db.close()
+            return jsonify({"success": False, "error": "快照数据缺失，无法恢复"}), 400
+        db.execute(
+            "INSERT INTO products(id, product_name, kpi, region, status, mcc_id, customer, owner_id, runner_ids, is_archived, deleted_at, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,0,'',?)",
+            (pid, pdata.get("product_name",""), pdata.get("kpi",""), pdata.get("region",""),
+             pdata.get("status",""), pdata.get("mcc_id"), pdata.get("customer",""),
+             pdata.get("owner_id", user_id), pdata.get("runner_ids","[]"),
+             pdata.get("created_at",""))
+        )
+    else:
+        # 软删除的，直接恢复
+        db.execute("UPDATE products SET is_archived=0, deleted_at='' WHERE id=?", (pid,))
+
+    # 恢复包
+    pkgs = detail.get("packages", [])
+    restored_pkgs = 0
+    for pkg in pkgs:
+        exists = db.execute("SELECT id FROM packages WHERE id=?", (pkg["id"],)).fetchone()
+        if exists:
+            continue
+        db.execute(
+            "INSERT INTO packages(id, product_id, series_name, package_name, url, status, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (pkg["id"], pid, pkg.get("series_name",""), pkg["package_name"],
+             pkg.get("url",""), pkg.get("status",""), pkg.get("created_at",""))
+        )
+        restored_pkgs += 1
+
+    db.commit()
+    db.close()
+    return jsonify({
+        "success": True,
+        "message": f"产品已恢复，恢复了 {restored_pkgs} 个包",
+        "product_id": pid,
+        "packages_restored": restored_pkgs,
+    })
 
 
 # ---------- 掉包检测 API ----------
@@ -4227,7 +4765,12 @@ def _run_weekly_cleanup_once():
             os.makedirs(d, exist_ok=True)
     ai_dir = os.path.join(_SCRAPE_DEFAULT_DIR, "ai")
     os.makedirs(ai_dir, exist_ok=True)
-    print(f"[Cleanup] 已清理爬取图片和视频: {_dt.datetime.now()}")
+    # 清理音频替换临时文件
+    audio_tmp = os.path.join(_DATA_ROOT, "temp", "audio_replace")
+    if os.path.isdir(audio_tmp):
+        _shutil.rmtree(audio_tmp)
+        os.makedirs(audio_tmp, exist_ok=True)
+    print(f"[Cleanup] 已清理爬取图片、视频、音频替换临时文件: {_dt.datetime.now()}")
 
 
 def _run_delist_check_once():
@@ -4344,19 +4887,25 @@ def _start_delist_scheduler():
 
     def _loop():
         # 启动时立即执行一次
-        print("[DelistScheduler] 启动，执行首次检测...")
-        try:
-            _run_delist_check_once()
-        except Exception as e:
-            print(f"[DelistScheduler] 首次检测出错: {e}")
+        # print("[DelistScheduler] 启动，执行首次检测...")
+        # try:
+        #     _run_delist_check_once()
+        # except Exception as e:
+        #     print(f"[DelistScheduler] 首次检测出错: {e}")
 
-        # 之后每小时执行一次
+        # 之后每小时执行一次，异常自动恢复
         while True:
             _time.sleep(3600)  # 1 小时
             try:
                 _run_delist_check_once()
             except Exception as e:
-                print(f"[DelistScheduler] 定时检测出错: {e}")
+                print(f"[DelistScheduler] 定时检测出错（将自动重试）: {e}")
+                # 出错后等 60 秒再试一次，避免连续失败
+                _time.sleep(60)
+                try:
+                    _run_delist_check_once()
+                except Exception as e2:
+                    print(f"[DelistScheduler] 重试仍失败: {e2}")
 
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
