@@ -84,6 +84,32 @@
         </div>
       </div>
 
+      <!-- 排序面板：拖拽调整图片顺序 -->
+      <div v-if="orderedImages.length" style="margin-top:4px;margin-bottom:8px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <span style="font-size:12px;font-weight:600;">📸 视频图片顺序（{{ orderedImages.length }} 张，拖拽调整）</span>
+          <el-button link size="small" @click="shuffleOrdered">🎲 随机排序</el-button>
+          <el-button link size="small" type="danger" @click="clearOrdered">🗑 清空</el-button>
+        </div>
+        <div style="display:flex;gap:6px;overflow-x:auto;padding:8px;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:6px;min-height:70px;align-items:center;">
+          <div v-for="(img, i) in orderedImages" :key="img.filename"
+            class="sort-card"
+            draggable="true"
+            @dragstart="onDragStart($event, i)"
+            @dragover.prevent="onDragOver($event, i)"
+            @dragend="onDragEnd"
+            @drop="onDrop($event, i)"
+            :class="{ 'drag-over': dragOverIndex === i, 'dragging': dragIndex === i }"
+            style="width:80px;flex-shrink:0;cursor:grab;border:2px solid #e2e8f0;border-radius:6px;overflow:hidden;background:#fff;transition:transform .15s;position:relative;">
+            <el-image :src="'/api/image?path=' + encodeURIComponent(img.path)" fit="cover" style="width:80px;height:50px;pointer-events:none;" />
+            <div style="padding:2px 4px;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;">{{ i + 1 }}. {{ img.filename }}</div>
+            <span @click.stop="removeFromOrdered(img.filename)"
+              style="position:absolute;top:1px;right:2px;cursor:pointer;font-size:12px;color:#ef4444;line-height:1;background:rgba(255,255,255,0.9);border-radius:50%;width:16px;height:16px;text-align:center;">✕</span>
+          </div>
+          <span v-if="!orderedImages.length" style="font-size:11px;color:#999;width:100%;text-align:center;">点击下方图片添加到排序面板</span>
+        </div>
+      </div>
+
       <div v-if="images.length" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;">
         <div v-for="img in images" :key="img.filename" class="img-card" :class="{ selected: selectedImgs[img.filename] }" @click="toggleImg(img.filename)">
           <el-image :src="'/api/image?path=' + encodeURIComponent(img.path)" fit="cover" style="aspect-ratio:16/10;border-radius:4px 4px 0 0;" />
@@ -91,7 +117,7 @@
         </div>
       </div>
       <div v-if="images.length" style="margin-top:6px;display:flex;gap:8px;align-items:center;">
-        <el-checkbox v-model="randomOrder" size="small">随机排序</el-checkbox>
+        <el-checkbox v-model="randomOrder" size="small" @change="onRandomOrderChange">随机排序</el-checkbox>
         <el-button link size="small" @click="toggleSelectAll">{{ allSelected ? '☑ 取消全选' : '☑ 全选' }}</el-button>
         <span style="font-size:11px;color:#888;">已选 {{ Object.values(selectedImgs).filter(Boolean).length }} / {{ images.length }}</span>
       </div>
@@ -252,13 +278,14 @@
       <!-- 任务队列 + 进度 -->
       <div v-if="taskQueue.length" style="margin-top:12px;">
         <el-tag v-for="(t,i) in taskQueue" :key="i" size="small" style="margin:2px;" closable @close="removeFromQueue(i)">{{ t.name || '任务 '+(i+1) }}</el-tag>
-        <el-button type="success" @click="generateAll" size="small" style="margin-top:6px;">⚡ 一键生成全部</el-button>
+        <el-button type="success" @click="generateAll" size="small" style="margin-top:6px;" :disabled="generatingBatch || !taskQueue.length">⚡ 一键生成全部</el-button>
       </div>
       <div v-if="progressMsg" style="margin-top:12px;">
         <el-progress :percentage="Math.round(progressPct * 100)" />
         <div style="display:flex;align-items:center;gap:8px;">
           <span style="font-size:12px;color:#888;">{{ progressMsg }}</span>
-          <el-button v-for="(p, i) in generatedPaths" :key="i" link size="small" type="primary" @click="downloadVideo(p)">📥 下载{{ generatedPaths.length > 1 ? ' #' + (i + 1) : '' }}</el-button>
+          <el-button v-for="(p, i) in generatedPaths" :key="i" link size="small" type="primary" @click="downloadVideo(p)">📥 {{ pathBasename(p) }}</el-button>
+          <el-button v-if="generatedPaths.length > 1" link size="small" type="info" @click="generatedPaths = []" style="font-size:10px;">清空列表</el-button>
         </div>
       </div>
 
@@ -368,8 +395,12 @@ const scanning = ref(false)
 const images = ref([])
 const logo = ref(null)
 const selectedImgs = ref({})
+const orderedImages = ref([])  // 排序面板中的图片（有序）
 const allSelected = ref(true)
 const randomOrder = ref(false)
+// 拖拽状态
+const dragIndex = ref(-1)
+const dragOverIndex = ref(-1)
 const remotePackages = ref([])
 const scrapeUsers = ref([])
 const selectedUserDn = ref('')
@@ -417,15 +448,97 @@ async function scanDir() {
 }
 
 function toggleImg(filename) {
-  selectedImgs.value = { ...selectedImgs.value, [filename]: !selectedImgs.value[filename] }
+  const wasSelected = selectedImgs.value[filename]
+  selectedImgs.value = { ...selectedImgs.value, [filename]: !wasSelected }
   allSelected.value = Object.keys(selectedImgs.value).length === images.value.length
+  // 同步排序面板
+  if (!wasSelected) {
+    // 新选中：追加到排序面板末尾
+    const img = images.value.find(i => i.filename === filename)
+    if (img && !orderedImages.value.find(o => o.filename === filename)) {
+      orderedImages.value.push({ filename: img.filename, path: img.path })
+    }
+  } else {
+    // 取消选中：从排序面板移除
+    orderedImages.value = orderedImages.value.filter(o => o.filename !== filename)
+  }
 }
 function toggleSelectAll(force) {
   const s = {}
   const val = force !== undefined ? force : !allSelected.value
-  if (val) images.value.forEach(img => s[img.filename] = true)
+  if (val) {
+    images.value.forEach(img => s[img.filename] = true)
+    // 全选：排序面板同步为全部图片（保持当前网格顺序）
+    orderedImages.value = images.value.map(img => ({ filename: img.filename, path: img.path }))
+  } else {
+    orderedImages.value = []
+  }
   selectedImgs.value = s
   allSelected.value = val
+}
+
+// ---- 排序面板操作 ----
+function removeFromOrdered(filename) {
+  orderedImages.value = orderedImages.value.filter(o => o.filename !== filename)
+  selectedImgs.value = { ...selectedImgs.value, [filename]: false }
+  allSelected.value = false
+}
+function clearOrdered() {
+  orderedImages.value = []
+  selectedImgs.value = {}
+  allSelected.value = false
+}
+function shuffleOrdered() {
+  if (orderedImages.value.length > 0) {
+    // 排序面板有图片 → 随机打乱
+    const arr = [...orderedImages.value]
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]]
+    }
+    orderedImages.value = arr
+  } else if (images.value.length > 0) {
+    // 排序面板为空 → 把所有图片随机打乱塞入
+    const arr = images.value.map(img => ({ filename: img.filename, path: img.path }))
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]]
+    }
+    orderedImages.value = arr
+    // 同时全选
+    const s = {}
+    arr.forEach(img => s[img.filename] = true)
+    selectedImgs.value = s
+    allSelected.value = true
+  }
+}
+function onRandomOrderChange(val) {
+  // 勾选随机排序时自动填充排序面板
+  if (val) shuffleOrdered()
+}
+
+// ---- 拖拽排序 ----
+function onDragStart(e, i) {
+  dragIndex.value = i
+  e.dataTransfer.effectAllowed = 'move'
+  e.dataTransfer.setData('text/plain', i.toString())
+}
+function onDragOver(e, i) {
+  dragOverIndex.value = i
+}
+function onDrop(e, i) {
+  const from = dragIndex.value
+  if (from < 0 || from === i) return
+  const arr = [...orderedImages.value]
+  const [item] = arr.splice(from, 1)
+  arr.splice(i, 0, item)
+  orderedImages.value = arr
+  dragIndex.value = -1
+  dragOverIndex.value = -1
+}
+function onDragEnd() {
+  dragIndex.value = -1
+  dragOverIndex.value = -1
 }
 
 async function loadRemotePackages(userDn) {
@@ -515,6 +628,7 @@ const progressMsg = ref('')
 const progressPct = ref(0)
 const generatedPaths = ref([])  // 队列生成时累积所有输出路径
 const generating = ref(false)
+const generatingBatch = ref(false)  // 批量生成中（防止重复点击）
 let pollTimer = null
 
 // 队列
@@ -593,9 +707,12 @@ async function browseSave() {
 
 // 生成
 function getSettings() {
-  const sel = images.value.filter(img => selectedImgs.value[img.filename])
+  // 优先使用排序面板的顺序，如果为空则用勾选的图片（保持网格顺序）
+  const ordered = orderedImages.value.length > 0
+    ? orderedImages.value.map(img => img.path)
+    : images.value.filter(img => selectedImgs.value[img.filename]).map(img => img.path)
   return {
-    images: sel.map(img => img.path), random_order: randomOrder.value,
+    images: ordered, random_order: false,  // 排序面板已确定顺序，不需后端再随机
     settings: {
       output_path: outputPath.value, use_logo: useLogo.value, logo_position: logoPosition.value, logo_effect: logoEffect.value,
       frame_duration: frameDuration.value, transition: transition.value, resolution: resolution.value,
@@ -652,6 +769,11 @@ function doGenerate(settings) {
   })
 }
 
+function pathBasename(p) {
+  if (!p) return ''
+  const clean = p.replace(/\\/g, '/')
+  return clean.split('/').pop() || p
+}
 function downloadVideo(path) {
   if (path) window.open('/api/video/download?path=' + encodeURIComponent(path), '_blank')
 }
@@ -679,9 +801,16 @@ function addToQueue() {
 }
 function removeFromQueue(i) { taskQueue.value.splice(i, 1) }
 async function generateAll() {
-  generatedPaths.value = []
-  for (const t of taskQueue.value) { await doGenerate(t); await new Promise(r => setTimeout(r, 1000)) }
-  taskQueue.value = []
+  if (generatingBatch.value || !taskQueue.value.length) return
+  generatingBatch.value = true
+  // 快照当前队列，立即从 taskQueue 中移除这批（新增的留给下次）
+  const batch = [...taskQueue.value]
+  taskQueue.value = taskQueue.value.slice(batch.length)
+  for (const t of batch) {
+    await doGenerate(t)
+    await new Promise(r => setTimeout(r, 1000))
+  }
+  generatingBatch.value = false
 }
 
 // 历史记录
@@ -708,6 +837,10 @@ async function loadHistory() {
   try {
     await videoStore.loadHistory()
     history.value = videoStore.history || {}
+    // 新加载的数据默认全部折叠
+    Object.keys(history.value).forEach(u => {
+      if (!(u in collapsedUsers)) collapsedUsers[u] = true
+    })
   } catch(e) {}
 }
 
@@ -715,7 +848,7 @@ function autoSaveHistory() {
   if (!videoDir.value || !images.value.length) return
   const s = getSettings()
   s.videoDir = videoDir.value
-  s.username = authStore.user?.username || authStore.user?.display_name || ''
+  s.username = authStore.user?.display_name || authStore.user?.username || ''
   s.name = (logo.value ? logo.value.filename : (images.value[0]?.filename || ''))
   delete s.images
   videoStore.saveHistory(s).then(() => loadHistory()).catch(() => {})
@@ -726,7 +859,7 @@ async function saveHistory() {
   if (!images.value.length) { ElMessage.warning('请先扫描图片'); return }
   const s = getSettings()
   s.videoDir = videoDir.value
-  s.username = authStore.user?.username || authStore.user?.display_name || ''
+  s.username = authStore.user?.display_name || authStore.user?.username || ''
   s.name = (logo.value ? logo.value.filename : (images.value[0]?.filename || ''))
   delete s.images
   await videoStore.saveHistory(s)
@@ -854,4 +987,7 @@ function onFontChange(fontId) {
 .img-card { border: 2px solid transparent; border-radius: 8px; cursor: pointer; transition: all .15s; }
 .img-card:hover { border-color: #0891b2; }
 .img-card.selected { border-color: #0891b2; background: rgba(8,145,178,.08); }
+.sort-card { transition: transform .15s, opacity .15s, border-color .15s; }
+.sort-card.dragging { opacity: 0.4; transform: scale(0.95); }
+.sort-card.drag-over { border-color: #0891b2 !important; transform: scale(1.05); }
 </style>

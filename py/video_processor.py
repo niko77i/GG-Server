@@ -325,7 +325,7 @@ class VideoTask:
 
                 # 预计算所有文案的时间，确保不重叠，且两条都能显示
                 text_timings = []
-                prev_end = 0.3  # 开头留 0.3s
+                prev_end = 0.0
                 text_count = min(len(texts), 2)
                 # 每条文案占视频时长比例：1条=40%, 2条=各30%
                 ratio = 0.30 if text_count == 2 else 0.40
@@ -334,13 +334,14 @@ class VideoTask:
                 max_dur = min(base_dur + 0.5, total_duration * 0.45)
                 gap = 0.3  # 文案之间间隔 0.3s
                 for ti in range(text_count):
-                    earliest = max(0.5, prev_end + gap)
+                    earliest = max(0.3, prev_end + gap)
                     # 至少需要 min_dur 展示时间
                     if earliest + min_dur > total_duration - 0.3:
                         break
                     avail = total_duration - 0.3 - earliest
                     disp_dur = round(min(rng.uniform(min_dur, max_dur), avail), 1)
-                    start_t = round(rng.uniform(earliest, earliest + avail * 0.3), 2)
+                    # 随机起点控制在 earliest ~ earliest+1.5s 内，避免出现太晚
+                    start_t = round(rng.uniform(earliest, earliest + min(1.5, avail * 0.15)), 2)
                     text_timings.append((start_t, disp_dur))
                     prev_end = start_t + disp_dur
 
