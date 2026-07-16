@@ -389,6 +389,7 @@ const defaultForm = form  // 共用默认值（保持原名兼容）
 
 // ===== 新账户逐行编辑 =====
 const newAccountEdits = reactive({})   // { [account_id]: { name, timezone, agent, status, mcc_id, acquired_date } }
+const newAccountBaselines = reactive({}) // 每行上次同步时的默认值快照，用于判断用户是否手动修改
 const newEditingId = ref(null)         // 当前正在编辑的新账户 account_id
 
 // 新账户表格行数据
@@ -413,7 +414,9 @@ function getDefaultValues(aid) {
 
 function initNewAccountEdit(aid) {
   if (!newAccountEdits[aid]) {
-    newAccountEdits[aid] = getDefaultValues(aid)
+    const defaults = getDefaultValues(aid)
+    newAccountEdits[aid] = { ...defaults }
+    newAccountBaselines[aid] = { ...defaults }
   }
 }
 
@@ -422,17 +425,17 @@ function getNewEdit(aid, field) {
   return newAccountEdits[aid][field]
 }
 
-// 比较当前值与默认值，判断是否被手动修改过
+// 比较当前值与基线快照，判断是否被用户手动修改过（基线记录的是上次同步默认值时的快照）
 function isNewDirty(aid) {
   const cur = newAccountEdits[aid]
-  if (!cur) return false
-  const def = getDefaultValues(aid)
-  return cur.name !== def.name
-    || cur.timezone !== def.timezone
-    || cur.agent !== def.agent
-    || cur.status !== def.status
-    || cur.mcc_id !== def.mcc_id
-    || cur.acquired_date !== def.acquired_date
+  const baseline = newAccountBaselines[aid]
+  if (!cur || !baseline) return false
+  return cur.name !== baseline.name
+    || cur.timezone !== baseline.timezone
+    || cur.agent !== baseline.agent
+    || cur.status !== baseline.status
+    || cur.mcc_id !== baseline.mcc_id
+    || cur.acquired_date !== baseline.acquired_date
 }
 
 function toggleNewEdit(aid) {
@@ -441,7 +444,9 @@ function toggleNewEdit(aid) {
 }
 
 function resetNewEdit(aid) {
-  newAccountEdits[aid] = getDefaultValues(aid)
+  const defaults = getDefaultValues(aid)
+  newAccountEdits[aid] = { ...defaults }
+  newAccountBaselines[aid] = { ...defaults }
 }
 
 function newRowClass({ row }) {
@@ -455,7 +460,13 @@ function syncDefaultsToNewAccounts() {
     if (!newAccountEdits[aid]) {
       newAccountEdits[aid] = {}
     }
-    Object.assign(newAccountEdits[aid], getDefaultValues(aid))
+    const newDefaults = getDefaultValues(aid)
+    Object.assign(newAccountEdits[aid], newDefaults)
+    // 同步更新基线快照，确保后续 isNewDirty 能正确判断
+    if (!newAccountBaselines[aid]) {
+      newAccountBaselines[aid] = {}
+    }
+    Object.assign(newAccountBaselines[aid], newDefaults)
   }
 }
 
@@ -470,6 +481,9 @@ watch(newIds, (ids) => {
   const idSet = new Set(ids)
   for (const key of Object.keys(newAccountEdits)) {
     if (!idSet.has(key)) delete newAccountEdits[key]
+  }
+  for (const key of Object.keys(newAccountBaselines)) {
+    if (!idSet.has(key)) delete newAccountBaselines[key]
   }
   // 初始化新 ID
   for (const aid of ids) {
@@ -558,6 +572,7 @@ function init() {
   result.value = null
   for (const k of Object.keys(claimEdits)) delete claimEdits[k]
   for (const k of Object.keys(newAccountEdits)) delete newAccountEdits[k]
+  for (const k of Object.keys(newAccountBaselines)) delete newAccountBaselines[k]
   loadMccOptions()
 }
 

@@ -73,6 +73,10 @@
           <el-select v-model="batchReview" @change="val => doBatchEdit('review_status', val)" placeholder="审核..." size="small" style="width:110px;" clearable filterable>
             <el-option v-for="s in store.tags.review_statuses" :key="s" :label="s" :value="s" />
           </el-select>
+          <el-select v-if="authStore.isAdmin" v-model="batchPublic" @change="val => doBatchEdit('is_public', val)" placeholder="可见性..." size="small" style="width:110px;" clearable>
+            <el-option label="🌐 公开" value="1" />
+            <el-option label="🔒 私有" value="0" />
+          </el-select>
         </div>
       </div>
 
@@ -92,6 +96,7 @@
                     <el-tag size="small" v-if="row.product_name" type="info">{{ row.product_name }}</el-tag>
                     <el-tag size="small" v-if="row.review_status" :type="row.review_status === '不能过审' ? 'danger' : 'success'">{{ row.review_status }}</el-tag>
                     <el-tag size="small" type="warning" v-if="row.owner_display_name" effect="plain">{{ row.owner_display_name }}</el-tag>
+                    <el-tag v-if="row.total_consumption > 0" size="small" type="danger" effect="dark" style="cursor:pointer;" @click.stop="openConsumption(row)">💰 {{ fmtAmount(row.total_consumption) }}</el-tag>
                     <el-tooltip v-if="productAssetMap[row.id] && productAssetMap[row.id].length" placement="top">
                       <template #content>
                         <div v-for="pname in productAssetMap[row.id]" :key="pname">{{ pname }}</div>
@@ -113,6 +118,7 @@
                   <div style="display:flex;flex-direction:column;gap:2px;">
                     <el-button link size="small" @click.stop="copyLink(row.id)" style="justify-content:flex-start;">📋 复制链接</el-button>
                     <el-button v-if="canModifyVideo(row)" link size="small" type="primary" @click.stop="openEdit(row)" style="justify-content:flex-start;">✏️ 编辑</el-button>
+                    <el-button link size="small" type="warning" @click="openConsumption(row)" style="justify-content:flex-start;">💰 消耗</el-button>
                   </div>
                 </el-popover>
               </template>
@@ -140,6 +146,51 @@
         </div>
       </div>
     </div>
+
+    <!-- 消耗详情弹窗 -->
+    <el-dialog v-model="consumptionVisible" :title="'💰 消耗详情 — ' + consumptionVideo?.title" width="700px" :close-on-click-modal="false" destroy-on-close>
+      <div v-if="consumptionLoading" style="text-align:center;padding:40px;">加载中...</div>
+      <template v-else>
+        <div style="margin-bottom:16px;font-size:16px;font-weight:600;">
+          总消耗：<span style="color:#f56c6c;">¥{{ consumptionTotal.toLocaleString() }}</span>
+        </div>
+        <div v-if="!consumptionUsers.length" style="color:#999;text-align:center;padding:20px;">暂无消耗记录</div>
+        <div v-for="user in consumptionUsers" :key="user.user_id" style="margin-bottom:12px;border:1px solid #ebeef5;border-radius:8px;overflow:hidden;">
+          <div @click="user._expanded = !user._expanded" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#f5f7fa;cursor:pointer;">
+            <span style="font-weight:600;">{{ user.display_name }}</span>
+            <span style="color:#f56c6c;font-weight:600;">¥{{ user.total.toLocaleString() }}</span>
+            <span style="font-size:12px;color:#999;">{{ user._expanded ? '▲' : '▼' }}</span>
+          </div>
+          <div v-show="user._expanded" style="padding:8px 14px;">
+            <div v-for="rec in user.records" :key="rec.id" style="display:flex;align-items:center;gap:12px;padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:13px;">
+              <span style="color:#666;width:90px;">{{ rec.consume_date }}</span>
+              <span v-if="rec.product_name" style="color:#409eff;flex:1;">{{ rec.product_name }}</span>
+              <span v-else style="color:#999;flex:1;">-</span>
+              <span style="color:#f56c6c;font-weight:500;width:80px;text-align:right;">¥{{ rec.amount.toLocaleString() }}</span>
+              <template v-if="authStore.isAdmin && authStore.user?.id === user.user_id">
+                <el-button link size="small" type="primary" @click.stop="editConsumptionRec(rec)">✏️</el-button>
+                <el-button link size="small" type="danger" @click.stop="deleteConsumptionRec(rec)">🗑</el-button>
+              </template>
+            </div>
+          </div>
+        </div>
+        <!-- 录入表单 (仅 admin/developer 可见，只能给自己加) -->
+        <div v-if="authStore.isAdmin" style="margin-top:20px;padding-top:16px;border-top:2px solid #ebeef5;">
+          <div style="font-weight:600;margin-bottom:10px;">📝 {{ consumptionEditId ? '编辑消耗' : '录入消耗' }}</div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <el-input v-model="consumptionForm.amount" placeholder="金额" type="number" size="small" style="width:130px;" />
+            <el-date-picker v-model="consumptionForm.consume_date" placeholder="日期" size="small" value-format="YYYY-MM-DD" style="width:150px;" />
+            <el-select v-model="consumptionForm.product_id" placeholder="产品(可选)" size="small" filterable clearable style="width:180px;">
+              <el-option v-for="p in runnerProducts" :key="p.id" :label="p.product_name" :value="p.id" />
+            </el-select>
+            <el-button size="small" type="primary" @click="submitConsumption" :loading="consumptionSaving">
+              {{ consumptionEditId ? '更新' : '保存' }}
+            </el-button>
+            <el-button v-if="consumptionEditId" size="small" @click="cancelEditConsumption">取消</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
 
     <!-- ===== 文案展示 ===== -->
     <div v-show="activeTab === 'copywriting'" class="yt-view-tab">
@@ -351,7 +402,7 @@ import { useYoutubeStore } from '@/stores/youtube'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
-import { translateApi } from '@/api/youtube'
+import { translateApi, consumptionApi, productApi } from '@/api/youtube'
 import api from '@/api/client'
 
 const router = useRouter()
@@ -406,19 +457,136 @@ const pagedVideos = computed(() => {
 
 const dateRange = ref(null)
 
-// 日期格子标记：有视频的日期加 has-video 类名
+// 日期格子标记：有视频或有消耗的日期加标记类名
 const dateSet = computed(() => new Set(Object.keys(store.videoDates)))
 function dateCellClass(date) {
   const y = date.getFullYear()
   const m = String(date.getMonth() + 1).padStart(2, '0')
   const d = String(date.getDate()).padStart(2, '0')
-  return dateSet.value.has(`${y}-${m}-${d}`) ? 'has-video' : ''
+  const key = `${y}-${m}-${d}`
+  if (dateSet.value.has(key)) return 'has-video'
+  if (consumptionDateSet.value.has(key)) return 'has-consumption'
+  return ''
 }
 
 // 搜索文本变化时重置页码
 watch(searchText, () => { ytPage.value = 1 })
 // 每页条数变化时重置页码，防止当前页码超出新总页数导致空数据
 watch(ytPageSize, () => { ytPage.value = 1 })
+
+// ═══════════════════════ 消耗追踪 ═══════════════════════
+const consumptionDates = ref({})
+const consumptionVisible = ref(false)
+const consumptionVideo = ref(null)
+const consumptionLoading = ref(false)
+const consumptionSaving = ref(false)
+const consumptionTotal = ref(0)
+const consumptionUsers = ref([])
+const consumptionEditId = ref(null)
+const consumptionForm = ref({ amount: null, consume_date: '', product_id: null })
+const runnerProducts = ref([])
+
+function fmtAmount(val) {
+  if (!val) return '¥0'
+  if (val >= 10000) return '¥' + (val / 10000).toFixed(1) + '万'
+  return '¥' + val.toLocaleString()
+}
+
+async function loadConsumptionDates() {
+  try {
+    const res = await consumptionApi.dates({ scope: store.filters.scope })
+    consumptionDates.value = res.dates || {}
+  } catch { consumptionDates.value = {} }
+}
+
+// 更新日期标记（含视频导入日期 + 消耗日期）
+const consumptionDateSet = computed(() => new Set(Object.keys(consumptionDates.value)))
+// dateCellClass 中合并两个集合
+
+async function openConsumption(video) {
+  consumptionVideo.value = video
+  consumptionVisible.value = true
+  consumptionEditId.value = null
+  consumptionForm.value = { amount: null, consume_date: '', product_id: null }
+  await loadConsumptionDetail()
+  if (authStore.isAdmin) await loadRunnerProducts()
+}
+
+async function loadConsumptionDetail() {
+  if (!consumptionVideo.value) return
+  consumptionLoading.value = true
+  try {
+    const res = await consumptionApi.get(consumptionVideo.value.id)
+    consumptionTotal.value = res.total || 0
+    consumptionUsers.value = (res.users || []).map(u => ({ ...u, _expanded: false }))
+  } catch { consumptionTotal.value = 0; consumptionUsers.value = [] }
+  consumptionLoading.value = false
+}
+
+async function loadRunnerProducts() {
+  try {
+    const res = await productApi.runnerProducts()
+    runnerProducts.value = res.products || []
+  } catch { runnerProducts.value = [] }
+}
+
+async function submitConsumption() {
+  const f = consumptionForm.value
+  if (!f.amount || parseFloat(f.amount) <= 0) { ElMessage.warning('请输入金额'); return }
+  if (!f.consume_date) { ElMessage.warning('请选择日期'); return }
+  consumptionSaving.value = true
+  try {
+    if (consumptionEditId.value) {
+      await consumptionApi.update(consumptionVideo.value.id, consumptionEditId.value, {
+        amount: parseFloat(f.amount), consume_date: f.consume_date, product_id: f.product_id
+      })
+      ElMessage.success('消耗记录已更新')
+    } else {
+      await consumptionApi.add(consumptionVideo.value.id, {
+        amount: parseFloat(f.amount), consume_date: f.consume_date, product_id: f.product_id
+      })
+      ElMessage.success('消耗记录已添加')
+    }
+    consumptionEditId.value = null
+    consumptionForm.value = { amount: null, consume_date: '', product_id: null }
+    await loadConsumptionDetail()
+    // 刷新视频列表以更新 total_consumption
+    await loadVideos()
+    await loadConsumptionDates()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '操作失败')
+  }
+  consumptionSaving.value = false
+}
+
+function editConsumptionRec(rec) {
+  consumptionEditId.value = rec.id
+  consumptionForm.value = {
+    amount: rec.amount,
+    consume_date: rec.consume_date,
+    product_id: rec.product_id || null
+  }
+}
+
+function cancelEditConsumption() {
+  consumptionEditId.value = null
+  consumptionForm.value = { amount: null, consume_date: '', product_id: null }
+}
+
+async function deleteConsumptionRec(rec) {
+  try {
+    await ElMessageBox.confirm(`确定删除 ¥${rec.amount.toLocaleString()} 的消耗记录？`, '确认删除', { type: 'warning' })
+  } catch { return }
+  try {
+    await consumptionApi.delete(consumptionVideo.value.id, rec.id)
+    ElMessage.success('已删除')
+    await loadConsumptionDetail()
+    await loadVideos()
+    await loadConsumptionDates()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '删除失败')
+  }
+}
 
 function onDateChange(val) {
   store.filters.from_date = val ? val[0] : ''
@@ -431,6 +599,7 @@ async function loadVideos() {
   await store.loadVideos()
   store.loadDates(store.filters)
   loadProductAssetMap()
+  loadConsumptionDates()
 }
 
 async function loadProductAssetMap() {
@@ -530,12 +699,18 @@ const batchFrame = ref('')
 const batchEff = ref('')
 const batchProd = ref('')
 const batchReview = ref('')
+const batchPublic = ref('')
 
 async function doBatchEdit(field, val) {
-  if (!val || !selected.value.length) return
+  if ((!val && val !== 0) || !selected.value.length) return
   try {
-    await store.batchEditVideos({ ids: selected.value.map(v => v.id), field, value: val })
-    ElMessage.success(`已批量更新 ${selected.value.length} 个视频 ✓`)
+    const res = await store.batchEditVideos({ ids: selected.value.map(v => v.id), field, value: val })
+    const updated = res?.updated ?? 0
+    if (updated > 0) {
+      ElMessage.success(`已批量更新 ${updated} 个视频 ✓`)
+    } else {
+      ElMessage.warning('没有视频被更新，请确认你有权限编辑所选视频')
+    }
   } catch (e) {
     ElMessage.error('批量更新失败：' + (e.message || '未知错误'))
   }
@@ -545,6 +720,7 @@ async function doBatchEdit(field, val) {
   else if (field === 'effectiveness') batchEff.value = ''
   else if (field === 'product_name') batchProd.value = ''
   else if (field === 'review_status') batchReview.value = ''
+  else if (field === 'is_public') batchPublic.value = ''
   loadVideos()
 }
 
@@ -556,7 +732,7 @@ const importEff = ref('')
 const importProd = ref('')
 const importReview = ref('能过审')
 const importTime = ref('')           // 视频时间，格式 YYYY-MM-DD HH:mm
-const importIsPublic = ref(true)      // 默认公开
+const importIsPublic = ref(!authStore.isAdmin)      // admin默认私有，普通用户默认公开
 const importing = ref(false)
 const importResult = ref('')
 
@@ -888,5 +1064,22 @@ watch(activeTab, async (tab) => {
   height: 4px;
   border-radius: 50%;
   background: #409eff;
+}
+.yt-date-picker .has-consumption {
+  background: #fef0f0;
+}
+.yt-date-picker .has-consumption .el-date-table-cell__text {
+  position: relative;
+}
+.yt-date-picker .has-consumption .el-date-table-cell__text::after {
+  content: '';
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #f56c6c;
 }
 </style>

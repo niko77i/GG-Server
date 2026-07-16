@@ -5,6 +5,7 @@
       <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
         <el-button type="primary" @click="showModal()">➕ 新增账户</el-button>
         <el-button @click="batchVisible = true">📥 批量导入</el-button>
+        <el-button @click="lookupVisible = true">🔍 批量查户</el-button>
         <span style="color:#888;font-size:12px;">已选 {{ selected.length }} 条</span>
         <el-select v-model="batchStatus" @change="doBatchStatus" placeholder="批量修改状态..."
           style="width:160px;" :disabled="!selected.length" clearable filterable>
@@ -86,6 +87,7 @@
 
     <AccountModal v-model:visible="acModalVisible" :edit-id="acEditId" @saved="load" />
     <AccountBatchImportModal v-model:visible="batchVisible" @saved="load" />
+    <AccountBatchLookupModal v-model:visible="lookupVisible" />
   </div>
 </template>
 
@@ -94,6 +96,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
 import AccountModal from '@/components/AccountModal.vue'
 import AccountBatchImportModal from '@/components/AccountBatchImportModal.vue'
+import AccountBatchLookupModal from '@/components/AccountBatchLookupModal.vue'
 import { ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
@@ -102,6 +105,7 @@ const selected = ref([])
 const acModalVisible = ref(false)
 const acEditId = ref(null)
 const batchVisible = ref(false)
+const lookupVisible = ref(false)
 const batchStatus = ref('')
 const batchMcc = ref('')
 const mccOptions = ref([])

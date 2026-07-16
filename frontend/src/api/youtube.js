@@ -19,6 +19,18 @@ export const copywritingApi = {
   batchEdit: (body)   => api.post('/copywriting/batch-edit', body),
 }
 
+export const consumptionApi = {
+  get:      (videoId) => api.get(`/youtube/${videoId}/consumption`),
+  add:      (videoId, body) => api.post(`/youtube/${videoId}/consumption`, body),
+  update:   (videoId, recordId, body) => api.put(`/youtube/${videoId}/consumption/${recordId}`, body),
+  delete:   (videoId, recordId) => api.delete(`/youtube/${videoId}/consumption/${recordId}`),
+  dates:    (params) => api.get('/youtube/consumption/dates', { params }),
+}
+
+export const productApi = {
+  runnerProducts: () => api.get('/products/runner-products'),
+}
+
 export const translateApi = {
   translate: (body) => api.post('/translate', body),
 }

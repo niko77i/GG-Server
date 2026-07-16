@@ -176,6 +176,20 @@ def _ensure_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_product_assets_product ON product_assets(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_assets_video ON product_assets(video_id);
 
+        -- 视频消耗追踪（手动录入广告消耗）
+        CREATE TABLE IF NOT EXISTS video_consumption (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id TEXT NOT NULL REFERENCES videos(id),
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            product_id INTEGER REFERENCES products(id),
+            amount REAL NOT NULL DEFAULT 0,
+            consume_date TEXT NOT NULL DEFAULT (date('now','localtime')),
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_vc_video ON video_consumption(video_id);
+        CREATE INDEX IF NOT EXISTS idx_vc_user ON video_consumption(user_id);
+        CREATE INDEX IF NOT EXISTS idx_vc_date ON video_consumption(consume_date);
+
         -- 做表数据保存（广告投放报告）
         CREATE TABLE IF NOT EXISTS ad_reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -275,6 +289,31 @@ def _ensure_schema(conn: sqlite3.Connection):
             UNIQUE(package_id, user_id)
         );
         CREATE INDEX IF NOT EXISTS idx_delist_notif_user ON delist_notifications(user_id);
+
+        -- 音频替换历史
+        CREATE TABLE IF NOT EXISTS audio_replace_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_name  TEXT    NOT NULL,
+            audio_name  TEXT    NOT NULL,
+            output_name TEXT    NOT NULL,
+            output_path TEXT    NOT NULL,
+            size_mb     REAL    NOT NULL,
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+
+        -- 审计日志（产品删除等关键操作）
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL REFERENCES users(id),
+            action      TEXT    NOT NULL,
+            target_type TEXT    NOT NULL,
+            target_id   INTEGER NOT NULL,
+            target_name TEXT    DEFAULT '',
+            detail      TEXT    DEFAULT '{}',
+            created_at  TEXT    DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at);
     """)
 
     # 产品表迁移：补 mcc_id 和兼容 is_paused→status
@@ -330,6 +369,8 @@ def _ensure_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE products ADD COLUMN is_archived INTEGER DEFAULT 0")
     if "customer" not in pcols:
         conn.execute("ALTER TABLE products ADD COLUMN customer TEXT DEFAULT ''")
+    if "deleted_at" not in pcols:
+        conn.execute("ALTER TABLE products ADD COLUMN deleted_at TEXT DEFAULT ''")
 
     # 迁移：copywritings 表补 owner_id/effectiveness（2026-06-27 文案私有化）
     cwcols = [r[1] for r in conn.execute("PRAGMA table_info(copywritings)").fetchall()]

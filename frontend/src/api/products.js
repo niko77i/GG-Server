@@ -18,4 +18,7 @@ export const productsApi = {
   getDelistStatus: ()    => api.get('/products/delist-status'),
   dismissDelist: (pkgId) => api.post('/delist/dismiss', { package_id: pkgId }),
   getPendingDelist: ()   => api.get('/delist/pending'),
+  // 审计日志
+  auditLogList: (params) => api.get('/audit-log/list', { params }),
+  auditLogRestore: (logId) => api.post(`/audit-log/restore/${logId}`),
 }

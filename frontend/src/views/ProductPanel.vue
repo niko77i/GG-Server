@@ -4,6 +4,7 @@
     <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
       <el-button v-if="!auth.isViewer" type="primary" @click="showProductModal()">➕ 新增产品</el-button>
       <el-button v-if="!auth.isViewer" @click="copyVisible = true">📋 复制导入</el-button>
+      <el-button @click="openAuditLog">📜 删除日志</el-button>
       <el-radio-group v-model="runnerFilter" @change="onRunnerFilterChange" size="small">
         <el-radio-button value="mine">我在跑的 ({{ runnerCounts.mine ?? '...' }})</el-radio-button>
         <el-radio-button value="all">全部产品 ({{ runnerCounts.all ?? '...' }})</el-radio-button>
@@ -66,6 +67,37 @@
     <ProductDetailModal v-model:visible="detailVisible" :prod-id="detailId" @saved="load" />
     <CopyImportModal v-model:visible="copyVisible" @saved="load" />
     <AddPackageModal v-model:visible="addPkgVisible" :prod-id="addPkgProdId" @saved="load" />
+
+    <!-- 删除日志弹窗 -->
+    <el-dialog v-model="auditVisible" title="📜 产品删除日志" width="800px" :close-on-click-modal="false" destroy-on-close @opened="loadAuditLogs">
+      <el-table :data="auditLogs" size="small" stripe max-height="500">
+        <el-table-column label="时间" prop="created_at" width="160" />
+        <el-table-column label="操作人" prop="display_name" width="100" />
+        <el-table-column label="产品名" prop="target_name" min-width="200" show-overflow-tooltip />
+        <el-table-column label="操作" width="160" align="center">
+          <template #default="{ row }">
+            <el-button link size="small" type="primary" @click="toggleAuditDetail(row)">详情</el-button>
+            <el-button v-if="auth.isDeveloper && row.action==='delete_product'" link size="small" type="success" @click="restoreProduct(row)">恢复</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-pagination v-if="auditTotal > 20" v-model:current-page="auditPage" :page-size="20" :total="auditTotal" layout="prev,pager,next" size="small" @change="loadAuditLogs" style="margin-top:10px;justify-content:center;" />
+      <div v-if="auditDetailRow" style="margin-top:12px;padding:12px;background:#f5f7fa;border-radius:8px;font-size:13px;">
+        <div style="font-weight:600;margin-bottom:8px;">📋 快照详情 — {{ auditDetailRow.target_name }}</div>
+        <div v-if="auditDetailRow.detail.product">
+          <div><b>产品:</b> {{ auditDetailRow.detail.product.product_name }}</div>
+          <div><b>KPI:</b> {{ auditDetailRow.detail.product.kpi }} | <b>地区:</b> {{ auditDetailRow.detail.product.region }}</div>
+          <div><b>MCC:</b> {{ auditDetailRow.detail.product.mcc_id }} | <b>customer:</b> {{ auditDetailRow.detail.product.customer || '-' }}</div>
+        </div>
+        <div v-if="auditDetailRow.detail.packages?.length" style="margin-top:6px;">
+          <b>包 ({{ auditDetailRow.detail.packages.length }}):</b>
+          <div v-for="(p, i) in auditDetailRow.detail.packages" :key="i" style="margin-left:12px;color:#666;">
+            {{ p.package_name }} <el-tag size="small">{{ p.status || '正常' }}</el-tag>
+          </div>
+        </div>
+        <div style="margin-top:4px;color:#999;">素材: {{ auditDetailRow.detail.asset_count ?? 0 }} 个</div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -240,5 +272,44 @@ async function togglePause({ id, paused }) {
   await ElMessageBox.confirm(msg, '确认', { type: 'warning' })
   await store.updateProduct(id, { status: paused ? 'paused' : '' })
   load()
+}
+
+// 删除日志
+const auditVisible = ref(false)
+const auditLogs = ref([])
+const auditTotal = ref(0)
+const auditPage = ref(1)
+const auditDetailRow = ref(null)
+
+function openAuditLog() {
+  auditVisible.value = true
+  auditPage.value = 1
+  auditDetailRow.value = null
+}
+
+async function loadAuditLogs() {
+  try {
+    const res = await productsApi.auditLogList({ page: auditPage.value, size: 20 })
+    auditLogs.value = res.logs || []
+    auditTotal.value = res.total || 0
+  } catch { auditLogs.value = [] }
+}
+
+function toggleAuditDetail(row) {
+  auditDetailRow.value = auditDetailRow.value?.id === row.id ? null : row
+}
+
+async function restoreProduct(row) {
+  try {
+    await ElMessageBox.confirm(`确定恢复产品「${row.target_name}」？`, '确认恢复', { type: 'warning' })
+  } catch { return }
+  try {
+    const res = await productsApi.auditLogRestore(row.id)
+    ElMessage.success(res.message || '产品已恢复')
+    await loadAuditLogs()
+    load()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '恢复失败')
+  }
 }
 </script>
