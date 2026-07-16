@@ -87,22 +87,51 @@
     </div>
 
     <!-- ===== 音频替换 ===== -->
-    <div v-show="activeTab === 'audio'" style="flex:1;min-height:0;overflow-y:auto;max-width:600px;">
+    <div v-show="activeTab === 'audio'" style="flex:1;min-height:0;overflow-y:auto;max-width:700px;">
       <el-form-item label="🎬 原视频">
-        <div style="display:flex;gap:6px;">
-          <el-input v-model="audioVideoPath" placeholder="F:\video\test.mp4" style="flex:1;" />
-          <el-button v-if="isLocalhost()" @click="doBrowseFile('video')" style="width:44px;">📂</el-button>
-        </div>
+        <input type="file" accept="video/*" @change="onAudioVideoFileChange" style="width:100%;" />
+        <span v-if="audioVideoFile" style="font-size:12px;color:#22c55e;">已选择: {{ audioVideoFile.name }}</span>
+        <video v-if="audioVideoBlobUrl" :src="audioVideoBlobUrl" controls muted loop style="width:100%;max-height:200px;margin-top:6px;border-radius:6px;background:#000;" />
       </el-form-item>
       <el-form-item label="🎶 新音频源（音频或视频）">
-        <div style="display:flex;gap:6px;">
-          <el-input v-model="audioSourcePath" placeholder="F:\music\bg.mp3 或 F:\video\source.mp4" style="flex:1;" />
-          <el-button v-if="isLocalhost()" @click="doBrowseFile('audio')" style="width:44px;">📂</el-button>
-        </div>
-        <span class="hint">支持 .mp3/.wav/.aac/.m4a 等音频，或 .mp4 等视频（自动提取音频）</span>
+        <input type="file" accept="audio/*,video/*" @change="onAudioSourceFileChange" style="width:100%;" />
+        <span v-if="audioSourceFile" style="font-size:12px;color:#22c55e;">已选择: {{ audioSourceFile.name }}</span>
+        <video v-if="audioSourceBlobUrl && audioSourceFile?.type?.startsWith('video/')" :src="audioSourceBlobUrl" controls muted loop style="width:100%;max-height:200px;margin-top:6px;border-radius:6px;background:#000;" />
+        <audio v-else-if="audioSourceBlobUrl" :src="audioSourceBlobUrl" controls style="width:100%;margin-top:6px;" />
       </el-form-item>
       <el-button type="primary" @click="audioReplace" :loading="audioReplacing">🎵 替换音频</el-button>
-      <div v-if="audioResult" style="margin-top:8px;font-size:12px;">{{ audioResult }}</div>
+      <div v-if="audioResult" style="margin-top:8px;font-size:12px;">
+        {{ audioResult }}
+        <el-button v-if="audioDownloadUrl" type="success" link size="small" @click="audioDoDownload" style="margin-left:8px;">⬇ 下载</el-button>
+      </div>
+
+      <!-- 历史记录 -->
+      <div v-if="audioHistory.length" style="margin-top:24px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <h3 style="margin:0;">📋 历史记录 <el-tag size="small">{{ audioHistory.length }}</el-tag></h3>
+          <el-popconfirm title="确定清空全部历史记录？" @confirm="audioHistoryClearAll">
+            <template #reference><el-button type="danger" size="small" link>🗑 清空全部</el-button></template>
+          </el-popconfirm>
+        </div>
+        <div v-for="item in audioHistory" :key="item.id"
+          style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #eee;font-size:13px;">
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;gap:6px;align-items:center;">
+              <span style="font-weight:600;">🎬 {{ item.video_name }}</span>
+              <span style="color:#999;">+</span>
+              <span>🎶 {{ item.audio_name }}</span>
+            </div>
+            <div style="color:#888;font-size:11px;margin-top:2px;">→ {{ item.output_name }} · {{ item.size_mb }} MB · {{ item.created_at }}</div>
+          </div>
+          <template v-if="item.file_exists">
+            <el-button size="small" type="primary" link @click="audioHistoryDownload(item)">⬇ 下载</el-button>
+          </template>
+          <el-tag v-else size="small" type="info">已过期</el-tag>
+          <el-popconfirm title="确定删除此记录？" @confirm="audioHistoryDelete(item)">
+            <template #reference><el-button size="small" type="danger" link>🗑</el-button></template>
+          </el-popconfirm>
+        </div>
+      </div>
     </div>
 
     <!-- ===== 翻译工具 ===== -->
@@ -236,20 +265,17 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useVideoStore } from '@/stores/video'
-import { browseApi } from '@/api/browse'
-import { isLocalhost } from '@/utils/env'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 import { parseAdsData } from '@/utils/adsParser'
 import { translateApi } from '@/api/youtube'
+import { videoApi } from '@/api/video'
 import api from '@/api/client'
 
 const router = useRouter()
 const route = useRoute()
-const vStore = useVideoStore()
 
 const activeTab = computed(() => {
   if (route.path.includes('/audio')) return 'audio'
@@ -426,39 +452,83 @@ function zbExportExcel() {
 }
 
 // ========== 音频替换 ==========
-const audioVideoPath = ref('')
-const audioSourcePath = ref('')
+const audioVideoFile = ref(null)
+const audioSourceFile = ref(null)
+const audioVideoBlobUrl = ref('')
+const audioSourceBlobUrl = ref('')
 const audioReplacing = ref(false)
 const audioResult = ref('')
+const audioDownloadUrl = ref('')
+const audioHistory = ref([])
 
-async function doBrowseFile(type) {
-  const fileType = type === 'video' ? 'video' : 'audio'
-  const curPath = type === 'video' ? audioVideoPath.value : audioSourcePath.value
-  let initialDir = null
-  if (curPath) {
-    const lastSep = Math.max(curPath.lastIndexOf('/'), curPath.lastIndexOf('\\'))
-    if (lastSep > -1) initialDir = curPath.substring(0, lastSep)
-  }
-  try {
-    const res = await browseApi.file({ type: fileType, initial_dir: initialDir })
-    if (res.path) {
-      if (type === 'video') audioVideoPath.value = res.path
-      else audioSourcePath.value = res.path
-    }
-  } catch(e) { ElMessage.error('文件选择失败: ' + e.message) }
+// ------ 文件选择 & 预览 ------
+function _revokeAudioBlobs() {
+  if (audioVideoBlobUrl.value) { URL.revokeObjectURL(audioVideoBlobUrl.value); audioVideoBlobUrl.value = '' }
+  if (audioSourceBlobUrl.value) { URL.revokeObjectURL(audioSourceBlobUrl.value); audioSourceBlobUrl.value = '' }
+}
+onUnmounted(_revokeAudioBlobs)
+
+function onAudioVideoFileChange(e) {
+  audioVideoFile.value = e.target.files?.[0] || null
+  if (audioVideoBlobUrl.value) { URL.revokeObjectURL(audioVideoBlobUrl.value); audioVideoBlobUrl.value = '' }
+  if (audioVideoFile.value) audioVideoBlobUrl.value = URL.createObjectURL(audioVideoFile.value)
 }
 
+function onAudioSourceFileChange(e) {
+  audioSourceFile.value = e.target.files?.[0] || null
+  if (audioSourceBlobUrl.value) { URL.revokeObjectURL(audioSourceBlobUrl.value); audioSourceBlobUrl.value = '' }
+  if (audioSourceFile.value) audioSourceBlobUrl.value = URL.createObjectURL(audioSourceFile.value)
+}
+
+// ------ 替换 & 下载 ------
 async function audioReplace() {
-  if (!audioVideoPath.value || !audioSourcePath.value) { ElMessage.warning('请选择原视频和音频源'); return }
-  audioReplacing.value = true; audioResult.value = ''
+  if (!audioVideoFile.value || !audioSourceFile.value) { ElMessage.warning('请选择原视频和音频源'); return }
+  audioReplacing.value = true; audioResult.value = ''; audioDownloadUrl.value = ''
   try {
-    const res = await vStore.audioReplace({ video_path: audioVideoPath.value, audio_source: audioSourcePath.value })
+    const fd = new FormData()
+    fd.append('video', audioVideoFile.value)
+    fd.append('audio', audioSourceFile.value)
+    const res = await api.post('/audio-replace', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     audioResult.value = `✅ 完成: ${res.output} (${res.size_mb} MB)`
-  } catch(e) { audioResult.value = '❌ ' + e.message }
+    audioDownloadUrl.value = res.download_url
+    audioLoadHistory()
+  } catch(e) { audioResult.value = '❌ ' + (e.response?.data?.error || e.message) }
   audioReplacing.value = false
 }
 
-const hint = 'font-size:11px;color:#888;margin-top:4px;display:block;'
+function audioDoDownload() {
+  if (audioDownloadUrl.value) window.open(audioDownloadUrl.value, '_blank')
+}
+
+// ------ 历史记录 ------
+async function audioLoadHistory() {
+  try {
+    const res = await videoApi.audioHistoryList()
+    audioHistory.value = res.items || []
+  } catch { /* 静默失败 */ }
+}
+
+async function audioHistoryDelete(item) {
+  try {
+    await videoApi.audioHistoryDelete(item.id)
+    ElMessage.success('已删除')
+    audioLoadHistory()
+  } catch(e) { ElMessage.error('删除失败: ' + (e.response?.data?.error || e.message)) }
+}
+
+async function audioHistoryClearAll() {
+  try {
+    await videoApi.audioHistoryClear()
+    ElMessage.success('已清空全部历史')
+    audioLoadHistory()
+  } catch(e) { ElMessage.error('清空失败: ' + (e.response?.data?.error || e.message)) }
+}
+
+function audioHistoryDownload(item) {
+  window.open(`/api/audio-replace/download?path=${encodeURIComponent(item.output_path)}`, '_blank')
+}
+
+onMounted(() => { audioLoadHistory() })
 
 // ========== 翻译工具 ==========
 const TL_LANGS = [
