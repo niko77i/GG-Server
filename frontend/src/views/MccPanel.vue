@@ -17,7 +17,7 @@
     <!-- 表格 + 分页 — 滚动区 -->
     <div style="flex:1;min-height:0;overflow-y:auto;">
       <el-table :data="mccTree" @selection-change="val => selected = val" stripe size="small"
-        row-key="id" :tree-props="{ children: 'children', hasChildren: 'hasChildren' }" default-expand-all
+        row-key="id" :tree-props="{ children: 'children', hasChildren: 'hasChildren' }"
         :row-class-name="mccRowClass">
         <el-table-column type="selection" width="40" />
         <el-table-column prop="name" label="MCC 名称" />

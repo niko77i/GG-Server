@@ -213,7 +213,7 @@
 
       <el-table ref="cwTableRef" :data="copywritingTree" row-key="id"
         :tree-props="{ children: 'children', hasChildren: 'hasChildren' }"
-        default-expand-all :selectable="cwSelectable" :indent="28"
+        :selectable="cwSelectable" :indent="28"
         :row-class-name="cwRowClass"
         @selection-change="v => cwSelected = v" stripe size="small"
         class="cw-table">
