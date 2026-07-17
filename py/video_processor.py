@@ -3,6 +3,7 @@ import os
 import random
 import re
 import subprocess
+import time
 import uuid
 
 
@@ -454,6 +455,7 @@ class VideoTask:
             if self._proc.returncode == 0 and os.path.isfile(out_path):
                 size_mb = os.path.getsize(out_path) / (1024 * 1024)
                 self.status = "completed"
+                self._completed_at = time.time()
                 self.progress = 1.0
                 self.message = "视频生成完成"
                 self._result = {
@@ -466,6 +468,7 @@ class VideoTask:
                 stderr_tail = "".join(self._stderr_lines[-8:]) if self._stderr_lines else "(无输出)"
                 cmd_str = " ".join(getattr(self, '_cmd', []))
                 self.status = "error"
+                self._completed_at = time.time()
                 self.message = (
                     f"FFmpeg 返回错误码 {self._proc.returncode}。\n"
                     f"命令: {cmd_str[:300]}...\n"
@@ -473,9 +476,11 @@ class VideoTask:
                 )
         except FileNotFoundError:
             self.status = "error"
+            self._completed_at = time.time()
             self.message = "未找到 FFmpeg，请确认 ffmpeg.exe 在系统 PATH 中或与程序在同一目录"
         except Exception as e:
             self.status = "error"
+            self._completed_at = time.time()
             self.message = f"视频生成异常: {e}"
 
     def result(self):

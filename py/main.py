@@ -8,7 +8,7 @@ _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
     sys.path.insert(0, _current_dir)
 
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory, g
 from flask_cors import CORS
 from flask_compress import Compress
 
@@ -54,6 +54,7 @@ _SCRAPE_DEFAULT_DIR = os.path.join(_DATA_ROOT, "temp", "scraped_images")
 _MUSIC_DIR = os.path.join(_DATA_ROOT, "temp", "music")
 
 app = Flask(__name__, static_folder=_FRONTEND_DIR, static_url_path="")
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB 上传限制
 CORS(app)
 Compress(app)
 
@@ -89,6 +90,24 @@ def _add_static_cache(response):
         if ext in ('js', 'css', 'woff2', 'woff', 'ttf', 'png', 'svg', 'jpg', 'ico'):
             response.cache_control.max_age = 31536000  # 1 年
             response.cache_control.public = True
+    return response
+
+
+@app.before_request
+def _attach_db():
+    """每个请求附加一个共享的数据库连接（通过 flask.g）。"""
+    g.db = database.get_db()
+
+
+@app.after_request
+def _close_db(response):
+    """请求结束后自动关闭数据库连接。"""
+    db = g.pop("db", None)
+    if db is not None:
+        try:
+            db.close()
+        except Exception:
+            pass
     return response
 
 # --- GG-Server: Config ---
@@ -458,6 +477,31 @@ def video_scan_dir():
     })
 
 
+# 允许 serve_image / serve_audio 访问的目录白名单
+_ALLOWED_STATIC_DIRS = [
+    os.path.normpath(_SCRAPE_DEFAULT_DIR),
+    os.path.normpath(_MUSIC_DIR),
+    os.path.normpath(os.path.join(_DATA_ROOT, "temp")),
+]
+
+
+def _is_safe_path(path: str) -> bool:
+    """检查路径是否在白名单目录内，防止路径遍历攻击。"""
+    try:
+        real = os.path.realpath(path)
+    except (ValueError, OSError):
+        return False
+    for allowed in _ALLOWED_STATIC_DIRS:
+        try:
+            allowed_real = os.path.realpath(allowed) if os.path.isdir(allowed) else allowed
+        except (ValueError, OSError):
+            continue
+        # real 必须在 allowed 目录下（或以 allowed 为前缀+分隔符）
+        if real == allowed_real or real.startswith(allowed_real + os.sep):
+            return True
+    return False
+
+
 @app.route("/api/image", methods=["GET"])
 def serve_image():
     """返回本地图片文件流，供前端缩略图加载。"""
@@ -465,10 +509,11 @@ def serve_image():
     if not path:
         return "", 400
 
-    # 安全检查
     normalized = os.path.normpath(path)
-    if not os.path.isfile(normalized) or not normalized.lower().endswith(".png"):
+    if not normalized.lower().endswith(".png") or not os.path.isfile(normalized):
         return "", 404
+    if not _is_safe_path(normalized):
+        return "", 403
 
     from flask import send_file
     return send_file(normalized, mimetype="image/png", max_age=3600)
@@ -586,9 +631,17 @@ def video_generate():
 
 @app.route("/api/video/progress", methods=["GET"])
 def video_progress():
-    """查询视频生成任务进度。"""
+    """查询视频生成任务进度。同时惰性清理过期任务（>1小时的完成任务）。"""
     task_id = request.args.get("task_id", "")
     task = _video_tasks.get(task_id)
+
+    # 惰性清理：每次查询进度时，清理超过 1 小时的已完成/错误任务
+    _now = _time.time()
+    _expired = [tid for tid, t in _video_tasks.items()
+                if t.status in ("completed", "error") and (_now - getattr(t, '_completed_at', 0)) > 3600]
+    for tid in _expired:
+        _video_tasks.pop(tid, None)
+
     if task is None:
         return jsonify({"success": False, "error": "未知任务 ID"}), 404
 
@@ -671,6 +724,8 @@ def serve_audio():
     path = request.args.get("path", "").strip()
     if not path or not os.path.isfile(path):
         return "", 404
+    if not _is_safe_path(path):
+        return "", 403
     mt = "audio/mpeg" if path.lower().endswith('.mp3') else "audio/wav"
     return send_file(path, mimetype=mt)
 
@@ -1223,8 +1278,12 @@ import sqlite3 as _sqlite3
 import json as _json
 
 def _yt_db():
-    """返回统一数据库连接（temp/app.db），由 database.py 管理建表与迁移。"""
-    return database.get_db()
+    """返回请求级共享数据库连接（通过 flask.g），避免同一请求多次连接。"""
+    db = getattr(g, "db", None)
+    if db is None:
+        db = database.get_db()
+        g.db = db
+    return db
 
 
 def _extract_youtube_id(url: str):
@@ -1857,6 +1916,21 @@ def youtube_tags_save():
 
 import re as _re_prod
 
+
+def _upsert_package(db, product_id: int, series_name: str, package_name: str, url: str, now: str):
+    """包去重逻辑：同名+同链接则更新系列名，否则新增。共享于 products_create 和 products_add_package。"""
+    existing = db.execute(
+        "SELECT id FROM packages WHERE product_id=? AND package_name=? AND url=?",
+        (product_id, package_name, url)
+    ).fetchone()
+    if existing:
+        db.execute("UPDATE packages SET series_name=? WHERE id=?", (series_name, existing["id"]))
+    else:
+        db.execute(
+            "INSERT INTO packages(product_id,series_name,package_name,url,created_at) VALUES(?,?,?,?,?)",
+            (product_id, series_name, package_name, url, now)
+        )
+
 @app.route("/api/products/runner-products", methods=["GET"])
 @jwt_required()
 def runner_products():
@@ -1864,16 +1938,13 @@ def runner_products():
     user_id = int(get_jwt_identity())
     db = database.get_db()
     rows = db.execute(
-        "SELECT id, product_name, runner_ids FROM products WHERE is_archived=0 AND deleted_at='' ORDER BY product_name"
+        "SELECT p.id, p.product_name FROM products p "
+        "INNER JOIN product_runners pr ON p.id = pr.product_id "
+        "WHERE pr.user_id = ? AND p.is_archived=0 AND p.deleted_at='' "
+        "ORDER BY p.product_name", (user_id,)
     ).fetchall()
     db.close()
-    # 过滤出当前用户是 runner 的产品
-    import json as _json
-    products = []
-    for r in rows:
-        runner_ids = _json.loads(r["runner_ids"] or "[]")
-        if user_id in runner_ids:
-            products.append({"id": r["id"], "product_name": r["product_name"]})
+    products = [{"id": r["id"], "product_name": r["product_name"]} for r in rows]
     return jsonify({"success": True, "products": products})
 
 
@@ -1907,18 +1978,17 @@ def products_list():
         except Exception:
             user_id = None
         if user_id:
-            uid_s = str(user_id)
-            where.append("(p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)")
-            params += [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"]
+            where.append("EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)")
+            params.append(user_id)
     elif runner == "all":
         pass
     elif runner.isdigit():
-        uid_s = str(runner)
+        rid = int(runner)
         where.append(
-            "(p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR "
-            "p.runner_ids LIKE ? OR p.owner_id = ?)"
+            "(EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
+            " OR p.owner_id = ?)"
         )
-        params += [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]", int(runner)]
+        params += [rid, rid]
     if search:
         where.append("(p.product_name LIKE ? OR p.kpi LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -2030,10 +2100,9 @@ def products_list():
     except Exception:
         uid = None
     if uid:
-        uid_s = str(uid)
         runner_counts["mine"] = db.execute(
-            f"SELECT COUNT(*) FROM products p WHERE (p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?) AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
-            [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"] + stat_params_mine
+            f"SELECT COUNT(*) FROM products p WHERE EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?) AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
+            [uid] + stat_params_mine
         ).fetchone()[0]
     else:
         runner_counts["mine"] = runner_counts["all"]
@@ -2082,6 +2151,7 @@ def products_create():
             if user_id not in runners:
                 runners.append(user_id)
                 db.execute("UPDATE products SET runner_ids=? WHERE id=?", (_json.dumps(runners), pid))
+                db.execute("INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)", (pid, user_id))
                 # 自动分配产品 MCC 给当前用户
                 if mcc_id:
                     _assign_mcc_to_users(db, mcc_id, [user_id])
@@ -2090,20 +2160,10 @@ def products_create():
         db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,customer,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?,?)",
                    (product_name, kpi, region, mcc_id, customer, user_id, runner_ids, now))
         pid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        if user_id:
+            db.execute("INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)", (pid, user_id))
     for p in packages:
-        pkg_name = p.get("package_name","")
-        pkg_url = p.get("url","")
-        # 同一产品下，包名+链接相同 = 同一个包，只更新系列名
-        existing_pkg = db.execute(
-            "SELECT id FROM packages WHERE product_id=? AND package_name=? AND url=?",
-            (pid, pkg_name, pkg_url)
-        ).fetchone()
-        if existing_pkg:
-            db.execute("UPDATE packages SET series_name=? WHERE id=?",
-                       (p.get("series_name",""), existing_pkg["id"]))
-        else:
-            db.execute("INSERT INTO packages(product_id,series_name,package_name,url,created_at) VALUES(?,?,?,?,?)",
-                       (pid, p.get("series_name",""), pkg_name, pkg_url, now))
+        _upsert_package(db, pid, p.get("series_name",""), p.get("package_name",""), p.get("url",""), now)
     db.commit(); db.close()
     return jsonify({"success": True, "id": pid})
 
@@ -2116,9 +2176,14 @@ def products_update(pid):
     data = request.get_json(silent=True) or {}
     db = _yt_db()
 
-    for f in ["product_name", "kpi", "region", "status", "mcc_id", "customer"]:
-        if f in data:
-            db.execute(f"UPDATE products SET {f}=? WHERE id=?", (data[f], pid))
+    # 仅允许白名单字段更新
+    _product_fields = {
+        "product_name": "product_name", "kpi": "kpi", "region": "region",
+        "status": "status", "mcc_id": "mcc_id", "customer": "customer",
+    }
+    for key, col in _product_fields.items():
+        if key in data:
+            db.execute(f"UPDATE products SET {col}=? WHERE id=?", (data[key], pid))
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -2244,6 +2309,10 @@ def products_merge():
     master_runners = list(set(master_runners))
     db.execute("UPDATE products SET runner_ids=? WHERE id=?",
                (_json.dumps(master_runners), master_id))
+    # 同步 product_runners 关联表
+    db.execute("DELETE FROM product_runners WHERE product_id=?", (master_id,))
+    for uid in master_runners:
+        db.execute("INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)", (master_id, uid))
 
     db.execute("PRAGMA foreign_keys=ON")
     db.commit()
@@ -2321,9 +2390,13 @@ def products_update_runners(pid):
         old_runners = []
     new_runners = [uid for uid in runner_ids if uid not in old_runners]
 
-    # 更新 runner_ids
+    # 更新 runner_ids (JSON 列) + product_runners 关联表
     db.execute("UPDATE products SET runner_ids=? WHERE id=?",
                (json.dumps(runner_ids), pid))
+    # 原子替换关联表
+    db.execute("DELETE FROM product_runners WHERE product_id=?", (pid,))
+    for uid in runner_ids:
+        db.execute("INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)", (pid, uid))
 
     # 自动分配产品 MCC 给新增的 runner
     product_mcc_id = existing["mcc_id"]
@@ -2397,17 +2470,7 @@ def products_add_package(pid):
 
     import datetime
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    # 同一产品下，包名+链接相同 = 同一个包，只更新系列名
-    existing = db.execute(
-        "SELECT id FROM packages WHERE product_id=? AND package_name=? AND url=?",
-        (pid, package_name, url)
-    ).fetchone()
-    if existing:
-        db.execute("UPDATE packages SET series_name=? WHERE id=?",
-                   (series_name, existing["id"]))
-    else:
-        db.execute("INSERT INTO packages(product_id,series_name,package_name,url,created_at) VALUES(?,?,?,?,?)",
-                   (pid, series_name, package_name, url, now))
+    _upsert_package(db, pid, series_name, package_name, url, now)
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -2420,9 +2483,11 @@ def products_update_package(pkg_id):
     data = request.get_json(silent=True) or {}
     db = _yt_db()
 
-    for f in ["series_name", "package_name", "url", "status"]:
-        if f in data:
-            db.execute(f"UPDATE packages SET {f}=? WHERE id=?", (data[f], pkg_id))
+    _pkg_fields = {"series_name": "series_name", "package_name": "package_name",
+                   "url": "url", "status": "status"}
+    for key, col in _pkg_fields.items():
+        if key in data:
+            db.execute(f"UPDATE packages SET {col}=? WHERE id=?", (data[key], pkg_id))
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -2434,6 +2499,8 @@ def products_delete_package(pkg_id):
     if reject: return reject
     db = _yt_db()
 
+    # 先删 delist_checks，否则外键约束阻止删除包
+    db.execute("DELETE FROM delist_checks WHERE package_id=?", (pkg_id,))
     db.execute("DELETE FROM packages WHERE id=?", (pkg_id,))
     db.commit(); db.close()
     return jsonify({"success": True})
@@ -2513,6 +2580,13 @@ def audit_log_restore(log_id):
              pdata.get("owner_id", user_id), pdata.get("runner_ids","[]"),
              pdata.get("created_at",""))
         )
+        # 恢复 product_runners 关联
+        try:
+            runner_ids = json.loads(pdata.get("runner_ids", "[]"))
+        except Exception:
+            runner_ids = []
+        for uid in runner_ids:
+            db.execute("INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)", (pid, uid))
     else:
         # 软删除的，直接恢复
         db.execute("UPDATE products SET is_archived=0, deleted_at='' WHERE id=?", (pid,))
@@ -2588,7 +2662,6 @@ def products_delist_status():
     user_id = int(get_jwt_identity())
     db = _yt_db()
 
-    uid_s = str(user_id)
     # 查找当前用户作为 runner 的产品
     rows = db.execute(
         "SELECT dc.package_id, dc.product_id, dc.is_delisted, dc.checked_at, dc.error_msg, "
@@ -2599,10 +2672,10 @@ def products_delist_status():
         "JOIN products prod ON dc.product_id = prod.id "
         "WHERE dc.is_delisted = 1 "
         "AND (pkg.status IS NULL OR pkg.status = '' OR pkg.status = '0' OR pkg.status NOT IN ('dropped', 'paused')) "
-        "AND (prod.runner_ids = ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ?) "
+        "AND EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = prod.id AND pr.user_id = ?) "
         "AND (prod.is_archived IS NULL OR prod.is_archived = 0) "
         "ORDER BY dc.checked_at DESC",
-        (f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]")
+        (user_id,)
     ).fetchall()
 
     delisted_packages = []
@@ -2983,49 +3056,46 @@ def accounts_lookup():
     })
 
 
+def _account_row_to_dict(e):
+    """将 accounts 查询行转为统一返回格式。"""
+    return {
+        "id": e["id"], "name": e["name"], "account_id": e["account_id"],
+        "timezone": e.get("timezone", ""), "agent": e.get("agent", ""),
+        "status": e.get("status", ""), "acquired_date": e.get("acquired_date", ""),
+        "mcc_id": e.get("mcc_id"), "mcc_name": e.get("mcc_name", ""),
+        "mcc_code": e.get("mcc_code", ""), "owner_id": e.get("owner_id"),
+        "owner_name": (e.get("display_name") or e.get("username") or "未知"),
+    }
+
+
 @app.route("/api/accounts/batch-lookup", methods=["POST"])
 @jwt_required()
 def accounts_batch_lookup():
-    """批量查询多个 account_id 是否已存在"""
+    """批量查询多个 account_id 是否已存在（单次 SQL IN 查询）。"""
     data = request.get_json(silent=True) or {}
     account_ids = data.get("account_ids") or []
     if not account_ids or not isinstance(account_ids, list):
         return jsonify({"success": False, "error": "请提供 account_ids 列表"}), 400
 
-    db = _yt_db()
-    found = []
-    found_ids = set()
-    for aid in account_ids:
-        aid = str(aid).strip()
-        if not aid:
-            continue
-        existing = db.execute(
-            "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name "
-            "FROM accounts a "
-            "LEFT JOIN mcc m ON a.mcc_id = m.id "
-            "LEFT JOIN users u ON a.owner_id = u.id "
-            "WHERE a.account_id = ?",
-            (aid,)
-        ).fetchone()
-        if existing:
-            e = dict(existing)
-            found.append({
-                "id": e["id"],
-                "name": e["name"],
-                "account_id": e["account_id"],
-                "timezone": e.get("timezone", ""),
-                "agent": e.get("agent", ""),
-                "status": e.get("status", ""),
-                "acquired_date": e.get("acquired_date", ""),
-                "mcc_id": e.get("mcc_id"),
-                "mcc_name": e.get("mcc_name", ""),
-                "mcc_code": e.get("mcc_code", ""),
-                "owner_id": e.get("owner_id"),
-                "owner_name": (e.get("display_name") or e.get("username") or "未知"),
-            })
-            found_ids.add(aid)
+    # 清洗 ID 列表
+    clean_ids = [str(aid).strip() for aid in account_ids if str(aid).strip()]
+    if not clean_ids:
+        return jsonify({"success": True, "found": [], "not_found": []})
 
-    not_found = [aid for aid in account_ids if str(aid).strip() and str(aid).strip() not in found_ids]
+    db = _yt_db()
+    placeholders = ",".join(["?"] * len(clean_ids))
+    rows = db.execute(
+        f"SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name "
+        f"FROM accounts a "
+        f"LEFT JOIN mcc m ON a.mcc_id = m.id "
+        f"LEFT JOIN users u ON a.owner_id = u.id "
+        f"WHERE a.account_id IN ({placeholders})",
+        clean_ids
+    ).fetchall()
+
+    found = [_account_row_to_dict(dict(r)) for r in rows]
+    found_ids = {f["account_id"] for f in found}
+    not_found = [aid for aid in clean_ids if aid not in found_ids]
     db.close()
     return jsonify({"success": True, "found": found, "not_found": not_found})
 
@@ -3325,13 +3395,65 @@ def mcc_list():
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
     uid_str = str(user_id)
-    where = ["(m.owner_id = ? OR m.shared_user_ids = ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ?)"]
-    params = [user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]"]
-    if search:
-        where.append("(m.name LIKE ? OR m.mcc_id LIKE ?)")
-        params += [f"%{search}%", f"%{search}%"]
-    if level:
-        where.append("m.level LIKE ?"); params.append(f"%{level}%")
+    perm_where = "(m.owner_id = ? OR m.shared_user_ids = ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ?)"
+    perm_params = [user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]"]
+
+    has_filter = bool(search or level)
+
+    if has_filter:
+        # ===== 搜索/过滤模式：补全祖先链，保证前端树形能正确展示匹配的子MCC =====
+        # Step 1: 找出所有匹配的 MCC
+        where = [perm_where]
+        params = list(perm_params)
+        if search:
+            where.append("(m.name LIKE ? OR m.mcc_id LIKE ?)")
+            params += [f"%{search}%", f"%{search}%"]
+        if level:
+            where.append("m.level LIKE ?")
+            params.append(f"%{level}%")
+        sql = "SELECT m.* FROM mcc m WHERE " + " AND ".join(where) + " ORDER BY m.created_at DESC"
+        matched_rows = db.execute(sql, params).fetchall()
+
+        if not matched_rows:
+            db.close()
+            return jsonify({"success": True, "mcc_list": [], "total": 0})
+
+        # Step 2: 加载用户可访问的所有 MCC 的 id→parent_mcc_id 映射
+        all_mcc = db.execute(
+            f"SELECT id, parent_mcc_id FROM mcc WHERE {perm_where}", perm_params
+        ).fetchall()
+        parent_map = {r["id"]: r["parent_mcc_id"] for r in all_mcc}
+
+        # Step 3: 收集需要展示的 MCC ID = 匹配节点 + 所有祖先
+        needed_ids = set()
+        for r in matched_rows:
+            needed_ids.add(r["id"])
+            pid = r["parent_mcc_id"]
+            while pid and pid in parent_map:
+                needed_ids.add(pid)
+                pid = parent_map.get(pid)
+
+        # Step 4: 对每个祖先节点，加入它的所有直系子节点（保证树展开后层级完整）
+        ancestor_ids = list(needed_ids)
+        for aid in ancestor_ids:
+            for cid, p in parent_map.items():
+                if p == aid:
+                    needed_ids.add(cid)
+
+        # Step 5: 批量查询所有需要的 MCC（不可超过 2000 条）
+        if len(needed_ids) > 2000:
+            needed_ids = set(list(needed_ids)[:2000])
+        placeholders = ",".join("?" * len(needed_ids))
+        sql = f"SELECT m.* FROM mcc m WHERE m.id IN ({placeholders}) AND {perm_where} ORDER BY m.created_at DESC"
+        rows = db.execute(sql, list(needed_ids) + perm_params).fetchall()
+
+        mcc_list_data = [_mcc_to_dict(r, db, user_id) for r in rows]
+        db.close()
+        return jsonify({"success": True, "mcc_list": mcc_list_data, "total": len(rows)})
+
+    # ===== 无筛选：原有分页逻辑 =====
+    where = [perm_where]
+    params = list(perm_params)
     if parent_filter == "has_parent":
         where.append("m.parent_mcc_id IS NOT NULL")
     elif parent_filter == "top":
@@ -3464,10 +3586,11 @@ def mcc_update(mid):
         if not parent_row:
             db.close()
             return jsonify({"success": False, "error": "上级 MCC 不存在"}), 400
-    for f in ["name", "level", "parent_mcc_id"]:
-        if f in data:
-            db.execute(f"UPDATE mcc SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
-                       (data[f], mid))
+    _mcc_fields = {"name": "name", "level": "level", "parent_mcc_id": "parent_mcc_id"}
+    for key, col in _mcc_fields.items():
+        if key in data:
+            db.execute(f"UPDATE mcc SET {col}=?, updated_at=datetime('now','localtime') WHERE id=?",
+                       (data[key], mid))
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -4810,25 +4933,40 @@ def _run_delist_check_once():
         pkgs = [dict(r) for r in rows]
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         delisted_list = []
-        for pkg in pkgs:
+
+        # 并行 HTTP 检测（IO 密集型，最多 10 并发）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        max_workers = min(len(pkgs), 10)
+
+        def _check_one(pkg):
             url = (pkg.get("url") or "").strip()
             if not url:
-                continue
+                return None
             is_delisted, error = _delist_checker.check_url_delisted(url)
-            db.execute(
-                "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
-                "VALUES(?, ?, ?, ?, ?)",
-                (pkg["package_id"], pkg["product_id"], 1 if is_delisted else 0, now, error)
-            )
-            results.append({
-                "package_id": pkg["package_id"],
-                "product_id": pkg["product_id"],
-                "package_name": pkg.get("package_name", ""),
-                "is_delisted": is_delisted,
-                "error": error,
-            })
-            if is_delisted:
-                delisted_list.append(pkg)
+            return (pkg, is_delisted, error)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_check_one, pkg): pkg for pkg in pkgs}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is None:
+                    continue
+                pkg, is_delisted, error = result
+                # 写 DB（主线程安全）
+                db.execute(
+                    "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
+                    "VALUES(?, ?, ?, ?, ?)",
+                    (pkg["package_id"], pkg["product_id"], 1 if is_delisted else 0, now, error)
+                )
+                results.append({
+                    "package_id": pkg["package_id"],
+                    "product_id": pkg["product_id"],
+                    "package_name": pkg.get("package_name", ""),
+                    "is_delisted": is_delisted,
+                    "error": error,
+                })
+                if is_delisted:
+                    delisted_list.append(pkg)
 
         db.commit()
 
@@ -5098,11 +5236,12 @@ def ad_reports_products():
     rows = db.execute("""
         SELECT DISTINCT p.id, p.product_name, p.region
         FROM products p
+        LEFT JOIN product_runners pr ON p.id = pr.product_id
         WHERE (p.is_archived IS NULL OR p.is_archived = 0)
           AND (p.status IS NULL OR p.status = '' OR p.status = '0')
-          AND (p.owner_id = ? OR p.runner_ids LIKE '%' || ? || '%')
+          AND (p.owner_id = ? OR pr.user_id = ?)
         ORDER BY p.product_name
-    """, (user_id, str(user_id))).fetchall()
+    """, (user_id, user_id)).fetchall()
     db.close()
     return jsonify({"success": True, "products": [dict(r) for r in rows]})
 

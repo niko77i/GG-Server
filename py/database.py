@@ -8,6 +8,7 @@ import sqlite3
 import json
 import datetime
 import threading
+from contextlib import contextmanager
 
 _schema_lock = threading.Lock()
 _schema_verified = False
@@ -47,6 +48,28 @@ def get_db() -> sqlite3.Connection:
                 _schema_verified = True
                 _schema_verified_path = db_path
     return conn
+
+
+@contextmanager
+def db_conn():
+    """数据库连接上下文管理器，自动处理异常安全的关闭。
+
+    用法:
+        with db_conn() as db:
+            row = db.execute("SELECT ...").fetchone()
+    """
+    db = get_db()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, col_name: str, col_def: str):
+    """仅在列不存在时添加。避免重复 PRAGMA table_info 样板代码。"""
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if col_name not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
 
 
 def _ensure_schema(conn: sqlite3.Connection):
@@ -140,6 +163,14 @@ def _ensure_schema(conn: sqlite3.Connection):
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_copywritings_region ON copywritings(region);
+
+        -- 产品在跑人员关联表（替代 products.runner_ids JSON 列，支持索引查询）
+        CREATE TABLE IF NOT EXISTS product_runners (
+            product_id INTEGER NOT NULL REFERENCES products(id),
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            PRIMARY KEY (product_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_product_runners_user ON product_runners(user_id);
 
         -- 产品与包管理
         CREATE TABLE IF NOT EXISTS products (
@@ -325,69 +356,26 @@ def _ensure_schema(conn: sqlite3.Connection):
         if "is_paused" in tcols and "status" not in tcols:
             conn.execute(f"ALTER TABLE {t} RENAME COLUMN is_paused TO status")
 
-    # 迁移：videos 表补 review_status 列（2026-06-16 新增）
-    vcols = [r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()]
-    if "review_status" not in vcols:
-        conn.execute("ALTER TABLE videos ADD COLUMN review_status TEXT DEFAULT '能过审'")
+    # 增量迁移（使用公共函数缩减排板代码）
+    _add_column_if_missing(conn, "videos", "review_status", "review_status TEXT DEFAULT '能过审'")
+    _add_column_if_missing(conn, "accounts", "death_date", "death_date TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "videos", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "videos", "is_public", "is_public INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "accounts", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "mcc", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "mcc", "shared_user_ids", "shared_user_ids TEXT DEFAULT '[]'")
 
-    # 迁移：accounts 表补 death_date 列（2026-06-21 新增）
-    acols = [r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()]
-    if "death_date" not in acols:
-        conn.execute("ALTER TABLE accounts ADD COLUMN death_date TEXT DEFAULT ''")
-
-    # 迁移：videos 表补 owner_id 列（2026-06-26 数据隔离）
-    vcols2 = [r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()]
-    if "owner_id" not in vcols2:
-        conn.execute("ALTER TABLE videos ADD COLUMN owner_id INTEGER REFERENCES users(id)")
-    if "is_public" not in vcols2:
-        conn.execute("ALTER TABLE videos ADD COLUMN is_public INTEGER DEFAULT 0")
-
-    # 迁移：accounts 表补 owner_id 列（2026-06-26 数据隔离）
-    acols2 = [r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()]
-    if "owner_id" not in acols2:
-        conn.execute("ALTER TABLE accounts ADD COLUMN owner_id INTEGER REFERENCES users(id)")
-
-    # 迁移：mcc 表补 owner_id 列（2026-06-26 数据隔离）
-    mcols2 = [r[1] for r in conn.execute("PRAGMA table_info(mcc)").fetchall()]
-    if "owner_id" not in mcols2:
-        conn.execute("ALTER TABLE mcc ADD COLUMN owner_id INTEGER REFERENCES users(id)")
-
-    # 迁移：mcc 表补 shared_user_ids 列（2026-06-29 MCC 共享）
-    mcols3 = [r[1] for r in conn.execute("PRAGMA table_info(mcc)").fetchall()]
-    if "shared_user_ids" not in mcols3:
-        conn.execute("ALTER TABLE mcc ADD COLUMN shared_user_ids TEXT DEFAULT '[]'")
-
-    # 迁移：products 表补 owner_id/runner_ids/is_archived（2026-06-26 数据迁移）
-    pcols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
-    if "owner_id" not in pcols:
-        conn.execute("ALTER TABLE products ADD COLUMN owner_id INTEGER REFERENCES users(id)")
-        conn.execute("UPDATE products SET owner_id = 1 WHERE owner_id IS NULL")
-    if "runner_ids" not in pcols:
-        conn.execute("ALTER TABLE products ADD COLUMN runner_ids TEXT DEFAULT '[]'")
-        conn.execute("UPDATE products SET runner_ids = '[1]' WHERE runner_ids IS NULL OR runner_ids = '[]'")
-    if "is_archived" not in pcols:
-        conn.execute("ALTER TABLE products ADD COLUMN is_archived INTEGER DEFAULT 0")
-    if "customer" not in pcols:
-        conn.execute("ALTER TABLE products ADD COLUMN customer TEXT DEFAULT ''")
-    if "deleted_at" not in pcols:
-        conn.execute("ALTER TABLE products ADD COLUMN deleted_at TEXT DEFAULT ''")
-
-    # 迁移：copywritings 表补 owner_id/effectiveness（2026-06-27 文案私有化）
-    cwcols = [r[1] for r in conn.execute("PRAGMA table_info(copywritings)").fetchall()]
-    if "owner_id" not in cwcols:
-        conn.execute("ALTER TABLE copywritings ADD COLUMN owner_id INTEGER REFERENCES users(id)")
-        conn.execute("UPDATE copywritings SET owner_id = 1 WHERE owner_id IS NULL")
-    if "effectiveness" not in cwcols:
-        conn.execute("ALTER TABLE copywritings ADD COLUMN effectiveness TEXT DEFAULT ''")
-    if "is_public" not in cwcols:
-        conn.execute("ALTER TABLE copywritings ADD COLUMN is_public INTEGER DEFAULT 0")
-
-    # 迁移：users 表补 custom_name（2026-06-27 自定义后缀）
-    ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-    if "custom_name" not in ucols:
-        conn.execute("ALTER TABLE users ADD COLUMN custom_name TEXT DEFAULT ''")
-    if "email" not in ucols:
-        conn.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
+    # 增量迁移：产品/文案/用户 补列
+    _add_column_if_missing(conn, "products", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "products", "runner_ids", "runner_ids TEXT DEFAULT '[]'")
+    _add_column_if_missing(conn, "products", "is_archived", "is_archived INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "products", "customer", "customer TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "products", "deleted_at", "deleted_at TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "copywritings", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "copywritings", "effectiveness", "effectiveness TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "copywritings", "is_public", "is_public INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "users", "custom_name", "custom_name TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
 
     # 初始化默认标签
     for k, v in [("regions", '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),
@@ -431,6 +419,31 @@ def _ensure_schema(conn: sqlite3.Connection):
             )
         conn.execute(
             "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_ad_reports_dedup_v3','1')"
+        )
+
+    # 迁移：从 products.runner_ids JSON 列填充 product_runners 关联表
+    pr_migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_product_runners'"
+    ).fetchone()
+    if not pr_migrated:
+        rows = conn.execute(
+            "SELECT id, runner_ids FROM products WHERE runner_ids IS NOT NULL AND runner_ids != '' AND runner_ids != '[]'"
+        ).fetchall()
+        for r in rows:
+            try:
+                runner_ids = json.loads(r["runner_ids"] or "[]")
+            except Exception:
+                runner_ids = []
+            for uid in runner_ids:
+                try:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)",
+                        (r["id"], uid)
+                    )
+                except Exception:
+                    pass
+        conn.execute(
+            "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_product_runners','1')"
         )
 
     # 初始化地区时区（从 tags 同步已有地区，预设常见时区）
@@ -987,3 +1000,40 @@ def regions_delete(region_id: int):
     db.execute("DELETE FROM regions WHERE id=?", (region_id,))
     db.commit()
     db.close()
+
+
+# ---- product_runners 关联表操作 ----
+
+def set_product_runners(product_id: int, user_ids: list[int]):
+    """原子替换产品的 runner 列表（先删后插）。"""
+    db = get_db()
+    db.execute("DELETE FROM product_runners WHERE product_id=?", (product_id,))
+    for uid in user_ids:
+        db.execute(
+            "INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)",
+            (product_id, uid)
+        )
+    db.commit()
+    db.close()
+
+
+def add_product_runners(product_id: int, user_ids: list[int]):
+    """追加 runner 到产品（不删除已有的）。"""
+    db = get_db()
+    for uid in user_ids:
+        db.execute(
+            "INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)",
+            (product_id, uid)
+        )
+    db.commit()
+    db.close()
+
+
+def get_runner_product_ids(user_id: int) -> list[int]:
+    """获取某用户作为 runner 的所有产品 ID 列表（使用索引）。"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT product_id FROM product_runners WHERE user_id=?", (user_id,)
+    ).fetchall()
+    db.close()
+    return [r["product_id"] for r in rows]

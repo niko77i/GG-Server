@@ -26,6 +26,47 @@ class AIProvider:
         """将图片转为短视频，返回生成的 MP4 本地路径。"""
         raise NotImplementedError
 
+    def _download_video(self, video_url: str, prefix: str = "ai_video_") -> str:
+        """下载视频到临时文件，返回本地路径。子类可通过 prefix 区分来源。"""
+        try:
+            resp = requests.get(video_url, timeout=120, stream=True)
+            resp.raise_for_status()
+            fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix=prefix)
+            with os.fdopen(fd, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return tmp_path
+        except requests.RequestException as e:
+            raise AIServiceError(f"下载视频失败: {e}")
+
+    def _poll_task(self, task_id: str, headers: dict, base_url: str,
+                   timeout: int = 600, verbose: bool = False) -> str:
+        """通用轮询任务状态，返回视频下载 URL。"""
+        url = f"{base_url}/video/status/{task_id}"
+        start = time.time()
+        last_status = ""
+        while time.time() - start < timeout:
+            try:
+                resp = requests.get(url, headers=headers, timeout=15)
+                data = resp.json()
+                status = data.get("status", "")
+                if verbose and status != last_status:
+                    sys.stderr.write(f"  [{int(time.time()-start)}s] Status: {status}\n")
+                    sys.stderr.flush()
+                    last_status = status
+                if status in ("completed", "succeeded", "done"):
+                    video_url = data.get("video_url") or data.get("output_url") or data.get("url")
+                    if not video_url:
+                        raise AIServiceError("任务完成但缺少视频 URL")
+                    return video_url
+                elif status in ("failed", "cancelled", "error"):
+                    raise AIServiceError(f"任务失败: {data.get('message', status)}")
+            except requests.RequestException:
+                if not verbose:
+                    pass  # 网络抖动，继续轮询
+            time.sleep(2)
+        raise AIServiceError("任务超时")
+
     @staticmethod
     def _encode_image(image_path: str) -> str:
         """将本地图片编码为 base64 data URI（JPEG 压缩，确保 ≤2MB）。"""
@@ -74,11 +115,11 @@ class AtlasProvider(AIProvider):
         # Step 1: 提交生成请求
         task_id = self._create_task(image_path, duration, headers)
 
-        # Step 2: 轮询直到完成
-        video_url = self._poll_task(task_id, headers)
+        # Step 2: 轮询直到完成（基类方法）
+        video_url = self._poll_task(task_id, headers, self.BASE_URL)
 
-        # Step 3: 下载视频到临时目录
-        return self._download_video(video_url)
+        # Step 3: 下载视频到临时目录（基类方法）
+        return self._download_video(video_url, "ai_video_")
 
     def _create_task(self, image_path: str, duration: int, headers: dict) -> str:
         """提交视频生成任务，返回 task_id。"""
@@ -100,39 +141,7 @@ class AtlasProvider(AIProvider):
         except requests.RequestException as e:
             raise AIServiceError(f"Atlas Cloud 网络错误: {e}")
 
-    def _poll_task(self, task_id: str, headers: dict, timeout: int = 600) -> str:
-        """轮询任务状态，返回视频下载 URL。"""
-        url = f"{self.BASE_URL}/video/status/{task_id}"
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                resp = requests.get(url, headers=headers, timeout=15)
-                data = resp.json()
-                status = data.get("status", "")
-                if status in ("completed", "succeeded", "done"):
-                    video_url = data.get("video_url") or data.get("output_url") or data.get("url")
-                    if not video_url:
-                        raise AIServiceError("任务完成但缺少视频 URL")
-                    return video_url
-                elif status in ("failed", "cancelled", "error"):
-                    raise AIServiceError(f"任务失败: {data.get('message', status)}")
-            except requests.RequestException:
-                pass  # 网络抖动，继续轮询
-            time.sleep(2)
-        raise AIServiceError("任务超时")
-
-    def _download_video(self, video_url: str) -> str:
-        """下载视频到临时文件，返回本地路径。"""
-        try:
-            resp = requests.get(video_url, timeout=120, stream=True)
-            resp.raise_for_status()
-            fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="ai_video_")
-            with os.fdopen(fd, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            return tmp_path
-        except requests.RequestException as e:
-            raise AIServiceError(f"下载视频失败: {e}")
+    # _poll_task 和 _download_video 继承自 AIProvider 基类
 
 
 class VeoProvider(AIProvider):
@@ -182,13 +191,15 @@ class VeoProvider(AIProvider):
             video_url = data.get("video_url") or data.get("url")
             if video_url:
                 self._log(f"Sync response, downloading: {video_url[:80]}...")
-                return self._download_video(video_url)
+                return self._download_video(video_url, "veo_ai_")
 
-            # 异步轮询
+            # 异步轮询（基类方法，verbose 模式）
             task_id = data.get("task_id") or data.get("id")
             if task_id:
                 self._log(f"Async task: {task_id}")
-                return self._poll_and_download(task_id, headers)
+                video_url = self._poll_task(task_id, headers, self.BASE_URL, verbose=True)
+                self._log(f"Downloading: {video_url[:80]}...")
+                return self._download_video(video_url, "veo_ai_")
 
             self._log(f"Unknown response format: {data}")
             raise AIServiceError("Veo 返回格式未知")
@@ -196,50 +207,7 @@ class VeoProvider(AIProvider):
             self._log(f"Network error: {e}")
             raise AIServiceError(f"Veo 网络错误: {e}")
 
-    def _poll_and_download(self, task_id: str, headers: dict) -> str:
-        """轮询 Veo 任务并下载视频。"""
-        url = f"{self.BASE_URL}/video/status/{task_id}"
-        self._log(f"Polling {task_id}...")
-        start = time.time()
-        last_status = ""
-        while time.time() - start < 600:
-            try:
-                resp = requests.get(url, headers=headers, timeout=15)
-                data = resp.json()
-                status = data.get("status", "")
-                if status != last_status:
-                    self._log(f"[{int(time.time()-start)}s] Status: {status}")
-                    last_status = status
-                if status in ("completed", "done"):
-                    video_url = data.get("video_url") or data.get("url")
-                    if video_url:
-                        self._log(f"Downloading: {video_url[:80]}...")
-                        return self._download_video(video_url)
-                    self._log("Completed but no video URL!")
-                    raise AIServiceError("Veo 完成但无视频 URL")
-                elif status in ("failed", "error"):
-                    self._log(f"Task failed: {data.get('message')}")
-                    raise AIServiceError(f"Veo 任务失败: {data.get('message')}")
-            except requests.RequestException:
-                pass
-            time.sleep(2)
-        self._log("Timeout!")
-        raise AIServiceError("Veo 任务超时")
-
-    def _download_video(self, video_url: str) -> str:
-        """下载 Veo 视频到临时文件。"""
-        try:
-            resp = requests.get(video_url, timeout=120, stream=True)
-            resp.raise_for_status()
-            fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="veo_ai_")
-            with os.fdopen(fd, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            self._log(f"Downloaded: {tmp_path} ({os.path.getsize(tmp_path)/1024:.0f} KB)")
-            return tmp_path
-        except requests.RequestException as e:
-            self._log(f"Download failed: {e}")
-            raise AIServiceError(f"Veo 下载视频失败: {e}")
+    # _poll_task / _download_video 继承自 AIProvider 基类
 
 
 class DoubaoProvider(AIProvider):
@@ -333,7 +301,7 @@ class DoubaoProvider(AIProvider):
                     raise AIServiceError("豆包 Seedance 任务完成但缺少视频 URL")
                 self._log(f"Video URL: {video_url[:80]}...")
                 self._log("Downloading video...")
-                tmp_path = self._download_video(video_url)
+                tmp_path = self._download_video(video_url, "doubao_ai_")
                 self._log(f"Downloaded: {tmp_path} ({os.path.getsize(tmp_path)/1024:.0f} KB)")
                 return tmp_path
 
@@ -347,18 +315,7 @@ class DoubaoProvider(AIProvider):
         self._log(f"Timeout after {timeout}s")
         raise AIServiceError("豆包 Seedance 任务超时（15 分钟）")
 
-    def _download_video(self, video_url: str) -> str:
-        """下载视频到临时文件，返回本地路径。"""
-        try:
-            resp = requests.get(video_url, timeout=180, stream=True)
-            resp.raise_for_status()
-            fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="doubao_ai_")
-            with os.fdopen(fd, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            return tmp_path
-        except requests.RequestException as e:
-            raise AIServiceError(f"豆包 Seedance 下载视频失败: {e}")
+    # _download_video 继承自 AIProvider 基类
 
 
 # 服务注册表
