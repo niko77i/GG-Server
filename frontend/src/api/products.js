@@ -9,6 +9,7 @@ export const productsApi = {
   addPackage:  (pid, body) => api.post(`/products/${pid}/packages`, body),
   updatePackage: (pkgId, body) => api.put(`/products/packages/${pkgId}`, body),
   deletePackage: (pkgId) => api.delete(`/products/packages/${pkgId}`),
+  batchDeletePackages: (ids) => api.post('/products/packages/batch-delete', { ids }),
   importText:  (body)   => api.post('/products/import-text', body),
   // 新增
   merge:       (body)   => api.post('/products/merge', body),

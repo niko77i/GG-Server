@@ -68,6 +68,7 @@
             <el-option label="正常" value="normal" /><el-option label="暂停" value="paused" /><el-option label="掉包" value="dropped" /><el-option label="拒登" value="rejected" />
           </el-select>
           <el-button v-if="checkedIds.length" size="small" @click.stop="batchCopyLinks" type="primary">📋 复制链接</el-button>
+          <el-button v-if="checkedIds.length && !auth.isViewer" size="small" @click.stop="batchDelPkgs" type="danger">🗑 批量删除</el-button>
         </span>
         <span style="font-size:11px;color:#888;">已选 {{ checkedIds.length }} 个</span>
       </div>
@@ -221,6 +222,14 @@ function batchCopyLinks() {
   const links = packages.value.filter(p=>checkedIds.value.includes(p.id)&&p.url).map(p=>p.url)
   if(!links.length){ElMessage.warning('选中的包没有链接');return}
   copyToClipboard(links.join('\n')).then(()=>{ElMessage.success(`已复制 ${links.length} 个链接 ✓`)})
+}
+async function batchDelPkgs() {
+  if (!checkedIds.value.length) return
+  await ElMessageBox.confirm(`确定删除选中的 ${checkedIds.value.length} 个包？此操作不可撤销。`, '批量删除', { type: 'error' })
+  await store.batchDeletePackages(checkedIds.value)
+  checkedIds.value = []
+  ElMessage.success('批量删除完成')
+  emit('refresh')
 }
 function copy(text) {
   if (!text) return

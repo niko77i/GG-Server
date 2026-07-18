@@ -38,6 +38,7 @@ export const useProductStore = defineStore('products', {
     async addPackage(pid, body) { return productsApi.addPackage(pid, body) },
     async updatePackage(pkgId, body) { return productsApi.updatePackage(pkgId, body) },
     async deletePackage(pkgId) { await productsApi.deletePackage(pkgId); return this.loadProducts() },
+    async batchDeletePackages(ids) { await productsApi.batchDeletePackages(ids); return this.loadProducts() },
     async importText(body) { return productsApi.importText(body) },
   },
 })

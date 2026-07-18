@@ -2506,6 +2506,24 @@ def products_delete_package(pkg_id):
     return jsonify({"success": True})
 
 
+@app.route("/api/products/packages/batch-delete", methods=["POST"])
+@jwt_required()
+def products_batch_delete_packages():
+    """批量删除包"""
+    reject = _reject_viewer()
+    if reject: return reject
+    data = request.get_json(silent=True) or {}
+    ids = data.get("ids", [])
+    if not ids or not isinstance(ids, list):
+        return jsonify({"error": "请提供要删除的包 ID 列表"}), 400
+    db = _yt_db()
+    placeholders = ",".join("?" * len(ids))
+    db.execute(f"DELETE FROM delist_checks WHERE package_id IN ({placeholders})", ids)
+    db.execute(f"DELETE FROM packages WHERE id IN ({placeholders})", ids)
+    db.commit(); db.close()
+    return jsonify({"success": True, "deleted": len(ids)})
+
+
 # ---------- 审计日志 API ----------
 
 @app.route("/api/audit-log/list", methods=["GET"])
