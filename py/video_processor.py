@@ -438,6 +438,12 @@ class VideoTask:
 
         try:
             cmd = self.build_command()
+            # 设置 Fontconfig 路径，防止 "Cannot load default config file" 导致 FFmpeg 崩溃
+            _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            _fontconfig_dir = os.path.join(_project_root, "etc", "fonts")
+            _env = os.environ.copy()
+            if os.path.isdir(_fontconfig_dir):
+                _env["FONTCONFIG_PATH"] = _fontconfig_dir
             self._proc = subprocess.Popen(
                 cmd,
                 stderr=subprocess.PIPE,
@@ -445,6 +451,7 @@ class VideoTask:
                 universal_newlines=True,
                 encoding="utf-8",
                 errors="replace",
+                env=_env,
             )
             for line in self._proc.stderr:
                 self._stderr_lines.append(line)

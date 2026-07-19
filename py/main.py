@@ -703,10 +703,14 @@ def video_upload_music():
         out_fp = os.path.join(_MUSIC_DIR, out_name)
         ffmpeg = _get_ffmpeg_path()
         try:
+            _fc_dir = os.path.join(_DATA_ROOT, "etc", "fonts")
+            _env = os.environ.copy()
+            if os.path.isdir(_fc_dir):
+                _env["FONTCONFIG_PATH"] = _fc_dir
             subprocess.run(
                 [ffmpeg, "-y", "-i", raw_fp, "-vn", "-acodec", "libmp3lame",
                  "-q:a", "2", out_fp],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=120, env=_env,
             )
             # 删除原始 mp4，只保留提取的音频
             try: os.remove(raw_fp)
@@ -775,7 +779,11 @@ def audio_replace():
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        _fc_dir = os.path.join(_DATA_ROOT, "etc", "fonts")
+        _env = os.environ.copy()
+        if os.path.isdir(_fc_dir):
+            _env["FONTCONFIG_PATH"] = _fc_dir
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=_env)
         if result.returncode != 0:
             err_tail = result.stderr[-300:] if result.stderr else "(无输出)"
             return jsonify({"success": False, "error": f"FFmpeg 执行失败: {err_tail}"}), 500
