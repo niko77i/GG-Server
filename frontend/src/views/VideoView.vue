@@ -304,7 +304,9 @@ onMounted(async () => {
     loadRemotePackages()
     loadMusicList()
   }
-  // 检查是否有从爬取页面传来的目录
+  // 1) 首先尝试恢复上次未提交的表单（任何场景都适用）
+  await restoreFormState()
+  // 2) 爬取页面桥接目录（优先级高于表单恢复）
   const bridgeDir = sessionStorage.getItem('bridgeVideoDir')
   if (bridgeDir) {
     videoDir.value = bridgeDir
@@ -312,11 +314,11 @@ onMounted(async () => {
     sessionStorage.removeItem('bridgeVideoDir')
     await scanDir()
   }
-  // 恢复活跃或刚完成的视频任务（切换页面后回来）
+  // 3) 活跃任务恢复（优先级最高：用 meta 中的目录覆盖）
   const videoTasks = taskStore.visibleTasks.filter(t => t.type === 'video')
   if (videoTasks.length > 0) {
     const latest = videoTasks[0]
-    if (latest.meta?.videoDir && !videoDir.value) {
+    if (latest.meta?.videoDir) {
       videoDir.value = latest.meta.videoDir
       if (latest.meta.outputPath) outputPath.value = latest.meta.outputPath
       await scanDir()
@@ -327,7 +329,6 @@ onMounted(async () => {
       progressMsg.value = latest.message || '正在重新连接...'
       pollLocalTask(latest)
     } else if (latest.status === 'completed') {
-      // 任务在切走期间已完成
       generating.value = false
       generatedPath.value = latest.result?.output?.path || ''
       progressMsg.value = latest.message || '✅ 已完成'
@@ -336,15 +337,14 @@ onMounted(async () => {
       generating.value = false
       progressMsg.value = latest.message || '❌ 任务失败'
     }
-  } else if (!videoDir.value) {
-    // 无活跃任务且无桥接目录 → 恢复上次未提交的表单
-    await restoreFormState()
   }
 })
 
 onUnmounted(() => {
   pollAborted = true
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
+  // 始终保存表单（不管是否在生成中）
+  _saveFormNow()
 })
 
 // ========== 表单持久化（实时保存 + 挂载恢复）==========
@@ -387,9 +387,8 @@ async function restoreFormState() {
   } catch {}
 }
 
-// 实时保存（任何表单字段变化 → 写 sessionStorage）
-watchEffect(() => {
-  if (generating.value) return  // 任务运行中不覆盖（meta 优先）
+// 统一保存函数（watchEffect + onUnmounted 共用）
+function _saveFormNow() {
   const form = {
     videoDir: videoDir.value,
     outputPath: outputPath.value,
@@ -407,7 +406,9 @@ watchEffect(() => {
     selectedImgs: { ...selectedImgs.value },
   }
   try { sessionStorage.setItem(FORM_KEY, JSON.stringify(form)) } catch {}
-})
+}
+// 实时保存（任何表单字段变化 → 写 sessionStorage）
+watchEffect(() => { if (!generating.value) _saveFormNow() })
 
 async function loadHistory() {
   await store.loadHistory()
