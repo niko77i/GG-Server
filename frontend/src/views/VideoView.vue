@@ -316,10 +316,15 @@ onMounted(async () => {
   const activeVideo = taskStore.activeTasks.filter(t => t.type === 'video')
   if (activeVideo.length > 0) {
     const latest = activeVideo[0]
+    // 恢复页面上下文：目录 + 扫描图片 + 设置
+    if (latest.meta?.videoDir && !videoDir.value) {
+      videoDir.value = latest.meta.videoDir
+      if (latest.meta.outputPath) outputPath.value = latest.meta.outputPath
+      await scanDir()
+    }
     generating.value = true
     progressPct.value = latest.progress || 0
     progressMsg.value = latest.message || '正在重新连接...'
-    // 恢复本地轮询
     pollLocalTask(latest)
   }
 })
@@ -483,6 +488,7 @@ function getSettings() {
     settings: {
       output_path: outputPath.value,
       use_logo: useLogo.value,
+      logo_path: (useLogo.value && logo.value) ? logo.value.path : undefined,
       logo_position: logoPosition.value,
       logo_effect: logoEffect.value,
       frame_duration: frameDuration.value,
@@ -513,9 +519,13 @@ function doGenerate(settings) {
 
   return store.generate(settings).then(res => {
     const tid = res.task_id
-    // 注册到全局任务 Store
+    // 注册到全局任务 Store，附带页面上下文用于恢复
     const label = (settings.name || outputPath.value || '未命名')
     const innerId = taskStore.addTask('video', label, tid)
+    // 保存页面上下文：目录 + 输出路径，切换页面回来后可重建
+    taskStore.updateTask(innerId, {
+      meta: { videoDir: videoDir.value, outputPath: outputPath.value },
+    })
 
     return new Promise((resolve) => {
       let done = false

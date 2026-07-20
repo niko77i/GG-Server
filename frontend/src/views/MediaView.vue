@@ -644,10 +644,17 @@ onMounted(async () => {
   loadMusicList()
   loadHistory()
   if (authStore.isAdmin) loadScrapeUsers()
-  // 恢复活跃的视频生成任务
+  // 恢复活跃的视频生成任务（切换页面后回来）
   const activeVideo = taskStore.activeTasks.filter(t => t.type === 'video')
   if (activeVideo.length > 0) {
     const latest = activeVideo[0]
+    // 恢复页面上下文：目录 + 扫描图片 + 设置
+    if (latest.meta?.videoDir && !videoDir.value) {
+      videoDir.value = latest.meta.videoDir
+      if (latest.meta.outputPath) outputPath.value = latest.meta.outputPath
+      // MediaView 中图片目录即视频目录，自动扫描
+      await scanDir()
+    }
     generating.value = true
     progressPct.value = latest.progress || 0
     progressMsg.value = latest.message || '正在重新连接...'
@@ -750,6 +757,9 @@ function doGenerate(settings) {
     const tid = res.task_id
     const label = (settings.name || '未命名')
     const innerId = taskStore.addTask('video', label, tid)
+    taskStore.updateTask(innerId, {
+      meta: { videoDir: videoDir.value, outputPath: outputPath.value },
+    })
 
     return new Promise((resolve) => {
       let done = false

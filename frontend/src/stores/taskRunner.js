@@ -217,6 +217,7 @@ export const useTaskStore = defineStore('taskRunner', {
             taskId: t.taskId,
             status: t.status,
             startedAt: t.startedAt,
+            ...(t.meta ? { meta: t.meta } : {}),
           }))
         if (running.length) {
           localStorage.setItem(LS_KEY, JSON.stringify(running))
