@@ -435,20 +435,25 @@ def _ensure_schema(conn: sqlite3.Connection):
             "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_ad_reports_dedup_v3','1')"
         )
 
-    # 迁移：从 products.runner_ids JSON 列填充 product_runners 关联表
-    pr_migrated = conn.execute(
-        "SELECT value FROM config WHERE key='migrated_product_runners'"
-    ).fetchone()
-    if not pr_migrated:
-        rows = conn.execute(
-            "SELECT id, runner_ids FROM products WHERE runner_ids IS NOT NULL AND runner_ids != '' AND runner_ids != '[]'"
-        ).fetchall()
-        for r in rows:
-            try:
-                runner_ids = json.loads(r["runner_ids"] or "[]")
-            except Exception:
-                runner_ids = []
-            for uid in runner_ids:
+    # 修复同步：确保 product_runners 关联表与 products.runner_ids JSON 列一致
+    # 每次启动都执行，修复可能因 FK 约束静默失败等原因导致的数据不一致
+    rows = conn.execute(
+        "SELECT id, runner_ids FROM products WHERE runner_ids IS NOT NULL AND runner_ids != '' AND runner_ids != '[]'"
+    ).fetchall()
+    # 获取有效用户 ID（跳过不存在于 users 表的无效用户）
+    valid_uids = set(r[0] for r in conn.execute("SELECT id FROM users").fetchall())
+    for r in rows:
+        try:
+            runner_ids = json.loads(r["runner_ids"] or "[]")
+        except Exception:
+            runner_ids = []
+        valid_rids = [uid for uid in runner_ids if uid in valid_uids]
+        current = set(row[0] for row in conn.execute(
+            "SELECT user_id FROM product_runners WHERE product_id=?", (r["id"],)
+        ).fetchall())
+        if set(valid_rids) != current:
+            conn.execute("DELETE FROM product_runners WHERE product_id=?", (r["id"],))
+            for uid in valid_rids:
                 try:
                     conn.execute(
                         "INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)",
@@ -456,9 +461,6 @@ def _ensure_schema(conn: sqlite3.Connection):
                     )
                 except Exception:
                     pass
-        conn.execute(
-            "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_product_runners','1')"
-        )
 
     # 初始化地区时区（从 tags 同步已有地区，预设常见时区）
     _init_regions(conn)

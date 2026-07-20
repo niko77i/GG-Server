@@ -17,7 +17,7 @@
       </div>
 
       <h4>📌 关联账户（{{ product.related_account_count || 0 }} 个）</h4>
-      <el-table :data="product.related_accounts" size="small" v-if="product.related_accounts?.length">
+      <el-table :data="sortedAccounts" size="small" v-if="sortedAccounts.length">
         <el-table-column prop="name" label="账户名称" />
         <el-table-column prop="account_id" label="账户 ID" />
         <el-table-column prop="status" label="状态">
@@ -171,6 +171,18 @@ function copy(id) {
   const url = `https://www.youtube.com/watch?v=${id}`
   copyToClipboard(url).then(() => ElMessage.success('已复制链接 ✓'))
 }
+
+// 按状态排序的关联账户：存活 > 验证 > 死亡 > 其他
+const statusOrder = { '存活': 0, '验证': 1, '死亡': 2 }
+const sortedAccounts = computed(() => {
+  const accounts = product.value?.related_accounts
+  if (!accounts?.length) return []
+  return [...accounts].sort((a, b) => {
+    const orderA = statusOrder[a.status] ?? 3
+    const orderB = statusOrder[b.status] ?? 3
+    return orderA - orderB
+  })
+})
 
 const assetGroups = computed(() => {
   const map = {}
