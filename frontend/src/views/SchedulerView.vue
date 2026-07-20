@@ -71,9 +71,24 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { adminApi } from '../api/admin'
+import { useTaskStore } from '@/stores/taskRunner'
 import { ElMessage } from 'element-plus'
+
+const taskStore = useTaskStore()
+
+// 恢复上次执行结果（切换页面后回来）
+onMounted(() => {
+  for (const t of taskStore.visibleTasks) {
+    if (t.type === 'delist' && t.status === 'completed' && t.result) {
+      delistResult.value = { success: true, ...t.result }
+    }
+    if (t.type === 'cleanup' && t.status === 'completed' && t.result) {
+      cleanupResult.value = { success: true, ...t.result }
+    }
+  }
+})
 
 // 掉包检测
 const delistRunning = ref(false)
@@ -82,14 +97,23 @@ const delistResult = ref(null)
 async function triggerDelist() {
   delistRunning.value = true
   delistResult.value = null
+  const innerId = taskStore.addTask('delist', '掉包检测', null)
   try {
     const res = await adminApi.triggerDelistCheck()
+    taskStore.updateTask(innerId, {
+      status: 'completed', progress: 1,
+      message: `共${res.total}包，${res.delisted}掉包`,
+      result: res,
+      finishedAt: Date.now(),
+    })
     delistResult.value = { success: true, ...res }
     ElMessage.success(`掉包检测完成：${res.total} 个包，${res.delisted} 个掉包`)
-    // 立即通知全局轮询和产品列表刷新
     window.dispatchEvent(new CustomEvent('delist-check-completed'))
   } catch (e) {
     const msg = e?.response?.data?.error || e.message || '未知错误'
+    taskStore.updateTask(innerId, {
+      status: 'error', message: msg, finishedAt: Date.now(),
+    })
     delistResult.value = { success: false, error: msg }
     ElMessage.error('掉包检测失败：' + msg)
   } finally {
@@ -104,12 +128,22 @@ const cleanupResult = ref(null)
 async function triggerCleanup() {
   cleanupRunning.value = true
   cleanupResult.value = null
+  const innerId = taskStore.addTask('cleanup', '每周清理', null)
   try {
     const res = await adminApi.triggerWeeklyCleanup()
+    taskStore.updateTask(innerId, {
+      status: 'completed', progress: 1,
+      message: res.message || '清理完成',
+      result: res,
+      finishedAt: Date.now(),
+    })
     cleanupResult.value = { success: true, ...res }
     ElMessage.success('每周清理已执行完成')
   } catch (e) {
     const msg = e?.response?.data?.error || e.message || '未知错误'
+    taskStore.updateTask(innerId, {
+      status: 'error', message: msg, finishedAt: Date.now(),
+    })
     cleanupResult.value = { success: false, error: msg }
     ElMessage.error('清理失败：' + msg)
   } finally {

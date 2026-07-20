@@ -551,6 +551,16 @@ def video_generate():
     task = VideoTask(data)
     _video_tasks[task.task_id] = task
 
+    # 持久化到 SQLite（服务器重启后历史可查）
+    try:
+        database.task_create(
+            task_id=task.task_id,
+            package=data.get("settings", {}).get("output_path", ""),
+            settings=data,
+        )
+    except Exception:
+        pass  # DB 写入失败不影响主流程
+
     # 后台线程执行
     import threading
 
@@ -610,6 +620,21 @@ def video_generate():
         # 执行 FFmpeg
         task.run()
 
+        # 持久化任务结果到 SQLite
+        try:
+            _status = "completed" if task.status == "completed" else "error"
+            _output = task.result().get("path", "") if task.result() else ""
+            database.task_update(
+                task_id=task.task_id,
+                status=_status,
+                progress=1.0 if _status == "completed" else task.progress,
+                message=task.message or "",
+                output_path=_output,
+                finished_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        except Exception:
+            pass  # DB 写入失败不影响主流程
+
         # 清理 temp 中的 AI 视频（_ai_videos 中的副本保留）
         ai_videos = task.params.get("_ai_videos", {})
         for tmp_path in ai_videos.values():
@@ -643,6 +668,24 @@ def video_progress():
         _video_tasks.pop(tid, None)
 
     if task is None:
+        # 内存中没有，尝试从 SQLite 查询（服务器重启后兜底）
+        try:
+            db_task = database.task_get(task_id)
+            if db_task:
+                _out = None
+                if db_task.get("output_path"):
+                    _out = {"path": db_task["output_path"]}
+                return jsonify({
+                    "task_id": db_task["task_id"],
+                    "status": db_task["status"],
+                    "progress": db_task["progress"],
+                    "message": db_task["message"],
+                    "output": _out,
+                })
+        except Exception:
+            # DB 查询失败（锁、损坏等），记录错误但不暴露给前端
+            import traceback
+            traceback.print_exc()
         return jsonify({"success": False, "error": "未知任务 ID"}), 404
 
     resp = {
@@ -656,6 +699,34 @@ def video_progress():
     elif task.status == "error":
         resp["error"] = task.message
     return jsonify(resp)
+
+
+@app.route("/api/tasks", methods=["GET"])
+@jwt_required()
+def list_active_tasks():
+    """返回活跃任务及最近完成的任务列表。页面刷新后用于恢复。"""
+    db = _yt_db()
+    rows = db.execute("""
+        SELECT task_id, status, progress, message, output_path, created_at, finished_at
+        FROM video_tasks
+        WHERE status IN ('pending', 'processing')
+           OR (status IN ('completed', 'error')
+               AND finished_at >= datetime('now', 'localtime', '-1 hour'))
+        ORDER BY created_at DESC
+        LIMIT 50
+    """).fetchall()
+
+    tasks = []
+    for r in rows:
+        d = dict(r)
+        # 内存中有更新的数据则用内存覆盖 DB
+        mem = _video_tasks.get(d["task_id"])
+        if mem:
+            d["status"] = mem.status
+            d["progress"] = mem.progress
+            d["message"] = mem.message
+        tasks.append(d)
+    return jsonify({"success": True, "tasks": tasks})
 
 
 @app.route("/api/video/download", methods=["GET"])
@@ -1976,9 +2047,11 @@ def runner_products():
     db = database.get_db()
     rows = db.execute(
         "SELECT p.id, p.product_name FROM products p "
-        "INNER JOIN product_runners pr ON p.id = pr.product_id "
-        "WHERE pr.user_id = ? AND p.is_archived=0 AND p.deleted_at='' "
-        "ORDER BY p.product_name", (user_id,)
+        "WHERE (EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?) "
+        "OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?) "
+        "AND p.is_archived=0 AND p.deleted_at='' "
+        "ORDER BY p.product_name",
+        (user_id, f"[{user_id}]", f"[{user_id},%", f"%, {user_id},%", f"%, {user_id}]")
     ).fetchall()
     db.close()
     products = [{"id": r["id"], "product_name": r["product_name"]} for r in rows]
@@ -2015,17 +2088,23 @@ def products_list():
         except Exception:
             user_id = None
         if user_id:
-            where.append("EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)")
-            params.append(user_id)
+            uid_s = str(user_id)
+            where.append(
+                "(EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
+                " OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)"
+            )
+            params.extend([user_id, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"])
     elif runner == "all":
         pass
     elif runner.isdigit():
         rid = int(runner)
+        uid_s = runner
         where.append(
             "(EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
-            " OR p.owner_id = ?)"
+            " OR p.owner_id = ?"
+            " OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)"
         )
-        params += [rid, rid]
+        params.extend([rid, rid, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"])
     if search:
         where.append("(p.product_name LIKE ? OR p.kpi LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -2137,9 +2216,13 @@ def products_list():
     except Exception:
         uid = None
     if uid:
+        uid_s = str(uid)
         runner_counts["mine"] = db.execute(
-            f"SELECT COUNT(*) FROM products p WHERE EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?) AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
-            [uid] + stat_params_mine
+            f"SELECT COUNT(*) FROM products p WHERE "
+            f"(EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
+            f" OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)"
+            f" AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
+            [uid, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"] + stat_params_mine
         ).fetchone()[0]
     else:
         runner_counts["mine"] = runner_counts["all"]
@@ -2723,34 +2806,21 @@ def products_check_delist(pid):
 
     # 新掉包 → Telegram 群组通知
     if newly_delisted:
-        tg_cfg = APP_CONFIG.get("telegram", {})
-        if tg_cfg.get("bot_token") and tg_cfg.get("chat_id"):
-            import telegram_sender as _tg_sender
-            tg_config = _tg_sender._TelegramConfig(
-                bot_token=tg_cfg.get("bot_token", ""),
-                chat_id=tg_cfg.get("chat_id", ""),
-                parse_mode=tg_cfg.get("parse_mode", "HTML"),
-            )
-            try:
-                runner_ids = _json.loads(runner_ids_raw)
-            except Exception:
-                runner_ids = []
-            usernames = []
-            if runner_ids:
-                rows2 = db.execute(
-                    f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
-                    runner_ids
-                ).fetchall()
-                usernames = [r2["telegram_username"] for r2 in rows2]
-            for r in newly_delisted:
-                orig = pkg_map.get(r["package_id"], {})
-                pkg_info = {
-                    "product_name": product_name,
-                    "series_name": orig.get("series_name", ""),
-                    "package_name": orig.get("package_name", ""),
-                    "url": orig.get("url", ""),
-                }
-                _tg_sender.send_delist_notification(tg_config, pkg_info, usernames)
+        try:
+            rids = _json.loads(runner_ids_raw)
+        except Exception:
+            rids = []
+        # 补齐包详情字段
+        tg_pkgs = []
+        for r in newly_delisted:
+            orig = pkg_map.get(r["package_id"], {})
+            tg_pkgs.append({
+                "product_name": product_name,
+                "series_name": orig.get("series_name", ""),
+                "package_name": orig.get("package_name", ""),
+                "url": orig.get("url", ""),
+            })
+        _send_telegram_notifications(db, tg_pkgs, rids)
 
     db.close()
     return jsonify({"success": True, "results": results})
@@ -2773,10 +2843,11 @@ def products_delist_status():
         "JOIN products prod ON dc.product_id = prod.id "
         "WHERE dc.is_delisted = 1 "
         "AND (pkg.status IS NULL OR pkg.status = '' OR pkg.status = '0' OR pkg.status NOT IN ('dropped', 'paused')) "
-        "AND EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = prod.id AND pr.user_id = ?) "
+        "AND (EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = prod.id AND pr.user_id = ?) "
+        "OR prod.runner_ids = ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ?) "
         "AND (prod.is_archived IS NULL OR prod.is_archived = 0) "
         "ORDER BY dc.checked_at DESC",
-        (user_id,)
+        (user_id, f"[{user_id}]", f"[{user_id},%", f"%, {user_id},%", f"%, {user_id}]")
     ).fetchall()
 
     delisted_packages = []
@@ -5120,6 +5191,43 @@ def _run_weekly_cleanup_once():
     print(f"[Cleanup] 已清理爬取图片、视频、音频替换临时文件: {_dt.datetime.now()}")
 
 
+def _send_telegram_notifications(db, pkgs, runner_ids):
+    """发送 Telegram 群组掉包通知（公共辅助函数）。
+
+    Args:
+        db: 数据库连接
+        pkgs: 掉包字典列表，每项含 product_name, series_name, package_name, url
+        runner_ids: 在跑人员 ID 列表
+    """
+    tg_cfg = APP_CONFIG.get("telegram", {})
+    if not (tg_cfg.get("bot_token") and tg_cfg.get("chat_id") and pkgs):
+        return
+
+    import telegram_sender as _tg_sender
+    tg_config = _tg_sender._TelegramConfig(
+        bot_token=tg_cfg.get("bot_token", ""),
+        chat_id=tg_cfg.get("chat_id", ""),
+        parse_mode=tg_cfg.get("parse_mode", "HTML"),
+    )
+
+    usernames = []
+    if runner_ids:
+        rows = db.execute(
+            f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
+            runner_ids
+        ).fetchall()
+        usernames = [r["telegram_username"] for r in rows]
+
+    for pkg in pkgs:
+        pkg_info = {
+            "product_name": pkg.get("product_name", ""),
+            "series_name": pkg.get("series_name", ""),
+            "package_name": pkg.get("package_name", ""),
+            "url": pkg.get("url", ""),
+        }
+        _tg_sender.send_delist_notification(tg_config, pkg_info, usernames)
+
+
 def _run_delist_check_once():
     """立即执行一次掉包检测，返回 {total, delisted, results}。"""
     import delist_checker as _delist_checker
@@ -5226,33 +5334,13 @@ def _run_delist_check_once():
                             _email_sender.send_delist_notification(smtp_config, emails, pkg_info)
 
             # --- Telegram 群组通知（仅发本轮新掉包的包，不重复发送）---
-            tg_cfg = APP_CONFIG.get("telegram", {})
-            if tg_cfg.get("bot_token") and tg_cfg.get("chat_id") and newly_delisted_list:
-                import telegram_sender as _tg_sender
-                tg_config = _tg_sender._TelegramConfig(
-                    bot_token=tg_cfg.get("bot_token", ""),
-                    chat_id=tg_cfg.get("chat_id", ""),
-                    parse_mode=tg_cfg.get("parse_mode", "HTML"),
-                )
+            if newly_delisted_list:
                 for pkg in newly_delisted_list:
                     try:
-                        runner_ids = _json.loads(pkg.get("runner_ids", "[]"))
+                        rids = _json.loads(pkg.get("runner_ids", "[]"))
                     except Exception:
-                        runner_ids = []
-                    usernames = []
-                    if runner_ids:
-                        rows = db.execute(
-                            f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
-                            runner_ids
-                        ).fetchall()
-                        usernames = [r["telegram_username"] for r in rows]
-                    pkg_info = {
-                        "product_name": pkg.get("product_name", ""),
-                        "series_name": pkg.get("series_name", ""),
-                        "package_name": pkg.get("package_name", ""),
-                        "url": pkg.get("url", ""),
-                    }
-                    _tg_sender.send_delist_notification(tg_config, pkg_info, usernames)
+                        rids = []
+                    _send_telegram_notifications(db, [pkg], rids)
 
         return {"total": len(pkgs), "delisted": len(delisted_list), "results": results}
     except Exception as e:
@@ -5504,9 +5592,10 @@ def ad_reports_products():
         LEFT JOIN product_runners pr ON p.id = pr.product_id
         WHERE (p.is_archived IS NULL OR p.is_archived = 0)
           AND (p.status IS NULL OR p.status = '' OR p.status = '0')
-          AND (p.owner_id = ? OR pr.user_id = ?)
+          AND (p.owner_id = ? OR pr.user_id = ?
+               OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)
         ORDER BY p.product_name
-    """, (user_id, user_id)).fetchall()
+    """, (user_id, user_id, f"[{user_id}]", f"[{user_id},%", f"%, {user_id},%", f"%, {user_id}]")).fetchall()
     db.close()
     return jsonify({"success": True, "products": [dict(r) for r in rows]})
 

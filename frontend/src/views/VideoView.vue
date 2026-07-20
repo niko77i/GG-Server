@@ -219,14 +219,16 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useVideoStore } from '@/stores/video'
+import { useTaskStore } from '@/stores/taskRunner'
 import { videoApi } from '@/api/video'
 import { browseApi } from '@/api/browse'
 import { isLocalhost } from '@/utils/env'
 import { ElMessage } from 'element-plus'
 
 const store = useVideoStore()
+const taskStore = useTaskStore()
 
 // 目录 + 图片
 const videoDir = ref('')
@@ -274,6 +276,7 @@ const progressPct = ref(0)
 const generatedPath = ref('')
 const generating = ref(false)
 let pollTimer = null
+let pollAborted = false
 
 // 任务队列
 const taskQueue = ref([])
@@ -309,6 +312,21 @@ onMounted(async () => {
     sessionStorage.removeItem('bridgeVideoDir')
     await scanDir()
   }
+  // 恢复活跃的视频生成任务（切换页面后回来）
+  const activeVideo = taskStore.activeTasks.filter(t => t.type === 'video')
+  if (activeVideo.length > 0) {
+    const latest = activeVideo[0]
+    generating.value = true
+    progressPct.value = latest.progress || 0
+    progressMsg.value = latest.message || '正在重新连接...'
+    // 恢复本地轮询
+    pollLocalTask(latest)
+  }
+})
+
+onUnmounted(() => {
+  pollAborted = true
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
 })
 
 async function loadHistory() {
@@ -495,19 +513,34 @@ function doGenerate(settings) {
 
   return store.generate(settings).then(res => {
     const tid = res.task_id
+    // 注册到全局任务 Store
+    const label = (settings.name || outputPath.value || '未命名')
+    const innerId = taskStore.addTask('video', label, tid)
+
     return new Promise((resolve) => {
       let done = false
       const poll = () => {
         if (done) return
         store.checkProgress(tid).then(p => {
-          if (done) return
+          if (pollAborted || done) return
           progressPct.value = p.progress || 0
           progressMsg.value = p.message || '处理中...'
+          // 同步更新全局 Store
+          taskStore.updateTask(innerId, {
+            status: 'running',
+            progress: p.progress || 0,
+            message: p.message || '处理中...',
+          })
           if (p.status === 'completed') {
             done = true
             generating.value = false
             generatedPath.value = p.output?.path || ''
             progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
+            taskStore.updateTask(innerId, {
+              status: 'completed', progress: 1,
+              message: '✅ 完成: ' + (p.output?.path || ''),
+              result: p, finishedAt: Date.now(),
+            })
             ElMessage.success('视频生成完成')
             autoSaveHistory()
             resolve()
@@ -515,24 +548,77 @@ function doGenerate(settings) {
             done = true
             generating.value = false
             progressMsg.value = '❌ ' + (p.message || '未知错误')
+            taskStore.updateTask(innerId, {
+              status: 'error',
+              message: p.message || '未知错误',
+              error: p.message, finishedAt: Date.now(),
+            })
             ElMessage.error(p.message || '未知错误')
-            resolve() // 错误已提示，不阻塞队列后续任务
+            resolve()
           } else {
             pollTimer = setTimeout(poll, 2000)
           }
         }).catch(() => {
-          // 轮询请求失败不中断，继续重试
-          if (!done) pollTimer = setTimeout(poll, 2000)
+          if (!pollAborted && !done) pollTimer = setTimeout(poll, 2000)
         })
       }
       poll()
     })
   }).catch(e => {
-    // store.generate 提交失败（网络错误等）
     generating.value = false
     ElMessage.error(e.message || '提交任务失败')
-    // 不 rethrow，让 generateAll 继续处理后续任务
   })
+}
+
+/**
+ * 恢复本地轮询——用于页面挂载后重新连接全局 Store 中的活跃任务。
+ * 全局轮询更新 store，本地 watch 同步 UI。
+ */
+function pollLocalTask(latest) {
+  const tid = latest.taskId
+  if (!tid) return
+
+  let done = false
+  const poll = () => {
+    if (done) return
+    store.checkProgress(tid).then(p => {
+      if (pollAborted || done) return
+      progressPct.value = p.progress || 0
+      progressMsg.value = p.message || '处理中...'
+      taskStore.updateTask(latest.id, {
+        progress: p.progress || 0,
+        message: p.message || '',
+        status: 'running',
+      })
+      if (p.status === 'completed') {
+        done = true
+        generating.value = false
+        generatedPath.value = p.output?.path || ''
+        progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
+        taskStore.updateTask(latest.id, {
+          status: 'completed', progress: 1,
+          message: '✅ 完成', result: p, finishedAt: Date.now(),
+        })
+        ElMessage.success('视频生成完成')
+        autoSaveHistory()
+      } else if (p.status === 'error') {
+        done = true
+        generating.value = false
+        progressMsg.value = '❌ ' + (p.message || '未知错误')
+        taskStore.updateTask(latest.id, {
+          status: 'error',
+          message: p.message || '未知错误',
+          error: p.message, finishedAt: Date.now(),
+        })
+        ElMessage.error(p.message || '未知错误')
+      } else {
+        pollTimer = setTimeout(poll, 2000)
+      }
+    }).catch(() => {
+      if (!pollAborted && !done) pollTimer = setTimeout(poll, 2000)
+    })
+  }
+  poll()
 }
 
 function downloadVideo() {

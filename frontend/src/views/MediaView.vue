@@ -282,9 +282,9 @@
       </div>
       <div v-if="progressMsg" style="margin-top:12px;">
         <el-progress :percentage="Math.round(progressPct * 100)" />
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span style="font-size:12px;color:#888;">{{ progressMsg }}</span>
-          <el-button v-for="(p, i) in generatedPaths" :key="i" link size="small" type="primary" @click="downloadVideo(p)">📥 {{ pathBasename(p) }}</el-button>
+        <div style="font-size:12px;color:#888;">{{ progressMsg }}</div>
+        <div v-if="generatedPaths.length" style="display:flex;flex-wrap:wrap;gap:4px;max-height:120px;overflow-y:auto;margin-top:4px;padding:4px;background:#f9fafb;border-radius:4px;">
+          <el-button v-for="(p, i) in generatedPaths" :key="i" link size="small" type="primary" @click="downloadVideo(p)" style="font-size:11px;">📥 {{ pathBasename(p) }}</el-button>
           <el-button v-if="generatedPaths.length > 1" link size="small" type="info" @click="generatedPaths = []" style="font-size:10px;">清空列表</el-button>
         </div>
       </div>
@@ -327,8 +327,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useVideoStore } from '@/stores/video'
+import { useTaskStore } from '@/stores/taskRunner'
 import { useAuthStore } from '@/stores/auth'
 import { videoApi } from '@/api/video'
 import { scrapeApi } from '@/api/scrape'
@@ -338,6 +339,7 @@ import { ElMessage } from 'element-plus'
 
 const videoStore = useVideoStore()
 const authStore = useAuthStore()
+const taskStore = useTaskStore()
 
 // ========== ① 爬取 ==========
 const urls = ref('')
@@ -630,6 +632,7 @@ const generatedPaths = ref([])  // 队列生成时累积所有输出路径
 const generating = ref(false)
 const generatingBatch = ref(false)  // 批量生成中（防止重复点击）
 let pollTimer = null
+let pollAborted = false
 
 // 队列
 const taskQueue = ref([])
@@ -641,6 +644,19 @@ onMounted(async () => {
   loadMusicList()
   loadHistory()
   if (authStore.isAdmin) loadScrapeUsers()
+  // 恢复活跃的视频生成任务
+  const activeVideo = taskStore.activeTasks.filter(t => t.type === 'video')
+  if (activeVideo.length > 0) {
+    const latest = activeVideo[0]
+    generating.value = true
+    progressPct.value = latest.progress || 0
+    progressMsg.value = latest.message || '正在重新连接...'
+    pollLocalTask(latest)
+  }
+})
+
+onUnmounted(() => {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
 })
 
 async function loadMusicList() {
@@ -732,19 +748,31 @@ function doGenerate(settings) {
 
   return videoStore.generate(settings).then(res => {
     const tid = res.task_id
+    const label = (settings.name || '未命名')
+    const innerId = taskStore.addTask('video', label, tid)
+
     return new Promise((resolve) => {
       let done = false
       const poll = () => {
         if (done) return
         videoStore.checkProgress(tid).then(p => {
-          if (done) return
+          if (pollAborted || done) return
           progressPct.value = p.progress || 0
           progressMsg.value = p.message || '处理中...'
+          taskStore.updateTask(innerId, {
+            status: 'running',
+            progress: p.progress || 0,
+            message: p.message || '处理中...',
+          })
           if (p.status === 'completed') {
             done = true
             generating.value = false
             if (p.output?.path) generatedPaths.value.push(p.output.path)
             progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
+            taskStore.updateTask(innerId, {
+              status: 'completed', progress: 1,
+              message: '✅ 完成', result: p, finishedAt: Date.now(),
+            })
             ElMessage.success('视频生成完成')
             autoSaveHistory()
             resolve()
@@ -752,6 +780,11 @@ function doGenerate(settings) {
             done = true
             generating.value = false
             progressMsg.value = '❌ ' + (p.message || '未知错误')
+            taskStore.updateTask(innerId, {
+              status: 'error',
+              message: p.message || '未知错误',
+              error: p.message, finishedAt: Date.now(),
+            })
             ElMessage.error(p.message || '未知错误')
             resolve()
           } else {
@@ -767,6 +800,43 @@ function doGenerate(settings) {
     generating.value = false
     ElMessage.error(e.message || '提交任务失败')
   })
+}
+
+/** 恢复本地轮询——页面挂载后重新连接全局 Store 中的活跃任务 */
+function pollLocalTask(latest) {
+  const tid = latest.taskId
+  if (!tid) return
+  let done = false
+  const poll = () => {
+    if (done) return
+    videoStore.checkProgress(tid).then(p => {
+      if (done) return
+      progressPct.value = p.progress || 0
+      progressMsg.value = p.message || '处理中...'
+      taskStore.updateTask(latest.id, {
+        progress: p.progress || 0, message: p.message || '', status: 'running',
+      })
+      if (p.status === 'completed') {
+        done = true; generating.value = false
+        if (p.output?.path) generatedPaths.value.push(p.output.path)
+        progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
+        taskStore.updateTask(latest.id, {
+          status: 'completed', progress: 1, message: '✅ 完成', result: p, finishedAt: Date.now(),
+        })
+        ElMessage.success('视频生成完成'); autoSaveHistory()
+      } else if (p.status === 'error') {
+        done = true; generating.value = false
+        progressMsg.value = '❌ ' + (p.message || '未知错误')
+        taskStore.updateTask(latest.id, {
+          status: 'error', message: p.message || '未知错误', error: p.message, finishedAt: Date.now(),
+        })
+        ElMessage.error(p.message || '未知错误')
+      } else {
+        pollTimer = setTimeout(poll, 2000)
+      }
+    }).catch(() => { if (!done) pollTimer = setTimeout(poll, 2000) })
+  }
+  poll()
 }
 
 function pathBasename(p) {
@@ -849,7 +919,7 @@ function autoSaveHistory() {
   const s = getSettings()
   s.videoDir = videoDir.value
   s.username = authStore.user?.display_name || authStore.user?.username || ''
-  s.name = (logo.value ? logo.value.filename : (images.value[0]?.filename || ''))
+  s.name = videoDir.value.replace(/\\/g, '/').split('/').pop() || (images.value[0]?.filename || '')
   delete s.images
   videoStore.saveHistory(s).then(() => loadHistory()).catch(() => {})
 }
@@ -860,7 +930,7 @@ async function saveHistory() {
   const s = getSettings()
   s.videoDir = videoDir.value
   s.username = authStore.user?.display_name || authStore.user?.username || ''
-  s.name = (logo.value ? logo.value.filename : (images.value[0]?.filename || ''))
+  s.name = videoDir.value.replace(/\\/g, '/').split('/').pop() || (images.value[0]?.filename || '')
   delete s.images
   await videoStore.saveHistory(s)
   await loadHistory()
@@ -885,7 +955,12 @@ async function deleteHistoryPkg(username, pkg) {
 
 async function applyHistory(e) {
   activeHistoryId.value = e._id
-  if (e.videoDir) videoDir.value = e.videoDir
+  // 1. 先扫描目录加载图片（会填充默认 outputPath 等）
+  if (e.videoDir) {
+    videoDir.value = e.videoDir
+    await scanDir()
+  }
+  // 2. 再用历史配置覆盖（scanDir 的自动填充被历史值覆盖）
   if (e.settings) {
     const s = e.settings
     if (s.output_path) outputPath.value = s.output_path
@@ -904,7 +979,6 @@ async function applyHistory(e) {
     if (s.use_logo != null) useLogo.value = s.use_logo
     if (s.logo_position) logoPosition.value = s.logo_position
     if (s.logo_effect) logoEffect.value = s.logo_effect
-    if (s.bg_image != null) bgImage.value = s.bg_image
     if (s.overwrite != null) overwrite.value = s.overwrite
     if (s.random_order != null) randomOrder.value = s.random_order
   }
@@ -914,9 +988,8 @@ async function applyHistory(e) {
     if (e.ai.duration) aiDuration.value = e.ai.duration
     if (e.ai.api_key) aiApiKey.value = e.ai.api_key
     if (e.ai.prompt) aiPrompt.value = e.ai.prompt
-  }
-  if (e.videoDir) {
-    await scanDir()
+  } else if (e.ai && e.ai.enabled === false) {
+    useAI.value = false
   }
   ElMessage.success('已应用' + (e.videoDir && !images.value.length ? '（目录可能已不存在）' : ''))
 }
