@@ -56,6 +56,7 @@
               </div>
             </div>
             <el-button
+              v-if="authStore.isAdmin"
               link
               type="danger"
               size="small"
@@ -82,11 +83,13 @@
 import { ref } from 'vue'
 import { accountsApi } from '@/api/accounts'
 import { useAccountStore } from '@/stores/accounts'
+import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const props = defineProps({ visible: Boolean, accountId: [Number, null] })
 const emit = defineEmits(['update:visible'])
 
+const authStore = useAuthStore()
 const account = ref(null)
 const history = ref([])
 const deleting = ref(null)

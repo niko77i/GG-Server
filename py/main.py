@@ -3183,6 +3183,7 @@ def accounts_create():
                 "VALUES(?, NULL, ?, ?, ?)",
                 (new_id, mcc_val, user_id, "create")
             )
+            db.commit()
         db.close()
         return jsonify({"success": True, "id": new_id})
     except _sqlite3.IntegrityError as e:
@@ -3286,6 +3287,7 @@ def accounts_batch_create():
                     "VALUES(?, NULL, ?, ?, ?)",
                     (new_id, _mcc, user_id, "import")
                 )
+                db.commit()
         except _sqlite3.IntegrityError as e:
             err_msg = str(e).lower()
             if "account_id" in err_msg or "unique" in err_msg:
