@@ -21,6 +21,7 @@ export const useTaskStore = defineStore('taskRunner', {
     tasks: {},     // { [internalId]: Task }
     _nextId: 1,
     _timer: null,  // 轮询定时器
+    _cleanupTimer: null,  // 清理定时器
     _ready: false, // 是否已完成初始化
   }),
 
@@ -33,11 +34,9 @@ export const useTaskStore = defineStore('taskRunner', {
     /** 运行中任务数量 */
     runningCount() { return this.activeTasks.length },
 
-    /** 面板中可见的任务：运行中 + 最近 5 分钟完成的 */
+    /** 面板中可见的任务：运行中 + 最近完成的（由清理定时器维护） */
     visibleTasks: (s) => Object.values(s.tasks)
       .filter(t => !t._dismissed)
-      .filter(t => t.status === 'running'
-        || (t.finishedAt && Date.now() - t.finishedAt < COMPLETED_TTL))
       .sort((a, b) => b.startedAt - a.startedAt),
   },
 
@@ -153,29 +152,30 @@ export const useTaskStore = defineStore('taskRunner', {
       }
     },
 
-    /** @private 轮询所有运行中的视频任务 */
+    /** @private 并行轮询所有运行中的视频任务 */
     async _poll() {
       const running = Object.values(this.tasks).filter(
         t => t.status === 'running' && t.taskId && t.type === 'video'
       )
       if (!running.length) { this.stopPolling(); return }
 
-      for (const t of running) {
-        try {
-          const p = await videoApi.progress(t.taskId)
-          // { sync: false } — 轮询只是获取进度，不广播给其他 Tab（各自轮询）
-          this.updateTask(t.id, {
-            status: p.status === 'completed' ? 'completed' :
-                    p.status === 'error' ? 'error' : 'running',
-            progress: p.progress || 0,
-            message: p.message || '',
-            result: p.status === 'completed' ? p : null,
-            error: p.status === 'error' ? (p.message || '未知错误') : null,
-            finishedAt: (p.status === 'completed' || p.status === 'error') ? Date.now() : null,
-          }, { sync: false })
-        } catch {
-          // 单次轮询失败静默跳过，下次继续
-        }
+      // Promise.all 并行查询，N 个任务只花 1 次 RTT
+      const results = await Promise.allSettled(
+        running.map(t => videoApi.progress(t.taskId).then(p => ({ taskId: t.taskId, id: t.id, p })))
+      )
+
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue
+        const { id, p } = r.value
+        this.updateTask(id, {
+          status: p.status === 'completed' ? 'completed' :
+                  p.status === 'error' ? 'error' : 'running',
+          progress: p.progress || 0,
+          message: p.message || '',
+          result: p.status === 'completed' ? p : null,
+          error: p.status === 'error' ? (p.message || '未知错误') : null,
+          finishedAt: (p.status === 'completed' || p.status === 'error') ? Date.now() : null,
+        }, { sync: false })
       }
     },
 
@@ -237,7 +237,8 @@ export const useTaskStore = defineStore('taskRunner', {
 
     /** @private 定时清理过期任务 */
     _startCleanupTimer() {
-      setInterval(() => {
+      if (this._cleanupTimer) return
+      this._cleanupTimer = setInterval(() => {
         const now = Date.now()
         for (const id of Object.keys(this.tasks)) {
           const t = this.tasks[id]
