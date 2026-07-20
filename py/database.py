@@ -152,6 +152,19 @@ def _ensure_schema(conn: sqlite3.Connection):
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         );
 
+        -- 账户 MCC 变更历史
+        CREATE TABLE IF NOT EXISTS account_mcc_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            old_mcc_id INTEGER,
+            new_mcc_id INTEGER,
+            changed_by INTEGER REFERENCES users(id),
+            change_type TEXT NOT NULL DEFAULT 'manual',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_acmh_account ON account_mcc_history(account_id);
+        CREATE INDEX IF NOT EXISTS idx_acmh_changed_by ON account_mcc_history(changed_by);
+
         -- 文案管理
         CREATE TABLE IF NOT EXISTS copywritings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
