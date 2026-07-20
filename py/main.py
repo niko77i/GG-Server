@@ -1294,6 +1294,28 @@ def _yt_db():
     return db
 
 
+def _record_mcc_change(db, account_id, new_mcc_id, changed_by, change_type):
+    """检测 mcc_id 变更并写入历史记录。值未变化则不写入。"""
+    old = db.execute("SELECT mcc_id FROM accounts WHERE id=?", (account_id,)).fetchone()
+    if not old:
+        return
+    old_mcc_id = old["mcc_id"]
+    # 标准化空值
+    if old_mcc_id == 0 or old_mcc_id == "0" or (isinstance(old_mcc_id, str) and not old_mcc_id.strip()):
+        old_mcc_id = None
+    if new_mcc_id == 0 or new_mcc_id == "0" or (isinstance(new_mcc_id, str) and not new_mcc_id.strip()):
+        new_mcc_id = None
+    if new_mcc_id is None and old_mcc_id is None:
+        return
+    if old_mcc_id == new_mcc_id:
+        return
+    db.execute(
+        "INSERT INTO account_mcc_history(account_id, old_mcc_id, new_mcc_id, changed_by, change_type) "
+        "VALUES(?,?,?,?,?)",
+        (account_id, old_mcc_id, new_mcc_id, changed_by, change_type)
+    )
+
+
 def _extract_youtube_id(url: str):
     import re
     m = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/shorts/|m\.youtube\.com/watch\?v=)([a-zA-Z0-9_-]{11})', url)
@@ -3151,6 +3173,10 @@ def accounts_create():
              now, now, user_id))
         db.commit()
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # 记录 MCC 变更历史（首次分配）
+        mcc_val = data.get("mcc_id") or None
+        if mcc_val:
+            _record_mcc_change(db, new_id, mcc_val, user_id, "create")
         db.close()
         return jsonify({"success": True, "id": new_id})
     except _sqlite3.IntegrityError as e:
@@ -3243,6 +3269,10 @@ def accounts_batch_create():
                  status, acquired_date, common["death_date"], now, now, user_id))
             db.commit()
             created.append(aid)
+            # 记录 MCC 变更历史
+            if mcc_id:
+                new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                _record_mcc_change(db, new_id, mcc_id, user_id, "import")
         except _sqlite3.IntegrityError as e:
             err_msg = str(e).lower()
             if "account_id" in err_msg or "unique" in err_msg:
@@ -3274,6 +3304,7 @@ def accounts_update(aid):
     data = request.get_json(silent=True) or {}
     db = _yt_db()
     try:
+        user_id = int(get_jwt_identity())
         for f in ["name", "mcc_id", "timezone", "agent", "status", "acquired_date", "death_date"]:
             if f in data:
                 val = data[f]
@@ -3281,6 +3312,8 @@ def accounts_update(aid):
                 if f == "mcc_id":
                     if val is None or val == 0 or val == "0" or (isinstance(val, str) and not val.strip()):
                         val = None
+                    # 记录 MCC 变更历史
+                    _record_mcc_change(db, aid, val, user_id, "manual")
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
         db.commit()
@@ -3339,6 +3372,13 @@ def accounts_reassign(aid):
             if mcc_val is None or mcc_val == 0 or mcc_val == "0" or (isinstance(mcc_val, str) and not mcc_val.strip()):
                 mcc_val = None
             db.execute("UPDATE accounts SET mcc_id = ? WHERE id = ?", (mcc_val, aid))
+
+        # 记录 MCC 变更历史
+        if "mcc_id" in data:
+            mcc_val = data["mcc_id"]
+            if mcc_val is None or mcc_val == 0 or mcc_val == "0" or (isinstance(mcc_val, str) and not mcc_val.strip()):
+                mcc_val = None
+            _record_mcc_change(db, aid, mcc_val, user_id, "reassign")
 
         db.commit()
         db.close()
@@ -3399,13 +3439,74 @@ def accounts_batch_update():
         # mcc_id 空值/0 转 None，避免 FK 约束失败
         if field == "mcc_id" and (value is None or value == 0 or value == "0" or (isinstance(value, str) and not value.strip())):
             value = None
+        user_id = int(get_jwt_identity())
         for aid in ids:
+            if field == "mcc_id":
+                _record_mcc_change(db, aid, value, user_id, "batch")
             db.execute(f"UPDATE accounts SET {field}=?, updated_at=datetime('now','localtime') WHERE id=?",
                        (value, aid))
         db.commit()
         return jsonify({"success": True, "updated": len(ids)})
     finally:
         db.close()
+
+
+@app.route("/api/accounts/<int:aid>/mcc-history", methods=["GET"])
+@jwt_required()
+def accounts_mcc_history(aid):
+    """获取账户的 MCC 变更历史"""
+    db = _yt_db()
+    try:
+        rows = db.execute(
+            "SELECT h.*, "
+            "  om.name AS old_mcc_name, om.mcc_id AS old_mcc_code, "
+            "  nm.name AS new_mcc_name, nm.mcc_id AS new_mcc_code, "
+            "  u.username, u.display_name "
+            "FROM account_mcc_history h "
+            "LEFT JOIN mcc om ON h.old_mcc_id = om.id "
+            "LEFT JOIN mcc nm ON h.new_mcc_id = nm.id "
+            "LEFT JOIN users u ON h.changed_by = u.id "
+            "WHERE h.account_id = ? "
+            "ORDER BY h.created_at DESC",
+            (aid,)
+        ).fetchall()
+        history = []
+        type_labels = {
+            "manual": "手动编辑", "batch": "批量修改", "reassign": "认领转移",
+            "import": "批量导入", "create": "新建账户",
+        }
+        for r in rows:
+            r = dict(r)
+            r["changed_by_name"] = r.get("display_name") or r.get("username") or f"User#{r.get('changed_by','')}"
+            r["change_type_label"] = type_labels.get(r.get("change_type", ""), r.get("change_type", ""))
+            history.append(r)
+        db.close()
+        return jsonify({"success": True, "history": history})
+    except Exception as e:
+        db.close()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/accounts/<int:aid>/mcc-history/<int:hid>", methods=["DELETE"])
+@jwt_required()
+def accounts_mcc_history_delete(aid, hid):
+    """删除单条 MCC 历史记录（admin/developer）"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] not in ("developer", "admin"):
+        return jsonify({"success": False, "error": "权限不足"}), 403
+    db = _yt_db()
+    try:
+        db.execute(
+            "DELETE FROM account_mcc_history WHERE id=? AND account_id=?",
+            (hid, aid)
+        )
+        db.commit()
+        db.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.close()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ---------- MCC API ----------
