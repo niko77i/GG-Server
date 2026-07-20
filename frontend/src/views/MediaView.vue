@@ -644,21 +644,29 @@ onMounted(async () => {
   loadMusicList()
   loadHistory()
   if (authStore.isAdmin) loadScrapeUsers()
-  // 恢复活跃的视频生成任务（切换页面后回来）
-  const activeVideo = taskStore.activeTasks.filter(t => t.type === 'video')
-  if (activeVideo.length > 0) {
-    const latest = activeVideo[0]
-    // 恢复页面上下文：目录 + 扫描图片 + 设置
+  // 恢复活跃或刚完成的视频任务（切换页面后回来）
+  const videoTasks = taskStore.visibleTasks.filter(t => t.type === 'video')
+  if (videoTasks.length > 0) {
+    const latest = videoTasks[0]
     if (latest.meta?.videoDir && !videoDir.value) {
       videoDir.value = latest.meta.videoDir
       if (latest.meta.outputPath) outputPath.value = latest.meta.outputPath
-      // MediaView 中图片目录即视频目录，自动扫描
       await scanDir()
     }
-    generating.value = true
-    progressPct.value = latest.progress || 0
-    progressMsg.value = latest.message || '正在重新连接...'
-    pollLocalTask(latest)
+    if (latest.status === 'running') {
+      generating.value = true
+      progressPct.value = latest.progress || 0
+      progressMsg.value = latest.message || '正在重新连接...'
+      pollLocalTask(latest)
+    } else if (latest.status === 'completed') {
+      generating.value = false
+      if (latest.result?.output?.path) generatedPaths.value.push(latest.result.output.path)
+      progressMsg.value = latest.message || '✅ 已完成'
+      progressPct.value = 1
+    } else if (latest.status === 'error') {
+      generating.value = false
+      progressMsg.value = latest.message || '❌ 任务失败'
+    }
   }
 })
 
