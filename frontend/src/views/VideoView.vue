@@ -219,7 +219,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch, watchEffect } from 'vue'
 import { useVideoStore } from '@/stores/video'
 import { useTaskStore } from '@/stores/taskRunner'
 import { videoApi } from '@/api/video'
@@ -345,40 +345,17 @@ onMounted(async () => {
 onUnmounted(() => {
   pollAborted = true
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
-  // 保存表单状态：下次回来可恢复（未提交任务时）
-  if (!generating.value) saveFormState()
 })
 
-// ========== 表单持久化 ==========
+// ========== 表单持久化（实时保存 + 挂载恢复）==========
 const FORM_KEY = 'gg_video_form'
 
-function saveFormState() {
-  const form = {
-    videoDir: videoDir.value,
-    outputPath: outputPath.value,
-    bgImage: bgImage.value, bgColor: bgColor.value,
-    dynamicBg: dynamicBg.value, dynamicBgMode: dynamicBgMode.value,
-    contentScale: contentScale.value, frameDuration: frameDuration.value,
-    transition: transition.value, resolution: resolution.value,
-    musicPath: musicPath.value, text1: text1.value, text2: text2.value,
-    textFont: textFont.value, useLogo: useLogo.value,
-    logoPosition: logoPosition.value, logoEffect: logoEffect.value,
-    useAI: useAI.value, aiService: aiService.value,
-    aiDuration: aiDuration.value, aiApiKey: aiApiKey.value,
-    aiPrompt: aiPrompt.value, randomOrder: randomOrder.value,
-    overwrite: overwrite.value,
-    selectedImgs: { ...selectedImgs.value },
-  }
-  try { sessionStorage.setItem(FORM_KEY, JSON.stringify(form)) } catch {}
-}
-
+// 挂载时恢复
 async function restoreFormState() {
   try {
     const raw = sessionStorage.getItem(FORM_KEY)
     if (!raw) return
     const f = JSON.parse(raw)
-    sessionStorage.removeItem(FORM_KEY)
-    // 恢复表单字段
     if (f.videoDir) videoDir.value = f.videoDir
     if (f.outputPath) outputPath.value = f.outputPath
     if (f.bgImage != null) bgImage.value = f.bgImage
@@ -403,13 +380,34 @@ async function restoreFormState() {
     if (f.aiPrompt) aiPrompt.value = f.aiPrompt
     if (f.randomOrder) randomOrder.value = f.randomOrder
     if (f.overwrite) overwrite.value = f.overwrite
-    // 扫描图片 + 恢复选择
     if (f.videoDir) {
       await scanDir()
       if (f.selectedImgs) selectedImgs.value = f.selectedImgs
     }
   } catch {}
 }
+
+// 实时保存（任何表单字段变化 → 写 sessionStorage）
+watchEffect(() => {
+  if (generating.value) return  // 任务运行中不覆盖（meta 优先）
+  const form = {
+    videoDir: videoDir.value,
+    outputPath: outputPath.value,
+    bgImage: bgImage.value, bgColor: bgColor.value,
+    dynamicBg: dynamicBg.value, dynamicBgMode: dynamicBgMode.value,
+    contentScale: contentScale.value, frameDuration: frameDuration.value,
+    transition: transition.value, resolution: resolution.value,
+    musicPath: musicPath.value, text1: text1.value, text2: text2.value,
+    textFont: textFont.value, useLogo: useLogo.value,
+    logoPosition: logoPosition.value, logoEffect: logoEffect.value,
+    useAI: useAI.value, aiService: aiService.value,
+    aiDuration: aiDuration.value, aiApiKey: aiApiKey.value,
+    aiPrompt: aiPrompt.value, randomOrder: randomOrder.value,
+    overwrite: overwrite.value,
+    selectedImgs: { ...selectedImgs.value },
+  }
+  try { sessionStorage.setItem(FORM_KEY, JSON.stringify(form)) } catch {}
+})
 
 async function loadHistory() {
   await store.loadHistory()
