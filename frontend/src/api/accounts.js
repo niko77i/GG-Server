@@ -11,6 +11,8 @@ export const accountsApi = {
   batchLookup: (accountIds) => api.post('/accounts/batch-lookup', { account_ids: accountIds }),
   lookup:  (accountId) => api.get('/accounts/lookup', { params: { account_id: accountId } }),
   reassign: (id, body) => api.put(`/accounts/${id}/reassign`, body || {}),
+  history: (aid) => api.get(`/accounts/${aid}/mcc-history`),
+  deleteHistory: (aid, hid) => api.delete(`/accounts/${aid}/mcc-history/${hid}`),
 }
 
 export const mccApi = {
