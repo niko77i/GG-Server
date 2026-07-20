@@ -3173,10 +3173,16 @@ def accounts_create():
              now, now, user_id))
         db.commit()
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-        # 记录 MCC 变更历史（首次分配）
+        # 记录 MCC 变更历史（首次分配 — 直接写入，因为 _record_mcc_change 检测的是变更）
         mcc_val = data.get("mcc_id") or None
+        if mcc_val == 0 or mcc_val == "0" or (isinstance(mcc_val, str) and not mcc_val.strip()):
+            mcc_val = None
         if mcc_val:
-            _record_mcc_change(db, new_id, mcc_val, user_id, "create")
+            db.execute(
+                "INSERT INTO account_mcc_history(account_id, old_mcc_id, new_mcc_id, changed_by, change_type) "
+                "VALUES(?, NULL, ?, ?, ?)",
+                (new_id, mcc_val, user_id, "create")
+            )
         db.close()
         return jsonify({"success": True, "id": new_id})
     except _sqlite3.IntegrityError as e:
@@ -3269,10 +3275,17 @@ def accounts_batch_create():
                  status, acquired_date, common["death_date"], now, now, user_id))
             db.commit()
             created.append(aid)
-            # 记录 MCC 变更历史
-            if mcc_id:
+            # 记录 MCC 变更历史（首次分配 — 直接写入）
+            _mcc = mcc_id
+            if _mcc == 0 or _mcc == "0" or (isinstance(_mcc, str) and not _mcc.strip()):
+                _mcc = None
+            if _mcc:
                 new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-                _record_mcc_change(db, new_id, mcc_id, user_id, "import")
+                db.execute(
+                    "INSERT INTO account_mcc_history(account_id, old_mcc_id, new_mcc_id, changed_by, change_type) "
+                    "VALUES(?, NULL, ?, ?, ?)",
+                    (new_id, _mcc, user_id, "import")
+                )
         except _sqlite3.IntegrityError as e:
             err_msg = str(e).lower()
             if "account_id" in err_msg or "unique" in err_msg:
@@ -3312,10 +3325,9 @@ def accounts_update(aid):
                 if f == "mcc_id":
                     if val is None or val == 0 or val == "0" or (isinstance(val, str) and not val.strip()):
                         val = None
+                    _record_mcc_change(db, aid, val, user_id, "manual")
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
-                if f == "mcc_id":
-                    _record_mcc_change(db, aid, val, user_id, "manual")
         db.commit()
         return jsonify({"success": True})
     except _sqlite3.IntegrityError as e:
@@ -3371,14 +3383,8 @@ def accounts_reassign(aid):
             mcc_val = data["mcc_id"]
             if mcc_val is None or mcc_val == 0 or mcc_val == "0" or (isinstance(mcc_val, str) and not mcc_val.strip()):
                 mcc_val = None
-            db.execute("UPDATE accounts SET mcc_id = ? WHERE id = ?", (mcc_val, aid))
-
-        # 记录 MCC 变更历史
-        if "mcc_id" in data:
-            mcc_val = data["mcc_id"]
-            if mcc_val is None or mcc_val == 0 or mcc_val == "0" or (isinstance(mcc_val, str) and not mcc_val.strip()):
-                mcc_val = None
             _record_mcc_change(db, aid, mcc_val, user_id, "reassign")
+            db.execute("UPDATE accounts SET mcc_id = ? WHERE id = ?", (mcc_val, aid))
 
         db.commit()
         db.close()
