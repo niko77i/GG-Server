@@ -1,0 +1,26 @@
+{
+    "secret_key": "gg-server-jwt-secret-2026",
+    "jwt_expire_hours": 24,
+    "jwt_refresh_days": 7,
+    "developer": {
+        "username": "carl567",
+        "password": "1976xiaobai"
+    },
+    "server": {
+        "host": "0.0.0.0",
+        "port": 5001,
+        "debug": false
+    },
+    "scrape_cache_dir": "temp/scrape_cache",
+    "smtp": {
+        "host": "smtp.qq.com",
+        "port": 465,
+        "user": "2350574164@qq.com",
+        "password": "vassdzilljbpdibe",
+        "from_name": "GG-Server 掉包通知"
+    },
+    "telegram": {
+        "bot_token": "8705623419:AAHTV7MUQ9xlYe2FGzwgJFJI6AI_afeu07Y",
+        "chat_id": "-5220122275"
+    }
+}
