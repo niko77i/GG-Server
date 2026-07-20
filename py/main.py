@@ -3312,10 +3312,10 @@ def accounts_update(aid):
                 if f == "mcc_id":
                     if val is None or val == 0 or val == "0" or (isinstance(val, str) and not val.strip()):
                         val = None
-                    # 记录 MCC 变更历史
-                    _record_mcc_change(db, aid, val, user_id, "manual")
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
+                if f == "mcc_id":
+                    _record_mcc_change(db, aid, val, user_id, "manual")
         db.commit()
         return jsonify({"success": True})
     except _sqlite3.IntegrityError as e:
