@@ -37,7 +37,7 @@ def get_user_by_id(user_id: int) -> dict | None:
     conn = database.get_db()
     try:
         cur = conn.execute(
-            "SELECT id, username, role, display_name, created_at, last_login, created_by, config FROM users WHERE id = ?",
+            "SELECT id, username, role, display_name, created_at, last_login, created_by, config, email, telegram_username FROM users WHERE id = ?",
             (user_id,)
         )
         row = cur.fetchone()
@@ -77,14 +77,14 @@ def list_users(search: str = "", page: int = 1, page_size: int = 20, current_use
             ).fetchone()["total"]
             offset = (page - 1) * page_size
             rows = conn.execute(
-                f"SELECT id, username, role, display_name, created_at, last_login, created_by FROM users WHERE (username LIKE ? OR display_name LIKE ?){dev_filter} ORDER BY id DESC LIMIT ? OFFSET ?",
+                f"SELECT id, username, role, display_name, created_at, last_login, created_by, telegram_username FROM users WHERE (username LIKE ? OR display_name LIKE ?){dev_filter} ORDER BY id DESC LIMIT ? OFFSET ?",
                 (like, like, page_size, offset)
             ).fetchall()
         else:
             total = conn.execute(f"SELECT COUNT(*) as total FROM users WHERE 1=1{dev_filter}").fetchone()["total"]
             offset = (page - 1) * page_size
             rows = conn.execute(
-                f"SELECT id, username, role, display_name, created_at, last_login, created_by FROM users WHERE 1=1{dev_filter} ORDER BY id DESC LIMIT ? OFFSET ?",
+                f"SELECT id, username, role, display_name, created_at, last_login, created_by, telegram_username FROM users WHERE 1=1{dev_filter} ORDER BY id DESC LIMIT ? OFFSET ?",
                 (page_size, offset)
             ).fetchall()
         return {"users": [dict(r) for r in rows], "total": total}

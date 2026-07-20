@@ -1,18 +1,18 @@
 <template>
   <el-dialog :model-value="visible" @update:model-value="$emit('update:visible', $event)"
     title="📋 账户详情" width="650px" @open="load">
-    <div v-if="account" style="font-size:13px;">
+    <div v-if="account" class="detail-body">
       <!-- 基本信息 -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;margin-bottom:16px;">
+      <div class="info-grid">
         <div><strong>账户名称：</strong>{{ account.name }}</div>
         <div><strong>账户 ID：</strong>{{ account.account_id }}</div>
         <div>
           <strong>当前 MCC：</strong>
           <template v-if="account.mcc_name">
-            <span style="color:#0891b2;">{{ account.mcc_name }}</span>
-            <span style="font-size:10px;color:#0891b2;"> ({{ account.mcc_code }})</span>
+            <span class="mcc-current">{{ account.mcc_name }}</span>
+            <span class="mcc-code"> ({{ account.mcc_code }})</span>
           </template>
-          <span v-else style="color:#888;">未分配</span>
+          <span v-else class="text-muted">未分配</span>
         </div>
         <div><strong>时区：</strong>{{ account.timezone || '-' }}</div>
         <div><strong>代理：</strong>{{ account.agent || '-' }}</div>
@@ -21,37 +21,37 @@
           <el-tag size="small" :type="statusTagType(account.status)">{{ account.status || '未知' }}</el-tag>
         </div>
         <div><strong>到手时间：</strong>{{ account.acquired_date || '-' }}</div>
-        <div v-if="account.death_date"><strong>死亡时间：</strong><span style="color:#dc2626;">{{ account.death_date }}</span></div>
+        <div v-if="account.death_date"><strong>死亡时间：</strong><span class="text-danger">{{ account.death_date }}</span></div>
       </div>
 
       <el-divider />
 
       <!-- MCC 变更历史 -->
       <h4>🕓 MCC 变更历史（{{ history.length }} 条）</h4>
-      <el-timeline v-if="history.length" style="margin-top:12px;">
+      <el-timeline v-if="history.length" class="history-timeline">
         <el-timeline-item
           v-for="h in history"
           :key="h.id"
           :timestamp="h.created_at"
           placement="top"
         >
-          <div style="display:flex;align-items:flex-start;justify-content:space-between;">
+          <div class="timeline-row">
             <div>
-              <span style="color:#666;">{{ h.changed_by_name }}</span>
-              <el-tag size="small" type="info" style="margin-left:6px;">{{ h.change_type_label }}</el-tag>
-              <div style="margin-top:2px;">
+              <span class="operator-name">{{ h.changed_by_name }}</span>
+              <el-tag size="small" type="info" class="type-tag">{{ h.change_type_label }}</el-tag>
+              <div class="mcc-change">
                 <template v-if="h.old_mcc_name">
-                  <span style="color:#dc2626;">{{ h.old_mcc_name }} ({{ h.old_mcc_code }})</span>
+                  <span class="old-mcc">{{ h.old_mcc_name }} ({{ h.old_mcc_code }})</span>
                 </template>
                 <template v-else>
-                  <span style="color:#999;">(未分配)</span>
+                  <span class="text-muted">(未分配)</span>
                 </template>
-                <span style="margin:0 4px;color:#666;">→</span>
+                <span class="arrow">→</span>
                 <template v-if="h.new_mcc_name">
-                  <span style="color:#16a34a;">{{ h.new_mcc_name }} ({{ h.new_mcc_code }})</span>
+                  <span class="new-mcc">{{ h.new_mcc_name }} ({{ h.new_mcc_code }})</span>
                 </template>
                 <template v-else>
-                  <span style="color:#999;">(未分配)</span>
+                  <span class="text-muted">(未分配)</span>
                 </template>
               </div>
             </div>
@@ -62,9 +62,7 @@
               size="small"
               @click="deleteHistory(h.id)"
               :loading="deleting === h.id"
-              style="flex-shrink:0;opacity:0.5;"
-              @mouseenter="(e) => e.target.style.opacity = 1"
-              @mouseleave="(e) => e.target.style.opacity = 0.5"
+              class="delete-btn"
             >✕</el-button>
           </div>
         </el-timeline-item>
@@ -137,3 +135,77 @@ async function deleteHistory(hid) {
   }
 }
 </script>
+
+<style scoped>
+.detail-body {
+  font-size: 13px;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+
+.mcc-current {
+  color: #0891b2;
+}
+
+.mcc-code {
+  font-size: 10px;
+  color: #0891b2;
+}
+
+.text-muted {
+  color: #999;
+}
+
+.text-danger {
+  color: #dc2626;
+}
+
+.history-timeline {
+  margin-top: 12px;
+}
+
+.timeline-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.operator-name {
+  color: #666;
+}
+
+.type-tag {
+  margin-left: 6px;
+}
+
+.mcc-change {
+  margin-top: 2px;
+}
+
+.old-mcc {
+  color: #dc2626;
+}
+
+.new-mcc {
+  color: #16a34a;
+}
+
+.arrow {
+  margin: 0 4px;
+  color: #666;
+}
+
+.delete-btn {
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+.delete-btn:hover {
+  opacity: 1;
+}
+</style>

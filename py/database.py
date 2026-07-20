@@ -389,6 +389,7 @@ def _ensure_schema(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "copywritings", "is_public", "is_public INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "users", "custom_name", "custom_name TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
 
     # 初始化默认标签
     for k, v in [("regions", '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),

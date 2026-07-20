@@ -62,6 +62,22 @@
       <el-button type="primary" size="small" :loading="savingEmail" @click="saveEmail">保存</el-button>
     </el-card>
 
+    <!-- Telegram 通知 -->
+    <el-card shadow="never" style="margin-bottom:16px;">
+      <template #header>
+        <span style="font-weight:600;">📱 Telegram 通知</span>
+      </template>
+      <p style="font-size:12px;color:#888;margin-bottom:8px;">
+        填写 Telegram 用户名（不带 @），掉包时会在群组中 @ 你。留空则不接收群组 @ 通知。
+      </p>
+      <el-form :model="tgForm" label-width="100px" size="small">
+        <el-form-item label="Telegram 用户名">
+          <el-input v-model="tgForm.telegram_username" placeholder="例如 carl567" />
+        </el-form-item>
+      </el-form>
+      <el-button type="primary" size="small" :loading="savingTg" @click="saveTelegramUsername">保存</el-button>
+    </el-card>
+
     <!-- 修改密码 -->
     <el-card shadow="never">
       <template #header>
@@ -102,6 +118,9 @@ const savingCustomName = ref(false)
 const emailForm = ref({ email: "" })
 const savingEmail = ref(false)
 
+const tgForm = ref({ telegram_username: "" })
+const savingTg = ref(false)
+
 const pwdForm = ref({ old_password: "", new_password: "", confirm_password: "" })
 const changingPwd = ref(false)
 
@@ -128,6 +147,8 @@ onMounted(async () => {
     const res = await api.get('/auth/email')
     emailForm.value.email = res.email || ''
   } catch {}
+  // 加载 telegram_username（/auth/me 已返回此字段）
+  tgForm.value.telegram_username = u?.telegram_username || ''
 })
 
 async function saveCustomName() {
@@ -151,6 +172,18 @@ async function saveEmail() {
     ElMessage.error('更新失败')
   } finally {
     savingEmail.value = false
+  }
+}
+
+async function saveTelegramUsername() {
+  savingTg.value = true
+  try {
+    await api.put('/auth/telegram-username', { telegram_username: tgForm.value.telegram_username })
+    ElMessage.success('Telegram 用户名已更新')
+  } catch (e) {
+    ElMessage.error('更新失败')
+  } finally {
+    savingTg.value = false
   }
 }
 

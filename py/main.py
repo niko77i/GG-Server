@@ -1294,6 +1294,13 @@ def _yt_db():
     return db
 
 
+# MCC 变更类型中文标签（模块级常量，避免每次请求重建）
+_MCC_CHANGE_TYPE_LABELS = {
+    "manual": "手动编辑", "batch": "批量修改", "reassign": "认领转移",
+    "import": "批量导入", "create": "新建账户",
+}
+
+
 def _record_mcc_change(db, account_id, new_mcc_id, changed_by, change_type):
     """检测 mcc_id 变更并写入历史记录。值未变化则不写入。"""
     old = db.execute("SELECT mcc_id FROM accounts WHERE id=?", (account_id,)).fetchone()
@@ -2678,7 +2685,7 @@ def products_check_delist(pid):
 
     # 获取产品下所有正常状态的包
     pkgs = db.execute(
-        "SELECT id, package_name, url FROM packages "
+        "SELECT id, package_name, series_name, url FROM packages "
         "WHERE product_id=? AND (status IS NULL OR status='' OR status='0' OR status='normal')",
         (pid,)
     ).fetchall()
@@ -2688,18 +2695,64 @@ def products_check_delist(pid):
         return jsonify({"success": True, "results": [], "message": "没有需要检测的包"})
 
     pkg_list = [dict(p) for p in pkgs]
+    # 建立 package_id → 原始包数据的映射（check_product_packages 返回不含 series_name/url 等）
+    pkg_map = {p["id"]: p for p in pkg_list}
     results = delist_checker.check_product_packages(pid, pkg_list)
 
-    # 更新/插入 delist_checks 表
+    # 获取产品信息（用于通知）
+    prod = db.execute(
+        "SELECT product_name, runner_ids FROM products WHERE id=?", (pid,)
+    ).fetchone()
+    product_name = prod["product_name"] if prod else ""
+    runner_ids_raw = prod["runner_ids"] if prod else "[]"
+
+    # 更新/插入 delist_checks 表，同时收集掉包（手动检测全部按新掉包处理）
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    newly_delisted = []
+    import json as _json
     for r in results:
         db.execute(
             "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
             "VALUES(?, ?, ?, ?, ?)",
             (r["package_id"], pid, 1 if r["is_delisted"] else 0, now, r.get("error", ""))
         )
+        if r["is_delisted"]:
+            newly_delisted.append(r)
 
-    db.commit(); db.close()
+    db.commit()
+
+    # 新掉包 → Telegram 群组通知
+    if newly_delisted:
+        tg_cfg = APP_CONFIG.get("telegram", {})
+        if tg_cfg.get("bot_token") and tg_cfg.get("chat_id"):
+            import telegram_sender as _tg_sender
+            tg_config = _tg_sender._TelegramConfig(
+                bot_token=tg_cfg.get("bot_token", ""),
+                chat_id=tg_cfg.get("chat_id", ""),
+                parse_mode=tg_cfg.get("parse_mode", "HTML"),
+            )
+            try:
+                runner_ids = _json.loads(runner_ids_raw)
+            except Exception:
+                runner_ids = []
+            usernames = []
+            if runner_ids:
+                rows2 = db.execute(
+                    f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
+                    runner_ids
+                ).fetchall()
+                usernames = [r2["telegram_username"] for r2 in rows2]
+            for r in newly_delisted:
+                orig = pkg_map.get(r["package_id"], {})
+                pkg_info = {
+                    "product_name": product_name,
+                    "series_name": orig.get("series_name", ""),
+                    "package_name": orig.get("package_name", ""),
+                    "url": orig.get("url", ""),
+                }
+                _tg_sender.send_delist_notification(tg_config, pkg_info, usernames)
+
+    db.close()
     return jsonify({"success": True, "results": results})
 
 
@@ -3479,14 +3532,10 @@ def accounts_mcc_history(aid):
             (aid,)
         ).fetchall()
         history = []
-        type_labels = {
-            "manual": "手动编辑", "batch": "批量修改", "reassign": "认领转移",
-            "import": "批量导入", "create": "新建账户",
-        }
         for r in rows:
             r = dict(r)
             r["changed_by_name"] = r.get("display_name") or r.get("username") or f"User#{r.get('changed_by','')}"
-            r["change_type_label"] = type_labels.get(r.get("change_type", ""), r.get("change_type", ""))
+            r["change_type_label"] = _MCC_CHANGE_TYPE_LABELS.get(r.get("change_type", ""), r.get("change_type", ""))
             history.append(r)
         db.close()
         return jsonify({"success": True, "history": history})
@@ -3505,13 +3554,14 @@ def accounts_mcc_history_delete(aid, hid):
         return jsonify({"success": False, "error": "权限不足"}), 403
     db = _yt_db()
     try:
-        db.execute(
+        cur = db.execute(
             "DELETE FROM account_mcc_history WHERE id=? AND account_id=?",
             (hid, aid)
         )
         db.commit()
+        deleted = cur.rowcount
         db.close()
-        return jsonify({"success": True})
+        return jsonify({"success": True, "deleted": deleted})
     except Exception as e:
         db.close()
         return jsonify({"success": False, "error": str(e)}), 500
@@ -4578,6 +4628,20 @@ def auth_email_set():
     return jsonify({"success": True, "email": email})
 
 
+@app.route("/api/auth/telegram-username", methods=["PUT"])
+@jwt_required()
+def auth_telegram_username_set():
+    """当前用户设置自己的 Telegram 用户名（不带 @ 前缀）。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    username = (data.get("telegram_username") or "").strip().lstrip("@")
+    db = database.get_db()
+    db.execute("UPDATE users SET telegram_username=? WHERE id=?", (username, user_id))
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "telegram_username": username})
+
+
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required(optional=True)
 def users_names():
@@ -4787,6 +4851,31 @@ def admin_reset_password(uid):
     if auth.update_password(uid, password):
         return jsonify(success=True)
     return jsonify(success=False, error="更新失败"), 400
+
+
+@app.route("/api/admin/users/<int:uid>/telegram-username", methods=["PUT"])
+@jwt_required()
+def admin_set_telegram_username(uid):
+    """管理员设置用户的 Telegram 用户名。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] not in ("developer", "admin"):
+        return jsonify(success=False, error="Permission denied"), 403
+
+    target = auth.get_user_by_id(uid)
+    if not target:
+        return jsonify(success=False, error="User not found"), 404
+    if not _can_modify_user(user, target):
+        return jsonify(success=False, error="不能操作同级管理员"), 403
+
+    data = request.get_json(silent=True) or {}
+    username = (data.get("telegram_username") or "").strip().lstrip("@")
+
+    db = database.get_db()
+    db.execute("UPDATE users SET telegram_username=? WHERE id=?", (username, uid))
+    db.commit()
+    db.close()
+    return jsonify(success=True, telegram_username=username)
 
 
 @app.route("/api/auth/password", methods=["PUT"])
@@ -5068,6 +5157,7 @@ def _run_delist_check_once():
         pkgs = [dict(r) for r in rows]
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         delisted_list = []
+        newly_delisted_list = []  # 本轮新发现的掉包（只发一次 Telegram）
 
         # 并行 HTTP 检测（IO 密集型，最多 10 并发）
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -5087,6 +5177,15 @@ def _run_delist_check_once():
                 if result is None:
                     continue
                 pkg, is_delisted, error = result
+                # 检查是否此前已标记为掉包（用于 Telegram 去重）
+                was_delisted = False
+                if is_delisted:
+                    prev = db.execute(
+                        "SELECT is_delisted FROM delist_checks WHERE package_id=?",
+                        (pkg["package_id"],)
+                    ).fetchone()
+                    was_delisted = prev is not None and prev["is_delisted"] == 1
+
                 # 写 DB（主线程安全）
                 db.execute(
                     "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
@@ -5102,6 +5201,8 @@ def _run_delist_check_once():
                 })
                 if is_delisted:
                     delisted_list.append(pkg)
+                    if not was_delisted:
+                        newly_delisted_list.append(pkg)
 
         db.commit()
 
@@ -5123,6 +5224,35 @@ def _run_delist_check_once():
                                 "url": pkg.get("url", ""),
                             }
                             _email_sender.send_delist_notification(smtp_config, emails, pkg_info)
+
+            # --- Telegram 群组通知（仅发本轮新掉包的包，不重复发送）---
+            tg_cfg = APP_CONFIG.get("telegram", {})
+            if tg_cfg.get("bot_token") and tg_cfg.get("chat_id") and newly_delisted_list:
+                import telegram_sender as _tg_sender
+                tg_config = _tg_sender._TelegramConfig(
+                    bot_token=tg_cfg.get("bot_token", ""),
+                    chat_id=tg_cfg.get("chat_id", ""),
+                    parse_mode=tg_cfg.get("parse_mode", "HTML"),
+                )
+                for pkg in newly_delisted_list:
+                    try:
+                        runner_ids = _json.loads(pkg.get("runner_ids", "[]"))
+                    except Exception:
+                        runner_ids = []
+                    usernames = []
+                    if runner_ids:
+                        rows = db.execute(
+                            f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
+                            runner_ids
+                        ).fetchall()
+                        usernames = [r["telegram_username"] for r in rows]
+                    pkg_info = {
+                        "product_name": pkg.get("product_name", ""),
+                        "series_name": pkg.get("series_name", ""),
+                        "package_name": pkg.get("package_name", ""),
+                        "url": pkg.get("url", ""),
+                    }
+                    _tg_sender.send_delist_notification(tg_config, pkg_info, usernames)
 
         return {"total": len(pkgs), "delisted": len(delisted_list), "results": results}
     except Exception as e:

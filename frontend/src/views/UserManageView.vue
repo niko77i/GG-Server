@@ -97,6 +97,9 @@
         <el-form-item label="显示名">
           <el-input v-model="editForm.display_name" placeholder="可选" />
         </el-form-item>
+        <el-form-item label="Telegram">
+          <el-input v-model="editForm.telegram_username" placeholder="用户名（不带 @）" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editDialogVisible = false">取消</el-button>
@@ -270,11 +273,11 @@ async function handleCreate() {
 const editDialogVisible = ref(false)
 const editing = ref(false)
 const editTargetId = ref(null)
-const editForm = ref({ username: "", display_name: "" })
+const editForm = ref({ username: "", display_name: "", telegram_username: "" })
 
 function showEditDialog(row) {
   editTargetId.value = row.id
-  editForm.value = { username: row.username, display_name: row.display_name || "" }
+  editForm.value = { username: row.username, display_name: row.display_name || "", telegram_username: row.telegram_username || "" }
   editDialogVisible.value = true
 }
 
@@ -285,7 +288,8 @@ async function handleEdit() {
   }
   editing.value = true
   try {
-    await adminApi.updateUser(editTargetId.value, editForm.value)
+    await adminApi.updateUser(editTargetId.value, { username: editForm.value.username, display_name: editForm.value.display_name })
+    await adminApi.updateUserTelegram(editTargetId.value, editForm.value.telegram_username)
     ElMessage.success("用户信息已更新")
     editDialogVisible.value = false
     fetchUsers()

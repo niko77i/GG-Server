@@ -11,12 +11,12 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, watch, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import AppSidebar from './components/AppSidebar.vue'
 import { productsApi } from './api/products'
-import { ElNotification } from 'element-plus'
+import { ElNotification, ElMessage } from 'element-plus'
 
 const route = useRoute()
 const router = useRouter()
@@ -35,6 +35,7 @@ onMounted(async () => {
 let _delistTimer = null
 let _checking = false  // 防止并发重复弹窗
 const _notifiedPkgIds = new Set()
+let _tgWarned = false  // Telegram 未配置提醒只弹一次
 
 watch(() => auth.isLoggedIn, (loggedIn) => {
   if (loggedIn) startDelistPolling()
@@ -65,6 +66,17 @@ async function checkDelistNotifications() {
   try {
     const res = await productsApi.getPendingDelist()
     const notifications = res.notifications || []
+
+    // 有掉包通知但未配置 Telegram 用户名时，提醒一次
+    if (notifications.length > 0 && !_tgWarned && !auth.user?.telegram_username) {
+      _tgWarned = true
+      ElMessage.warning({
+        message: '检测到包掉包！请在个人信息页配置 Telegram 用户名以接收群组 @ 通知',
+        duration: 8000,
+        showClose: true,
+      })
+    }
+
     for (const n of notifications) {
       // reminder 用 reminder_count 区分，避免重复提醒被去重
       const key = n.type === 'reminder'

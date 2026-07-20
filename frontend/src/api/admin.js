@@ -22,6 +22,9 @@ export const adminApi = {
   resetPassword(uid, password) {
     return api.put(`/admin/users/${uid}/password`, { password })
   },
+  updateUserTelegram(uid, username) {
+    return api.put(`/admin/users/${uid}/telegram-username`, { telegram_username: username })
+  },
   triggerWeeklyCleanup() {
     return api.post('/admin/trigger-weekly-cleanup')
   },
