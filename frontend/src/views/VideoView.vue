@@ -316,7 +316,6 @@ onMounted(async () => {
   const activeVideo = taskStore.activeTasks.filter(t => t.type === 'video')
   if (activeVideo.length > 0) {
     const latest = activeVideo[0]
-    // 恢复页面上下文：目录 + 扫描图片 + 设置
     if (latest.meta?.videoDir && !videoDir.value) {
       videoDir.value = latest.meta.videoDir
       if (latest.meta.outputPath) outputPath.value = latest.meta.outputPath
@@ -326,13 +325,80 @@ onMounted(async () => {
     progressPct.value = latest.progress || 0
     progressMsg.value = latest.message || '正在重新连接...'
     pollLocalTask(latest)
+  } else if (!videoDir.value) {
+    // 无活跃任务且无桥接目录 → 恢复上次未提交的表单
+    await restoreFormState()
   }
 })
 
 onUnmounted(() => {
   pollAborted = true
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
+  // 保存表单状态：下次回来可恢复（未提交任务时）
+  if (!generating.value) saveFormState()
 })
+
+// ========== 表单持久化 ==========
+const FORM_KEY = 'gg_video_form'
+
+function saveFormState() {
+  const form = {
+    videoDir: videoDir.value,
+    outputPath: outputPath.value,
+    bgImage: bgImage.value, bgColor: bgColor.value,
+    dynamicBg: dynamicBg.value, dynamicBgMode: dynamicBgMode.value,
+    contentScale: contentScale.value, frameDuration: frameDuration.value,
+    transition: transition.value, resolution: resolution.value,
+    musicPath: musicPath.value, text1: text1.value, text2: text2.value,
+    textFont: textFont.value, useLogo: useLogo.value,
+    logoPosition: logoPosition.value, logoEffect: logoEffect.value,
+    useAI: useAI.value, aiService: aiService.value,
+    aiDuration: aiDuration.value, aiApiKey: aiApiKey.value,
+    aiPrompt: aiPrompt.value, randomOrder: randomOrder.value,
+    overwrite: overwrite.value,
+    selectedImgs: { ...selectedImgs.value },
+  }
+  try { sessionStorage.setItem(FORM_KEY, JSON.stringify(form)) } catch {}
+}
+
+async function restoreFormState() {
+  try {
+    const raw = sessionStorage.getItem(FORM_KEY)
+    if (!raw) return
+    const f = JSON.parse(raw)
+    sessionStorage.removeItem(FORM_KEY)
+    // 恢复表单字段
+    if (f.videoDir) videoDir.value = f.videoDir
+    if (f.outputPath) outputPath.value = f.outputPath
+    if (f.bgImage != null) bgImage.value = f.bgImage
+    if (f.bgColor) bgColor.value = f.bgColor
+    dynamicBg.value = f.dynamicBg || false
+    if (f.dynamicBgMode) dynamicBgMode.value = f.dynamicBgMode
+    if (f.contentScale) contentScale.value = f.contentScale
+    if (f.frameDuration) frameDuration.value = f.frameDuration
+    if (f.transition) transition.value = f.transition
+    if (f.resolution) resolution.value = f.resolution
+    if (f.musicPath != null) musicPath.value = f.musicPath
+    if (f.text1 != null) text1.value = f.text1
+    if (f.text2 != null) text2.value = f.text2
+    if (f.textFont) textFont.value = f.textFont
+    useLogo.value = f.useLogo || false
+    if (f.logoPosition) logoPosition.value = f.logoPosition
+    if (f.logoEffect) logoEffect.value = f.logoEffect
+    useAI.value = f.useAI || false
+    if (f.aiService) aiService.value = f.aiService
+    if (f.aiDuration) aiDuration.value = f.aiDuration
+    if (f.aiApiKey) aiApiKey.value = f.aiApiKey
+    if (f.aiPrompt) aiPrompt.value = f.aiPrompt
+    if (f.randomOrder) randomOrder.value = f.randomOrder
+    if (f.overwrite) overwrite.value = f.overwrite
+    // 扫描图片 + 恢复选择
+    if (f.videoDir) {
+      await scanDir()
+      if (f.selectedImgs) selectedImgs.value = f.selectedImgs
+    }
+  } catch {}
+}
 
 async function loadHistory() {
   await store.loadHistory()
