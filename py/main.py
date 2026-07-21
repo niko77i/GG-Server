@@ -35,8 +35,6 @@ from routes.decorators import reject_viewer as _reject_viewer
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 # google_ads_service 按需加载，不打包进 EXE
 
-app.register_blueprint(auth_bp, url_prefix="/api/auth")
-
 # 判断是否为 PyInstaller 打包模式
 _FROZEN = getattr(sys, "frozen", False)
 
@@ -178,6 +176,7 @@ except (FileNotFoundError, json.JSONDecodeError):
 app.config["JWT_SECRET_KEY"] = APP_CONFIG.get("secret_key", "gg-server-default-secret")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = APP_CONFIG.get("jwt_expire_hours", 24) * 3600
 jwt = JWTManager(app)
+register_jwt_callbacks(jwt)
 
 try:
     auth.init_developer(APP_CONFIG)

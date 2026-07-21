@@ -734,28 +734,6 @@ async function cwDoBatchEffEdit(effectiveness) {
   loadCopywritings()
 }
 
-// 导入
-async function cwDoImport() {
-  const text = cwImportText.value.trim()
-  if (!text) return
-  cwImporting.value = true
-  try {
-    const res = await store.importCopywritings({
-      text, region: cwImportRegion.value, effectiveness: cwImportEff.value,
-      is_public: canChooseScope.value ? (cwImportPublic.value ? 1 : 0) : 1,
-    })
-    cwImportResult.value = `导入 ${res.imported} 条`
-    cwImportText.value = ''
-    loadCopywritings()
-  } catch (e) {
-    ElMessage.error('导入失败：' + (e.message || '未知错误'))
-  } finally {
-    cwImporting.value = false
-  }
-}
-
-const importSubTab = ref('video')
-
 async function loadCopywritings() {
   await store.loadCopywritings()
   // 清除翻译缓存中已不存在的
