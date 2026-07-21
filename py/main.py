@@ -3512,6 +3512,7 @@ def accounts_update(aid):
     db = _yt_db()
     try:
         user_id = int(get_jwt_identity())
+        old_status = db.execute("SELECT status, agent, account_id FROM accounts WHERE id=?", (aid,)).fetchone()
         for f in ["name", "mcc_id", "timezone", "agent", "status", "acquired_date", "death_date"]:
             if f in data:
                 val = data[f]
@@ -3522,8 +3523,32 @@ def accounts_update(aid):
                     _record_mcc_change(db, aid, val, user_id, "manual")
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
+
+        # 死亡清账：状态变为「死亡」时自动追加 amount='清'
+        recharge_note = None
+        new_status = data.get("status", "")
+        if new_status == "死亡" and (not old_status or old_status["status"] != "死亡"):
+            existing_clear = db.execute(
+                "SELECT id FROM recharge_records WHERE account_id=? AND amount='清'",
+                (old_status["account_id"],)
+            ).fetchone()
+            if not existing_clear:
+                user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
+                operator_name = (user["display_name"] or "") if user else ""
+                db.execute(
+                    "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
+                    "VALUES (?, '清', ?, ?, ?)",
+                    (old_status["account_id"], data.get("agent", old_status["agent"] or ""),
+                     operator_name, user_id)
+                )
+                recharge_note = "已追加清账记录"
+
         db.commit()
-        return jsonify({"success": True})
+
+        resp = {"success": True}
+        if recharge_note:
+            resp["recharge_note"] = recharge_note
+        return jsonify(resp)
     except _sqlite3.IntegrityError as e:
         err_msg = str(e).lower()
         if "foreign key" in err_msg:
@@ -3649,6 +3674,138 @@ def accounts_batch_update():
         return jsonify({"success": True, "updated": len(ids)})
     finally:
         db.close()
+
+
+# ---------- 充值 API ----------
+
+@app.route("/api/recharge/submit", methods=["POST"])
+@jwt_required()
+def recharge_submit():
+    """单次充值 — 写入 DB + Google Sheets"""
+    data = request.get_json(silent=True) or {}
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+
+    # 获取当前用户 display_name
+    user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
+    operator = (user["display_name"] or "") if user else ""
+
+    account_id = (data.get("account_id") or "").strip()
+    amount = str(data.get("amount", "")).strip()
+    agent = (data.get("agent") or "").strip()
+
+    if not account_id or not amount:
+        db.close()
+        return jsonify({"success": False, "error": "账户ID和金额不能为空"}), 400
+
+    try:
+        # 1. 写入数据库
+        db.execute(
+            "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (account_id, amount, agent, operator, user_id)
+        )
+        db.commit()
+        record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 2. 异步追加到 Google Sheets
+        sheets_warning = None
+        try:
+            sheet_id_row = db.execute(
+                "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+            ).fetchone()
+            if sheet_id_row:
+                sheet_id = _json.loads(sheet_id_row["value"]) if sheet_id_row["value"] else ""
+                if sheet_id:
+                    credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
+                    if credentials_path and os.path.isfile(credentials_path):
+                        from py import google_sheets_service as gs
+                        service = gs.build_service(credentials_path)
+                        gs.append_recharge(service, sheet_id, [{
+                            "account_id": account_id,
+                            "amount": amount,
+                            "agent": agent,
+                            "operator": operator,
+                        }])
+        except Exception as e:
+            log.warning("充值记录已写入数据库，但 Google Sheets 同步失败: %s", e)
+            sheets_warning = "数据库已保存，但 Google Sheets 同步失败，请手动检查"
+
+        db.close()
+        resp = {"success": True, "id": record_id}
+        if sheets_warning:
+            resp["warning"] = sheets_warning
+        return jsonify(resp)
+    except Exception as e:
+        db.close()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/recharge/batch-submit", methods=["POST"])
+@jwt_required()
+def recharge_batch_submit():
+    """批量充值 — 写入 DB + Google Sheets"""
+    data = request.get_json(silent=True) or {}
+    records = data.get("records", [])
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+
+    if not records or not isinstance(records, list):
+        db.close()
+        return jsonify({"success": False, "error": "充值记录不能为空"}), 400
+
+    user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
+    operator = (user["display_name"] or "") if user else ""
+
+    try:
+        # 1. 批量写入数据库
+        sheet_rows = []
+        for r in records:
+            account_id = (r.get("account_id") or "").strip()
+            amount = str(r.get("amount", "")).strip()
+            agent = (r.get("agent") or "").strip()
+            if not account_id or not amount:
+                continue
+            db.execute(
+                "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (account_id, amount, agent, operator, user_id)
+            )
+            sheet_rows.append({
+                "account_id": account_id,
+                "amount": amount,
+                "agent": agent,
+                "operator": operator,
+            })
+        db.commit()
+
+        # 2. 异步追加到 Google Sheets
+        sheets_warning = None
+        if sheet_rows:
+            try:
+                sheet_id_row = db.execute(
+                    "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+                ).fetchone()
+                if sheet_id_row:
+                    sheet_id = _json.loads(sheet_id_row["value"]) if sheet_id_row["value"] else ""
+                    if sheet_id:
+                        credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
+                        if credentials_path and os.path.isfile(credentials_path):
+                            from py import google_sheets_service as gs
+                            service = gs.build_service(credentials_path)
+                            gs.append_recharge(service, sheet_id, sheet_rows)
+            except Exception as e:
+                log.warning("批量充值 Google Sheets 同步失败: %s", e)
+                sheets_warning = "数据库已保存，但 Google Sheets 同步失败，请手动检查"
+
+        db.close()
+        resp = {"success": True, "count": len(sheet_rows)}
+        if sheets_warning:
+            resp["warning"] = sheets_warning
+        return jsonify(resp)
+    except Exception as e:
+        db.close()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/accounts/<int:aid>/mcc-history", methods=["GET"])
@@ -4053,7 +4210,7 @@ def mcc_detail(mid):
 def account_settings_get():
     """返回账户管理相关的可配置项（状态、代理、MCC 等级等）。"""
     db = _yt_db()
-    keys = ["account_statuses", "account_agents", "mcc_levels", "sales_persons"]
+    keys = ["account_statuses", "account_agents", "mcc_levels", "sales_persons", "recharge_sheet_id"]
     result = {}
     for k in keys:
         row = db.execute("SELECT value FROM tags WHERE key=?", (k,)).fetchone()
@@ -4061,7 +4218,7 @@ def account_settings_get():
             try:
                 result[k] = _json.loads(row["value"])
             except Exception:
-                result[k] = []
+                result[k] = [] if k != "recharge_sheet_id" else ""
         else:
             # 默认值
             defaults = {
@@ -4069,8 +4226,9 @@ def account_settings_get():
                 "account_agents": [],
                 "mcc_levels": [],
                 "sales_persons": [],
+                "recharge_sheet_id": "",
             }
-            result[k] = defaults.get(k, [])
+            result[k] = defaults.get(k, [] if k != "recharge_sheet_id" else "")
     db.close()
     return jsonify({"success": True, "settings": result})
 
@@ -4080,7 +4238,7 @@ def account_settings_save():
     """保存账户管理相关的可配置项。"""
     data = request.get_json(silent=True) or {}
     db = _yt_db()
-    for key in ["account_statuses", "account_agents", "mcc_levels", "sales_persons"]:
+    for key in ["account_statuses", "account_agents", "mcc_levels", "sales_persons", "recharge_sheet_id"]:
         if key in data:
             db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
                        (key, _json.dumps(data[key], ensure_ascii=False)))
