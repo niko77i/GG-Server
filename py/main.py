@@ -25,6 +25,7 @@ from cache import cache as _app_cache
 
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity, create_access_token, create_refresh_token
 import json
+import json as _json
 import auth
 import data_service
 import datetime
@@ -149,6 +150,17 @@ def _runner_ids_where(alias: str, uid: int):
         f"OR {alias}.runner_ids LIKE ? OR {alias}.runner_ids LIKE ?)",
         [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"]
     )
+
+
+def _scope_where(scope: str, user_id: int, alias: str = None):
+    """返回 scope 过滤的 (SQL片段, 参数列表)。alias 可选，如 \"v\"、\"cw\"。"""
+    col = f"{alias}." if alias else ""
+    if scope == "public":
+        return f"{col}is_public = 1", []
+    elif scope == "private":
+        return f"{col}owner_id = ?", [user_id]
+    else:  # all
+        return f"({col}is_public = 1 OR {col}owner_id = ?)", [user_id]
 
 # --- GG-Server: Config ---
 _CONFIG_PATH = os.path.join(os.path.dirname(_current_dir), "config", "config.json")
@@ -1060,7 +1072,6 @@ def _load_pkg_history(pkg: str) -> list:
     fp = _history_file(pkg)
     if os.path.isfile(fp):
         try:
-            import json
             with open(fp, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
@@ -1071,7 +1082,6 @@ def _load_pkg_history(pkg: str) -> list:
 def _save_pkg_history(pkg: str, entries: list):
     fp = _history_file(pkg)
     os.makedirs(os.path.dirname(fp), exist_ok=True)
-    import json
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
@@ -1095,7 +1105,7 @@ def video_history_save():
     entry = data.get("entry") or {}
     if not entry:
         return jsonify({"success": False, "error": "无数据"}), 400
-    import datetime
+
     entry["saved_at"] = datetime.datetime.now().strftime("%m-%d %H:%M")
     # 按用户名 + 包名分组存储（_shared 不建子目录，兼容旧数据）
     username = (entry.get("username") or "").strip()
@@ -1198,7 +1208,6 @@ def _scan_fonts_dir() -> list[dict]:
     recent_file = os.path.join(_FONTS_DIR, ".recent.json")
     recent = []
     try:
-        import json
         if os.path.isfile(recent_file):
             with open(recent_file, "r") as rf:
                 recent = json.load(rf) or []
@@ -1222,7 +1231,6 @@ def _mark_font_used(font_id: str):
     recent_file = os.path.join(_FONTS_DIR, ".recent.json")
     recent = []
     try:
-        import json
         if os.path.isfile(recent_file):
             with open(recent_file, "r") as f:
                 recent = json.load(f) or []
@@ -1416,7 +1424,6 @@ def serve_font_file():
 
 import re as _re
 import sqlite3 as _sqlite3
-import json as _json
 
 def _yt_db():
     """返回请求级共享数据库连接（通过 flask.g），避免同一请求多次连接。"""
@@ -1583,18 +1590,14 @@ def youtube_list():
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
     uploader_id = request.args.get("uploader_id", "").strip()
-    import datetime
+
 
     db = _yt_db()
     where = []; params = []
 
     # 按 scope 过滤
-    if scope == "public":
-        where.append("v.is_public = 1")
-    elif scope == "private":
-        where.append("v.owner_id = ?"); params.append(user_id)
-    else:  # all
-        where.append("(v.is_public = 1 OR v.owner_id = ?)"); params.append(user_id)
+    where_clause, scope_params = _scope_where(scope, user_id, "v")
+    where.append(where_clause); params.extend(scope_params)
 
     for f, v in [("region", region), ("frame_type", frame_type), ("effectiveness", effectiveness), ("product_name", product_name)]:
         if v: where.append(f"v.{f}=?"); params.append(v)
@@ -1652,12 +1655,8 @@ def youtube_dates():
 
     db = _yt_db()
     where = []; params = []
-    if scope == "public":
-        where.append("v.is_public = 1")
-    elif scope == "private":
-        where.append("v.owner_id = ?"); params.append(user_id)
-    else:
-        where.append("(v.is_public = 1 OR v.owner_id = ?)"); params.append(user_id)
+    where_clause, scope_params = _scope_where(scope, user_id, "v")
+    where.append(where_clause); params.extend(scope_params)
     for f, v in [("region", region), ("frame_type", frame_type), ("effectiveness", effectiveness), ("product_name", product_name)]:
         if v: where.append(f"v.{f}=?"); params.append(v)
     if review_status and review_status != "全部":
@@ -1995,14 +1994,8 @@ def youtube_consumption_dates():
     # 按 scope 过滤可见视频
     video_where = []
     video_params = []
-    if scope == "public":
-        video_where.append("is_public = 1")
-    elif scope == "private":
-        video_where.append("owner_id = ?")
-        video_params.append(user_id)
-    else:
-        video_where.append("(is_public = 1 OR owner_id = ?)")
-        video_params.append(user_id)
+    where_clause, scope_params = _scope_where(scope, user_id)
+    video_where.append(where_clause); video_params.extend(scope_params)
 
     query = """
         SELECT vc.consume_date, COUNT(DISTINCT vc.video_id) AS cnt
@@ -2316,7 +2309,6 @@ def products_create():
         return jsonify({"success": False, "error": "产品名不能为空"}), 400
     db = _yt_db()
 
-    import datetime, json as _json
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # 获取当前用户
@@ -2662,7 +2654,7 @@ def products_add_package(pid):
         return jsonify({"success": False, "error": "包名不能为空"}), 400
     db = _yt_db()
 
-    import datetime
+
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     _upsert_package(db, pid, series_name, package_name, url, now)
     db.commit(); db.close()
@@ -2866,7 +2858,6 @@ def products_check_delist(pid):
     # 更新/插入 delist_checks 表，同时收集掉包（手动检测全部按新掉包处理）
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     newly_delisted = []
-    import json as _json
     for r in results:
         db.execute(
             "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
@@ -3356,7 +3347,7 @@ def accounts_create():
     if not name or not account_id:
         return jsonify({"success": False, "error": "账户名称和ID不能为空"}), 400
     db = _yt_db()
-    import datetime
+
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
         db.execute(
@@ -3868,7 +3859,7 @@ def mcc_create():
             db.close()
             return jsonify({"success": False, "error": "上级 MCC 不存在"}), 400
 
-    import datetime
+
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
         db.execute(
@@ -4136,16 +4127,16 @@ def config_ai_save():
 
 # ---------- Google Sheets 用户配置 ----------
 
-@app.route("/api/config/google-sheets", methods=["GET"])
-@jwt_required()
-def config_google_sheets_get():
-    """获取当前用户的 Google Sheets 配置（多表格列表 + 激活标记）。"""
-    user_id = int(get_jwt_identity())
+def _get_user_sheets_config(user_id: int):
+    """读取用户的 Google Sheets 配置，返回 (sheets_list, active_config_or_None)。
+
+    如果用户未配置任何表格，sheets 为空列表。
+    active_config 保证有效（优先激活标记，其次第一个表格）。
+    """
     db = _yt_db()
     row = db.execute(
         "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
     ).fetchone()
-    # 激活标记
     active_row = db.execute(
         "SELECT value FROM config WHERE key=?", (f"google_sheets_active_{user_id}",)
     ).fetchone()
@@ -4160,15 +4151,11 @@ def config_google_sheets_get():
         except Exception:
             sheets = []
 
-    active_id = ""
-    if active_row:
-        active_id = active_row["value"].strip()
-
-    # 如果 sheets 不为空但 active_id 无效，自动选第一个
+    active_id = active_row["value"].strip() if active_row else ""
     if sheets and (not active_id or not any(s.get("id") == active_id for s in sheets)):
         active_id = sheets[0].get("id", "")
 
-    # 全局默认 spreadsheet_id 回退（单表兼容迁移）
+    # 全局默认 spreadsheet_id 回退
     global_id = _GOOGLE_SHEETS_CONFIG.get("spreadsheet_id", "")
     if not sheets and global_id:
         sheets = [{
@@ -4179,6 +4166,24 @@ def config_google_sheets_get():
         }]
         active_id = "m0"
 
+    active_config = None
+    for s in sheets:
+        if s.get("id") == active_id:
+            active_config = s
+            break
+    if not active_config and sheets:
+        active_config = sheets[0]
+
+    return sheets, active_config
+
+
+@app.route("/api/config/google-sheets", methods=["GET"])
+@jwt_required()
+def config_google_sheets_get():
+    """获取当前用户的 Google Sheets 配置（多表格列表 + 激活标记）。"""
+    user_id = int(get_jwt_identity())
+    sheets, active_config = _get_user_sheets_config(user_id)
+    active_id = active_config.get("id", "") if active_config else ""
     return jsonify({"success": True, "sheets": sheets, "active_id": active_id})
 
 
@@ -4235,54 +4240,23 @@ def google_sheets_update_zuobiao():
     region = (data.get("region") or "").strip()
     report_date = (data.get("report_date") or "").strip()
     rows = data.get("rows") or []
+    sales_person = (data.get("sales_person") or "").strip()
+    agency_ratio = data.get("agency_ratio")
 
     if not product_name:
         return jsonify({"success": False, "error": "产品名不能为空"}), 400
     if not rows:
         return jsonify({"success": False, "error": "做表数据不能为空"}), 400
 
-    # 读取用户激活的表格配置
-    db = _yt_db()
-    config_row = db.execute(
-        "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
-    ).fetchone()
-    active_row = db.execute(
-        "SELECT value FROM config WHERE key=?", (f"google_sheets_active_{user_id}",)
-    ).fetchone()
-
-    sheets = []
-    if config_row:
-        try:
-            sheets = json.loads(config_row["value"])
-        except Exception:
-            sheets = []
-    active_id = active_row["value"].strip() if active_row else ""
-
-    if not sheets:
-        return jsonify({"success": False, "error": "请先在个人中心配置 Google 表格"}), 400
-
-    active_config = None
-    for s in sheets:
-        if s.get("id") == active_id:
-            active_config = s
-            break
+    sheets, active_config = _get_user_sheets_config(user_id)
     if not active_config:
-        active_config = sheets[0]
+        return jsonify({"success": False, "error": "请先在个人中心配置 Google 表格"}), 400
 
     spreadsheet_id = active_config.get("spreadsheet_id", "")
     sheet_gid = active_config.get("sheet_gid", "0")
     if not spreadsheet_id:
         return jsonify({"success": False, "error": "表格 ID 为空，请检查配置"}), 400
 
-    # 获取产品的 sales_person 和 agency_ratio
-    prod_row = db.execute(
-        "SELECT sales_person, agency_ratio FROM products WHERE product_name=?",
-        (product_name,)
-    ).fetchone()
-    sales_person = prod_row["sales_person"] if prod_row and prod_row["sales_person"] else ""
-    agency_ratio = prod_row["agency_ratio"] if prod_row else None
-
-    # 构建 Google Sheets 服务
     try:
         from google_sheets_service import (
             build_service, get_spreadsheet_info, upsert_zuobiao,
@@ -4303,6 +4277,7 @@ def google_sheets_update_zuobiao():
     try:
         result = upsert_zuobiao(
             service=service,
+            info=info,
             spreadsheet_id=spreadsheet_id,
             sheet_gid=sheet_gid,
             rows=rows,
@@ -4753,12 +4728,8 @@ def copywriting_list():
     db = _yt_db()
 
     where = []; params = []
-    if scope == "public":
-        where.append("cw.is_public = 1")
-    elif scope == "private":
-        where.append("cw.owner_id = ?"); params.append(user_id)
-    else:
-        where.append("(cw.is_public = 1 OR cw.owner_id = ?)"); params.append(user_id)
+    where_clause, scope_params = _scope_where(scope, user_id, "cw")
+    where.append(where_clause); params.extend(scope_params)
 
     if region:
         where.append("cw.region = ?"); params.append(region)
@@ -5528,7 +5499,6 @@ def _run_delist_check_once():
     """立即执行一次掉包检测，返回 {total, delisted, results}。"""
     import delist_checker as _delist_checker
     import email_sender as _email_sender
-    import json as _json
 
     smtp_cfg = APP_CONFIG.get("smtp", {})
     smtp_config = None

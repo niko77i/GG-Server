@@ -373,11 +373,14 @@ async function zbUpdateSheet() {
   if (!zbZuobiao.value.length) { ElMessage.warning('没有做表数据，请先解析'); return }
   zbUpdatingSheet.value = true
   try {
+    const p = zbProducts.value.find(x => x.product_name === zbSelectedProduct.value)
     const res = await googleSheetsApi.updateZuobiao({
       product_name: zbSelectedProduct.value,
       region: zbSelectedRegion.value,
       report_date: zbSelectedDate.value,
       rows: zbZuobiao.value,
+      sales_person: p?.sales_person || '',
+      agency_ratio: p?.agency_ratio ?? null,
     })
     ElMessage.success(`表格已更新！更新 ${res.updated} 条，新增 ${res.inserted} 条`)
   } catch (e) {

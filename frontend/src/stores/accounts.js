@@ -56,8 +56,15 @@ export const useAccountStore = defineStore('accounts', {
     async linkMcc(id) { return mccApi.link(id) },
 
     async loadSettings() {
-      const res = await settingsApi.get()
-      this.settings = res.settings
+      if (this._settingsLoading) return this._settingsLastPromise
+      this._settingsLoading = true
+      const promise = settingsApi.get().then(res => {
+        this.settings = res.settings
+        this._settingsLoaded = true
+        return res
+      }).finally(() => { this._settingsLoading = false })
+      this._settingsLastPromise = promise
+      return promise
     },
     async saveSettings(body) { return settingsApi.save(body) },
   },

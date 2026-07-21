@@ -63,7 +63,7 @@ async function loadRegions() {
 
 function init() {
   loadRegions()
-  accountStore.loadSettings()
+  if (!accountStore._settingsLoaded) accountStore.loadSettings()
   if (props.editId) {
     const p = store.products.find(p => p.id === props.editId)
     if (p) Object.assign(form, {

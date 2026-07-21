@@ -68,11 +68,7 @@ def _get_credentials(credentials_path: str):
 
 
 def build_service(credentials_path: str):
-    """构建 Google Sheets API v4 服务对象。
-
-    Raises:
-        GoogleSheetsServiceError: 凭据无效或文件不存在
-    """
+    """构建 Google Sheets API v4 服务对象。"""
     from googleapiclient.discovery import build
 
     try:
@@ -86,11 +82,11 @@ def build_service(credentials_path: str):
 
 
 def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
-    """获取表格标题和所有 sheet（tab）信息，解析运营名。
+    """获取表格标题、所有 sheet 信息（含行数），解析运营名。
 
     Returns:
         {"title": "卡尔202607", "operator": "卡尔", "year_month": "202607",
-         "sheets": [{"name": "Sheet1", "gid": 0}, ...]}
+         "sheets": [{"name": "Sheet1", "gid": 0, "rowCount": 1000}, ...]}
     """
     import re
     try:
@@ -114,6 +110,7 @@ def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
         sheets.append({
             "name": props.get("title", ""),
             "gid": props.get("sheetId", 0),
+            "rowCount": props.get("gridProperties", {}).get("rowCount", 1000),
         })
 
     return {
@@ -124,20 +121,20 @@ def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
     }
 
 
-def upsert_zuobiao(service, spreadsheet_id: str, sheet_gid: str, rows: list,
-                   product_name: str, region: str, report_date: str,
+def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
+                   rows: list, product_name: str, region: str, report_date: str,
                    sales_person: str, agency_ratio, operator_name: str) -> dict:
     """将做表数据 upsert 到 Google Sheets。
 
-    以 (日期, 客户ID, 渠道号) 为唯一键，
-    匹配到则覆盖该行，未匹配则追加到表格末尾。
+    info: get_spreadsheet_info 的返回值（含 sheets 列表和 rowCount）
     """
-    # 1. sheet 名称
-    info = get_spreadsheet_info(service, spreadsheet_id)
+    # 1. 从已缓存的 info 解析 sheet 名和行数（不再调 API）
     sheet_name = "Sheet1"
+    sheet_rows = 1000
     for s in info.get("sheets", []):
         if str(s.get("gid", 0)) == str(sheet_gid):
             sheet_name = s["name"]
+            sheet_rows = s.get("rowCount", 1000)
             break
     sheet_id_int = int(sheet_gid) if str(sheet_gid).isdigit() else 0
 
@@ -148,7 +145,6 @@ def upsert_zuobiao(service, spreadsheet_id: str, sheet_gid: str, rows: list,
         range=range_read,
     ).execute()
     existing = result.get("values", [])
-    # 找到真正的最后一行（只看 A-J 列，忽略 M/N 的公式默认值）
     last_row = 0
     for i in range(len(existing) - 1, -1, -1):
         row = existing[i]
@@ -170,20 +166,11 @@ def upsert_zuobiao(service, spreadsheet_id: str, sheet_gid: str, rows: list,
     new_rows = []
     for row in rows:
         new_rows.append([
-            report_date,
-            operator_name,
-            row.get("account", ""),
-            str(row.get("customerId", "")),
-            row.get("cost", 0),
-            "",
-            product_name,
-            sales_person or "",
-            region,
-            row.get("campaign", ""),
-            "",
-            percent_str,
-            "",
-            "",
+            report_date, operator_name,
+            row.get("account", ""), str(row.get("customerId", "")),
+            row.get("cost", 0), "",
+            product_name, sales_person or "", region,
+            row.get("campaign", ""), "", percent_str, "", "",
         ])
 
     # 5. 分拣
@@ -198,34 +185,23 @@ def upsert_zuobiao(service, spreadsheet_id: str, sheet_gid: str, rows: list,
 
     log.info("Google Sheets: 更新 %d 行，新增 %d 行", len(updates), len(appends))
 
-    # 6. 更新已存在的行
-    for row_idx, row_data in updates:
-        rng = f"'{sheet_name}'!A{row_idx + 1}:N{row_idx + 1}"
-        service.spreadsheets().values().update(
+    # 6. 批量更新 — 一次 API 调用
+    if updates:
+        data = []
+        for row_idx, row_data in updates:
+            data.append({
+                "range": f"'{sheet_name}'!A{row_idx + 1}:N{row_idx + 1}",
+                "values": [row_data],
+            })
+        service.spreadsheets().values().batchUpdate(
             spreadsheetId=spreadsheet_id,
-            range=rng,
-            valueInputOption="USER_ENTERED",
-            body={"values": [row_data]},
+            body={"valueInputOption": "USER_ENTERED", "data": data},
         ).execute()
 
-    # 7. 追加新行 — 用 update 精确写入，不用 append
+    # 7. 追加新行（用 info 中的 rowCount，不再调 API）
     if appends:
-        start = last_row + 1  # 1-based
+        start = last_row + 1
         end = last_row + len(appends)
-        rng = f"'{sheet_name}'!A{start}:N{end}"
-
-        # 确保 sheet 行数足够
-        ss_meta = service.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            ranges=[f"'{sheet_name}'"],
-            fields="sheets/properties/gridProperties/rowCount"
-        ).execute()
-        sheet_rows = 0
-        for s in ss_meta.get("sheets", []):
-            if s.get("properties", {}).get("sheetId", 0) == sheet_id_int:
-                sheet_rows = s.get("properties", {}).get("gridProperties", {}).get("rowCount", 0)
-                break
-
         if end > sheet_rows:
             service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,
@@ -237,40 +213,34 @@ def upsert_zuobiao(service, spreadsheet_id: str, sheet_gid: str, rows: list,
                     }
                 }]}
             ).execute()
-
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=rng,
+            range=f"'{sheet_name}'!A{start}:N{end}",
             valueInputOption="USER_ENTERED",
             body={"values": appends},
         ).execute()
 
-    # 8. 格式化 D列（文本）、E列（数字）
-    requests = [
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId": sheet_id_int,
-                    "startColumnIndex": 3, "endColumnIndex": 4,
-                },
-                "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
-                "fields": "userEnteredFormat.numberFormat"
-            }
-        },
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId": sheet_id_int,
-                    "startColumnIndex": 4, "endColumnIndex": 5,
-                },
-                "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}}},
-                "fields": "userEnteredFormat.numberFormat"
-            }
-        }
-    ]
-    service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": requests}
-    ).execute()
+    # 8. 格式化 — 仅对新写入的行
+    if appends:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [
+                {"repeatCell": {
+                    "range": {"sheetId": sheet_id_int, "startColumnIndex": 3,
+                              "endColumnIndex": 4, "startRowIndex": start - 1,
+                              "endRowIndex": end},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
+                    "fields": "userEnteredFormat.numberFormat"
+                }},
+                {"repeatCell": {
+                    "range": {"sheetId": sheet_id_int, "startColumnIndex": 4,
+                              "endColumnIndex": 5, "startRowIndex": start - 1,
+                              "endRowIndex": end},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER",
+                              "pattern": "#,##0.00"}}},
+                    "fields": "userEnteredFormat.numberFormat"
+                }}
+            ]}
+        ).execute()
 
     return {"updated": len(updates), "inserted": len(appends)}
