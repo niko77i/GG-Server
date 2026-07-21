@@ -248,3 +248,83 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
         ).execute()
 
     return {"updated": len(updates), "inserted": len(appends)}
+
+
+def append_recharge(service, spreadsheet_id: str, rows: list) -> dict:
+    """将充值记录追加到 Google Sheets「充值表」sheet。
+
+    rows: [{"account_id": "123-456-7890", "amount": "1000",
+            "agent": "卡尔", "operator": "张三"}, ...]
+
+    A=账户ID, B=金额, C=代理, D=运营, E=留空, F=留空
+    """
+    # 1. 获取表格信息，找到名为「充值表」的 sheet
+    ss = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    target_sheet = None
+    for s in ss.get("sheets", []):
+        props = s.get("properties", {})
+        if props.get("title", "") == "充值表":
+            target_sheet = {
+                "name": props["title"],
+                "gid": props["sheetId"],
+                "rowCount": props.get("gridProperties", {}).get("rowCount", 1000),
+            }
+            break
+
+    if not target_sheet:
+        raise GoogleSheetsServiceError("表格中未找到「充值表」工作表")
+
+    sheet_name = target_sheet["name"]
+    sheet_id_int = target_sheet["gid"]
+    sheet_rows = target_sheet["rowCount"]
+
+    # 2. 读取现有数据，找最后一行
+    range_read = f"'{sheet_name}'!A:F"
+    result = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=range_read,
+    ).execute()
+    existing = result.get("values", [])
+    last_row = 0
+    for i in range(len(existing) - 1, -1, -1):
+        row = existing[i]
+        if any(row[j] for j in range(min(4, len(row))) if row[j]):
+            last_row = i + 1
+            break
+
+    # 3. 构建待写入行（A-F，E和F留空）
+    new_rows = []
+    for r in rows:
+        new_rows.append([
+            r.get("account_id", ""),
+            str(r.get("amount", "")),
+            r.get("agent", ""),
+            r.get("operator", ""),
+            "",  # E列 时间 留空
+            "",  # F列 是否充值 留空
+        ])
+
+    # 4. 检查是否需要扩充行数
+    start = last_row + 1
+    end = last_row + len(new_rows)
+    if end > sheet_rows:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{
+                "appendDimension": {
+                    "sheetId": sheet_id_int,
+                    "dimension": "ROWS",
+                    "length": end - sheet_rows
+                }
+            }]}
+        ).execute()
+
+    # 5. 追加写入
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{sheet_name}'!A{start}:F{end}",
+        valueInputOption="USER_ENTERED",
+        body={"values": new_rows},
+    ).execute()
+
+    log.info("充值记录已追加到 Google Sheets: %d 行", len(new_rows))
+    return {"appended": len(new_rows)}
