@@ -1,12 +1,72 @@
 # 大规模重构设计：拆分 main.py + 前端大组件
 
+> **执行状态**：已完成 Phase 1-2 + 部分 Phase 6。剩余见文末 TODO 清单。
+> **最后更新**：2026-07-22
+
+## 零、已完成项
+
+### 后端
+| 完成项 | 详情 |
+|--------|------|
+| helpers.py 扩展 | `scope_where`、`can_modify`、`can_modify_user`、`runner_ids_where`、`MCC_CHANGE_TYPE_LABELS` 已迁移 |
+| auth_routes.py Blueprint | ✅ 已激活，main.py 旧路由已删除 |
+| `_reject_viewer` 统一 | 删除 main.py 中的重复，统一用 decorators 版本 |
+| `_can_modify` 优化 | db 连接由调用方传入，消除双连接 |
+| 多余 import 清理 | json x8, datetime x6 已从函数体移除 |
+| JWT 滑动过期 | `_refresh_jwt` after_request 钩子 |
+| 测试 | 29 个新测试，127/127 全通过 |
+| sales_person 列 | database.py 添加 `_add_column_if_missing` |
+
+### 前端
+| 完成项 | 详情 |
+|--------|------|
+| dedupLoader.js | 提取公共 loading guard，3 个 store 已采用 |
+| loadSettings 优化 | 防重复 + `_settingsLoaded` 标志 |
+| TagsConfig.vue | ✅ 已独立 |
+| ImportTab.vue | ✅ 已独立 |
+| CopywritingTab.vue | ✅ 已独立 |
+| MCC 悬停复制 | ProductCard.vue |
+| 商务下拉框 | ProductModal.vue + SettingsPanel.vue |
+
+### 文件变更清单
+```
+新增:
+  py/routes/auth_routes.py
+  py/tests/test_helpers.py
+  py/tests/test_decorators.py
+  py/tests/test_auth.py
+  frontend/src/utils/dedupLoader.js
+  frontend/src/components/youtube/TagsConfig.vue
+  frontend/src/components/youtube/ImportTab.vue
+  frontend/src/components/youtube/CopywritingTab.vue
+  docs/superpowers/specs/2026-07-22-large-scale-refactoring-design.md (本文件)
+  docs/superpowers/specs/2026-07-22-optimization-tests-design.md
+
+修改:
+  py/main.py (7462→7306 行)
+  py/database.py (+sales_person/agency_ratio 列)
+  py/scraper.py (User-Agent 常量化)
+  py/routes/helpers.py (+6 个公共函数)
+  py/routes/decorators.py (reject_viewer 更新)
+  frontend/src/stores/accounts.js (dedupLoader)
+  frontend/src/stores/products.js (dedupLoader)
+  frontend/src/stores/youtube.js (dedupLoader)
+  frontend/src/api/client.js (JWT 滑动过期)
+  frontend/src/components/ProductCard.vue (MCC)
+  frontend/src/components/ProductModal.vue (商务下拉)
+  frontend/src/views/SettingsPanel.vue (商务管理)
+  frontend/src/views/YoutubeView.vue (1085→849 行)
+```
+
+---
+
 ## 一、现状分析
 
-### 1.1 main.py — 7462 行单体巨石
+### 1.1 main.py — 7306 行（从 7462 缩减）
 
 | 指标 | 数值 |
 |------|------|
-| 总行数 | 7462 |
+| 总行数 | 7306 |
 | 路由总数 | 157 |
 | `@jwt_required()` 调用 | 114 |
 | `_yt_db()` 调用 | 90 |
