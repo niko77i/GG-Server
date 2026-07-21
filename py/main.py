@@ -61,6 +61,13 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB 上传限制
 CORS(app)
 Compress(app)
 
+
+@app.route("/favicon.ico")
+def _favicon():
+    """静默处理浏览器自动请求的 favicon.ico，避免日志中 404 错误。"""
+    return "", 204
+
+
 # --- 请求日志 ---
 import time as _time
 from urllib.parse import quote
@@ -2297,6 +2304,13 @@ def products_create():
     region = (data.get("region") or "").strip()
     mcc_id = data.get("mcc_id") or None
     customer = (data.get("customer") or "").strip()
+    sales_person = (data.get("sales_person") or "").strip()
+    agency_ratio = data.get("agency_ratio")
+    if agency_ratio is not None:
+        try:
+            agency_ratio = float(agency_ratio)
+        except (ValueError, TypeError):
+            agency_ratio = None
     packages = data.get("packages") or []
     if not product_name:
         return jsonify({"success": False, "error": "产品名不能为空"}), 400
@@ -2317,6 +2331,10 @@ def products_create():
         pid = existing["id"]
         if mcc_id is not None:
             db.execute("UPDATE products SET mcc_id=? WHERE id=?", (mcc_id, pid))
+        if sales_person:
+            db.execute("UPDATE products SET sales_person=? WHERE id=?", (sales_person, pid))
+        if agency_ratio is not None:
+            db.execute("UPDATE products SET agency_ratio=? WHERE id=?", (agency_ratio, pid))
         # 将当前用户加入 runner
         if user_id:
             try:
@@ -2332,8 +2350,8 @@ def products_create():
                     _assign_mcc_to_users(db, mcc_id, [user_id])
     else:
         runner_ids = _json.dumps([user_id]) if user_id else "[]"
-        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,customer,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                   (product_name, kpi, region, mcc_id, customer, user_id, runner_ids, now))
+        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,customer,sales_person,agency_ratio,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (product_name, kpi, region, mcc_id, customer, sales_person, agency_ratio, user_id, runner_ids, now))
         pid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         if user_id:
             db.execute("INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)", (pid, user_id))
@@ -4109,6 +4127,97 @@ def config_ai_save():
     db = _yt_db()
     db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                (f"ai_analysis_{user_id}", json.dumps(cfg, ensure_ascii=False)))
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+
+# ---------- Google Sheets 用户配置 ----------
+
+@app.route("/api/config/google-sheets", methods=["GET"])
+@jwt_required()
+def config_google_sheets_get():
+    """获取当前用户的 Google Sheets 配置（多表格列表 + 激活标记）。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    row = db.execute(
+        "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
+    ).fetchone()
+    # 激活标记
+    active_row = db.execute(
+        "SELECT value FROM config WHERE key=?", (f"google_sheets_active_{user_id}",)
+    ).fetchone()
+    db.close()
+
+    sheets = []
+    if row:
+        try:
+            sheets = json.loads(row["value"])
+            if not isinstance(sheets, list):
+                sheets = []
+        except Exception:
+            sheets = []
+
+    active_id = ""
+    if active_row:
+        active_id = active_row["value"].strip()
+
+    # 如果 sheets 不为空但 active_id 无效，自动选第一个
+    if sheets and (not active_id or not any(s.get("id") == active_id for s in sheets)):
+        active_id = sheets[0].get("id", "")
+
+    # 全局默认 spreadsheet_id 回退（单表兼容迁移）
+    global_id = _GOOGLE_SHEETS_CONFIG.get("spreadsheet_id", "")
+    if not sheets and global_id:
+        sheets = [{
+            "id": "m0",
+            "spreadsheet_id": global_id,
+            "spreadsheet_name": "",
+            "sheet_gid": "0",
+        }]
+        active_id = "m0"
+
+    return jsonify({"success": True, "sheets": sheets, "active_id": active_id})
+
+
+@app.route("/api/config/google-sheets", methods=["POST"])
+@jwt_required()
+def config_google_sheets_save():
+    """保存当前用户的 Google Sheets 配置（多表格列表 + 激活标记）。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    sheets = data.get("sheets", [])
+    active_id = (data.get("active_id") or "").strip()
+
+    if not isinstance(sheets, list):
+        return jsonify({"success": False, "error": "sheets 必须是数组"}), 400
+
+    # 清洗每项数据
+    cleaned = []
+    for s in sheets:
+        sid = (s.get("spreadsheet_id") or "").strip()
+        if not sid:
+            continue
+        cleaned.append({
+            "id": (s.get("id") or "").strip() or ("m" + str(int(__import__("time").time() * 1000))),
+            "spreadsheet_id": sid,
+            "spreadsheet_name": (s.get("spreadsheet_name") or "").strip(),
+            "sheet_gid": (s.get("sheet_gid") or "0").strip(),
+        })
+
+    # 确保 active_id 有效
+    if cleaned and (not active_id or not any(s["id"] == active_id for s in cleaned)):
+        active_id = cleaned[0]["id"]
+
+    db = _yt_db()
+    db.execute(
+        "INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+        (f"google_sheets_{user_id}", json.dumps(cleaned, ensure_ascii=False)),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+        (f"google_sheets_active_{user_id}", active_id),
+    )
     db.commit()
     db.close()
     return jsonify({"success": True})
