@@ -4259,6 +4259,7 @@ def google_sheets_update_zuobiao():
     active_id = active_row["value"].strip() if active_row else ""
 
     if not sheets:
+        db.close()
         return jsonify({"success": False, "error": "请先在个人中心配置 Google 表格"}), 400
 
     active_config = None
@@ -4272,15 +4273,15 @@ def google_sheets_update_zuobiao():
     spreadsheet_id = active_config.get("spreadsheet_id", "")
     sheet_gid = active_config.get("sheet_gid", "0")
     if not spreadsheet_id:
+        db.close()
         return jsonify({"success": False, "error": "表格 ID 为空，请检查配置"}), 400
 
     # 获取产品的 sales_person 和 agency_ratio
-    db2 = _yt_db()
-    prod_row = db2.execute(
+    prod_row = db.execute(
         "SELECT sales_person, agency_ratio FROM products WHERE product_name=?",
         (product_name,)
     ).fetchone()
-    db2.close()
+    db.close()
     sales_person = prod_row["sales_person"] if prod_row and prod_row["sales_person"] else ""
     agency_ratio = prod_row["agency_ratio"] if prod_row else None
 
