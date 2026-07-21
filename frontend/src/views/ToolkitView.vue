@@ -14,7 +14,7 @@
       <div style="flex-shrink:0;">
         <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;">
           <el-select v-model="zbSelectedProduct" placeholder="搜索并选择产品..." filterable clearable style="width:220px;" :loading="zbProductsLoading">
-            <el-option v-for="p in zbProducts" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '')" :value="p.product_name" />
+            <el-option v-for="p in zbProducts" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '') + (p.sales_person ? ' - ' + p.sales_person : '')" :value="p.product_name" />
           </el-select>
           <el-date-picker v-model="zbSelectedDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" style="width:150px;" />
         </div>

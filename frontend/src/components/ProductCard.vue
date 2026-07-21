@@ -9,12 +9,12 @@
           <el-button size="small" type="warning" plain :loading="checkingDelist" @click.stop="checkDelist">
             {{ checkingDelist ? '检测中...' : '🔍 是否掉包' }}
           </el-button>
+          <el-tag v-if="product.customer" size="small" type="success">💼 {{ product.customer }}</el-tag>
           <el-tag v-if="product.kpi" size="small" type="warning">{{ product.kpi }}</el-tag>
           <el-tooltip v-if="product.region" placement="top">
             <template #content>时区：{{ regionTimezone[product.region] || '未设置' }}</template>
             <el-tag size="small" type="primary">{{ product.region }}</el-tag>
           </el-tooltip>
-          <el-tag v-if="product.customer" size="small" type="success">👤 {{ product.customer }}</el-tag>
           <el-tooltip v-if="product.mcc_name" placement="top">
             <template #content>
               <div>🏢 {{ product.mcc_name }}</div>
