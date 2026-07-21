@@ -60,3 +60,61 @@ def parse_pagination() -> tuple[int, int]:
     page = max(1, int(request.args.get("page", 1) or 1))
     size = max(1, min(100, int(request.args.get("size", 20) or 20)))
     return page, size
+
+
+# --- 从 main.py 迁移的公共辅助函数 ---
+
+MCC_CHANGE_TYPE_LABELS = {
+    "manual": "手动编辑", "batch": "批量修改", "reassign": "认领转移",
+    "import": "批量导入", "create": "新建账户",
+}
+
+
+def runner_ids_where(alias: str, uid: int):
+    """返回 (SQL 片段, 参数列表)，匹配 products 表中 runner_ids JSON 列含指定 uid。"""
+    uid_s = str(uid)
+    return (
+        f"({alias}.runner_ids = ? OR {alias}.runner_ids LIKE ? "
+        f"OR {alias}.runner_ids LIKE ? OR {alias}.runner_ids LIKE ?)",
+        [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"]
+    )
+
+
+def scope_where(scope: str, user_id: int, alias: str = None):
+    """返回 scope 过滤的 (SQL片段, 参数列表)。alias 可选，如 \"v\"、\"cw\"。"""
+    col = f"{alias}." if alias else ""
+    if scope == "public":
+        return f"{col}is_public = 1", []
+    elif scope == "private":
+        return f"{col}owner_id = ?", [user_id]
+    else:  # all
+        return f"({col}is_public = 1 OR {col}owner_id = ?)", [user_id]
+
+
+def can_modify(db, user_id, table, item_id):
+    """检查用户是否有权编辑/删除某项。db 由调用方传入。
+    返回 (can: bool, error: str|None)
+    """
+    user = auth.get_user_by_id(user_id)
+    if user and user["role"] in ("developer", "admin"):
+        return True, None
+    try:
+        row = db.execute(
+            f"SELECT owner_id, is_public FROM {table} WHERE id=?", (item_id,)
+        ).fetchone()
+        if not row:
+            return False, "记录不存在"
+        if row["owner_id"] == user_id:
+            return True, None
+        if row["is_public"] == 1:
+            return True, None
+        return False, "无权限：仅可操作自己的或公开的内容"
+    except Exception:
+        return False, "查询出错"
+
+
+def can_modify_user(actor: dict, target: dict) -> bool:
+    """admin 只能操作 user/viewer/hidden，不能操作其他 admin。developer 不受限。"""
+    if actor["role"] == "developer":
+        return True
+    return target["role"] in ("user", "viewer", "hidden")

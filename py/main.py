@@ -32,7 +32,10 @@ import datetime
 import requests
 from functools import wraps
 from routes.decorators import reject_viewer as _reject_viewer
+from routes.auth_routes import auth_bp, register_jwt_callbacks
 # google_ads_service 按需加载，不打包进 EXE
+
+app.register_blueprint(auth_bp, url_prefix="/api/auth")
 
 # 判断是否为 PyInstaller 打包模式
 _FROZEN = getattr(sys, "frozen", False)

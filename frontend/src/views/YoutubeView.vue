@@ -193,170 +193,13 @@
     </el-dialog>
 
     <!-- ===== 文案展示 ===== -->
-    <div v-show="activeTab === 'copywriting'" class="yt-view-tab">
-      <div style="flex-shrink:0;display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center;">
-        <el-radio-group v-if="authStore.isAdmin" v-model="store.cwScope" @change="loadCopywritings" size="small">
-          <el-radio-button value="public">公用</el-radio-button>
-          <el-radio-button value="private">私有</el-radio-button>
-        </el-radio-group>
-        <el-button size="small" @click="cwToggleSelectAll">☑ 全选</el-button>
-        <el-button size="small" @click="cwInvertSelection">↔ 反选</el-button>
-        <el-button size="small" type="danger" @click="cwDeleteSelected">🗑 删除选中</el-button>
-        <el-select v-model="cwBatchRegion" @change="val => cwDoBatchEdit(val)" placeholder="批量改地区" size="small" style="width:140px;" clearable filterable>
-          <el-option v-for="r in store.tags.regions" :key="r" :label="r" :value="r" />
-        </el-select>
-        <el-select v-model="cwBatchEff" @change="val => cwDoBatchEffEdit(val)" placeholder="批量改成效" size="small" style="width:140px;" clearable filterable>
-          <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e || '(空)'" :value="e" />
-        </el-select>
-        <span style="font-size:12px;color:#888;margin-left:auto;">已选 {{ cwSelected.length }} 条</span>
-      </div>
-
-      <el-table ref="cwTableRef" :data="copywritingTree" row-key="id"
-        :tree-props="{ children: 'children', hasChildren: 'hasChildren' }"
-        :selectable="cwSelectable" :indent="28"
-        :row-class-name="cwRowClass"
-        @selection-change="v => cwSelected = v" stripe size="small"
-        class="cw-table">
-        <el-table-column type="selection" width="40" />
-        <el-table-column label="文案内容" min-width="300">
-          <template #default="{ row }">
-            <div v-if="!row.isRegion" class="cw-content-cell">
-              <div class="cw-content-row">
-                <el-tag v-if="row.effectiveness" size="small" :type="row.effectiveness === '成效' ? 'success' : 'warning'" style="margin-right:6px;flex-shrink:0;">{{ row.effectiveness }}</el-tag>
-                <span class="cw-content-text" @click="copyCopywriting(row)" :title="row.content">{{ row.content }}</span>
-                <span class="cw-content-actions">
-                  <el-button link size="small" @click.stop="cwTranslate(row)"
-                    :type="cwTransMap[row.id]?.expanded ? 'primary' : 'default'">
-                    {{ cwTransMap[row.id]?.expanded ? '翻译 ▲' : '翻译' }}
-                  </el-button>
-                  <el-button v-if="canModifyCopywriting(row)" link size="small" @click.stop="cwOpenEdit(row)">✏️</el-button>
-                  <el-button v-if="canModifyCopywriting(row)" link size="small" type="danger" @click.stop="cwDeleteOne(row)">🗑</el-button>
-                </span>
-              </div>
-              <div v-if="cwTransMap[row.id]?.expanded" class="cw-trans-inline">
-                <div class="cw-trans-header">
-                  <span class="cw-trans-label">🌐 翻译结果</span>
-                  <el-button link size="small" @click="cwTransMap[row.id].expanded = false">关闭 ✕</el-button>
-                </div>
-                <div class="cw-trans-body">{{ cwTransMap[row.id].text || '翻译中...' }}</div>
-                <div class="cw-trans-footer">
-                  <el-select v-model="cwTransMap[row.id].target" @change="v => cwTranslate(row, v)" size="small" style="width:120px;" filterable>
-                    <el-option v-for="l in CW_LANGS" :key="l.value" :label="l.label" :value="l.value" />
-                  </el-select>
-                  <el-button link size="small" @click.stop="cwCopyTrans(row.id)">📋 复制译文</el-button>
-                </div>
-              </div>
-            </div>
-            <span v-else class="cw-region-name">{{ row.name }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
-    </div>
+    <CopywritingTab ref="cwTabRef" v-show="activeTab === 'copywriting'" />
 
     <!-- ===== 导入视频或文案 ===== -->
-    <div v-show="activeTab === 'import'" style="max-width:600px;">
-      <el-tabs v-model="importSubTab" size="small" style="margin-bottom:12px;">
-        <el-tab-pane label="导入视频" name="video" />
-        <el-tab-pane label="导入文案" name="copywriting" />
-      </el-tabs>
-
-      <div v-show="importSubTab === 'video'">
-        <el-input v-model="importUrls" type="textarea" :rows="6" placeholder="每行一个 YouTube 链接..." />
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;">
-          <el-select v-model="importRegion" placeholder="地区" size="small">
-            <el-option v-for="r in store.tags.regions" :key="r" :label="r" :value="r" />
-          </el-select>
-          <el-select v-model="importFrame" placeholder="帧类型" size="small">
-            <el-option v-for="f in store.tags.frame_types" :key="f" :label="f" :value="f" />
-          </el-select>
-          <el-select v-model="importEff" placeholder="成效" size="small" clearable>
-            <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e" :value="e" />
-          </el-select>
-          <el-select v-model="importProd" placeholder="产品名" size="small" clearable>
-            <el-option v-for="p in store.tags.product_names" :key="p" :label="p" :value="p" />
-          </el-select>
-          <el-select v-model="importReview" placeholder="审核" size="small">
-            <el-option v-for="s in store.tags.review_statuses" :key="s" :label="s" :value="s" />
-          </el-select>
-          <el-date-picker
-            v-model="importTime"
-            type="datetime"
-            placeholder="视频时间（可选）"
-            size="small"
-            format="YYYY-MM-DD HH:mm"
-            value-format="YYYY-MM-DD HH:mm"
-            :clearable="true"
-          />
-        </div>
-        <div style="display:flex;align-items:center;gap:12px;margin-top:10px;">
-          <span style="font-size:13px;color:#606266;">可见范围：</span>
-          <el-radio-group v-if="canChooseScope" v-model="importIsPublic" size="small">
-            <el-radio-button :value="false">🔒 私有</el-radio-button>
-            <el-radio-button :value="true">🌐 公开</el-radio-button>
-          </el-radio-group>
-          <el-tag v-else size="small" type="info">🌐 公开</el-tag>
-          <span v-if="!canChooseScope" style="font-size:11px;color:#999;">（普通用户仅可导入公开视频）</span>
-          <el-button type="primary" @click="doImport" :loading="importing" style="margin-left:auto;">保存视频</el-button>
-        </div>
-        <div v-if="importResult" style="margin-top:8px;font-size:12px;">{{ importResult }}</div>
-      </div>
-
-      <div v-show="importSubTab === 'copywriting'">
-        <el-select v-model="cwImportRegion" placeholder="地区" size="small" style="width:100%;margin-bottom:12px;">
-          <el-option v-for="r in store.tags.regions" :key="r" :label="r" :value="r" />
-        </el-select>
-        <el-select v-model="cwImportEff" placeholder="成效（可选）" size="small" clearable style="width:100%;margin-bottom:12px;">
-          <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e || '(空)'" :value="e" />
-        </el-select>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-          <span style="font-size:13px;color:#606266;">可见范围：</span>
-          <el-radio-group v-if="canChooseScope" v-model="cwImportPublic" size="small">
-            <el-radio-button :value="false">🔒 私有</el-radio-button>
-            <el-radio-button :value="true">🌐 公开</el-radio-button>
-          </el-radio-group>
-          <el-tag v-else size="small" type="info">🌐 公开</el-tag>
-        </div>
-        <el-input v-model="cwImportText" type="textarea" :rows="8" placeholder="每行一条文案，空行自动跳过" />
-        <el-button type="primary" @click="cwDoImport" :loading="cwImporting" style="margin-top:12px;">导入文案</el-button>
-        <div v-if="cwImportResult" style="margin-top:8px;font-size:12px;">{{ cwImportResult }}</div>
-      </div>
-    </div>
+    <ImportTab v-show="activeTab === 'import'" />
 
     <!-- ===== 标签配置 ===== -->
-    <div v-show="activeTab === 'config'" style="max-width:600px;">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <el-form-item label="地区选项"><el-input v-model="cfgRegions" type="textarea" :rows="5" /></el-form-item>
-        <el-form-item label="帧类型选项"><el-input v-model="cfgFrames" type="textarea" :rows="5" /></el-form-item>
-      </div>
-      <el-form-item label="成效选项"><el-input v-model="cfgEffs" type="textarea" :rows="3" /></el-form-item>
-      <el-form-item label="产品名称选项"><el-input v-model="cfgProds" type="textarea" :rows="3" /></el-form-item>
-      <el-form-item label="审核状态选项"><el-input v-model="cfgReviewStatuses" type="textarea" :rows="3" /></el-form-item>
-      <el-button type="primary" @click="saveConfig" :loading="savingCfg">保存配置</el-button>
-      <span v-if="cfgMsg" style="margin-left:8px;font-size:11px;color:#059669;">{{ cfgMsg }}</span>
-    </div>
-
-    <!-- ===== 文案编辑弹窗 ===== -->
-    <el-dialog v-model="cwEditVisible" title="✏️ 编辑文案" width="500px" top="10vh">
-      <el-form label-position="top">
-        <el-form-item label="地区">
-          <el-select v-model="cwEditForm.region" style="width:100%;" filterable>
-            <el-option v-for="r in store.tags.regions" :key="r" :label="r" :value="r" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="成效">
-          <el-select v-model="cwEditForm.effectiveness" style="width:100%;" clearable>
-            <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e || '(空)'" :value="e" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="文案内容">
-          <el-input v-model="cwEditForm.content" type="textarea" :rows="4" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="cwEditVisible = false">取消</el-button>
-        <el-button type="primary" @click="cwSaveEdit" :loading="cwSavingEdit">💾 保存</el-button>
-      </template>
-    </el-dialog>
+    <TagsConfig v-show="activeTab === 'config'" />
 
     <!-- ===== 视频编辑弹窗 ===== -->
     <el-dialog v-model="editVisible" title="✏️ 编辑视频" width="450px" top="10vh">
@@ -404,6 +247,9 @@ import { ElMessageBox, ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 import { translateApi, consumptionApi, productApi } from '@/api/youtube'
 import api from '@/api/client'
+import TagsConfig from '@/components/youtube/TagsConfig.vue'
+import ImportTab from '@/components/youtube/ImportTab.vue'
+import CopywritingTab from '@/components/youtube/CopywritingTab.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -632,11 +478,6 @@ onMounted(async () => {
   store.loadDates(store.filters)
   await loadVideos()
   loadAssetProductOptions()
-  cfgRegions.value = (store.tags.regions || []).join('\n')
-  cfgFrames.value = (store.tags.frame_types || []).join('\n')
-  cfgEffs.value = (store.tags.effectiveness || []).filter(Boolean).join('\n')
-  cfgProds.value = (store.tags.product_names || []).join('\n')
-  cfgReviewStatuses.value = (store.tags.review_statuses || []).join('\n')
 })
 
 function onRowClick(row) {
@@ -724,70 +565,13 @@ async function doBatchEdit(field, val) {
   loadVideos()
 }
 
-// Import tab
-const importUrls = ref('')
-const importRegion = ref('通用')
-const importFrame = ref('非融帧')
-const importEff = ref('')
-const importProd = ref('')
-const importReview = ref('能过审')
-const importTime = ref('')           // 视频时间，格式 YYYY-MM-DD HH:mm
-const importIsPublic = ref(!authStore.isAdmin)      // admin默认私有，普通用户默认公开
-const importing = ref(false)
-const importResult = ref('')
+// Import tab — moved to ImportTab.vue
 
-// 普通用户只能选公开
-const canChooseScope = computed(() => authStore.isAdmin)
-
-async function doImport() {
-  const urls = importUrls.value.split(/[\n,]+/).map(s => s.trim()).filter(s => s && s.includes('youtu'))
-  if (!urls.length) return
-  importing.value = true
-  const res = await store.importVideos({
-    urls,
-    region: importRegion.value,
-    frame_type: importFrame.value,
-    effectiveness: importEff.value,
-    product_name: importProd.value,
-    review_status: importReview.value,
-    imported_at: importTime.value || undefined,
-    is_public: canChooseScope.value ? (importIsPublic.value ? 1 : 0) : 1,
-  })
-  importResult.value = `导入 ${res.imported} 个，重复 ${(res.duplicates || []).length} 个`
-  importUrls.value = ''
-  importTime.value = ''
-  importing.value = false
-  loadVideos()
-}
-
-// Config tab
-const cfgRegions = ref(''); const cfgFrames = ref(''); const cfgEffs = ref(''); const cfgProds = ref(''); const cfgReviewStatuses = ref('')
-const savingCfg = ref(false); const cfgMsg = ref('')
-
-async function saveConfig() {
-  savingCfg.value = true
-  await store.saveTags({
-    regions: cfgRegions.value.split('\n').map(s => s.trim()).filter(Boolean),
-    frame_types: cfgFrames.value.split('\n').map(s => s.trim()).filter(Boolean),
-    effectiveness: cfgEffs.value.split('\n').map(s => s.trim()).filter(Boolean),
-    product_names: cfgProds.value.split('\n').map(s => s.trim()).filter(Boolean),
-    review_statuses: cfgReviewStatuses.value.split('\n').map(s => s.trim()).filter(Boolean),
-  })
-  await store.loadTags()
-  cfgMsg.value = '已保存'
-  setTimeout(() => cfgMsg.value = '', 2000)
-  savingCfg.value = false
-}
+// Config tab — moved to TagsConfig.vue
 
 // ---- 文案管理 ----
 const cwTableRef = ref(null)
 const cwSelected = ref([])
-const cwImportText = ref('')
-const cwImportPublic = ref(false)  // 默认私有（管理员覆盖），普通用户强制公开
-const cwImportRegion = ref('通用')
-const cwImportEff = ref('')
-const cwImporting = ref(false)
-const cwImportResult = ref('')
 const cwBatchRegion = ref('')
 const cwBatchEff = ref('')
 const cwTransMap = ref({})
@@ -982,8 +766,10 @@ async function loadCopywritings() {
 }
 
 // 每次切换到文案 tab 都刷新（包括首次）
+const cwTabRef = ref(null)
+
 watch(activeTab, async (tab) => {
-  if (tab === 'copywriting') await loadCopywritings()
+  if (tab === 'copywriting') await cwTabRef.value?.loadCopywritings()
 }, { immediate: true })
 </script>
 
