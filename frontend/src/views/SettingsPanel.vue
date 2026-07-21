@@ -27,6 +27,13 @@
           <el-input v-model="form.sales_persons" type="textarea" :rows="4"
             placeholder="每行一个，用于产品编辑时选择商务人员" />
         </el-form-item>
+        <template v-if="authStore.isAdmin || authStore.isDeveloper">
+          <el-divider />
+          <h4 style="margin-bottom:8px;">📊 充值表配置（仅管理员可见）</h4>
+          <el-form-item label="Google Sheets ID">
+            <el-input v-model="form.recharge_sheet_id" placeholder="输入充值表的 spreadsheet ID" />
+          </el-form-item>
+        </template>
         <el-button type="primary" @click="save" :loading="saving">💾 保存配置</el-button>
         <span v-if="msg" style="margin-left:8px;font-size:11px;color:#059669;">{{ msg }}</span>
       </el-tab-pane>
@@ -125,12 +132,14 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
+import { useAuthStore } from '@/stores/auth'
 import { dataApi } from '@/api/data'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import api from '@/api/client'
 
 const store = useAccountStore()
+const authStore = useAuthStore()
 const saving = ref(false)
 const msg = ref('')
 const activeTab = ref('account')
@@ -140,6 +149,7 @@ const form = reactive({
   account_agents: '',
   mcc_levels: '',
   sales_persons: '',
+  recharge_sheet_id: '',
 })
 
 // 数据管理
@@ -169,6 +179,7 @@ onMounted(async () => {
   form.account_agents = (store.settings.account_agents || []).join('\n')
   form.mcc_levels = (store.settings.mcc_levels || []).join('\n')
   form.sales_persons = (store.settings.sales_persons || []).join('\n')
+  form.recharge_sheet_id = store.settings.recharge_sheet_id || ''
   loadImportHistory()
   loadRegions()
 })
@@ -209,6 +220,7 @@ async function save() {
     account_agents: form.account_agents.split('\n').map(s => s.trim()).filter(Boolean),
     mcc_levels: form.mcc_levels.split('\n').map(s => s.trim()).filter(Boolean),
     sales_persons: form.sales_persons.split('\n').map(s => s.trim()).filter(Boolean),
+    recharge_sheet_id: form.recharge_sheet_id.trim(),
   }
   await store.saveSettings(body)
   store.settings = body
