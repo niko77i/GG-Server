@@ -3529,9 +3529,16 @@ def accounts_update(aid):
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
 
+        # 复活清理：状态从「死亡」变为其他时，删除旧的清账记录
+        new_status = data.get("status", "")
+        if old_status and old_status["status"] == "死亡" and new_status and new_status != "死亡":
+            db.execute(
+                "DELETE FROM recharge_records WHERE account_id=? AND amount='清'",
+                (old_status["account_id"],)
+            )
+
         # 死亡清账：状态变为「死亡」时自动追加 amount='清'
         recharge_note = None
-        new_status = data.get("status", "")
         if new_status == "死亡" and old_status and old_status["status"] != "死亡":
             existing_clear = db.execute(
                 "SELECT id FROM recharge_records WHERE account_id=? AND amount='清'",
