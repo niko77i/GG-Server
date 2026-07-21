@@ -6,6 +6,7 @@
         <el-button type="primary" @click="showModal()">➕ 新增账户</el-button>
         <el-button @click="batchVisible = true">📥 批量导入</el-button>
         <el-button @click="lookupVisible = true">🔍 批量查户</el-button>
+        <el-button @click="batchRechargeVisible = true" :disabled="!selected.length">💰 批量充值</el-button>
         <span style="color:#888;font-size:12px;">已选 {{ selected.length }} 条</span>
         <el-select v-model="batchStatus" @change="doBatchStatus" placeholder="批量修改状态..."
           style="width:160px;" :disabled="!selected.length" clearable filterable>
@@ -67,10 +68,11 @@
         <el-table-column v-if="store.acFilters.status === '死亡'" label="死亡时间" width="110" show-overflow-tooltip>
           <template #default="{ row }"><span v-if="row.death_date" style="color:#dc2626;">{{ row.death_date }}</span><span v-else style="color:#ccc;">—</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="160">
+        <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showModal(row.id)">✏️</el-button>
             <el-button link type="success" size="small" @click="showDetail(row.id)">📋</el-button>
+            <el-button link type="warning" size="small" @click="openRecharge(row)">💰</el-button>
             <el-button link type="danger" size="small" @click="del(row.id)"><el-icon :size="14"><Delete /></el-icon></el-button>
           </template>
         </el-table-column>
@@ -90,6 +92,8 @@
     <AccountBatchImportModal v-model:visible="batchVisible" @saved="load" />
     <AccountBatchLookupModal v-model:visible="lookupVisible" />
     <AccountDetailModal v-model:visible="detailVisible" :account-id="detailAccountId" />
+    <RechargeModal v-model:visible="rechargeVisible" :default-account-id="rechargeAccountId" @saved="load" />
+    <RechargeBatchModal v-model:visible="batchRechargeVisible" :accounts="selected" @saved="onBatchRecharged" />
   </div>
 </template>
 
@@ -100,6 +104,8 @@ import AccountModal from '@/components/AccountModal.vue'
 import AccountBatchImportModal from '@/components/AccountBatchImportModal.vue'
 import AccountBatchLookupModal from '@/components/AccountBatchLookupModal.vue'
 import AccountDetailModal from '@/components/AccountDetailModal.vue'
+import RechargeModal from '@/components/RechargeModal.vue'
+import RechargeBatchModal from '@/components/RechargeBatchModal.vue'
 import { ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
@@ -111,6 +117,9 @@ const batchVisible = ref(false)
 const lookupVisible = ref(false)
 const detailVisible = ref(false)
 const detailAccountId = ref(null)
+const rechargeVisible = ref(false)
+const rechargeAccountId = ref('')
+const batchRechargeVisible = ref(false)
 const batchStatus = ref('')
 const batchMcc = ref('')
 const mccOptions = ref([])
@@ -170,6 +179,16 @@ function search() {
 function searchAndLoad() { store.acPage = 1; load() }
 function showModal(id) { acEditId.value = id || null; acModalVisible.value = true }
 function showDetail(id) { detailAccountId.value = id; detailVisible.value = true }
+
+function openRecharge(row) {
+  rechargeAccountId.value = row.account_id
+  rechargeVisible.value = true
+}
+
+function onBatchRecharged() {
+  selected.value = []
+  load()
+}
 
 async function del(id) {
   await ElMessageBox.confirm('确定删除此账户？', '确认', { type: 'warning' })
