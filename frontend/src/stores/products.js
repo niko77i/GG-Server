@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { productsApi } from '@/api/products'
+import { dedupLoader } from '@/utils/dedupLoader'
 
 export const useProductStore = defineStore('products', {
   state: () => ({
@@ -13,24 +14,21 @@ export const useProductStore = defineStore('products', {
 
   actions: {
     async loadProducts(extra = {}) {
-      if (this._loading) return this._lastPromise
-      this._loading = true
-      const params = {
-        page: this.page, size: this.pageSize,
-        search: this.filters.search || undefined,
-        region: this.filters.region || undefined,
-        mcc_id: this.filters.mcc_id || undefined,
-        status: this.pausedMode ? 'paused' : '',
-        runner: extra.runner || undefined,
-      }
-      const promise = productsApi.list(params).then(res => {
-        this.products = res.products
+      return dedupLoader(this, 'products', () => {
+        const params = {
+          page: this.page, size: this.pageSize,
+          search: this.filters.search || undefined,
+          region: this.filters.region || undefined,
+          mcc_id: this.filters.mcc_id || undefined,
+          status: this.pausedMode ? 'paused' : '',
+          runner: extra.runner || undefined,
+        }
+        return productsApi.list(params).then(res => {
+          this.products = res.products
         this.total = res.total
         return res
-      }).finally(() => { this._loading = false })
-      this._lastPromise = promise
-      return promise
-    },
+      })
+    })},
     async createProduct(body) { return productsApi.create(body) },
     async updateProduct(id, body) { return productsApi.update(id, body) },
     async deleteProduct(id) { await productsApi.delete(id); return this.loadProducts() },

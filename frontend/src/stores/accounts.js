@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { accountsApi, mccApi, settingsApi } from '@/api/accounts'
+import { dedupLoader } from '@/utils/dedupLoader'
 
 export const useAccountStore = defineStore('accounts', {
   state: () => ({
@@ -18,16 +19,14 @@ export const useAccountStore = defineStore('accounts', {
 
   actions: {
     async loadAccounts() {
-      if (this._acLoading) return this._acLastPromise
-      this._acLoading = true
-      const params = { page: this.acPage, size: this.acPageSize, ...this.acFilters }
-      const promise = accountsApi.list(params).then(res => {
-        this.accounts = res.accounts
-        this.acTotal = res.total
-        return res
-      }).finally(() => { this._acLoading = false })
-      this._acLastPromise = promise
-      return promise
+      return dedupLoader(this, 'ac', () => {
+        const params = { page: this.acPage, size: this.acPageSize, ...this.acFilters }
+        return accountsApi.list(params).then(res => {
+          this.accounts = res.accounts
+          this.acTotal = res.total
+          return res
+        })
+      })
     },
     async createAccount(body) { return accountsApi.create(body) },
     async reassignAccount(id, body) { return accountsApi.reassign(id, body) },
@@ -37,16 +36,14 @@ export const useAccountStore = defineStore('accounts', {
     async batchUpdateAccounts(body) { await accountsApi.batchUpdate(body); return this.loadAccounts() },
 
     async loadMccList() {
-      if (this._mccLoading) return this._mccLastPromise
-      this._mccLoading = true
-      const params = { page: this.mccPage, size: this.mccPageSize, ...this.mccFilters }
-      const promise = mccApi.list(params).then(res => {
-        this.mccList = res.mcc_list
-        this.mccTotal = res.total
-        return res
-      }).finally(() => { this._mccLoading = false })
-      this._mccLastPromise = promise
-      return promise
+      return dedupLoader(this, 'mcc', () => {
+        const params = { page: this.mccPage, size: this.mccPageSize, ...this.mccFilters }
+        return mccApi.list(params).then(res => {
+          this.mccList = res.mcc_list
+          this.mccTotal = res.total
+          return res
+        })
+      })
     },
     async createMcc(body) { return mccApi.create(body) },
     async updateMcc(id, body) { return mccApi.update(id, body) },
@@ -56,15 +53,13 @@ export const useAccountStore = defineStore('accounts', {
     async linkMcc(id) { return mccApi.link(id) },
 
     async loadSettings() {
-      if (this._settingsLoading) return this._settingsLastPromise
-      this._settingsLoading = true
-      const promise = settingsApi.get().then(res => {
-        this.settings = res.settings
-        this._settingsLoaded = true
-        return res
-      }).finally(() => { this._settingsLoading = false })
-      this._settingsLastPromise = promise
-      return promise
+      return dedupLoader(this, 'settings', () => {
+        return settingsApi.get().then(res => {
+          this.settings = res.settings
+          this._settingsLoaded = true
+          return res
+        })
+      })
     },
     async saveSettings(body) { return settingsApi.save(body) },
   },

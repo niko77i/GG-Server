@@ -31,6 +31,7 @@ import data_service
 import datetime
 import requests
 from functools import wraps
+from routes.decorators import reject_viewer as _reject_viewer
 # google_ads_service 按需加载，不打包进 EXE
 
 # 判断是否为 PyInstaller 打包模式
@@ -1675,8 +1676,8 @@ def youtube_dates():
     return jsonify({"success": True, "dates": dates})
 
 
-def _can_modify(user_id, table, item_id):
-    """检查用户是否有权编辑/删除某项。
+def _can_modify(db, user_id, table, item_id):
+    """检查用户是否有权编辑/删除某项。db 由调用方传入，避免重复连接。
     admin/developer 始终有权限；
     普通用户只能操作自己的项或 is_public=1 的项。
     返回 (can: bool, error: str|None)
@@ -1684,7 +1685,6 @@ def _can_modify(user_id, table, item_id):
     user = auth.get_user_by_id(user_id)
     if user and user["role"] in ("developer", "admin"):
         return True, None
-    db = _yt_db()
     try:
         row = db.execute(
             f"SELECT owner_id, is_public FROM {table} WHERE id=?", (item_id,)
@@ -1729,7 +1729,7 @@ def youtube_edit():
     vid = (data.get("id") or "").strip()
     if not vid: return jsonify({"success": False, "error": "未指定视频ID"}), 400
     db = _yt_db()
-    can, err = _can_modify(user_id, "videos", vid)
+    can, err = _can_modify(db, user_id, "videos", vid)
     if not can:
         db.close()
         return jsonify({"success": False, "error": err}), 403
@@ -4759,7 +4759,7 @@ def copywriting_edit():
     if not cid:
         return jsonify({"success": False, "error": "未指定文案ID"}), 400
     db = _yt_db()
-    can, err = _can_modify(user_id, "copywritings", cid)
+    can, err = _can_modify(db, user_id, "copywritings", cid)
     if not can:
         db.close()
         return jsonify({"success": False, "error": err}), 403
@@ -5269,16 +5269,6 @@ def admin_required(fn):
     return wrapper
 
 
-def _reject_viewer():
-    """如果当前用户是 viewer，返回 403 错误响应；否则返回 None。"""
-    try:
-        user_id = int(get_jwt_identity())
-    except Exception:
-        return None  # 未登录，由 @jwt_required() 处理
-    user = auth.get_user_by_id(user_id)
-    if user and user["role"] == "viewer":
-        return jsonify({"success": False, "error": "权限不足：只读用户无法执行此操作"}), 403
-    return None
 
 
 # ---------- Data Import/Export ----------

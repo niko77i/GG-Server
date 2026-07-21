@@ -3,6 +3,12 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 class ScrapeError(Exception):
     """爬取失败异常。"""
@@ -32,11 +38,7 @@ def scrape_images(url: str) -> list[str]:
         ScrapeError: 页面不可访问、未找到目标标签
     """
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
+        "User-Agent": _USER_AGENT
     }
 
     try:
@@ -81,11 +83,7 @@ def scrape_logo(url: str) -> str | None:
         第一张图片的绝对 URL，未找到返回 None
     """
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
+        "User-Agent": _USER_AGENT
     }
 
     try:

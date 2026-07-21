@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { youtubeApi, copywritingApi } from '@/api/youtube'
+import { dedupLoader } from '@/utils/dedupLoader'
 
 export const useYoutubeStore = defineStore('youtube', {
   state: () => ({
@@ -15,15 +16,13 @@ export const useYoutubeStore = defineStore('youtube', {
 
   actions: {
     async loadVideos() {
-      if (this._vLoading) return this._vLastPromise
-      this._vLoading = true
-      const promise = youtubeApi.list(this.filters).then(res => {
-        this.videos = res.videos
-        this.counts = res.counts
-        return res
-      }).finally(() => { this._vLoading = false })
-      this._vLastPromise = promise
-      return promise
+      return dedupLoader(this, 'v', () => {
+        return youtubeApi.list(this.filters).then(res => {
+          this.videos = res.videos
+          this.counts = res.counts
+          return res
+        })
+      })
     },
     async importVideos(body) { return youtubeApi.import(body) },
     async deleteVideos(ids) { await youtubeApi.delete({ ids }); return this.loadVideos() },
@@ -35,17 +34,15 @@ export const useYoutubeStore = defineStore('youtube', {
 
     // 文案管理
     async loadCopywritings(region = '') {
-      if (this._cwLoading) return this._cwLastPromise
-      this._cwLoading = true
-      const params = { scope: this.cwScope }
-      if (region) params.region = region
-      const promise = copywritingApi.list(params).then(res => {
-        this.copywritings = res.items
-        this.copywritingCounts = res.counts
-        return res
-      }).finally(() => { this._cwLoading = false })
-      this._cwLastPromise = promise
-      return promise
+      return dedupLoader(this, 'cw', () => {
+        const params = { scope: this.cwScope }
+        if (region) params.region = region
+        return copywritingApi.list(params).then(res => {
+          this.copywritings = res.items
+          this.copywritingCounts = res.counts
+          return res
+        })
+      })
     },
     async importCopywritings(body) { return copywritingApi.import(body) },
     async editCopywriting(body) { return copywritingApi.edit(body) },

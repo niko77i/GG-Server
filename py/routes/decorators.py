@@ -40,8 +40,8 @@ def reject_viewer():
     try:
         uid = int(get_jwt_identity())
     except Exception:
-        return err("未认证", 401)
+        return None  # 未登录，由 @jwt_required() 处理
     user = auth.get_user_by_id(uid)
     if user and user.get("role") == "viewer":
-        return err("观察者无写入权限", 403)
+        return err("权限不足：只读用户无法执行此操作", 403)
     return None

@@ -17,6 +17,7 @@
             <el-option v-for="p in zbProducts" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '') + (p.sales_person ? ' - ' + p.sales_person : '')" :value="p.product_name" />
           </el-select>
           <el-date-picker v-model="zbSelectedDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" style="width:150px;" />
+          <el-select v-model="zbYanghuKeywords" multiple filterable allow-create placeholder="养户关键词（匹配到的行→养户/止戈）" style="flex:1;min-width:250px;" size="small" />
         </div>
         <p style="color:#888;margin-bottom:8px;font-size:13px;">粘贴包含"添加过滤条件"和"Total"的原始竖排数据：</p>
         <el-checkbox v-model="zbIncludeCampaignId" size="small" style="margin-bottom:8px;" :disabled="zbYanghu">包含广告系列ID（原数据11列，自动剔除第5列）</el-checkbox>
@@ -265,7 +266,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
@@ -300,6 +301,14 @@ const zbSelectedDate = ref(_yesterday())
 const zbProducts = ref([])
 const zbProductsLoading = ref(false)
 const zbUpdatingSheet = ref(false)
+
+// 养户关键词（localStorage 持久化，默认值可随时增删）
+const ZB_YANGHU_KEY = 'zb_yanghu_keywords'
+const zbYanghuKeywords = ref(
+  (() => { try { const v = localStorage.getItem(ZB_YANGHU_KEY); return v ? JSON.parse(v) : ['养户', 'Website traffic-Search', 'Campaign #1'] } catch { return ['养户', 'Website traffic-Search', 'Campaign #1'] } })()
+)
+watch(zbYanghuKeywords, (v) => { localStorage.setItem(ZB_YANGHU_KEY, JSON.stringify(v)) }, { deep: true })
+
 const zbSelectedRegion = computed(() => {
   const p = zbProducts.value.find(x => x.product_name === zbSelectedProduct.value)
   return p ? p.region : ''
@@ -374,11 +383,16 @@ async function zbUpdateSheet() {
   zbUpdatingSheet.value = true
   try {
     const p = zbProducts.value.find(x => x.product_name === zbSelectedProduct.value)
+    const keywords = zbYanghuKeywords.value.filter(Boolean)
+    const taggedRows = zbZuobiao.value.map(row => ({
+      ...row,
+      is_yanghu: keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
+    }))
     const res = await googleSheetsApi.updateZuobiao({
       product_name: zbSelectedProduct.value,
       region: zbSelectedRegion.value,
       report_date: zbSelectedDate.value,
-      rows: zbZuobiao.value,
+      rows: taggedRows,
       sales_person: p?.sales_person || '',
       agency_ratio: p?.agency_ratio ?? null,
     })
