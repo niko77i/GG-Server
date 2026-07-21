@@ -392,6 +392,8 @@ def _ensure_schema(conn: sqlite3.Connection):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
     _add_column_if_missing(conn, "products", "customer", "customer TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "deleted_at", "deleted_at TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "products", "sales_person", "sales_person TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "products", "agency_ratio", "agency_ratio REAL DEFAULT NULL")
     _add_column_if_missing(conn, "copywritings", "owner_id", "owner_id INTEGER REFERENCES users(id)")
     _add_column_if_missing(conn, "copywritings", "effectiveness", "effectiveness TEXT DEFAULT ''")
     _add_column_if_missing(conn, "copywritings", "is_public", "is_public INTEGER DEFAULT 0")
