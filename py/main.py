@@ -3554,18 +3554,16 @@ def accounts_update(aid):
                 sheet_id = _json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else ""
                 if sheet_id:
                     try:
-                        credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
-                        if credentials_path and os.path.isfile(credentials_path):
-                            import google_sheets_service as gs
-                            service = gs.build_service(credentials_path)
-                            gs.append_recharge(service, sheet_id, [clear_row])
-                            # Sheets 成功后再写数据库
-                            db.execute(
-                                "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
-                                "VALUES (?, '清', ?, ?, ?)",
-                                (old_status["account_id"], clear_agent, operator_name, user_id)
-                            )
-                            recharge_note = "已追加清账记录"
+                        import google_sheets_service as gs
+                        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                        gs.append_recharge(service, sheet_id, [clear_row])
+                        # Sheets 成功后再写数据库
+                        db.execute(
+                            "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
+                            "VALUES (?, '清', ?, ?, ?)",
+                            (old_status["account_id"], clear_agent, operator_name, user_id)
+                        )
+                        recharge_note = "已追加清账记录"
                     except Exception as e:
                         log.warning("死亡清账 Google Sheets 写入失败，跳过: %s", e)
 
@@ -3735,12 +3733,8 @@ def recharge_submit():
             return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
 
         # 2. 写 Google Sheets
-        credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
-        if not credentials_path or not os.path.isfile(credentials_path):
-            db.close()
-            return jsonify({"success": False, "error": "Google Sheets 未授权，请联系管理员"}), 500
         import google_sheets_service as gs
-        service = gs.build_service(credentials_path)
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
         gs.append_recharge(service, sheet_id, [{
             "account_id": account_id,
             "amount": amount,
@@ -3810,12 +3804,8 @@ def recharge_batch_submit():
             return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
 
         # 2. 写 Google Sheets
-        credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
-        if not credentials_path or not os.path.isfile(credentials_path):
-            db.close()
-            return jsonify({"success": False, "error": "Google Sheets 未授权，请联系管理员"}), 500
         import google_sheets_service as gs
-        service = gs.build_service(credentials_path)
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
         gs.append_recharge(service, sheet_id, sheet_rows)
 
         # 3. Sheets 成功后再写数据库
