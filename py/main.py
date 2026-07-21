@@ -3551,7 +3551,7 @@ def accounts_update(aid):
                 sheet_id_row = db.execute(
                     "SELECT value FROM tags WHERE key='recharge_sheet_id'"
                 ).fetchone()
-                sheet_id = _json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else ""
+                sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
                 if sheet_id:
                     try:
                         import google_sheets_service as gs
@@ -3702,6 +3702,14 @@ def accounts_batch_update():
 
 # ---------- 充值 API ----------
 
+def _parse_sheet_id(raw: str) -> str:
+    """从完整 Google Sheets URL 中提取 spreadsheet ID，直接传 ID 也兼容。"""
+    if not raw:
+        return ""
+    m = _re.search(r"/d/([a-zA-Z0-9_-]+)", raw)
+    return m.group(1) if m else raw.strip()
+
+
 @app.route("/api/recharge/submit", methods=["POST"])
 @jwt_required()
 def recharge_submit():
@@ -3727,7 +3735,7 @@ def recharge_submit():
         sheet_id_row = db.execute(
             "SELECT value FROM tags WHERE key='recharge_sheet_id'"
         ).fetchone()
-        sheet_id = _json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else ""
+        sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
         if not sheet_id:
             db.close()
             return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
@@ -3798,7 +3806,7 @@ def recharge_batch_submit():
         sheet_id_row = db.execute(
             "SELECT value FROM tags WHERE key='recharge_sheet_id'"
         ).fetchone()
-        sheet_id = _json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else ""
+        sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
         if not sheet_id:
             db.close()
             return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
