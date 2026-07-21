@@ -6,6 +6,10 @@ import sys
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("gg-server")
 
+# 屏蔽 Werkzeug 对高频轮询接口的日志
+_werkzeug_log = logging.getLogger("werkzeug")
+_werkzeug_log.addFilter(lambda r: "/api/delist/pending" not in r.getMessage())
+
 # 确保当前目录优先于 site-packages（解决 py 包名冲突）
 _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
