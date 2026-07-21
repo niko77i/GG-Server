@@ -4283,7 +4283,10 @@ def google_sheets_update_zuobiao():
 
     # 构建 Google Sheets 服务
     try:
-        from google_sheets_service import build_service, get_spreadsheet_info, upsert_zuobiao, GoogleSheetsServiceError
+        from google_sheets_service import (
+            build_service, get_spreadsheet_info, upsert_zuobiao,
+            GoogleSheetsServiceError, AuthRequiredError, generate_auth_url,
+        )
     except ImportError:
         return jsonify({"success": False, "error": "Google Sheets 功能不可用"}), 500
 
@@ -4291,9 +4294,17 @@ def google_sheets_update_zuobiao():
     token_path = _GOOGLE_SHEETS_CONFIG["token_path"]
 
     try:
-        service = build_service(creds_path, token_path)
+        service = build_service(creds_path, token_path, auto_auth=False)
         info = get_spreadsheet_info(service, spreadsheet_id)
         operator_name = info.get("operator", "")
+    except AuthRequiredError:
+        auth_url = generate_auth_url(creds_path)
+        return jsonify({
+            "success": False,
+            "error": "需要 Google Sheets 授权",
+            "auth_required": True,
+            "auth_url": auth_url,
+        })
     except GoogleSheetsServiceError as e:
         return jsonify({"success": False, "error": f"连接 Google Sheets 失败: {e}"}), 500
 
@@ -4718,6 +4729,40 @@ def google_sheets_status():
         result["spreadsheet_id"] = _GOOGLE_SHEETS_CONFIG.get("spreadsheet_id", "")
         result["success"] = True
         return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/google-sheets/auth-url", methods=["GET"])
+def google_sheets_auth_url():
+    """获取 Google OAuth 授权 URL。用户打开此链接授权后，将重定向 URL 回传。"""
+    try:
+        from google_sheets_service import generate_auth_url as _gen_url
+    except ImportError:
+        return jsonify({"success": False, "error": "Google Sheets 功能不可用"}), 500
+    creds_path = _GOOGLE_SHEETS_CONFIG["credentials_path"]
+    try:
+        url = _gen_url(creds_path)
+        return jsonify({"success": True, "auth_url": url})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/google-sheets/auth-callback", methods=["POST"])
+def google_sheets_auth_callback():
+    """完成 OAuth 授权：接收用户粘贴的重定向 URL，换取并保存 token。"""
+    data = request.get_json(silent=True) or {}
+    redirect_url = (data.get("redirect_url") or "").strip()
+    if not redirect_url:
+        return jsonify({"success": False, "error": "请提供重定向 URL"}), 400
+    try:
+        from google_sheets_service import complete_auth
+    except ImportError:
+        return jsonify({"success": False, "error": "Google Sheets 功能不可用"}), 500
+    token_path = _GOOGLE_SHEETS_CONFIG["token_path"]
+    try:
+        complete_auth(redirect_url, token_path)
+        return jsonify({"success": True, "message": "授权成功！Token 已保存，可以正常使用表格功能。"})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

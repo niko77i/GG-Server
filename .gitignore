@@ -29,6 +29,7 @@ config/google_sheets_token.json
 Thumbs.db
 *.bak.*
 *.swp
+ffmpeg.exe
 
 # IDE
 .vscode/

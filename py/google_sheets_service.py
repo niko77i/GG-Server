@@ -13,9 +13,17 @@ log = logging.getLogger("gg-server")
 # Google Sheets API 权限范围（仅电子表格，最小权限原则）
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
+# 内存中暂存授权中的 flow（state → flow 映射）
+_pending_flows = {}
+
 
 class GoogleSheetsServiceError(Exception):
     """Google Sheets 服务错误。"""
+    pass
+
+
+class AuthRequiredError(GoogleSheetsServiceError):
+    """需要 OAuth 授权（token 不存在且无法刷新）。"""
     pass
 
 
@@ -82,18 +90,17 @@ def check_configured(credentials_path: str) -> dict:
     return result
 
 
-def _get_credentials(credentials_path: str, token_path: str):
-    """获取 OAuth 2.0 凭据（含 token 缓存和自动刷新）。
+def _get_credentials(credentials_path: str, token_path: str, auto_auth: bool = True):
+    """获取 OAuth 2.0 凭据。
 
-    首次调用时启动本地 HTTP 服务器完成 OAuth 授权流程，
-    之后将 token 缓存到 token_path 文件中，下次启动自动复用。
-
-    Args:
-        credentials_path: OAuth 客户端凭据 JSON 文件路径
-        token_path: token 缓存文件路径（不存在则创建）
+    auto_auth=True:  首次调用时启动本地 HTTP 服务器阻塞等待 OAuth 回调
+    auto_auth=False: token 无效时抛出 AuthRequiredError，不阻塞
 
     Returns:
         google.oauth2.credentials.Credentials 对象
+
+    Raises:
+        AuthRequiredError: auto_auth=False 且 token 无效/不存在
     """
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
@@ -101,7 +108,6 @@ def _get_credentials(credentials_path: str, token_path: str):
 
     creds = None
 
-    # 尝试从缓存文件加载已有 token
     if os.path.isfile(token_path):
         try:
             creds = Credentials.from_authorized_user_file(token_path, SCOPES)
@@ -109,7 +115,6 @@ def _get_credentials(credentials_path: str, token_path: str):
         except Exception as e:
             log.warning("Google Sheets: 加载缓存 token 失败: %s", e)
 
-    # 如果没有有效凭据，启动 OAuth 流程
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             log.info("Google Sheets: token 已过期，尝试刷新")
@@ -117,23 +122,26 @@ def _get_credentials(credentials_path: str, token_path: str):
                 creds.refresh(Request())
                 log.info("Google Sheets: token 刷新成功")
             except Exception as e:
-                log.warning("Google Sheets: token 刷新失败，将重新授权: %s", e)
+                log.warning("Google Sheets: token 刷新失败: %s", e)
                 creds = None
 
         if not creds:
-            # 首次授权 —— 启动本地服务器
             if not os.path.isfile(credentials_path):
                 raise GoogleSheetsServiceError(
                     f"凭据文件不存在: {credentials_path}"
                 )
-            flow = InstalledAppFlow.from_client_secrets_file(
-                credentials_path, SCOPES
-            )
-            log.info("Google Sheets: 启动本地 OAuth 授权服务器...")
-            creds = flow.run_local_server(port=0)
-            log.info("Google Sheets: OAuth 授权完成")
+            if auto_auth:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    credentials_path, SCOPES
+                )
+                log.info("Google Sheets: 启动本地 OAuth 授权服务器...")
+                creds = flow.run_local_server(port=0)
+                log.info("Google Sheets: OAuth 授权完成")
+            else:
+                raise AuthRequiredError(
+                    "需要 Google Sheets 授权，请通过 /api/google-sheets/auth-url 获取授权链接"
+                )
 
-        # 缓存 token 到文件
         token_dir = os.path.dirname(token_path)
         if token_dir:
             os.makedirs(token_dir, exist_ok=True)
@@ -144,23 +152,97 @@ def _get_credentials(credentials_path: str, token_path: str):
     return creds
 
 
-def build_service(credentials_path: str, token_path: str):
+def generate_auth_url(credentials_path: str) -> str:
+    """生成 Google OAuth 授权 URL。
+
+    用户在浏览器中打开此 URL 完成授权后，
+    Google 会重定向到 localhost:PORT/?code=...&state=...
+    将浏览器地址栏中的完整 URL 复制下来传给 complete_auth() 即可。
+
+    Returns:
+        授权 URL 字符串
+    """
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    if not os.path.isfile(credentials_path):
+        raise GoogleSheetsServiceError(f"凭据文件不存在: {credentials_path}")
+
+    flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+    )
+    _pending_flows[state] = flow
+    log.info("Google Sheets: 已生成授权 URL (state=%s)", state)
+    return auth_url
+
+
+def complete_auth(redirect_url: str, token_path: str) -> bool:
+    """用授权回调 URL 完成 OAuth，保存 token。
+
+    Args:
+        redirect_url: 用户授权后浏览器地址栏中的完整 URL
+        token_path: token 缓存文件路径
+
+    Returns:
+        True 表示成功
+
+    Raises:
+        GoogleSheetsServiceError: code 缺失或 state 无效
+    """
+    from urllib.parse import urlparse, parse_qs
+
+    parsed = urlparse(redirect_url)
+    params = parse_qs(parsed.query)
+    code = params.get("code", [None])[0]
+    state = params.get("state", [None])[0]
+
+    if not code:
+        raise GoogleSheetsServiceError("重定向 URL 中缺少授权码 (code)")
+    if not state:
+        raise GoogleSheetsServiceError("重定向 URL 中缺少 state")
+
+    flow = _pending_flows.pop(state, None)
+    if not flow:
+        raise GoogleSheetsServiceError(
+            "授权会话已过期或 state 不匹配，请重新发起授权"
+        )
+
+    try:
+        flow.fetch_token(code=code)
+    except Exception as e:
+        raise GoogleSheetsServiceError(f"换取 token 失败: {e}") from e
+
+    creds = flow.credentials
+
+    token_dir = os.path.dirname(token_path)
+    if token_dir:
+        os.makedirs(token_dir, exist_ok=True)
+    with open(token_path, "w", encoding="utf-8") as f:
+        f.write(creds.to_json())
+    log.info("Google Sheets: OAuth 授权完成，token 已保存到 %s", token_path)
+    return True
+
+
+def build_service(credentials_path: str, token_path: str, auto_auth: bool = False):
     """构建 Google Sheets API v4 服务对象。
 
     Args:
         credentials_path: OAuth 客户端凭据 JSON 文件路径
         token_path: token 缓存文件路径
+        auto_auth: 是否在需要授权时自动启动本地 OAuth 服务器（默认 False）
 
     Returns:
         googleapiclient.discovery.Resource 对象
 
     Raises:
         GoogleSheetsServiceError: 凭据无效或授权失败
+        AuthRequiredError: auto_auth=False 且需要用户授权
     """
     from googleapiclient.discovery import build
 
     try:
-        creds = _get_credentials(credentials_path, token_path)
+        creds = _get_credentials(credentials_path, token_path, auto_auth=auto_auth)
         service = build("sheets", "v4", credentials=creds)
         return service
     except Exception as e:
