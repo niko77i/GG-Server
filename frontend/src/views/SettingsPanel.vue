@@ -30,8 +30,8 @@
         <template v-if="authStore.isAdmin || authStore.isDeveloper">
           <el-divider />
           <h4 style="margin-bottom:8px;">📊 充值表配置（仅管理员可见）</h4>
-          <el-form-item label="Google Sheets ID">
-            <el-input v-model="form.recharge_sheet_id" placeholder="输入充值表的 spreadsheet ID" />
+          <el-form-item label="Google Sheets（URL 或 ID）">
+            <el-input v-model="form.recharge_sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" />
           </el-form-item>
         </template>
         <el-button type="primary" @click="save" :loading="saving">💾 保存配置</el-button>
@@ -215,12 +215,16 @@ async function addRegion() {
 
 async function save() {
   saving.value = true
+  // 从 URL 中提取 spreadsheet ID（支持直接粘贴表格链接）
+  const rawId = form.recharge_sheet_id.trim()
+  const m = rawId.match(/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)
+  const sheetId = m ? m[1] : rawId
   const body = {
     account_statuses: form.account_statuses.split('\n').map(s => s.trim()).filter(Boolean),
     account_agents: form.account_agents.split('\n').map(s => s.trim()).filter(Boolean),
     mcc_levels: form.mcc_levels.split('\n').map(s => s.trim()).filter(Boolean),
     sales_persons: form.sales_persons.split('\n').map(s => s.trim()).filter(Boolean),
-    recharge_sheet_id: form.recharge_sheet_id.trim(),
+    recharge_sheet_id: sheetId,
   }
   await store.saveSettings(body)
   store.settings = body

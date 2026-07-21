@@ -3540,13 +3540,34 @@ def accounts_update(aid):
             if not existing_clear:
                 user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                 operator_name = (user["display_name"] or "") if user else ""
-                db.execute(
-                    "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
-                    "VALUES (?, '清', ?, ?, ?)",
-                    (old_status["account_id"], data.get("agent", old_status["agent"] or ""),
-                     operator_name, user_id)
-                )
-                recharge_note = "已追加清账记录"
+                clear_agent = data.get("agent", old_status["agent"] or "")
+                clear_row = {
+                    "account_id": old_status["account_id"],
+                    "amount": "清",
+                    "agent": clear_agent,
+                    "operator": operator_name,
+                }
+                # 读配置 — 未配置则跳过清账
+                sheet_id_row = db.execute(
+                    "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+                ).fetchone()
+                sheet_id = _json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else ""
+                if sheet_id:
+                    try:
+                        credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
+                        if credentials_path and os.path.isfile(credentials_path):
+                            import google_sheets_service as gs
+                            service = gs.build_service(credentials_path)
+                            gs.append_recharge(service, sheet_id, [clear_row])
+                            # Sheets 成功后再写数据库
+                            db.execute(
+                                "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
+                                "VALUES (?, '清', ?, ?, ?)",
+                                (old_status["account_id"], clear_agent, operator_name, user_id)
+                            )
+                            recharge_note = "已追加清账记录"
+                    except Exception as e:
+                        log.warning("死亡清账 Google Sheets 写入失败，跳过: %s", e)
 
         db.commit()
 
@@ -3704,7 +3725,30 @@ def recharge_submit():
         return jsonify({"success": False, "error": "账户ID和金额不能为空"}), 400
 
     try:
-        # 1. 写入数据库
+        # 1. 读配置
+        sheet_id_row = db.execute(
+            "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+        ).fetchone()
+        sheet_id = _json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else ""
+        if not sheet_id:
+            db.close()
+            return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
+
+        # 2. 写 Google Sheets
+        credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
+        if not credentials_path or not os.path.isfile(credentials_path):
+            db.close()
+            return jsonify({"success": False, "error": "Google Sheets 未授权，请联系管理员"}), 500
+        import google_sheets_service as gs
+        service = gs.build_service(credentials_path)
+        gs.append_recharge(service, sheet_id, [{
+            "account_id": account_id,
+            "amount": amount,
+            "agent": agent,
+            "operator": operator,
+        }])
+
+        # 3. Sheets 成功后再写数据库
         db.execute(
             "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -3713,34 +3757,8 @@ def recharge_submit():
         db.commit()
         record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        # 2. 异步追加到 Google Sheets
-        sheets_warning = None
-        try:
-            sheet_id_row = db.execute(
-                "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-            ).fetchone()
-            if sheet_id_row:
-                sheet_id = _json.loads(sheet_id_row["value"]) if sheet_id_row["value"] else ""
-                if sheet_id:
-                    credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
-                    if credentials_path and os.path.isfile(credentials_path):
-                        import google_sheets_service as gs
-                        service = gs.build_service(credentials_path)
-                        gs.append_recharge(service, sheet_id, [{
-                            "account_id": account_id,
-                            "amount": amount,
-                            "agent": agent,
-                            "operator": operator,
-                        }])
-        except Exception as e:
-            log.warning("充值记录已写入数据库，但 Google Sheets 同步失败: %s", e)
-            sheets_warning = "数据库已保存，但 Google Sheets 同步失败，请手动检查"
-
         db.close()
-        resp = {"success": True, "id": record_id}
-        if sheets_warning:
-            resp["warning"] = sheets_warning
-        return jsonify(resp)
+        return jsonify({"success": True, "id": record_id})
     except Exception as e:
         db.close()
         return jsonify({"success": False, "error": str(e)}), 500
@@ -3763,7 +3781,7 @@ def recharge_batch_submit():
     operator = (user["display_name"] or "") if user else ""
 
     try:
-        # 1. 批量写入数据库
+        # 构建有效记录列表
         sheet_rows = []
         for r in records:
             account_id = (r.get("account_id") or "").strip()
@@ -3771,45 +3789,46 @@ def recharge_batch_submit():
             agent = (r.get("agent") or "").strip()
             if not account_id or not amount:
                 continue
-            db.execute(
-                "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (account_id, amount, agent, operator, user_id)
-            )
             sheet_rows.append({
                 "account_id": account_id,
                 "amount": amount,
                 "agent": agent,
                 "operator": operator,
             })
+
+        if not sheet_rows:
+            db.close()
+            return jsonify({"success": False, "error": "所有充值记录缺少账户ID或金额，未写入任何数据"}), 400
+
+        # 1. 读配置
+        sheet_id_row = db.execute(
+            "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+        ).fetchone()
+        sheet_id = _json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else ""
+        if not sheet_id:
+            db.close()
+            return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
+
+        # 2. 写 Google Sheets
+        credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
+        if not credentials_path or not os.path.isfile(credentials_path):
+            db.close()
+            return jsonify({"success": False, "error": "Google Sheets 未授权，请联系管理员"}), 500
+        import google_sheets_service as gs
+        service = gs.build_service(credentials_path)
+        gs.append_recharge(service, sheet_id, sheet_rows)
+
+        # 3. Sheets 成功后再写数据库
+        for r in sheet_rows:
+            db.execute(
+                "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (r["account_id"], r["amount"], r["agent"], r["operator"], user_id)
+            )
         db.commit()
 
-        # 2. 异步追加到 Google Sheets
-        sheets_warning = None
-        if sheet_rows:
-            try:
-                sheet_id_row = db.execute(
-                    "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-                ).fetchone()
-                if sheet_id_row:
-                    sheet_id = _json.loads(sheet_id_row["value"]) if sheet_id_row["value"] else ""
-                    if sheet_id:
-                        credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
-                        if credentials_path and os.path.isfile(credentials_path):
-                            import google_sheets_service as gs
-                            service = gs.build_service(credentials_path)
-                            gs.append_recharge(service, sheet_id, sheet_rows)
-            except Exception as e:
-                log.warning("批量充值 Google Sheets 同步失败: %s", e)
-                sheets_warning = "数据库已保存，但 Google Sheets 同步失败，请手动检查"
-
         db.close()
-        if not sheet_rows:
-            return jsonify({"success": False, "error": "所有充值记录缺少账户ID或金额，未写入任何数据"}), 400
-        resp = {"success": True, "count": len(sheet_rows)}
-        if sheets_warning:
-            resp["warning"] = sheets_warning
-        return jsonify(resp)
+        return jsonify({"success": True, "count": len(sheet_rows)})
     except Exception as e:
         db.close()
         return jsonify({"success": False, "error": str(e)}), 500
