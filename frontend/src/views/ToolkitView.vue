@@ -265,7 +265,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
@@ -310,17 +310,11 @@ const zbShowSheetButtons = computed(() => {
 
 // ========== 保存到数据库相关状态 ==========
 const zbSaveDialogVisible = ref(false)
-const zbSaveProduct = ref('')
-const zbSaveRegion = ref('')
-const zbSaveDate = ref('')  // 前一天
-const zbSaveProducts = ref([])
-const zbSaveProductsLoading = ref(false)
 const zbSaving = ref(false)
-const saveRows = ref([])  // 待保存的行（从 zbRaw 复制，允许删除）
+const saveRows = ref([])
 const zbDupDialogVisible = ref(false)
 const duplicateItems = ref([])
 
-// 默认日期：前一天
 function _yesterday() {
   const d = new Date(Date.now() - 86400000)
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
@@ -328,12 +322,6 @@ function _yesterday() {
 
 async function onSaveDialogOpen() {
   saveRows.value = [...zbRaw.value]
-}
-
-function onProductSelect(pname) {
-  if (!pname) return
-  const p = zbSaveProducts.value.find(x => x.product_name === pname)
-  if (p && p.region) zbSaveRegion.value = p.region
 }
 
 function removeSaveRow(idx) {

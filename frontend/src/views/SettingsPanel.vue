@@ -23,6 +23,10 @@
           <el-input v-model="form.mcc_levels" type="textarea" :rows="3"
             placeholder="每行一个（留空则自由输入）" />
         </el-form-item>
+        <el-form-item label="商务人员选项">
+          <el-input v-model="form.sales_persons" type="textarea" :rows="4"
+            placeholder="每行一个，用于产品编辑时选择商务人员" />
+        </el-form-item>
         <el-button type="primary" @click="save" :loading="saving">💾 保存配置</el-button>
         <span v-if="msg" style="margin-left:8px;font-size:11px;color:#059669;">{{ msg }}</span>
       </el-tab-pane>
@@ -135,6 +139,7 @@ const form = reactive({
   account_statuses: '',
   account_agents: '',
   mcc_levels: '',
+  sales_persons: '',
 })
 
 // 数据管理
@@ -163,6 +168,7 @@ onMounted(async () => {
   form.account_statuses = (store.settings.account_statuses || []).join('\n')
   form.account_agents = (store.settings.account_agents || []).join('\n')
   form.mcc_levels = (store.settings.mcc_levels || []).join('\n')
+  form.sales_persons = (store.settings.sales_persons || []).join('\n')
   loadImportHistory()
   loadRegions()
 })
@@ -202,6 +208,7 @@ async function save() {
     account_statuses: form.account_statuses.split('\n').map(s => s.trim()).filter(Boolean),
     account_agents: form.account_agents.split('\n').map(s => s.trim()).filter(Boolean),
     mcc_levels: form.mcc_levels.split('\n').map(s => s.trim()).filter(Boolean),
+    sales_persons: form.sales_persons.split('\n').map(s => s.trim()).filter(Boolean),
   }
   await store.saveSettings(body)
   store.settings = body

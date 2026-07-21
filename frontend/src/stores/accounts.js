@@ -13,7 +13,7 @@ export const useAccountStore = defineStore('accounts', {
     mccPage: 1,
     mccPageSize: 20,
     mccFilters: { search: '', level: '', parent_filter: '' },
-    settings: { account_statuses: ['存活','死亡','验证','限额'], account_agents: [], mcc_levels: [] },
+    settings: { account_statuses: ['存活','死亡','验证','限额'], account_agents: [], mcc_levels: [], sales_persons: [] },
   }),
 
   actions: {

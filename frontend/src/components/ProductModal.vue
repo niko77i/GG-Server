@@ -17,7 +17,10 @@
         <el-input v-model="form.customer" placeholder="产品所属客户" />
       </el-form-item>
       <el-form-item label="商务">
-        <el-input v-model="form.sales_person" placeholder="负责该产品的商务人员" />
+        <el-select v-model="form.sales_person" filterable allow-create clearable
+          placeholder="选择或输入商务人员" style="width:100%;">
+          <el-option v-for="sp in salesPersonOptions" :key="sp" :label="sp" :value="sp" />
+        </el-select>
       </el-form-item>
       <el-form-item label="代投比例">
         <el-input v-model.number="form.agency_ratio" placeholder="数字，如 6 表示 6%" />
@@ -36,16 +39,20 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { useProductStore } from '@/stores/products'
+import { useAccountStore } from '@/stores/accounts'
 import api from '@/api/client'
 
 const props = defineProps({ visible: Boolean, editId: [Number, null], mccOptions: Array })
 const emit = defineEmits(['update:visible', 'saved'])
 const store = useProductStore()
+const accountStore = useAccountStore()
 const saving = ref(false)
 const regionOptions = ref([])
 const form = reactive({ product_name: '', kpi: '', region: '', customer: '', sales_person: '', agency_ratio: null, mcc_id: '' })
+
+const salesPersonOptions = computed(() => accountStore.settings.sales_persons || [])
 
 async function loadRegions() {
   try {
@@ -56,6 +63,7 @@ async function loadRegions() {
 
 function init() {
   loadRegions()
+  accountStore.loadSettings()
   if (props.editId) {
     const p = store.products.find(p => p.id === props.editId)
     if (p) Object.assign(form, {

@@ -4059,7 +4059,7 @@ def mcc_detail(mid):
 def account_settings_get():
     """返回账户管理相关的可配置项（状态、代理、MCC 等级等）。"""
     db = _yt_db()
-    keys = ["account_statuses", "account_agents", "mcc_levels"]
+    keys = ["account_statuses", "account_agents", "mcc_levels", "sales_persons"]
     result = {}
     for k in keys:
         row = db.execute("SELECT value FROM tags WHERE key=?", (k,)).fetchone()
@@ -4074,6 +4074,7 @@ def account_settings_get():
                 "account_statuses": ["存活", "死亡", "验证", "限额"],
                 "account_agents": [],
                 "mcc_levels": [],
+                "sales_persons": [],
             }
             result[k] = defaults.get(k, [])
     db.close()
@@ -4085,7 +4086,7 @@ def account_settings_save():
     """保存账户管理相关的可配置项。"""
     data = request.get_json(silent=True) or {}
     db = _yt_db()
-    for key in ["account_statuses", "account_agents", "mcc_levels"]:
+    for key in ["account_statuses", "account_agents", "mcc_levels", "sales_persons"]:
         if key in data:
             db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
                        (key, _json.dumps(data[key], ensure_ascii=False)))
