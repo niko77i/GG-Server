@@ -883,6 +883,32 @@ def task_get(task_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def task_delete(task_id: str):
+    """删除单条任务记录。"""
+    db = get_db()
+    db.execute("DELETE FROM video_tasks WHERE task_id=?", (task_id,))
+    db.commit()
+    db.close()
+
+
+def task_cleanup_old(retention_days: int = 7):
+    """删除超过保留天数的已完成/错误任务记录。"""
+    db = get_db()
+    db.execute(
+        "DELETE FROM video_tasks WHERE status IN ('completed', 'error') "
+        "AND finished_at != '' "
+        "AND datetime(finished_at) < datetime('now', 'localtime', ?)",
+        (f'-{retention_days} days',)
+    )
+    # 同时清理长时间卡在 pending/processing 的僵尸任务（超过 1 天）
+    db.execute(
+        "DELETE FROM video_tasks WHERE status IN ('pending', 'processing') "
+        "AND datetime(created_at) < datetime('now', 'localtime', '-1 day')"
+    )
+    db.commit()
+    db.close()
+
+
 # ---- 配置 ----
 
 def config_get(key: str, default: str = "") -> str:

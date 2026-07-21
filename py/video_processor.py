@@ -40,6 +40,36 @@ class VideoTask:
         images = self.params["images"]
         settings = self.params["settings"]
         logo = self.params.get("logo")
+        # 兼容前端只传 settings.use_logo + logo_path 的场景（logo 对象在顶层为 None）
+        if not logo and settings.get("use_logo") and settings.get("logo_path"):
+            logo = {
+                "path": settings["logo_path"],
+                "position": settings.get("logo_position", "top-right"),
+                "effect": settings.get("logo_effect", "static"),
+                "size": settings.get("logo_size", 16),
+            }
+        # 兜底：前端没传 logo_path 时，从图片目录自动查找 包logo/ 子目录
+        if not logo and settings.get("use_logo") and images:
+            # 从第一张图片的目录向上查找 包logo/（最多找 2 层）
+            first_img_dir = os.path.dirname(images[0])
+            for _ in range(2):
+                logo_dir = os.path.join(first_img_dir, "包logo")
+                if os.path.isdir(logo_dir):
+                    for lf in sorted(os.listdir(logo_dir)):
+                        if lf.lower().endswith(".png") and "_logo" in lf.lower():
+                            logo = {
+                                "path": os.path.join(logo_dir, lf).replace("\\", "/"),
+                                "position": settings.get("logo_position", "top-right"),
+                                "effect": settings.get("logo_effect", "static"),
+                                "size": settings.get("logo_size", 16),
+                            }
+                            break
+                    if logo:
+                        break
+                parent = os.path.dirname(first_img_dir)
+                if parent == first_img_dir:
+                    break
+                first_img_dir = parent
         transition = settings.get("transition", "fade")
         duration_per_frame = int(settings.get("duration_per_frame") or 3)
         resolution = settings.get("resolution", "1920:1080")
@@ -56,7 +86,9 @@ class VideoTask:
         inner_W = max(int(W * content_scale), 64)
         inner_H = max(int(H * content_scale), 64)
         # Logo 缩放到画面宽度的 16%（最小值 72px），只占一小角
-        logo_max_w = max(int(W * 0.16), 72)
+        # Logo 缩放比例：前端滑块 8-25%，默认 16%
+        logo_scale = float(settings.get("logo_size", 16)) / 100.0
+        logo_max_w = max(int(W * logo_scale), 48)
 
         # 提前计算总时长（后面多次用到）
         xfade_dur = 0.5 if transition != "none" else 0.0
@@ -230,78 +262,65 @@ class VideoTask:
         # ④ 将前景（rgba，透明填充区域会露底）叠加到背景上
         filter_parts.append(f"[bg]{fg_label}overlay=0:0[comp]")
 
-        # ⑤ Logo 叠加（缩放到画面宽度 16%）
+        # ⑤ Logo 叠加（缩放到画面宽度 16%，含去白底、半透明、阴影）
         if logo_idx >= 0:
             logo_pos = logo.get("position", "top-right")
             logo_effect = logo.get("effect", "static")
             overlay_x, overlay_y = self._logo_xy(logo_pos)
 
+            # === 公共基础处理：缩放 + 去白底 + 分叉（阴影用） ===
+            filter_parts.append(
+                f"[{logo_idx}:v]loop=loop=-1:size=1:start=0,"
+                f"trim=duration={total_duration},setpts=PTS-STARTPTS,"
+                f"scale={logo_max_w}:-1:force_original_aspect_ratio=decrease,"
+                f"format=rgba,"
+                f"colorkey=0xffffff:0.25:0.1,"       # 去白底：白色/近白色 → 透明
+                f"colorchannelmixer=aa=0.85,"          # 微透明 85%
+                f"split[l_base][l_for_shadow]"
+            )
+
+            # === 阴影：降低不透明度 + 模糊 ===
+            filter_parts.append(
+                f"[l_for_shadow]colorchannelmixer=aa=0.25,boxblur=6[l_shadow]"
+            )
+
+            # === 各效果的坐标 + [l_base] → [l_effected] 处理 ===
             if logo_effect == "fade":
-                # 淡入淡出
                 filter_parts.append(
-                    f"[{logo_idx}:v]loop=loop=-1:size=1:start=0,"
-                    f"trim=duration={total_duration},setpts=PTS-STARTPTS,"
-                    f"scale={logo_max_w}:-1:force_original_aspect_ratio=decrease,"
-                    f"format=rgba,"
-                    f"fade=t=in:st=0:d=1,fade=t=out:st={total_duration-1}:d=1[l]"
+                    f"[l_base]fade=t=in:st=0:d=1,fade=t=out:st={total_duration-1}:d=1[l_effected]"
                 )
-                filter_parts.append(f"[comp][l]overlay=x='{overlay_x}':y='{overlay_y}'[post_logo]")
-
+                logo_x, logo_y = overlay_x, overlay_y
+                shadow_x, shadow_y = f"{overlay_x}+2", f"{overlay_y}+2"
             elif logo_effect == "bounce":
-                # 浮动弹跳 — 使用动态坐标，忽略位置选择
-                bx, by = self._logo_xy("floating")
-                filter_parts.append(
-                    f"[{logo_idx}:v]loop=loop=-1:size=1:start=0,"
-                    f"trim=duration={total_duration},setpts=PTS-STARTPTS,"
-                    f"scale={logo_max_w}:-1:force_original_aspect_ratio=decrease,"
-                    f"format=rgba[l]"
-                )
-                filter_parts.append(f"[comp][l]overlay=x='{bx}':y='{by}'[post_logo]")
-
+                logo_x = f"{overlay_x}+20*sin(t*2)"
+                logo_y = f"{overlay_y}+15*cos(t*1.5)"
+                shadow_x, shadow_y = f"{logo_x}+2", f"{logo_y}+2"
+                filter_parts.append(f"[l_base]null[l_effected]")
             elif logo_effect == "zoom-in":
-                # 放大进入：0→0.6s 从 0.3x 放大到 1x，同时淡入
                 filter_parts.append(
-                    f"[{logo_idx}:v]loop=loop=-1:size=1:start=0,"
-                    f"trim=duration={total_duration},setpts=PTS-STARTPTS,"
-                    f"scale={logo_max_w}:-1:force_original_aspect_ratio=decrease,"
-                    f"format=rgba,"
-                    f"fade=t=in:st=0:d=0.6:alpha=1[l]"
+                    f"[l_base]fade=t=in:st=0:d=0.6:alpha=1[l_effected]"
                 )
-                filter_parts.append(f"[comp][l]overlay=x='{overlay_x}':y='{overlay_y}'[post_logo]")
-
+                logo_x, logo_y = overlay_x, overlay_y
+                shadow_x, shadow_y = f"{overlay_x}+2", f"{overlay_y}+2"
             elif logo_effect == "slide-right":
-                # 从右滑入：0→0.6s 从画面外右侧滑到目标位置
-                sx = f"if(lt(t,0.6),W-(W-w+10)*(t/0.6),{overlay_x})"
-                filter_parts.append(
-                    f"[{logo_idx}:v]loop=loop=-1:size=1:start=0,"
-                    f"trim=duration={total_duration},setpts=PTS-STARTPTS,"
-                    f"scale={logo_max_w}:-1:force_original_aspect_ratio=decrease,"
-                    f"format=rgba[l]"
-                )
-                filter_parts.append(f"[comp][l]overlay=x='{sx}':y='{overlay_y}'[post_logo]")
-
+                logo_x = f"if(lt(t,0.6),W-(W-w+10)*(t/0.6),{overlay_x})"
+                logo_y = overlay_y
+                shadow_x = f"if(lt(t,0.6),W-(W-w+10)*(t/0.6)+2,{overlay_x}+2)"
+                shadow_y = f"{overlay_y}+2"
+                filter_parts.append(f"[l_base]null[l_effected]")
             elif logo_effect == "pulse":
-                # 脉冲缩放：周期性缩放 + 浮动
-                px = f"{overlay_x}+6*sin(t*3)"
-                py = f"{overlay_y}+4*sin(t*2.5)"
-                filter_parts.append(
-                    f"[{logo_idx}:v]loop=loop=-1:size=1:start=0,"
-                    f"trim=duration={total_duration},setpts=PTS-STARTPTS,"
-                    f"scale={logo_max_w}:-1:force_original_aspect_ratio=decrease,"
-                    f"format=rgba[l]"
-                )
-                filter_parts.append(f"[comp][l]overlay=x='{px}':y='{py}'[post_logo]")
+                logo_x = f"{overlay_x}+6*sin(t*3)"
+                logo_y = f"{overlay_y}+4*sin(t*2.5)"
+                shadow_x, shadow_y = f"{logo_x}+2", f"{logo_y}+2"
+                filter_parts.append(f"[l_base]null[l_effected]")
+            else:  # static
+                logo_x, logo_y = overlay_x, overlay_y
+                shadow_x, shadow_y = f"{overlay_x}+2", f"{overlay_y}+2"
+                filter_parts.append(f"[l_base]null[l_effected]")
 
-            else:
-                # static — 静态放置
-                filter_parts.append(
-                    f"[{logo_idx}:v]loop=loop=-1:size=1:start=0,"
-                    f"trim=duration={total_duration},setpts=PTS-STARTPTS,"
-                    f"scale={logo_max_w}:-1:force_original_aspect_ratio=decrease,"
-                    f"format=rgba[l]"
-                )
-                filter_parts.append(f"[comp][l]overlay=x='{overlay_x}':y='{overlay_y}'[post_logo]")
-
+            # === 先叠阴影再叠 logo ===
+            filter_parts.append(f"[comp][l_shadow]overlay=x={shadow_x}:y={shadow_y}[with_shadow]")
+            filter_parts.append(f"[with_shadow][l_effected]overlay=x={logo_x}:y={logo_y}[post_logo]")
             current_vid = "[post_logo]"
         else:
             current_vid = "[comp]"
@@ -532,7 +551,7 @@ class VideoTask:
     @staticmethod
     def _logo_xy(position: str) -> tuple[str, str]:
         """根据位置返回 (x_expr, y_expr) 供 overlay 滤镜使用。"""
-        margin = 10
+        margin = 24
         positions = {
             "top-left":     (f"{margin}",                 f"{margin}"),
             "top-right":    (f"W-w-{margin}",             f"{margin}"),

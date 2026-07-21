@@ -41,20 +41,24 @@
         <!-- Logo 叠加 -->
         <div v-if="logo" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;margin-bottom:16px;">
           <el-checkbox v-model="useLogo">🏷️ Logo 叠加 — 检测到: {{ logo.filename }}</el-checkbox>
-          <div v-if="useLogo" style="display:flex;gap:12px;margin-top:8px;">
-            <el-form-item label="位置" style="flex:1;margin-bottom:0;">
+          <div v-if="useLogo" style="display:flex;gap:12px;margin-top:8px;flex-wrap:wrap;">
+            <el-form-item label="位置" style="flex:1;min-width:120px;margin-bottom:0;">
               <el-select v-model="logoPosition" size="small">
                 <el-option label="右上" value="top-right" /><el-option label="左上" value="top-left" />
                 <el-option label="左下" value="bottom-left" /><el-option label="右下" value="bottom-right" />
                 <el-option label="浮动" value="floating" />
               </el-select>
             </el-form-item>
-            <el-form-item label="效果" style="flex:1;margin-bottom:0;">
+            <el-form-item label="效果" style="flex:1;min-width:130px;margin-bottom:0;">
               <el-select v-model="logoEffect" size="small">
                 <el-option label="静态" value="static" /><el-option label="淡入淡出" value="fade" />
                 <el-option label="浮动弹跳" value="bounce" /><el-option label="放大进入" value="zoom-in" />
                 <el-option label="从右滑入" value="slide-right" /><el-option label="脉冲缩放" value="pulse" />
               </el-select>
+            </el-form-item>
+            <el-form-item style="flex:2;min-width:180px;margin-bottom:0;">
+              <template #label><span style="font-size:12px;">大小 {{ logoSize }}%</span></template>
+              <el-slider v-model="logoSize" :min="8" :max="25" size="small" show-stops />
             </el-form-item>
           </div>
         </div>
@@ -243,6 +247,7 @@ const randomOrder = ref(false)
 const useLogo = ref(false)
 const logoPosition = ref('top-right')
 const logoEffect = ref('static')
+const logoSize = ref(16)
 
 // AI
 const useAI = ref(false)
@@ -567,6 +572,7 @@ function getSettings() {
       logo_path: (useLogo.value && logo.value) ? logo.value.path : undefined,
       logo_position: logoPosition.value,
       logo_effect: logoEffect.value,
+      logo_size: logoSize.value,
       frame_duration: frameDuration.value,
       transition: transition.value,
       resolution: resolution.value,
@@ -809,6 +815,7 @@ function applyHistory(e) {
     if (s.use_logo != null) useLogo.value = s.use_logo
     if (s.logo_position) logoPosition.value = s.logo_position
     if (s.logo_effect) logoEffect.value = s.logo_effect
+    if (s.logo_size) logoSize.value = s.logo_size
     // 背景
     if (s.bg_image != null) bgImage.value = s.bg_image
     if (s.dynamic_bg != null) dynamicBg.value = s.dynamic_bg

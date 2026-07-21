@@ -269,6 +269,12 @@ def scrape():
             try:
                 os.makedirs(logo_dir, exist_ok=True)
                 logo_result = save_logo(logo_url, logo_dir, f"{pkg_name}_logo")
+                # 同时保存一份原图到包根目录（作为内容图片使用，不会被叠加优化影响）
+                import shutil
+                logo_src = os.path.join(logo_dir, f"{pkg_name}_logo.png")
+                logo_dst = os.path.join(pkg_dir, f"{pkg_name}_logo.png")
+                if os.path.isfile(logo_src) and not os.path.isfile(logo_dst):
+                    shutil.copy2(logo_src, logo_dst)
                 response["logo"] = logo_result
             except (ResizeError, OSError):
                 response["logo"] = None
@@ -427,6 +433,8 @@ def video_scan_dir():
     images = []
     from PIL import Image
     for root, dirs, files in os.walk(dir_path):
+        # 跳过 包logo 子目录（logo 只用于叠加，不混入内容图片）
+        dirs[:] = [d for d in dirs if d != "包logo"]
         for f in sorted(files):
             if not f.lower().endswith(".png"):
                 continue
@@ -666,6 +674,10 @@ def video_progress():
                 if t.status in ("completed", "error") and (_now - getattr(t, '_completed_at', 0)) > 3600]
     for tid in _expired:
         _video_tasks.pop(tid, None)
+        try:
+            database.task_delete(tid)
+        except Exception:
+            pass
 
     if task is None:
         # 内存中没有，尝试从 SQLite 查询（服务器重启后兜底）
@@ -5188,7 +5200,9 @@ def _run_weekly_cleanup_once():
     if os.path.isdir(audio_tmp):
         _shutil.rmtree(audio_tmp)
         os.makedirs(audio_tmp, exist_ok=True)
-    print(f"[Cleanup] 已清理爬取图片、视频、音频替换临时文件: {_dt.datetime.now()}")
+    # 清理 video_tasks 数据库历史记录（保留 7 天）
+    database.task_cleanup_old(retention_days=7)
+    print(f"[Cleanup] 已清理爬取图片、视频、音频替换临时文件及过期任务记录: {_dt.datetime.now()}")
 
 
 def _send_telegram_notifications(db, pkgs, runner_ids):
