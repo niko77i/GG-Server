@@ -3529,20 +3529,20 @@ def accounts_update(aid):
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
 
-        # 复活清理：状态从「死亡」变为其他时，删除旧的清账记录
+        # 状态清账：非存活状态自动追加 amount='清'，回到存活时删除旧记录
         new_status = data.get("status", "")
-        if old_status and old_status["status"] == "死亡" and new_status and new_status != "死亡":
+        recharge_note = None
+        if new_status == "存活" and old_status and old_status["status"] != "存活":
+            # 从非存活回到存活：删除该账户所有清账记录
             db.execute(
                 "DELETE FROM recharge_records WHERE account_id=? AND amount='清'",
                 (old_status["account_id"],)
             )
-
-        # 死亡清账：状态变为「死亡」时自动追加 amount='清'
-        recharge_note = None
-        if new_status == "死亡" and old_status and old_status["status"] != "死亡":
+        elif new_status and new_status != "存活" and old_status and old_status["status"] != new_status:
+            # 切换到非存活状态：按 account_id + status 去重后写入
             existing_clear = db.execute(
-                "SELECT id FROM recharge_records WHERE account_id=? AND amount='清'",
-                (old_status["account_id"],)
+                "SELECT id FROM recharge_records WHERE account_id=? AND amount='清' AND status=?",
+                (old_status["account_id"], new_status)
             ).fetchone()
             if not existing_clear:
                 user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
@@ -3553,6 +3553,7 @@ def accounts_update(aid):
                     "amount": "清",
                     "agent": clear_agent,
                     "operator": operator_name,
+                    "status": new_status,
                 }
                 # 读配置 — 未配置则跳过清账
                 sheet_id_row = db.execute(
@@ -3566,13 +3567,13 @@ def accounts_update(aid):
                         gs.append_recharge(service, sheet_id, [clear_row])
                         # Sheets 成功后再写数据库
                         db.execute(
-                            "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
-                            "VALUES (?, '清', ?, ?, ?)",
-                            (old_status["account_id"], clear_agent, operator_name, user_id)
+                            "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by) "
+                            "VALUES (?, '清', ?, ?, ?, ?)",
+                            (old_status["account_id"], clear_agent, operator_name, new_status, user_id)
                         )
                         recharge_note = "已追加清账记录"
                     except Exception as e:
-                        log.warning("死亡清账 Google Sheets 写入失败，跳过: %s", e)
+                        log.warning("状态清账 Google Sheets 写入失败，跳过: %s", e)
 
         db.commit()
 
@@ -3737,6 +3738,12 @@ def recharge_submit():
         db.close()
         return jsonify({"success": False, "error": "账户ID和金额不能为空"}), 400
 
+    # 校验账户状态必须为「存活」
+    ac = db.execute("SELECT status FROM accounts WHERE account_id=?", (account_id,)).fetchone()
+    if not ac or ac["status"] != "存活":
+        db.close()
+        return jsonify({"success": False, "error": "仅存活状态的账户允许充值"}), 400
+
     try:
         # 1. 读配置
         sheet_id_row = db.execute(
@@ -3790,13 +3797,16 @@ def recharge_batch_submit():
     operator = (user["display_name"] or "") if user else ""
 
     try:
-        # 构建有效记录列表
+        # 构建有效记录列表（仅存活账户）
         sheet_rows = []
         for r in records:
             account_id = (r.get("account_id") or "").strip()
             amount = str(r.get("amount", "")).strip()
             agent = (r.get("agent") or "").strip()
             if not account_id or not amount:
+                continue
+            ac = db.execute("SELECT status FROM accounts WHERE account_id=?", (account_id,)).fetchone()
+            if not ac or ac["status"] != "存活":
                 continue
             sheet_rows.append({
                 "account_id": account_id,
@@ -3849,7 +3859,7 @@ def accounts_recharge_records(aid):
         db.close()
         return jsonify({"success": False, "error": "账户不存在"}), 404
     records = db.execute(
-        "SELECT id, account_id, amount, agent, operator, created_at FROM recharge_records "
+        "SELECT id, account_id, amount, agent, operator, status, created_at FROM recharge_records "
         "WHERE account_id=? ORDER BY created_at DESC",
         (account["account_id"],)
     ).fetchall()

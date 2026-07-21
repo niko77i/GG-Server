@@ -254,9 +254,9 @@ def append_recharge(service, spreadsheet_id: str, rows: list) -> dict:
     """将充值记录追加到 Google Sheets「充值表」sheet。
 
     rows: [{"account_id": "123-456-7890", "amount": "1000",
-            "agent": "卡尔", "operator": "张三"}, ...]
+            "agent": "卡尔", "operator": "张三", "status": "死亡"}, ...]
 
-    A=账户ID, B=金额, C=代理, D=运营, E=留空, F=留空
+    A=账户ID, B=金额, C=代理, D=运营, E=留空, F=留空, G=状态
     """
     # 1. 获取表格信息，找到名为「充值表」的 sheet
     ss = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
@@ -279,7 +279,7 @@ def append_recharge(service, spreadsheet_id: str, rows: list) -> dict:
     sheet_rows = target_sheet["rowCount"]
 
     # 2. 读取现有数据，找最后一行
-    range_read = f"'{sheet_name}'!A:F"
+    range_read = f"'{sheet_name}'!A:G"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range_read,
     ).execute()
@@ -291,7 +291,7 @@ def append_recharge(service, spreadsheet_id: str, rows: list) -> dict:
             last_row = i + 1
             break
 
-    # 3. 构建待写入行（A-F，E和F留空）
+    # 3. 构建待写入行（A-G，E和F留空）
     new_rows = []
     for r in rows:
         new_rows.append([
@@ -301,6 +301,7 @@ def append_recharge(service, spreadsheet_id: str, rows: list) -> dict:
             r.get("operator", ""),
             "",  # E列 时间 留空
             "",  # F列 是否充值 留空
+            r.get("status", ""),  # G列 状态
         ])
 
     # 4. 检查是否需要扩充行数
@@ -321,7 +322,7 @@ def append_recharge(service, spreadsheet_id: str, rows: list) -> dict:
     # 5. 追加写入
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range=f"'{sheet_name}'!A{start}:F{end}",
+        range=f"'{sheet_name}'!A{start}:G{end}",
         valueInputOption="USER_ENTERED",
         body={"values": new_rows},
     ).execute()

@@ -42,7 +42,7 @@ const store = useAccountStore()
 const authStore = useAuthStore()
 const saving = ref(false)
 
-const accountOptions = computed(() => store.accounts || [])
+const accountOptions = computed(() => (store.accounts || []).filter(a => a.status === '存活'))
 
 const operator = computed(() => authStore.user?.display_name || '')
 

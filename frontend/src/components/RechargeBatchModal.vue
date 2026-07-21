@@ -43,7 +43,12 @@ const unifiedAmount = ref('')
 const rows = ref([])
 
 function init() {
-  rows.value = props.accounts.map(a => ({
+  const alive = props.accounts.filter(a => a.status === '存活')
+  const skipped = props.accounts.length - alive.length
+  if (skipped > 0) {
+    ElMessage.warning(`已跳过 ${skipped} 个非存活状态的账户，仅可对存活账户充值`)
+  }
+  rows.value = alive.map(a => ({
     account_id: a.account_id,
     agent: a.agent || '',
     amount: '',

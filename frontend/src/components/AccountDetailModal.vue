@@ -30,6 +30,12 @@
       <h4>💰 充值记录（{{ rechargeRecords.length }} 条）</h4>
       <el-table :data="rechargeRecords" size="small" border stripe v-if="rechargeRecords.length" style="margin-top:8px;">
         <el-table-column prop="amount" label="金额" width="80" />
+        <el-table-column prop="status" label="状态" width="80">
+          <template #default="{ row }">
+            <el-tag v-if="row.status" size="small" type="warning">{{ row.status }}</el-tag>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="agent" label="代理" width="80" />
         <el-table-column prop="operator" label="运营" width="80" />
         <el-table-column prop="created_at" label="时间" min-width="140" />

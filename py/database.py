@@ -173,6 +173,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             amount TEXT NOT NULL,
             agent TEXT DEFAULT '',
             operator TEXT DEFAULT '',
+            status TEXT DEFAULT '',
             created_by INTEGER REFERENCES users(id),
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
@@ -399,6 +400,7 @@ def _ensure_schema(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "products", "owner_id", "owner_id INTEGER REFERENCES users(id)")
     _add_column_if_missing(conn, "products", "runner_ids", "runner_ids TEXT DEFAULT '[]'")
     _add_column_if_missing(conn, "products", "is_archived", "is_archived INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "recharge_records", "status", "status TEXT DEFAULT ''")
     # 高频查询字段索引（_add_column_if_missing 之后创建，确保列已存在）
     conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
