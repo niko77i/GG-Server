@@ -148,11 +148,12 @@ def upsert_zuobiao(service, spreadsheet_id: str, sheet_gid: str, rows: list,
         range=range_read,
     ).execute()
     existing = result.get("values", [])
-    # 找到真正的最后一行（跳过末尾空行）
+    # 找到真正的最后一行（只看 A-J 列，忽略 M/N 的公式默认值）
     last_row = 0
     for i in range(len(existing) - 1, -1, -1):
-        if any(cell for cell in existing[i] if cell):
-            last_row = i + 1  # 1-based
+        row = existing[i]
+        if any(row[j] for j in range(min(10, len(row))) if row[j]):
+            last_row = i + 1
             break
 
     # 3. 构建索引
