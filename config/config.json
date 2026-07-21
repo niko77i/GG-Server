@@ -22,5 +22,10 @@
     "telegram": {
         "bot_token": "8705623419:AAHTV7MUQ9xlYe2FGzwgJFJI6AI_afeu07Y",
         "chat_id": "-5220122275"
+    },
+    "google_sheets": {
+        "credentials_path": "config/google_sheets_credentials.json",
+        "token_path": "config/google_sheets_token.json",
+        "spreadsheet_id": ""
     }
 }

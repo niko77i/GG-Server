@@ -9,3 +9,8 @@ google-ads>=24.0
 deep-translator>=1.11
 
 flask-jwt-extended>=4.6.0
+
+# Google Sheets API
+google-api-python-client>=2.0
+google-auth-httplib2>=0.1
+google-auth-oauthlib>=1.0
