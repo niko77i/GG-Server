@@ -166,6 +166,18 @@ def _ensure_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_acmh_account ON account_mcc_history(account_id);
         CREATE INDEX IF NOT EXISTS idx_acmh_changed_by ON account_mcc_history(changed_by);
 
+        -- 充值记录
+        CREATE TABLE IF NOT EXISTS recharge_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            agent TEXT DEFAULT '',
+            operator TEXT DEFAULT '',
+            created_by INTEGER REFERENCES users(id),
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_recharge_account ON recharge_records(account_id);
+
         -- 文案管理
         CREATE TABLE IF NOT EXISTS copywritings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
