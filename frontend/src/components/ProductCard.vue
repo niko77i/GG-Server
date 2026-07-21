@@ -15,7 +15,16 @@
             <el-tag size="small" type="primary">{{ product.region }}</el-tag>
           </el-tooltip>
           <el-tag v-if="product.customer" size="small" type="success">👤 {{ product.customer }}</el-tag>
-          <el-tag v-if="product.mcc_name" size="small" type="info">🏢 {{ product.mcc_name }}</el-tag>
+          <el-tooltip v-if="product.mcc_name" placement="top">
+            <template #content>
+              <div>🏢 {{ product.mcc_name }}</div>
+              <div v-if="product.mcc_code">🆔 {{ product.mcc_code }}</div>
+              <div style="margin-top:4px;color:#aaa;font-size:11px;">点击复制完整信息</div>
+            </template>
+            <el-tag size="small" type="info" style="cursor:pointer;" @click.stop="copyMcc">
+              🏢 {{ product.mcc_name }}
+            </el-tag>
+          </el-tooltip>
           <el-tooltip v-if="parsedRunnerIds.length" placement="top">
             <template #content>
               <div v-for="rid in parsedRunnerIds" :key="rid">{{ getRunnerName(rid) }}</div>
@@ -234,6 +243,12 @@ async function batchDelPkgs() {
 function copy(text) {
   if (!text) return
   copyToClipboard(text).then(() => { ElMessage.success('已复制 ✓') })
+}
+
+function copyMcc() {
+  const parts = [props.product.mcc_name]
+  if (props.product.mcc_code) parts.push(props.product.mcc_code)
+  copyToClipboard(parts.join('\n')).then(() => { ElMessage.success('已复制 MCC 信息 ✓') })
 }
 
 function copySeriesName(text) {
