@@ -2373,6 +2373,7 @@ def products_update(pid):
     _product_fields = {
         "product_name": "product_name", "kpi": "kpi", "region": "region",
         "status": "status", "mcc_id": "mcc_id", "customer": "customer",
+        "sales_person": "sales_person", "agency_ratio": "agency_ratio",
     }
     for key, col in _product_fields.items():
         if key in data:
@@ -5792,7 +5793,7 @@ def ad_reports_products():
     user_id = int(get_jwt_identity())
     db = _yt_db()
     rows = db.execute("""
-        SELECT DISTINCT p.id, p.product_name, p.region
+        SELECT DISTINCT p.id, p.product_name, p.region, p.sales_person, p.agency_ratio
         FROM products p
         LEFT JOIN product_runners pr ON p.id = pr.product_id
         WHERE (p.is_archived IS NULL OR p.is_archived = 0)
