@@ -14,5 +14,10 @@ export const googleSheetsApi = {
   /** 保存当前用户的 Google Sheets 配置 */
   saveConfig(body) {
     return api.post('/config/google-sheets', body)
+  },
+
+  /** 将做表数据写入用户激活的 Google Sheets */
+  updateZuobiao(body) {
+    return api.post('/google-sheets/update-zuobiao', body)
   }
 }

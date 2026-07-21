@@ -4224,6 +4224,105 @@ def config_google_sheets_save():
     return jsonify({"success": True})
 
 
+@app.route("/api/google-sheets/update-zuobiao", methods=["POST"])
+@jwt_required()
+def google_sheets_update_zuobiao():
+    """将做表数据写入用户激活的 Google Sheets 表格。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    product_name = (data.get("product_name") or "").strip()
+    region = (data.get("region") or "").strip()
+    report_date = (data.get("report_date") or "").strip()
+    rows = data.get("rows") or []
+
+    if not product_name:
+        return jsonify({"success": False, "error": "产品名不能为空"}), 400
+    if not rows:
+        return jsonify({"success": False, "error": "做表数据不能为空"}), 400
+
+    # 读取用户激活的表格配置
+    db = _yt_db()
+    config_row = db.execute(
+        "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
+    ).fetchone()
+    active_row = db.execute(
+        "SELECT value FROM config WHERE key=?", (f"google_sheets_active_{user_id}",)
+    ).fetchone()
+    db.close()
+
+    sheets = []
+    if config_row:
+        try:
+            sheets = json.loads(config_row["value"])
+        except Exception:
+            sheets = []
+    active_id = active_row["value"].strip() if active_row else ""
+
+    if not sheets:
+        return jsonify({"success": False, "error": "请先在个人中心配置 Google 表格"}), 400
+
+    active_config = None
+    for s in sheets:
+        if s.get("id") == active_id:
+            active_config = s
+            break
+    if not active_config:
+        active_config = sheets[0]
+
+    spreadsheet_id = active_config.get("spreadsheet_id", "")
+    sheet_gid = active_config.get("sheet_gid", "0")
+    if not spreadsheet_id:
+        return jsonify({"success": False, "error": "表格 ID 为空，请检查配置"}), 400
+
+    # 获取产品的 sales_person 和 agency_ratio
+    db2 = _yt_db()
+    prod_row = db2.execute(
+        "SELECT sales_person, agency_ratio FROM products WHERE product_name=?",
+        (product_name,)
+    ).fetchone()
+    db2.close()
+    sales_person = prod_row["sales_person"] if prod_row and prod_row["sales_person"] else ""
+    agency_ratio = prod_row["agency_ratio"] if prod_row else None
+
+    # 构建 Google Sheets 服务
+    try:
+        from google_sheets_service import build_service, get_spreadsheet_info, upsert_zuobiao, GoogleSheetsServiceError
+    except ImportError:
+        return jsonify({"success": False, "error": "Google Sheets 功能不可用"}), 500
+
+    creds_path = _GOOGLE_SHEETS_CONFIG["credentials_path"]
+    token_path = _GOOGLE_SHEETS_CONFIG["token_path"]
+
+    try:
+        service = build_service(creds_path, token_path)
+        info = get_spreadsheet_info(service, spreadsheet_id)
+        operator_name = info.get("operator", "")
+    except GoogleSheetsServiceError as e:
+        return jsonify({"success": False, "error": f"连接 Google Sheets 失败: {e}"}), 500
+
+    try:
+        result = upsert_zuobiao(
+            service=service,
+            spreadsheet_id=spreadsheet_id,
+            sheet_gid=sheet_gid,
+            rows=rows,
+            product_name=product_name,
+            region=region,
+            report_date=report_date,
+            sales_person=sales_person,
+            agency_ratio=agency_ratio,
+            operator_name=operator_name,
+        )
+        return jsonify({
+            "success": True,
+            "updated": result["updated"],
+            "inserted": result["inserted"],
+            "total": result["updated"] + result["inserted"],
+        })
+    except GoogleSheetsServiceError as e:
+        return jsonify({"success": False, "error": f"写入表格失败: {e}"}), 500
+
+
 # ---------- 文件浏览 API ----------
 
 

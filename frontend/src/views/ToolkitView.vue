@@ -12,6 +12,12 @@
     <!-- ===== 做表数据 — 输入区固定 + 结果滚动 ===== -->
     <div v-show="activeTab === 'zuobiao'" style="flex:1;min-height:0;display:flex;flex-direction:column;">
       <div style="flex-shrink:0;">
+        <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;">
+          <el-select v-model="zbSelectedProduct" placeholder="搜索并选择产品..." filterable clearable style="width:220px;" :loading="zbProductsLoading">
+            <el-option v-for="p in zbProducts" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '')" :value="p.product_name" />
+          </el-select>
+          <el-date-picker v-model="zbSelectedDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" style="width:150px;" />
+        </div>
         <p style="color:#888;margin-bottom:8px;font-size:13px;">粘贴包含"添加过滤条件"和"Total"的原始竖排数据：</p>
         <el-checkbox v-model="zbIncludeCampaignId" size="small" style="margin-bottom:8px;" :disabled="zbYanghu">包含广告系列ID（原数据11列，自动剔除第5列）</el-checkbox>
         <el-checkbox v-model="zbYanghu" size="small" style="margin-bottom:8px;margin-left:12px;">养户（7列：账号/客户ID/广告系列/状态/费用/展示/点击）</el-checkbox>
@@ -19,7 +25,8 @@
         <div style="display:flex;gap:8px;margin-top:8px;">
           <el-button type="primary" @click="zbProcess">🚀 一键解析并生成所有报表</el-button>
           <el-button @click="zbExportExcel" :disabled="!zbRaw.length">📥 导出全部为 Excel</el-button>
-          <el-button v-if="!zbYanghu" type="success" @click="zbSaveDialogVisible = true" :disabled="!zbRaw.length">💾 保存到数据库</el-button>
+          <el-button v-if="zbShowSheetButtons" type="success" @click="zbSaveDialogVisible = true">💾 保存到数据库</el-button>
+          <el-button v-if="zbShowSheetButtons" type="warning" @click="zbUpdateSheet" :loading="zbUpdatingSheet">📊 更新你的表格</el-button>
         </div>
         <div v-if="zbError" style="color:#dc2626;margin-top:8px;">{{ zbError }}</div>
       </div>
@@ -158,19 +165,11 @@
 
     <!-- 保存弹窗 -->
     <el-dialog v-model="zbSaveDialogVisible" title="💾 保存做表数据" width="95%" top="3vh" @open="onSaveDialogOpen">
-      <el-form :inline="true" label-width="80px">
-        <el-form-item label="产品名" required>
-          <el-select v-model="zbSaveProduct" placeholder="搜索并选择产品..." filterable style="width:200px;" :loading="zbSaveProductsLoading" @change="onProductSelect">
-            <el-option v-for="p in zbSaveProducts" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '')" :value="p.product_name" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="地区" required>
-          <el-input v-model="zbSaveRegion" placeholder="地区" style="width:120px;" />
-        </el-form-item>
-        <el-form-item label="日期">
-          <el-date-picker v-model="zbSaveDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" style="width:150px;" />
-        </el-form-item>
-      </el-form>
+      <div style="margin-bottom:12px;font-size:13px;color:#555;">
+        <span>产品：<b>{{ zbSelectedProduct }}</b></span>
+        <span style="margin-left:16px;">地区：<b>{{ zbSelectedRegion }}</b></span>
+        <span style="margin-left:16px;">日期：<b>{{ zbSelectedDate }}</b></span>
+      </div>
       <div style="margin-top:8px;">
         <div style="font-weight:600;margin-bottom:6px;">📋 待保存数据 ({{ saveRows.length }} 条)</div>
         <el-table :data="saveRows" size="small" border stripe max-height="380">
@@ -272,6 +271,7 @@ import { copyToClipboard } from '@/utils/clipboard'
 import { parseAdsData } from '@/utils/adsParser'
 import { translateApi } from '@/api/youtube'
 import { videoApi } from '@/api/video'
+import { googleSheetsApi } from '@/api/google-sheets'
 import api from '@/api/client'
 
 const router = useRouter()
@@ -293,6 +293,20 @@ const zbZuobiao = ref([])
 const zbKehu = ref([])
 const zbError = ref('')
 
+// ========== 外层产品/日期选择（共享给保存弹窗和更新表格） ==========
+const zbSelectedProduct = ref('')
+const zbSelectedDate = ref(_yesterday())
+const zbProducts = ref([])
+const zbProductsLoading = ref(false)
+const zbUpdatingSheet = ref(false)
+const zbSelectedRegion = computed(() => {
+  const p = zbProducts.value.find(x => x.product_name === zbSelectedProduct.value)
+  return p ? p.region : ''
+})
+const zbShowSheetButtons = computed(() => {
+  return zbSelectedProduct.value && zbRaw.value.length > 0 && !zbIncludeCampaignId.value && !zbYanghu.value
+})
+
 // ========== 保存到数据库相关状态 ==========
 const zbSaveDialogVisible = ref(false)
 const zbSaveProduct = ref('')
@@ -312,15 +326,7 @@ function _yesterday() {
 }
 
 async function onSaveDialogOpen() {
-  zbSaveDate.value = _yesterday()
   saveRows.value = [...zbRaw.value]
-  // 加载产品
-  zbSaveProductsLoading.value = true
-  try {
-    const res = await api.get('/ad-reports/products')
-    zbSaveProducts.value = res.products || []
-  } catch { zbSaveProducts.value = [] }
-  zbSaveProductsLoading.value = false
 }
 
 function onProductSelect(pname) {
@@ -334,15 +340,15 @@ function removeSaveRow(idx) {
 }
 
 async function zbDoSave() {
-  if (!zbSaveProduct.value) { ElMessage.warning('请选择产品'); return }
-  if (!zbSaveRegion.value) { ElMessage.warning('请填写地区'); return }
+  if (!zbSelectedProduct.value) { ElMessage.warning('请选择产品'); return }
+  if (!zbSelectedRegion.value) { ElMessage.warning('产品缺少地区信息'); return }
   if (!saveRows.value.length) { ElMessage.warning('没有可保存的数据'); return }
   zbSaving.value = true
   try {
     const checkRes = await api.post('/ad-reports/check-duplicates', {
-      product_name: zbSaveProduct.value,
-      region: zbSaveRegion.value,
-      report_date: zbSaveDate.value,
+      product_name: zbSelectedProduct.value,
+      region: zbSelectedRegion.value,
+      report_date: zbSelectedDate.value,
       rows: saveRows.value,
     })
     if (checkRes.duplicates && checkRes.duplicates.length) {
@@ -351,9 +357,9 @@ async function zbDoSave() {
       zbDupDialogVisible.value = true
     } else {
       const saveRes = await api.post('/ad-reports/save', {
-        product_name: zbSaveProduct.value,
-        region: zbSaveRegion.value,
-        report_date: zbSaveDate.value,
+        product_name: zbSelectedProduct.value,
+        region: zbSelectedRegion.value,
+        report_date: zbSelectedDate.value,
         rows: saveRows.value,
         override_ids: [],
       })
@@ -362,6 +368,33 @@ async function zbDoSave() {
     }
   } catch (e) { ElMessage.error('保存失败: ' + (e.message || '未知错误')) }
   zbSaving.value = false
+}
+
+async function loadZbProducts() {
+  zbProductsLoading.value = true
+  try {
+    const res = await api.get('/ad-reports/products')
+    zbProducts.value = res.products || []
+  } catch { zbProducts.value = [] }
+  zbProductsLoading.value = false
+}
+
+async function zbUpdateSheet() {
+  if (!zbSelectedProduct.value) { ElMessage.warning('请选择产品'); return }
+  if (!zbZuobiao.value.length) { ElMessage.warning('没有做表数据，请先解析'); return }
+  zbUpdatingSheet.value = true
+  try {
+    const res = await googleSheetsApi.updateZuobiao({
+      product_name: zbSelectedProduct.value,
+      region: zbSelectedRegion.value,
+      report_date: zbSelectedDate.value,
+      rows: zbZuobiao.value,
+    })
+    ElMessage.success(`表格已更新！更新 ${res.updated} 条，新增 ${res.inserted} 条`)
+  } catch (e) {
+    ElMessage.error('更新表格失败: ' + (e.response?.data?.error || e.message))
+  }
+  zbUpdatingSheet.value = false
 }
 
 function resolveDuplicate(idx, decision) {
@@ -387,9 +420,9 @@ async function zbConfirmSave() {
       .filter(d => d.decision === 'keep-new')
       .map(d => d.existing.id)
     const saveRes = await api.post('/ad-reports/save', {
-      product_name: zbSaveProduct.value,
-      region: zbSaveRegion.value,
-      report_date: zbSaveDate.value,
+      product_name: zbSelectedProduct.value,
+      region: zbSelectedRegion.value,
+      report_date: zbSelectedDate.value,
       rows: saveRows.value,
       override_ids: overrideIds,
     })
@@ -528,7 +561,7 @@ function audioHistoryDownload(item) {
   window.open(`/api/audio-replace/download?path=${encodeURIComponent(item.output_path)}`, '_blank')
 }
 
-onMounted(() => { audioLoadHistory() })
+onMounted(() => { audioLoadHistory(); loadZbProducts() })
 
 // ========== 翻译工具 ==========
 const TL_LANGS = [
