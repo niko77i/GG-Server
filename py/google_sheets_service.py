@@ -161,19 +161,20 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
         if d or cid or cam:
             existing_index[(d, cid, cam)] = i
 
-    # 4. 构建新行，养户行覆盖 G(客户名称) 和 H(商务)
+    # 4. 构建新行，养户行覆盖 G(客户名称)、H(商务)、L(代投比例=0%)
     percent_str = f"{int(agency_ratio)}%" if agency_ratio is not None else ""
     new_rows = []
     for row in rows:
         is_yanghu = row.get("is_yanghu", False)
         g_val = "养户" if is_yanghu else product_name
         h_val = "止戈" if is_yanghu else (sales_person or "")
+        l_val = "0%" if is_yanghu else percent_str
         new_rows.append([
             report_date, operator_name,
             row.get("account", ""), str(row.get("customerId", "")),
             row.get("cost", 0), "",
             g_val, h_val, region,
-            row.get("campaign", ""), "", percent_str, "", "",
+            row.get("campaign", ""), "", l_val, "", "",
         ])
 
     # 5. 分拣
