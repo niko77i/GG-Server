@@ -15,8 +15,8 @@ def _upgrade_image_url(img_url: str) -> str:
     Google Play 图片 URL 包含尺寸参数如 =w526-h296-rw，
     替换为 =w2400-h2400 以请求最大可用分辨率。
     """
-    # 匹配 =w数字-h数字 模式，替换为高分辨率
-    return re.sub(r"=w\d+-h\d+", "=w2400-h2400", img_url)
+    # 匹配 =w数字-h数字 模式，替换为合适分辨率（1200 够用且下载快）
+    return re.sub(r"=w\d+-h\d+", "=w1200-h1200", img_url)
 
 
 def scrape_images(url: str) -> list[str]:

@@ -1,7 +1,10 @@
+import logging
 import os
 import subprocess
 import sys
-import webbrowser
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("gg-server")
 
 # 确保当前目录优先于 site-packages（解决 py 包名冲突）
 _current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -93,6 +96,26 @@ def _add_static_cache(response):
     return response
 
 
+@app.after_request
+def _refresh_jwt(response):
+    """滑动过期：每次带有效 JWT 的请求自动签发新 token，通过响应头传回前端。
+    用户只要在 24h 内有操作，token 就永不过期；闲置超过 24h 则需重新登录。"""
+    # 仅对成功请求刷新，跳过错误响应
+    if response.status_code >= 400:
+        return response
+    # 跳过静态资源请求，避免不必要的 token 签发
+    if request.path.startswith('/assets/') or request.path.startswith('/favicon'):
+        return response
+    try:
+        user_id = get_jwt_identity()
+        if user_id:
+            new_token = create_access_token(identity=user_id)
+            response.headers['X-New-Access-Token'] = new_token
+    except Exception:
+        pass  # 无 JWT 或 JWT 无效，静默跳过
+    return response
+
+
 @app.before_request
 def _attach_db():
     """每个请求附加一个共享的数据库连接（通过 flask.g）。"""
@@ -109,6 +132,16 @@ def _close_db(response):
         except Exception:
             pass
     return response
+
+
+def _runner_ids_where(alias: str, uid: int):
+    """返回 (SQL 片段, 参数列表)，匹配 products 表中 runner_ids JSON 列含指定 uid。"""
+    uid_s = str(uid)
+    return (
+        f"({alias}.runner_ids = ? OR {alias}.runner_ids LIKE ? "
+        f"OR {alias}.runner_ids LIKE ? OR {alias}.runner_ids LIKE ?)",
+        [f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"]
+    )
 
 # --- GG-Server: Config ---
 _CONFIG_PATH = os.path.join(os.path.dirname(_current_dir), "config", "config.json")
@@ -301,15 +334,25 @@ def scrape():
         if response["logo"] is None:
             return jsonify({"success": False, "error": "该页面未找到图片"}), 404
     else:
+        # 并行下载图片（ThreadPoolExecutor, 最多 4 并发）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         results = []
-        # 不勾选时跳过 Google Ads 规格缩放，保留原图
         skip_scaling = not include_ads_images
-        for i, img_url in enumerate(img_urls):
-            try:
-                result = process_image(img_url, pkg_dir, f"{pkg_name}_{i+1:03d}", skip_scaling=skip_scaling)
-                results.append(result)
-            except ResizeError:
-                continue
+        max_workers = min(len(img_urls), 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(process_image, url, pkg_dir, f"{pkg_name}_{i+1:03d}", skip_scaling): i
+                for i, url in enumerate(img_urls)
+            }
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append((futures[future], result))
+                except ResizeError:
+                    pass
+        # 按原始顺序排序
+        results.sort(key=lambda x: x[0])
+        results = [r for _, r in results]
         response["image_count"] = len(results)
         response["images"] = results
 
@@ -4434,6 +4477,45 @@ def google_ads_report():
         return jsonify({"success": False, "error": f"未知错误: {e}"}), 500
 
 
+# ---------- Google Sheets API ----------
+
+# Google Sheets 配置（凭据路径优先环境变量，其次 config.json，最后默认值）
+_GOOGLE_SHEETS_CONFIG = {
+    "credentials_path": os.environ.get(
+        "GOOGLE_SHEETS_CREDENTIALS_PATH",
+        os.path.join(os.path.dirname(_current_dir),
+                     APP_CONFIG.get("google_sheets", {}).get("credentials_path",
+                         "config/google_sheets_credentials.json"))
+    ),
+    "token_path": os.environ.get(
+        "GOOGLE_SHEETS_TOKEN_PATH",
+        os.path.join(os.path.dirname(_current_dir),
+                     APP_CONFIG.get("google_sheets", {}).get("token_path",
+                         "config/google_sheets_token.json"))
+    ),
+    "spreadsheet_id": APP_CONFIG.get("google_sheets", {}).get("spreadsheet_id", ""),
+}
+
+
+@app.route("/api/google-sheets/status", methods=["GET"])
+def google_sheets_status():
+    """检查 Google Sheets API 配置状态（仅检查本地文件，不泄露凭据内容）。"""
+    try:
+        from google_sheets_service import check_configured  # noqa: F811
+    except ImportError:
+        return jsonify({
+            "success": False,
+            "error": "Google Sheets 功能仅在开发模式可用"
+        }), 500
+    try:
+        result = check_configured(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        result["spreadsheet_id"] = _GOOGLE_SHEETS_CONFIG.get("spreadsheet_id", "")
+        result["success"] = True
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # ---------- 文案管理 API ----------
 
 @app.route("/api/copywriting/import", methods=["POST"])
@@ -5202,7 +5284,7 @@ def _run_weekly_cleanup_once():
         os.makedirs(audio_tmp, exist_ok=True)
     # 清理 video_tasks 数据库历史记录（保留 7 天）
     database.task_cleanup_old(retention_days=7)
-    print(f"[Cleanup] 已清理爬取图片、视频、音频替换临时文件及过期任务记录: {_dt.datetime.now()}")
+    log.info("已清理爬取图片、视频、音频替换临时文件及过期任务记录")
 
 
 def _send_telegram_notifications(db, pkgs, runner_ids):
@@ -5329,7 +5411,7 @@ def _run_delist_check_once():
         db.commit()
 
         if delisted_list:
-            print(f"[DelistScheduler] 检测完成: {len(pkgs)} 个包, {len(delisted_list)} 个掉包")
+            log.info(f"掉包检测完成: {len(pkgs)} 个包, {len(delisted_list)} 个掉包")
             if smtp_config:
                 for pkg in delisted_list:
                     try:
@@ -5358,7 +5440,7 @@ def _run_delist_check_once():
 
         return {"total": len(pkgs), "delisted": len(delisted_list), "results": results}
     except Exception as e:
-        print(f"[DelistScheduler] 检测出错: {e}")
+        log.error(f"掉包检测出错: {e}")
         raise
     finally:
         db.close()
@@ -5404,13 +5486,13 @@ def _start_delist_scheduler():
             try:
                 _run_delist_check_once()
             except Exception as e:
-                print(f"[DelistScheduler] 定时检测出错（将自动重试）: {e}")
+                log.warning(f"掉包定时检测出错（将自动重试）: {e}")
                 # 出错后等 60 秒再试一次，避免连续失败
                 _time.sleep(60)
                 try:
                     _run_delist_check_once()
                 except Exception as e2:
-                    print(f"[DelistScheduler] 重试仍失败: {e2}")
+                    log.error(f"掉包检测重试仍失败: {e2}")
 
     t = threading.Thread(target=_loop, daemon=True)
     t.start()

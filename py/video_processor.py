@@ -24,6 +24,7 @@ class VideoTask:
         self._result = None
         self._proc = None
         self._total_duration = 0.0
+        self._ffmpeg = self._ffmpeg_path()  # 任务内缓存，避免重复查找
 
     # ---------- 公开 API ----------
 
@@ -78,7 +79,7 @@ class VideoTask:
         background_color = settings.get("background_color", "1a1a2e")
         _raw_scale = settings.get("content_scale")
         content_scale = float(_raw_scale if _raw_scale is not None else 0.82)
-        ffmpeg = self._ffmpeg_path()
+        ffmpeg = self._ffmpeg
 
         # 解析分辨率
         res_parts = resolution.split(":")
@@ -290,32 +291,32 @@ class VideoTask:
                     f"[l_base]fade=t=in:st=0:d=1,fade=t=out:st={total_duration-1}:d=1[l_effected]"
                 )
                 logo_x, logo_y = overlay_x, overlay_y
-                shadow_x, shadow_y = f"{overlay_x}+2", f"{overlay_y}+2"
+                shadow_x, shadow_y = f"({overlay_x})+2", f"({overlay_y})+2"
             elif logo_effect == "bounce":
-                logo_x = f"{overlay_x}+20*sin(t*2)"
-                logo_y = f"{overlay_y}+15*cos(t*1.5)"
-                shadow_x, shadow_y = f"{logo_x}+2", f"{logo_y}+2"
+                logo_x = f"({overlay_x})+20*sin(t*2)"
+                logo_y = f"({overlay_y})+15*cos(t*1.5)"
+                shadow_x, shadow_y = f"({logo_x})+2", f"({logo_y})+2"
                 filter_parts.append(f"[l_base]null[l_effected]")
             elif logo_effect == "zoom-in":
                 filter_parts.append(
                     f"[l_base]fade=t=in:st=0:d=0.6:alpha=1[l_effected]"
                 )
                 logo_x, logo_y = overlay_x, overlay_y
-                shadow_x, shadow_y = f"{overlay_x}+2", f"{overlay_y}+2"
+                shadow_x, shadow_y = f"({overlay_x})+2", f"({overlay_y})+2"
             elif logo_effect == "slide-right":
                 logo_x = f"if(lt(t,0.6),W-(W-w+10)*(t/0.6),{overlay_x})"
                 logo_y = overlay_y
-                shadow_x = f"if(lt(t,0.6),W-(W-w+10)*(t/0.6)+2,{overlay_x}+2)"
-                shadow_y = f"{overlay_y}+2"
+                shadow_x = f"if(lt(t,0.6),(W-(W-w+10)*(t/0.6))+2,({overlay_x})+2)"
+                shadow_y = f"({overlay_y})+2"
                 filter_parts.append(f"[l_base]null[l_effected]")
             elif logo_effect == "pulse":
-                logo_x = f"{overlay_x}+6*sin(t*3)"
-                logo_y = f"{overlay_y}+4*sin(t*2.5)"
-                shadow_x, shadow_y = f"{logo_x}+2", f"{logo_y}+2"
+                logo_x = f"({overlay_x})+6*sin(t*3)"
+                logo_y = f"({overlay_y})+4*sin(t*2.5)"
+                shadow_x, shadow_y = f"({logo_x})+2", f"({logo_y})+2"
                 filter_parts.append(f"[l_base]null[l_effected]")
             else:  # static
                 logo_x, logo_y = overlay_x, overlay_y
-                shadow_x, shadow_y = f"{overlay_x}+2", f"{overlay_y}+2"
+                shadow_x, shadow_y = f"({overlay_x})+2", f"({overlay_y})+2"
                 filter_parts.append(f"[l_base]null[l_effected]")
 
             # === 先叠阴影再叠 logo ===
@@ -561,11 +562,10 @@ class VideoTask:
         }
         return positions.get(position, positions["top-right"])
 
-    @staticmethod
-    def _video_has_audio(video_path: str) -> bool:
+    def _video_has_audio(self, video_path: str) -> bool:
         """用 ffprobe 检测视频是否包含音频轨道。"""
         import shutil
-        ffprobe = VideoTask._ffmpeg_path()
+        ffprobe = self._ffmpeg
         # 替换文件名中的 ffmpeg → ffprobe
         base = os.path.basename(ffprobe).replace("ffmpeg", "ffprobe")
         ffprobe = os.path.join(os.path.dirname(ffprobe), base)

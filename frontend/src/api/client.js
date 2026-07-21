@@ -11,7 +11,14 @@ api.interceptors.request.use(config => {
 })
 
 api.interceptors.response.use(
-  resp => resp.data,
+  resp => {
+    // 滑动过期：后端每次返回新 token，前端自动更新 localStorage
+    const newToken = resp.headers['x-new-access-token']
+    if (newToken) {
+      localStorage.setItem('token', newToken)
+    }
+    return resp.data
+  },
   err => {
     if (err.response?.status === 401 && !err.config.url?.includes('/auth/')) {
       localStorage.removeItem('token')

@@ -151,6 +151,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         );
+        CREATE INDEX IF NOT EXISTS idx_accounts_mcc ON accounts(mcc_id);
 
         -- 账户 MCC 变更历史
         CREATE TABLE IF NOT EXISTS account_mcc_history (
@@ -196,6 +197,9 @@ def _ensure_schema(conn: sqlite3.Connection):
             customer TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
+        CREATE INDEX IF NOT EXISTS idx_products_name ON products(product_name);
+        CREATE INDEX IF NOT EXISTS idx_products_region ON products(region);
+        CREATE INDEX IF NOT EXISTS idx_products_mcc ON products(mcc_id);
 
         CREATE TABLE IF NOT EXISTS packages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +211,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             created_at TEXT DEFAULT (datetime('now','localtime')),
             FOREIGN KEY(product_id) REFERENCES products(id)
         );
+        CREATE INDEX IF NOT EXISTS idx_packages_product ON packages(product_id);
 
         -- 产品成效素材关联
         CREATE TABLE IF NOT EXISTS product_assets (
@@ -382,6 +387,9 @@ def _ensure_schema(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "products", "owner_id", "owner_id INTEGER REFERENCES users(id)")
     _add_column_if_missing(conn, "products", "runner_ids", "runner_ids TEXT DEFAULT '[]'")
     _add_column_if_missing(conn, "products", "is_archived", "is_archived INTEGER DEFAULT 0")
+    # 高频查询字段索引（_add_column_if_missing 之后创建，确保列已存在）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
     _add_column_if_missing(conn, "products", "customer", "customer TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "deleted_at", "deleted_at TEXT DEFAULT ''")
     _add_column_if_missing(conn, "copywritings", "owner_id", "owner_id INTEGER REFERENCES users(id)")
@@ -436,31 +444,37 @@ def _ensure_schema(conn: sqlite3.Connection):
         )
 
     # 修复同步：确保 product_runners 关联表与 products.runner_ids JSON 列一致
-    # 每次启动都执行，修复可能因 FK 约束静默失败等原因导致的数据不一致
-    rows = conn.execute(
-        "SELECT id, runner_ids FROM products WHERE runner_ids IS NOT NULL AND runner_ids != '' AND runner_ids != '[]'"
-    ).fetchall()
-    # 获取有效用户 ID（跳过不存在于 users 表的无效用户）
-    valid_uids = set(r[0] for r in conn.execute("SELECT id FROM users").fetchall())
-    for r in rows:
-        try:
-            runner_ids = json.loads(r["runner_ids"] or "[]")
-        except Exception:
-            runner_ids = []
-        valid_rids = [uid for uid in runner_ids if uid in valid_uids]
-        current = set(row[0] for row in conn.execute(
-            "SELECT user_id FROM product_runners WHERE product_id=?", (r["id"],)
-        ).fetchall())
-        if set(valid_rids) != current:
-            conn.execute("DELETE FROM product_runners WHERE product_id=?", (r["id"],))
-            for uid in valid_rids:
-                try:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)",
-                        (r["id"], uid)
-                    )
-                except Exception:
-                    pass
+    # 仅在首次执行（门控），后续 runner 变更由 updateRunners 等接口实时同步
+    pr_migrated_v2 = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_product_runners_v2'"
+    ).fetchone()
+    if not pr_migrated_v2:
+        rows = conn.execute(
+            "SELECT id, runner_ids FROM products WHERE runner_ids IS NOT NULL AND runner_ids != '' AND runner_ids != '[]'"
+        ).fetchall()
+        valid_uids = set(r[0] for r in conn.execute("SELECT id FROM users").fetchall())
+        for r in rows:
+            try:
+                runner_ids = json.loads(r["runner_ids"] or "[]")
+            except Exception:
+                runner_ids = []
+            valid_rids = [uid for uid in runner_ids if uid in valid_uids]
+            current = set(row[0] for row in conn.execute(
+                "SELECT user_id FROM product_runners WHERE product_id=?", (r["id"],)
+            ).fetchall())
+            if set(valid_rids) != current:
+                conn.execute("DELETE FROM product_runners WHERE product_id=?", (r["id"],))
+                for uid in valid_rids:
+                    try:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)",
+                            (r["id"], uid)
+                        )
+                    except Exception:
+                        pass
+        conn.execute(
+            "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_product_runners_v2','1')"
+        )
 
     # 初始化地区时区（从 tags 同步已有地区，预设常见时区）
     _init_regions(conn)

@@ -18,6 +18,13 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
+    target: 'es2015',
+    sourcemap: false,
+    assetsInlineLimit: 4096,
+    minify: 'terser',
+    terserOptions: {
+      compress: { drop_console: true, drop_debugger: true },
+    },
     rollupOptions: {
       output: {
         manualChunks: {
