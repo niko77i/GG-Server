@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { accountsApi, mccApi, settingsApi } from '@/api/accounts'
+import { accountsApi, mccApi, settingsApi, rechargeApi } from '@/api/accounts'
 import { dedupLoader } from '@/utils/dedupLoader'
 
 export const useAccountStore = defineStore('accounts', {
@@ -62,5 +62,7 @@ export const useAccountStore = defineStore('accounts', {
       })
     },
     async saveSettings(body) { return settingsApi.save(body) },
+    async rechargeSubmit(body) { return rechargeApi.submit(body) },
+    async rechargeBatchSubmit(body) { return rechargeApi.batchSubmit(body) },
   },
 })

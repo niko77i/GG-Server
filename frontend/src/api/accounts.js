@@ -30,3 +30,8 @@ export const settingsApi = {
   get: ()     => api.get('/settings/account'),
   save: (body) => api.post('/settings/account', body),
 }
+
+export const rechargeApi = {
+  submit: (body) => api.post('/recharge/submit', body),
+  batchSubmit: (body) => api.post('/recharge/batch-submit', body),
+}
