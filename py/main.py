@@ -3527,7 +3527,7 @@ def accounts_update(aid):
         # 死亡清账：状态变为「死亡」时自动追加 amount='清'
         recharge_note = None
         new_status = data.get("status", "")
-        if new_status == "死亡" and (not old_status or old_status["status"] != "死亡"):
+        if new_status == "死亡" and old_status and old_status["status"] != "死亡":
             existing_clear = db.execute(
                 "SELECT id FROM recharge_records WHERE account_id=? AND amount='清'",
                 (old_status["account_id"],)
@@ -3719,7 +3719,7 @@ def recharge_submit():
                 if sheet_id:
                     credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
                     if credentials_path and os.path.isfile(credentials_path):
-                        from py import google_sheets_service as gs
+                        import google_sheets_service as gs
                         service = gs.build_service(credentials_path)
                         gs.append_recharge(service, sheet_id, [{
                             "account_id": account_id,
@@ -3791,7 +3791,7 @@ def recharge_batch_submit():
                     if sheet_id:
                         credentials_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
                         if credentials_path and os.path.isfile(credentials_path):
-                            from py import google_sheets_service as gs
+                            import google_sheets_service as gs
                             service = gs.build_service(credentials_path)
                             gs.append_recharge(service, sheet_id, sheet_rows)
             except Exception as e:
@@ -3799,6 +3799,8 @@ def recharge_batch_submit():
                 sheets_warning = "数据库已保存，但 Google Sheets 同步失败，请手动检查"
 
         db.close()
+        if not sheet_rows:
+            return jsonify({"success": False, "error": "所有充值记录缺少账户ID或金额，未写入任何数据"}), 400
         resp = {"success": True, "count": len(sheet_rows)}
         if sheets_warning:
             resp["warning"] = sheets_warning
