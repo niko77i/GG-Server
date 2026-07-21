@@ -24,8 +24,6 @@
         "chat_id": "-5220122275"
     },
     "google_sheets": {
-        "credentials_path": "config/google_sheets_credentials.json",
-        "token_path": "config/google_sheets_token.json",
-        "spreadsheet_id": ""
+        "credentials_path": "config/fit-boulevard-503111-u4-812bc02c2000.json"
     }
 }

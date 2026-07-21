@@ -261,21 +261,6 @@
       </template>
     </el-dialog>
 
-    <!-- Google Sheets 授权对话框 -->
-    <el-dialog v-model="zbAuthDialogVisible" title="🔑 Google Sheets 授权" width="550px" :close-on-click-modal="false">
-      <p style="margin-bottom:12px;">已在新标签页打开 Google 授权页面。请按以下步骤操作：</p>
-      <ol style="margin-bottom:16px;line-height:2;">
-        <li>在新标签页中选择 Google 账号并点击「允许」</li>
-        <li>授权后会跳转到一个无法打开的页面（<code>localhost</code>）</li>
-        <li><b>复制浏览器地址栏中的完整 URL</b></li>
-        <li>粘贴到下方输入框，点击「完成授权」</li>
-      </ol>
-      <el-input v-model="zbAuthRedirectUrl" placeholder="粘贴完整的重定向 URL（包含 ?code=...&state=...）" />
-      <template #footer>
-        <el-button @click="zbAuthDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="zbSubmitAuth" :loading="zbAuthSubmitting">🔓 完成授权</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -406,37 +391,11 @@ async function zbUpdateSheet() {
       report_date: zbSelectedDate.value,
       rows: zbZuobiao.value,
     })
-    if (res.auth_required) {
-      // 需要授权：打开授权链接，弹出对话框让用户粘贴回调 URL
-      zbAuthUrl.value = res.auth_url
-      window.open(res.auth_url, '_blank')
-      zbAuthDialogVisible.value = true
-    } else {
-      ElMessage.success(`表格已更新！更新 ${res.updated} 条，新增 ${res.inserted} 条`)
-    }
+    ElMessage.success(`表格已更新！更新 ${res.updated} 条，新增 ${res.inserted} 条`)
   } catch (e) {
     ElMessage.error('更新表格失败: ' + (e.response?.data?.error || e.message))
   }
   zbUpdatingSheet.value = false
-}
-
-// ========== Google Sheets 授权对话框 ==========
-const zbAuthUrl = ref('')
-const zbAuthDialogVisible = ref(false)
-const zbAuthRedirectUrl = ref('')
-const zbAuthSubmitting = ref(false)
-
-async function zbSubmitAuth() {
-  if (!zbAuthRedirectUrl.value.trim()) { ElMessage.warning('请粘贴浏览器地址栏中的完整 URL'); return }
-  zbAuthSubmitting.value = true
-  try {
-    await api.post('/google-sheets/auth-callback', { redirect_url: zbAuthRedirectUrl.value.trim() })
-    ElMessage.success('授权成功！请重新点击「更新你的表格」')
-    zbAuthDialogVisible.value = false
-  } catch (e) {
-    ElMessage.error('授权失败: ' + (e.response?.data?.error || e.message))
-  }
-  zbAuthSubmitting.value = false
 }
 
 function resolveDuplicate(idx, decision) {

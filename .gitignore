@@ -20,9 +20,10 @@ temp/audio_replace
 # 配置敏感信息（含密码）
 config/config.json
 
-# Google Sheets OAuth 凭据
+# Google Sheets 凭据
 config/google_sheets_credentials.json
 config/google_sheets_token.json
+config/fit-boulevard-503111-u4-812bc02c2000.json
 
 # 系统文件
 .DS_Store
