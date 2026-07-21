@@ -185,7 +185,10 @@ async function submit() {
         status: form.status, acquired_date: form.acquired_date, mcc_id: form.mcc_id,
       })
     } else if (props.editId) {
-      await store.updateAccount(props.editId, form)
+      const res = await store.updateAccount(props.editId, form)
+      if (res.recharge_note === '已追加清账记录') {
+        ElMessage.success('该账户已自动追加清账记录')
+      }
     } else {
       await store.createAccount(form)
     }
