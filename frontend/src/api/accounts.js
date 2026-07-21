@@ -13,6 +13,7 @@ export const accountsApi = {
   reassign: (id, body) => api.put(`/accounts/${id}/reassign`, body || {}),
   history: (aid) => api.get(`/accounts/${aid}/mcc-history`),
   deleteHistory: (aid, hid) => api.delete(`/accounts/${aid}/mcc-history/${hid}`),
+  rechargeRecords: (aid) => api.get(`/accounts/${aid}/recharge-records`),
 }
 
 export const mccApi = {

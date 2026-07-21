@@ -26,6 +26,18 @@
 
       <el-divider />
 
+      <!-- 充值记录 -->
+      <h4>💰 充值记录（{{ rechargeRecords.length }} 条）</h4>
+      <el-table :data="rechargeRecords" size="small" border stripe v-if="rechargeRecords.length" style="margin-top:8px;">
+        <el-table-column prop="amount" label="金额" width="80" />
+        <el-table-column prop="agent" label="代理" width="80" />
+        <el-table-column prop="operator" label="运营" width="80" />
+        <el-table-column prop="created_at" label="时间" min-width="140" />
+      </el-table>
+      <el-empty v-else description="暂无充值记录" :image-size="40" />
+
+      <el-divider />
+
       <!-- MCC 变更历史 -->
       <h4>🕓 MCC 变更历史（{{ history.length }} 条）</h4>
       <el-timeline v-if="history.length" class="history-timeline">
@@ -90,6 +102,7 @@ const emit = defineEmits(['update:visible'])
 const authStore = useAuthStore()
 const account = ref(null)
 const history = ref([])
+const rechargeRecords = ref([])
 const deleting = ref(null)
 
 function statusTagType(status) {
@@ -111,6 +124,9 @@ async function load() {
     // 加载历史
     const res = await accountsApi.history(props.accountId)
     history.value = res.history || []
+    // 加载充值记录
+    const rr = await accountsApi.rechargeRecords(props.accountId)
+    rechargeRecords.value = rr.records || []
   } catch (e) {
     ElMessage.error('加载失败: ' + (e.response?.data?.error || e.message))
   }

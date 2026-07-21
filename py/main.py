@@ -3832,6 +3832,24 @@ def recharge_batch_submit():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/api/accounts/<int:aid>/recharge-records", methods=["GET"])
+@jwt_required()
+def accounts_recharge_records(aid):
+    """获取指定账户的充值记录。"""
+    db = _yt_db()
+    account = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()
+    if not account:
+        db.close()
+        return jsonify({"success": False, "error": "账户不存在"}), 404
+    records = db.execute(
+        "SELECT id, account_id, amount, agent, operator, created_at FROM recharge_records "
+        "WHERE account_id=? ORDER BY created_at DESC",
+        (account["account_id"],)
+    ).fetchall()
+    db.close()
+    return jsonify({"success": True, "records": [dict(r) for r in records]})
+
+
 @app.route("/api/accounts/<int:aid>/mcc-history", methods=["GET"])
 @jwt_required()
 def accounts_mcc_history(aid):
