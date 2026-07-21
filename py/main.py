@@ -177,6 +177,7 @@ app.config["JWT_SECRET_KEY"] = APP_CONFIG.get("secret_key", "gg-server-default-s
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = APP_CONFIG.get("jwt_expire_hours", 24) * 3600
 jwt = JWTManager(app)
 register_jwt_callbacks(jwt)
+app.register_blueprint(auth_bp, url_prefix="/api/auth")
 
 try:
     auth.init_developer(APP_CONFIG)
@@ -4858,127 +4859,7 @@ def translate_text():
 # ---------- 启动 ----------
 
 
-# ---------- Auth Routes ----------
-
-@jwt.invalid_token_loader
-def invalid_token_callback(reason):
-    return jsonify(success=False, error="Invalid token"), 
-
-
-@jwt.expired_token_loader
-def expired_token_callback(jwt_header, jwt_payload):
-    return jsonify(success=False, error="Token expired"), 401
-
-@app.route("/api/auth/login", methods=["POST"])
-def auth_login():
-    data = request.get_json()
-    if not data:
-        return jsonify(success=False, error="Missing request body"), 400
-    username = data.get("username", "").strip()
-    password = data.get("password", "")
-    if not username or not password:
-        return jsonify(success=False, error="Username and password required"), 400
-    result = auth.login_user(username, password)
-    if not result:
-        return jsonify(success=False, error="Invalid credentials or account disabled"), 401
-    return jsonify(success=True, **result)
-
-@app.route("/api/auth/register", methods=["POST"])
-def auth_register():
-    data = request.get_json()
-    if not data:
-        return jsonify(success=False, error="Missing request body"), 400
-    username = data.get("username", "").strip()
-    password = data.get("password", "")
-    display_name = data.get("display_name", "").strip()
-    if not username or len(username) < 4 or len(username) > 20:
-        return jsonify(success=False, error="Username must be 4-20 characters"), 400
-    if not password or len(password) < 6:
-        return jsonify(success=False, error="Password must be at least 6 characters"), 400
-    existing = auth.get_user_by_username(username)
-    if existing:
-        return jsonify(success=False, error="Username already exists"), 409
-    user = auth.register_user(username, password, display_name)
-    if not user:
-        return jsonify(success=False, error="Registration failed"), 500
-    return jsonify(success=True, user=user)
-
-@app.route("/api/auth/refresh", methods=["POST"])
-@jwt_required(refresh=True)
-def auth_refresh():
-    user_id = get_jwt_identity()
-    new_token = create_access_token(identity=user_id)
-    return jsonify(success=True, access_token=new_token)
-
-@app.route("/api/auth/me", methods=["GET"])
-@jwt_required()
-def auth_me():
-    user_id = int(get_jwt_identity())
-    user = auth.get_user_by_id(user_id)
-    if not user:
-        return jsonify(success=False, error="User not found"), 404
-    return jsonify(success=True, user=user)
-
-
-@app.route("/api/auth/custom-name", methods=["GET"])
-@jwt_required()
-def auth_custom_name_get():
-    user_id = int(get_jwt_identity())
-    db = database.get_db()
-    row = db.execute("SELECT custom_name FROM users WHERE id=?", (user_id,)).fetchone()
-    db.close()
-    return jsonify({"success": True, "custom_name": row["custom_name"] if row else ""})
-
-
-@app.route("/api/auth/custom-name", methods=["PUT"])
-@jwt_required()
-def auth_custom_name_set():
-    user_id = int(get_jwt_identity())
-    data = request.get_json(silent=True) or {}
-    custom_name = (data.get("custom_name") or "").strip()
-    db = database.get_db()
-    db.execute("UPDATE users SET custom_name=? WHERE id=?", (custom_name, user_id))
-    db.commit()
-    db.close()
-    return jsonify({"success": True, "custom_name": custom_name})
-
-
-@app.route("/api/auth/email", methods=["GET"])
-@jwt_required()
-def auth_email_get():
-    user_id = int(get_jwt_identity())
-    db = database.get_db()
-    row = db.execute("SELECT email FROM users WHERE id=?", (user_id,)).fetchone()
-    db.close()
-    return jsonify({"success": True, "email": row["email"] if row else ""})
-
-
-@app.route("/api/auth/email", methods=["PUT"])
-@jwt_required()
-def auth_email_set():
-    user_id = int(get_jwt_identity())
-    data = request.get_json(silent=True) or {}
-    email = (data.get("email") or "").strip()
-    db = database.get_db()
-    db.execute("UPDATE users SET email=? WHERE id=?", (email, user_id))
-    db.commit()
-    db.close()
-    return jsonify({"success": True, "email": email})
-
-
-@app.route("/api/auth/telegram-username", methods=["PUT"])
-@jwt_required()
-def auth_telegram_username_set():
-    """当前用户设置自己的 Telegram 用户名（不带 @ 前缀）。"""
-    user_id = int(get_jwt_identity())
-    data = request.get_json(silent=True) or {}
-    username = (data.get("telegram_username") or "").strip().lstrip("@")
-    db = database.get_db()
-    db.execute("UPDATE users SET telegram_username=? WHERE id=?", (username, user_id))
-    db.commit()
-    db.close()
-    return jsonify({"success": True, "telegram_username": username})
-
+# Auth Routes — 已迁移至 routes/auth_routes.py (Blueprint: /api/auth)
 
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required(optional=True)
@@ -5215,46 +5096,7 @@ def admin_set_telegram_username(uid):
     db.close()
     return jsonify(success=True, telegram_username=username)
 
-
-@app.route("/api/auth/password", methods=["PUT"])
-@jwt_required()
-def auth_change_password():
-    """用户自己修改密码。"""
-    user_id = int(get_jwt_identity())
-    data = request.get_json(silent=True) or {}
-    old_password = data.get("old_password", "")
-    new_password = data.get("new_password", "")
-
-    if not old_password or not new_password:
-        return jsonify(success=False, error="请提供旧密码和新密码"), 400
-    if len(new_password) < 6:
-        return jsonify(success=False, error="新密码至少 6 位"), 400
-
-    current_user = auth.get_user_by_id(user_id)
-    if not current_user:
-        return jsonify(success=False, error="User not found"), 404
-    # get_user_by_id 不含 password，通过 username 获取完整信息验证旧密码
-    full_user = auth.get_user_by_username(current_user["username"])
-    if not auth.verify_password(old_password, full_user["password"]):
-        return jsonify(success=False, error="旧密码不正确"), 400
-
-    if auth.update_password(user_id, new_password):
-        return jsonify(success=True)
-    return jsonify(success=False, error="更新失败"), 400
-
-
-@app.route("/api/auth/profile", methods=["PUT"])
-@jwt_required()
-def auth_update_profile():
-    """用户自己更新个人信息（显示名）。"""
-    user_id = int(get_jwt_identity())
-    data = request.get_json(silent=True) or {}
-    display_name = data.get("display_name", "").strip()
-
-    result = auth.update_user(user_id, username=None, display_name=display_name)
-    if result:
-        return jsonify(success=True, user=result)
-    return jsonify(success=False, error="更新失败"), 400
+# password & profile — 已迁移至 routes/auth_routes.py (Blueprint: /api/auth)
 
 
 # ---------- admin_required decorator ----------

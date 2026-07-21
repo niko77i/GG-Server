@@ -139,40 +139,38 @@ def auth_telegram_username_set():
 @auth_bp.route("/password", methods=["PUT"])
 @jwt_required()
 def auth_password():
+    """用户自己修改密码。"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
-    old_pw = data.get("old_password", "")
-    new_pw = data.get("new_password", "")
-    if not old_pw or not new_pw:
-        return jsonify(success=False, error="旧密码和新密码不能为空"), 400
-    user = auth.get_user_by_id(user_id)
-    if not user or not auth.verify_password(old_pw, user["password"]):
-        return jsonify(success=False, error="原密码错误"), 403
-    if len(new_pw) < 6:
-        return jsonify(success=False, error="新密码至少6位"), 400
-    auth.update_password(user_id, new_pw)
-    return jsonify(success=True)
+    old_password = data.get("old_password", "")
+    new_password = data.get("new_password", "")
+    if not old_password or not new_password:
+        return jsonify(success=False, error="请提供旧密码和新密码"), 400
+    if len(new_password) < 6:
+        return jsonify(success=False, error="新密码至少 6 位"), 400
+    current_user = auth.get_user_by_id(user_id)
+    if not current_user:
+        return jsonify(success=False, error="User not found"), 404
+    # get_user_by_id 不含 password，通过 username 获取完整信息验证旧密码
+    full_user = auth.get_user_by_username(current_user["username"])
+    if not auth.verify_password(old_password, full_user["password"]):
+        return jsonify(success=False, error="旧密码不正确"), 400
+    if auth.update_password(user_id, new_password):
+        return jsonify(success=True)
+    return jsonify(success=False, error="更新失败"), 400
 
 
 @auth_bp.route("/profile", methods=["PUT"])
 @jwt_required()
 def auth_profile():
+    """用户自己更新个人信息（显示名）。"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
-    display_name = data.get("display_name")
-    if display_name is not None:
-        display_name = display_name.strip()
-    telegram_username = data.get("telegram_username")
-    if telegram_username is not None:
-        telegram_username = telegram_username.strip().lstrip("@")
-    db = database.get_db()
-    if display_name is not None:
-        db.execute("UPDATE users SET display_name=? WHERE id=?", (display_name, user_id))
-    if telegram_username is not None:
-        db.execute("UPDATE users SET telegram_username=? WHERE id=?", (telegram_username, user_id))
-    db.commit()
-    db.close()
-    return jsonify({"success": True})
+    display_name = data.get("display_name", "").strip()
+    result = auth.update_user(user_id, username=None, display_name=display_name)
+    if result:
+        return jsonify(success=True, user=result)
+    return jsonify(success=False, error="更新失败"), 400
 
 
 # --- 用户名称查询 ---
