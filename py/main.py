@@ -5887,10 +5887,9 @@ def ad_reports_products():
         LEFT JOIN product_runners pr ON p.id = pr.product_id
         WHERE (p.is_archived IS NULL OR p.is_archived = 0)
           AND (p.status IS NULL OR p.status = '' OR p.status = '0')
-          AND (p.owner_id = ? OR pr.user_id = ?
-               OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)
+          AND (p.owner_id = ? OR pr.user_id = ?)
         ORDER BY p.product_name
-    """, (user_id, user_id, f"[{user_id}]", f"[{user_id},%", f"%, {user_id},%", f"%, {user_id}]")).fetchall()
+    """, (user_id, user_id)).fetchall()
     db.close()
     return jsonify({"success": True, "products": [dict(r) for r in rows]})
 
