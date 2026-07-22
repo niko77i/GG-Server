@@ -3569,23 +3569,36 @@ def accounts_update(aid):
                     "operator": operator_name,
                     "status": new_status,
                 }
+                # 先写 DB
+                db.execute(
+                    "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by, sheets_synced) "
+                    "VALUES (?, '清', ?, ?, ?, ?, 0)",
+                    (old_status["account_id"], clear_agent, operator_name, new_status, user_id)
+                )
+                recharge_note = "已追加清账记录"
+                clear_record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+                # 后台同步 Sheets
                 sheet_id_row = db.execute(
                     "SELECT value FROM tags WHERE key='recharge_sheet_id'"
                 ).fetchone()
                 sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
-                if sheet_id:
-                    try:
+                if sheet_id and clear_record_id:
+                    _rid = clear_record_id
+                    def _do_sync():
                         import google_sheets_service as gs
                         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
                         gs.append_recharge(service, sheet_id, [clear_row])
-                        db.execute(
-                            "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by) "
-                            "VALUES (?, '清', ?, ?, ?, ?)",
-                            (old_status["account_id"], clear_agent, operator_name, new_status, user_id)
-                        )
-                        recharge_note = "已追加清账记录"
-                    except Exception as e:
-                        log.warning("状态清账 Google Sheets 写入失败，跳过: %s", e)
+                    def _on_fail(status, err_msg):
+                        _db = database.get_db()
+                        if status == "synced":
+                            _db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?",
+                                        (_rid,))
+                        else:
+                            _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
+                                        (err_msg, _rid))
+                        _db.commit(); _db.close()
+                    _sync_sheets_background(_do_sync, _on_fail)
 
         db.commit()
 
@@ -3749,40 +3762,52 @@ def accounts_batch_update():
                         user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                         op = (user["display_name"] or "") if user else ""
                         db.execute(
-                            "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by) "
-                            "VALUES (?, '清', ?, ?, ?, ?)",
+                            "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by, sheets_synced) "
+                            "VALUES (?, '清', ?, ?, ?, ?, 0)",
                             (old["account_id"], old["agent"] or "", op, value, user_id)
                         )
                         new_clear_rows.append({
                             "account_id": old["account_id"],
                             "agent": old["agent"] or "",
+                            "rid": db.execute("SELECT last_insert_rowid()").fetchone()[0],
                         })
 
             db.execute(f"UPDATE accounts SET {field}=?, updated_at=datetime('now','localtime') WHERE id=?",
                        (value, aid))
         db.commit()
-        # 批量改状态时同步写 Google Sheets（仅写入新插入的记录）
+        # 后台同步 Google Sheets（仅写入新插入的记录）
         if field == "status" and value and new_clear_rows:
-            try:
-                sheet_id_row = db.execute(
-                    "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-                ).fetchone()
-                sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
-                if sheet_id:
+            sheet_id_row = db.execute(
+                "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+            ).fetchone()
+            sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+            if sheet_id:
+                user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
+                op_name = (user["display_name"] or "") if user else ""
+                _sheet_data = [{
+                    "account_id": r["account_id"],
+                    "amount": "清",
+                    "agent": r["agent"],
+                    "operator": op_name,
+                    "status": value,
+                } for r in new_clear_rows]
+                _rids = [r["rid"] for r in new_clear_rows]
+                def _do_sync():
                     import google_sheets_service as gs
                     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                    user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
-                    op_name = (user["display_name"] or "") if user else ""
-                    sheet_data = [{
-                        "account_id": r["account_id"],
-                        "amount": "清",
-                        "agent": r["agent"],
-                        "operator": op_name,
-                        "status": value,
-                    } for r in new_clear_rows]
-                    gs.append_recharge(service, sheet_id, sheet_data)
-            except Exception as e:
-                log.warning("批量状态清账 Google Sheets 写入失败: %s", e)
+                    gs.append_recharge(service, sheet_id, _sheet_data)
+                def _on_fail(status, err_msg):
+                    _db = database.get_db()
+                    if status == "synced":
+                        for rid in _rids:
+                            _db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?",
+                                        (rid,))
+                    else:
+                        for rid in _rids:
+                            _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
+                                        (err_msg, rid))
+                    _db.commit(); _db.close()
+                _sync_sheets_background(_do_sync, _on_fail)
         return jsonify({"success": True, "updated": len(ids)})
     finally:
         db.close()
@@ -3825,45 +3850,56 @@ def recharge_submit():
         return jsonify({"success": False, "error": "仅存活状态的账户允许充值"}), 400
 
     try:
-        # 1. 读配置
-        sheet_id_row = db.execute(
-            "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-        ).fetchone()
-        sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
-        if not sheet_id:
-            db.close()
-            return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
-
-        # 2. 写 Google Sheets
-        import google_sheets_service as gs
-        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        gs.append_recharge(service, sheet_id, [{
-            "account_id": account_id,
-            "amount": amount,
-            "agent": agent,
-            "operator": operator,
-        }])
-
-        # 3. Sheets 成功后再写数据库
+        # 1. 先写数据库（立即完成）
         db.execute(
-            "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by, sheets_synced) "
+            "VALUES (?, ?, ?, ?, ?, 0)",
             (account_id, amount, agent, operator, user_id)
         )
         db.commit()
         record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
+        # 2. 读配置，启动后台同步
+        sheet_id_row = db.execute(
+            "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+        ).fetchone()
+        sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
         db.close()
+
+        if sheet_id:
+            def _do_sync():
+                import google_sheets_service as gs
+                service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                gs.append_recharge(service, sheet_id, [{
+                    "account_id": account_id, "amount": amount,
+                    "agent": agent, "operator": operator,
+                }])
+
+            def _on_fail(status, err_msg):
+                if status == "synced":
+                    _db = database.get_db()
+                    _db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?",
+                                (record_id,))
+                    _db.commit(); _db.close()
+                else:
+                    _db = database.get_db()
+                    _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
+                                (err_msg, record_id))
+                    _db.commit(); _db.close()
+
+            _sync_sheets_background(_do_sync, _on_fail)
+
         return jsonify({"success": True, "id": record_id})
     except Exception as e:
-        db.close()
+        try: db.close()
+        except: pass
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/recharge/batch-submit", methods=["POST"])
 @jwt_required()
 def recharge_batch_submit():
-    """批量充值 — 写入 DB + Google Sheets"""
+    """批量充值 — 写入 DB + 后台同步 Google Sheets"""
     data = request.get_json(silent=True) or {}
     records = data.get("records", [])
     user_id = int(get_jwt_identity())
@@ -3877,8 +3913,8 @@ def recharge_batch_submit():
     operator = (user["display_name"] or "") if user else ""
 
     try:
-        # 构建有效记录列表（仅存活账户）
-        sheet_rows = []
+        # 1. 先写数据库（立即完成）
+        valid_rows = []
         for r in records:
             account_id = (r.get("account_id") or "").strip()
             amount = str(r.get("amount", "")).strip()
@@ -3888,44 +3924,57 @@ def recharge_batch_submit():
             ac = db.execute("SELECT status FROM accounts WHERE account_id=?", (account_id,)).fetchone()
             if not ac or ac["status"] != "存活":
                 continue
-            sheet_rows.append({
-                "account_id": account_id,
-                "amount": amount,
-                "agent": agent,
-                "operator": operator,
+            valid_rows.append({
+                "account_id": account_id, "amount": amount,
+                "agent": agent, "operator": operator,
             })
 
-        if not sheet_rows:
+        if not valid_rows:
             db.close()
             return jsonify({"success": False, "error": "所有充值记录缺少账户ID或金额，未写入任何数据"}), 400
 
-        # 1. 读配置
+        inserted_ids = []
+        for r in valid_rows:
+            db.execute(
+                "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by, sheets_synced) "
+                "VALUES (?, ?, ?, ?, ?, 0)",
+                (r["account_id"], r["amount"], r["agent"], r["operator"], user_id)
+            )
+            inserted_ids.append(db.execute("SELECT last_insert_rowid()").fetchone()[0])
+        db.commit()
+
+        # 2. 读配置，启动后台同步
         sheet_id_row = db.execute(
             "SELECT value FROM tags WHERE key='recharge_sheet_id'"
         ).fetchone()
         sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
-        if not sheet_id:
-            db.close()
-            return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
-
-        # 2. 写 Google Sheets
-        import google_sheets_service as gs
-        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        gs.append_recharge(service, sheet_id, sheet_rows)
-
-        # 3. Sheets 成功后再写数据库
-        for r in sheet_rows:
-            db.execute(
-                "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (r["account_id"], r["amount"], r["agent"], r["operator"], user_id)
-            )
-        db.commit()
-
         db.close()
-        return jsonify({"success": True, "count": len(sheet_rows)})
+
+        if sheet_id:
+            _ids = list(inserted_ids)
+            def _do_sync():
+                import google_sheets_service as gs
+                service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                gs.append_recharge(service, sheet_id, valid_rows)
+
+            def _on_fail(status, err_msg):
+                _db = database.get_db()
+                if status == "synced":
+                    for rid in _ids:
+                        _db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?",
+                                    (rid,))
+                else:
+                    for rid in _ids:
+                        _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
+                                    (err_msg, rid))
+                _db.commit(); _db.close()
+
+            _sync_sheets_background(_do_sync, _on_fail)
+
+        return jsonify({"success": True, "count": len(valid_rows)})
     except Exception as e:
-        db.close()
+        try: db.close()
+        except: pass
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -3939,7 +3988,7 @@ def accounts_recharge_records(aid):
         db.close()
         return jsonify({"success": False, "error": "账户不存在"}), 404
     records = db.execute(
-        "SELECT id, account_id, amount, agent, operator, status, created_at FROM recharge_records "
+        "SELECT id, account_id, amount, agent, operator, status, sheets_synced, sheets_error, created_at FROM recharge_records "
         "WHERE account_id=? ORDER BY created_at DESC",
         (account["account_id"],)
     ).fetchall()
@@ -3990,6 +4039,52 @@ def recharge_delete(rid):
     except Exception as e:
         db.close()
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/recharge/<int:rid>/retry-sheets", methods=["POST"])
+@jwt_required()
+def recharge_retry_sheets(rid):
+    """手动重试单条充值记录的 Sheets 同步。"""
+    db = _yt_db()
+    try:
+        rec = db.execute(
+            "SELECT id, account_id, amount, agent, operator FROM recharge_records WHERE id=?",
+            (rid,)
+        ).fetchone()
+        if not rec:
+            db.close()
+            return jsonify({"success": False, "error": "记录不存在"}), 404
+
+        sheet_id_row = db.execute(
+            "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+        ).fetchone()
+        sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+        if not sheet_id:
+            db.close()
+            return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
+
+        import google_sheets_service as gs
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        gs.append_recharge(service, sheet_id, [{
+            "account_id": rec["account_id"],
+            "amount": rec["amount"],
+            "agent": rec["agent"] or "",
+            "operator": rec["operator"] or "",
+        }])
+
+        db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?", (rid,))
+        db.commit()
+        db.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        msg = str(e)
+        try:
+            db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?", (msg, rid))
+            db.commit()
+        except: pass
+        try: db.close()
+        except: pass
+        return jsonify({"success": False, "error": msg}), 500
 
 
 @app.route("/api/accounts/<int:aid>/mcc-history", methods=["GET"])
@@ -4486,8 +4581,10 @@ def _get_user_sheets_config(user_id: int):
 
     如果用户未配置任何表格，sheets 为空列表。
     active_config 保证有效（优先激活标记，其次第一个表格）。
+
+    注意：使用独立的 DB 连接（而非 _yt_db 共享连接），避免干扰调用方的连接生命周期。
     """
-    db = _yt_db()
+    db = database.get_db()
     row = db.execute(
         "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
     ).fetchone()
@@ -4587,7 +4684,7 @@ def config_google_sheets_save():
 @app.route("/api/google-sheets/update-zuobiao", methods=["POST"])
 @jwt_required()
 def google_sheets_update_zuobiao():
-    """将做表数据写入用户激活的 Google Sheets 表格，并同步到数据库。"""
+    """将做表数据写入用户激活的 Google Sheets 表格（后台异步），并同步到数据库。"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     product_name = (data.get("product_name") or "").strip()
@@ -4596,20 +4693,22 @@ def google_sheets_update_zuobiao():
     rows = data.get("rows") or []
     sales_person = (data.get("sales_person") or "").strip()
     agency_ratio = data.get("agency_ratio")
-    raw_rows = data.get("raw_rows") or []  # 原始清洗数据（用于保存到 DB）
+    raw_rows = data.get("raw_rows") or []
 
     if not product_name:
         return jsonify({"success": False, "error": "产品名不能为空"}), 400
     if not rows:
         return jsonify({"success": False, "error": "做表数据不能为空"}), 400
 
-    # ---------- 产品校验：包的系列名 vs 数据的广告系列 ----------
+    # ---------- 产品校验 ----------
     db = _yt_db()
     pkgs = db.execute(
-        "SELECT series_name FROM packages WHERE product_name=? AND (status IS NULL OR status='' OR status='0')",
+        "SELECT pkg.series_name FROM packages pkg "
+        "JOIN products prod ON pkg.product_id = prod.id "
+        "WHERE prod.product_name=? AND (pkg.status IS NULL OR pkg.status='' OR pkg.status='0')",
         (product_name,)
     ).fetchall()
-    db.close()
+    # 注意：不调 db.close()，因为 _yt_db() 使用 Flask g 共享连接
     pkg_names = set((p["series_name"] or "").strip() for p in pkgs)
     if pkg_names:
         campaigns = set((r.get("campaign") or "").strip() for r in rows)
@@ -4619,7 +4718,6 @@ def google_sheets_update_zuobiao():
                 "success": False,
                 "error": f"产品选择有误！「{product_name}」的包系列与数据中的广告系列不匹配，请重新选择产品。"
             }), 400
-    # --------------------------------------------------------
 
     sheets, active_config = _get_user_sheets_config(user_id)
     if not active_config:
@@ -4630,41 +4728,7 @@ def google_sheets_update_zuobiao():
     if not spreadsheet_id:
         return jsonify({"success": False, "error": "表格 ID 为空，请检查配置"}), 400
 
-    try:
-        from google_sheets_service import (
-            build_service, get_spreadsheet_info, upsert_zuobiao,
-            GoogleSheetsServiceError,
-        )
-    except ImportError:
-        return jsonify({"success": False, "error": "Google Sheets 功能不可用"}), 500
-
-    creds_path = _GOOGLE_SHEETS_CONFIG["credentials_path"]
-
-    try:
-        service = build_service(creds_path)
-        info = get_spreadsheet_info(service, spreadsheet_id)
-        operator_name = info.get("operator", "")
-    except GoogleSheetsServiceError as e:
-        return jsonify({"success": False, "error": f"连接 Google Sheets 失败: {e}"}), 500
-
-    try:
-        result = upsert_zuobiao(
-            service=service,
-            info=info,
-            spreadsheet_id=spreadsheet_id,
-            sheet_gid=sheet_gid,
-            rows=rows,
-            product_name=product_name,
-            region=region,
-            report_date=report_date,
-            sales_person=sales_person,
-            agency_ratio=agency_ratio,
-            operator_name=operator_name,
-        )
-    except GoogleSheetsServiceError as e:
-        return jsonify({"success": False, "error": f"写入表格失败: {e}"}), 500
-
-    # ---------- 表格更新成功 → 同步到数据库（排除养户行） ----------
+    # ---------- 1. 同步写数据库 ----------
     db_saved = 0
     if raw_rows:
         db_rows = [r for r in raw_rows if not r.get("is_yanghu")]
@@ -4676,7 +4740,6 @@ def google_sheets_update_zuobiao():
             _auto_link_mcc_and_accounts(db2, user_id, product_name, region, db_rows)
             db2.commit()
 
-            # 聚合
             aggregated = {}
             for row in db_rows:
                 account = str(row.get("account", "")).strip()
@@ -4685,25 +4748,18 @@ def google_sheets_update_zuobiao():
                 if not customer_id or not campaign:
                     continue
                 key = (report_date, product_name, account, customer_id, campaign)
-                if key not in aggregated:
-                    aggregated[key] = {
-                        "account": account,
-                        "customer_id": customer_id,
-                        "campaign": campaign,
-                        "cost": float(row.get("cost", 0) or 0),
-                        "impressions": int(row.get("impressions", 0) or 0),
-                        "clicks": int(row.get("clicks", 0) or 0),
-                        "installs": float(row.get("installs", 0) or 0),
-                        "in_app_actions": float(row.get("inAppActions", 0) or 0),
-                        "cost_per_in_app": float(row.get("costPerInApp", 0) or 0),
-                    }
-                else:
-                    aggregated[key]["cost"] += float(row.get("cost", 0) or 0)
-                    aggregated[key]["impressions"] += int(row.get("impressions", 0) or 0)
-                    aggregated[key]["clicks"] += int(row.get("clicks", 0) or 0)
-                    aggregated[key]["installs"] += float(row.get("installs", 0) or 0)
-                    aggregated[key]["in_app_actions"] += float(row.get("inAppActions", 0) or 0)
-                    aggregated[key]["cost_per_in_app"] += float(row.get("costPerInApp", 0) or 0)
+                # 相同键直接覆盖，不累加
+                aggregated[key] = {
+                    "account": account,
+                    "customer_id": customer_id,
+                    "campaign": campaign,
+                    "cost": float(row.get("cost", 0) or 0),
+                    "impressions": int(row.get("impressions", 0) or 0),
+                    "clicks": int(row.get("clicks", 0) or 0),
+                    "installs": float(row.get("installs", 0) or 0),
+                    "in_app_actions": float(row.get("inAppActions", 0) or 0),
+                    "cost_per_in_app": float(row.get("costPerInApp", 0) or 0),
+                }
 
             for ag in aggregated.values():
                 existing = db2.execute(
@@ -4715,9 +4771,9 @@ def google_sheets_update_zuobiao():
                 ).fetchone()
                 if existing:
                     db2.execute(
-                        """UPDATE ad_reports SET cost=cost+?, impressions=impressions+?,
-                           clicks=clicks+?, installs=installs+?,
-                           in_app_actions=in_app_actions+?, cost_per_in_app=cost_per_in_app+?,
+                        """UPDATE ad_reports SET cost=?, impressions=?,
+                           clicks=?, installs=?,
+                           in_app_actions=?, cost_per_in_app=?,
                            region=?
                            WHERE id=?""",
                         (ag["cost"], ag["impressions"], ag["clicks"],
@@ -4743,13 +4799,204 @@ def google_sheets_update_zuobiao():
         except Exception as e:
             log.warning("Google Sheets 同步到数据库失败: %s", e)
 
+    # ---------- 2. 后台同步到 Google Sheets ----------
+    percent_str = f"{int(agency_ratio)}%" if agency_ratio is not None else ""
+
+    def _fmt_rows(op_name):
+        """生成与 upsert_zuobiao 一致的 14 列行数据。"""
+        result = []
+        for row in rows:
+            is_yanghu = row.get("is_yanghu", False)
+            result.append([
+                report_date, op_name,
+                row.get("account", ""), str(row.get("customerId", "")),
+                row.get("cost", 0), "",
+                "养户" if is_yanghu else product_name,
+                "止戈" if is_yanghu else (sales_person or ""),
+                region,
+                row.get("campaign", ""), "",
+                "0%" if is_yanghu else percent_str,
+                None, None,
+            ])
+        return result
+
+    _op_name = [""]  # mutable for closure capture
+    _spreadsheet_id = spreadsheet_id
+    _sheet_gid = sheet_gid
+    _product_name = product_name
+    _region = region
+    _report_date = report_date
+    _rows = rows
+    _sales_person = sales_person
+    _agency_ratio = agency_ratio
+    _user_id = user_id
+
+    def _do_sync():
+        from google_sheets_service import (
+            build_service, get_spreadsheet_info, upsert_zuobiao,
+        )
+        service = build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        info = get_spreadsheet_info(service, _spreadsheet_id)
+        _op_name[0] = info.get("operator", "")
+        upsert_zuobiao(
+            service=service, info=info,
+            spreadsheet_id=_spreadsheet_id, sheet_gid=_sheet_gid,
+            rows=_rows, product_name=_product_name,
+            region=_region, report_date=_report_date,
+            sales_person=_sales_person, agency_ratio=_agency_ratio,
+            operator_name=_op_name[0],
+        )
+
+    def _on_fail(status, err_msg):
+        _db = database.get_db()
+        if status == "synced":
+            _db.execute(
+                "DELETE FROM sheets_sync_log WHERE user_id=? AND product_name=?",
+                (_user_id, _product_name)
+            )
+        else:
+            formatted = _fmt_rows(_op_name[0])
+            _db.execute(
+                """INSERT OR REPLACE INTO sheets_sync_log
+                   (user_id, product_name, spreadsheet_id, sheet_gid, status, error_msg, rows_json, retry_count, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
+                (_user_id, _product_name, _spreadsheet_id, _sheet_gid, status, err_msg,
+                 json.dumps(formatted, ensure_ascii=False),
+                 1 if status == "retry_failed" else 0)
+            )
+        _db.commit()
+        _db.close()
+
+    _sync_sheets_background(_do_sync, _on_fail)
+
     return jsonify({
         "success": True,
-        "updated": result["updated"],
-        "inserted": result["inserted"],
-        "total": result["updated"] + result["inserted"],
+        "sheets_status": "syncing",
         "db_saved": db_saved,
     })
+
+
+@app.route("/api/google-sheets/sync-status", methods=["GET"])
+@jwt_required()
+def google_sheets_sync_status():
+    """查询当前用户指定产品的 Sheets 同步失败记录（含行数据用于展示）。"""
+    user_id = int(get_jwt_identity())
+    product_name = (request.args.get("product_name") or "").strip()
+    if not product_name:
+        return jsonify({"success": False, "error": "product_name 不能为空"}), 400
+    db = _yt_db()
+    row = db.execute(
+        "SELECT id, status, error_msg, rows_json, retry_count, updated_at "
+        "FROM sheets_sync_log WHERE user_id=? AND product_name=? "
+        "ORDER BY updated_at DESC LIMIT 1",
+        (user_id, product_name)
+    ).fetchone()
+    db.close()
+    if row:
+        d = dict(row)
+        if d.get("rows_json"):
+            try: d["rows"] = json.loads(d["rows_json"])
+            except: d["rows"] = []
+        return jsonify({"success": True, "log": d})
+    return jsonify({"success": True, "log": None})
+
+
+@app.route("/api/google-sheets/retry-sync", methods=["POST"])
+@jwt_required()
+def google_sheets_retry_sync():
+    """手动重试做表数据的 Sheets 同步。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    product_name = (data.get("product_name") or "").strip()
+    if not product_name:
+        return jsonify({"success": False, "error": "product_name 不能为空"}), 400
+
+    db = _yt_db()
+    log_row = db.execute(
+        "SELECT * FROM sheets_sync_log WHERE user_id=? AND product_name=?",
+        (user_id, product_name)
+    ).fetchone()
+    if not log_row:
+        db.close()
+        return jsonify({"success": False, "error": "没有待同步的记录"}), 404
+
+    # 取数据库中的做表原始数据重新汇总
+    report_date = ""
+    region = ""
+    rows_raw = db.execute(
+        "SELECT DISTINCT account, customer_id, campaign, cost, impressions, clicks, "
+        "installs, in_app_actions, cost_per_in_app, report_date, region "
+        "FROM ad_reports WHERE user_id=? AND product_name=? ORDER BY report_date DESC",
+        (user_id, product_name)
+    ).fetchall()
+    if not rows_raw:
+        db.close()
+        return jsonify({"success": False, "error": "没有找到对应的做表数据"}), 404
+
+    report_date = rows_raw[0]["report_date"] or ""
+    region = rows_raw[0]["region"] or ""
+
+    rows = []
+    for r in rows_raw:
+        rows.append({
+            "account": r["account"] or "",
+            "customerId": str(r["customer_id"] or ""),
+            "campaign": r["campaign"] or "",
+            "cost": r["cost"] or 0,
+        })
+
+    # 取产品信息
+    prod = db.execute(
+        "SELECT sales_person, agency_ratio FROM products WHERE product_name=? AND (is_archived IS NULL OR is_archived=0) LIMIT 1",
+        (product_name,)
+    ).fetchone()
+    sales_person = (prod["sales_person"] or "") if prod else ""
+    agency_ratio = prod["agency_ratio"] if prod else None
+
+    spreadsheet_id = log_row["spreadsheet_id"] or ""
+    sheet_gid = log_row["sheet_gid"] or "0"
+    db.close()
+
+    if not spreadsheet_id:
+        return jsonify({"success": False, "error": "表格 ID 为空"}), 400
+
+    try:
+        from google_sheets_service import (
+            build_service, get_spreadsheet_info, upsert_zuobiao,
+            GoogleSheetsServiceError,
+        )
+        service = build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        info = get_spreadsheet_info(service, spreadsheet_id)
+        operator_name = info.get("operator", "")
+        result = upsert_zuobiao(
+            service=service, info=info,
+            spreadsheet_id=spreadsheet_id, sheet_gid=sheet_gid,
+            rows=rows, product_name=product_name,
+            region=region, report_date=report_date,
+            sales_person=sales_person, agency_ratio=agency_ratio,
+            operator_name=operator_name,
+        )
+
+        # 成功 → 删除日志
+        db2 = _yt_db()
+        db2.execute("DELETE FROM sheets_sync_log WHERE id=?", (log_row["id"],))
+        db2.commit(); db2.close()
+
+        return jsonify({
+            "success": True,
+            "updated": result["updated"],
+            "inserted": result["inserted"],
+        })
+    except Exception as e:
+        msg = str(e)
+        db2 = _yt_db()
+        db2.execute(
+            "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
+            "updated_at=datetime('now','localtime') WHERE id=?",
+            (msg, log_row["id"])
+        )
+        db2.commit(); db2.close()
+        return jsonify({"success": False, "error": msg}), 500
 
 
 # ---------- 文件浏览 API ----------
@@ -5125,6 +5372,37 @@ _GOOGLE_SHEETS_CONFIG = {
                      "config", "fit-boulevard-503111-u4-812bc02c2000.json")
     ),
 }
+
+
+def _sync_sheets_background(sync_fn, on_fail_fn):
+    """后台线程写 Google Sheets，失败 30s 后重试一次。
+
+    sync_fn:      无参函数，执行 Sheets 写入
+    on_fail_fn:   回调 (status: str, error: str)，status 取值:
+                  'failed' | 'synced' | 'retry_failed'
+    """
+    import time as _time
+    def _run():
+        try:
+            sync_fn()
+        except Exception as e:
+            log.warning("Sheets 同步失败，30s 后重试: %s", e)
+            if on_fail_fn:
+                try: on_fail_fn("failed", str(e))
+                except Exception: pass
+            _time.sleep(30)
+            try:
+                sync_fn()
+                if on_fail_fn:
+                    try: on_fail_fn("synced", "")
+                    except Exception: pass
+            except Exception as e2:
+                log.error("Sheets 重试失败: %s", e2)
+                if on_fail_fn:
+                    try: on_fail_fn("retry_failed", str(e2))
+                    except Exception: pass
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
 
 
 @app.route("/api/google-sheets/status", methods=["GET"])
