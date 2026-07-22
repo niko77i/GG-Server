@@ -6723,21 +6723,28 @@ def ad_reports_list():
     # 选地区 → 展示有做表数据的产品；选产品 → 展示产品的配置地区
     region_filter = request.args.get("region", "").strip()
     product_filter = request.args.get("product_name", "").strip()
-    uid_str = str(user_id)
     if region_filter:
         products = [r[0] for r in db.execute(
-            "SELECT DISTINCT product_name FROM ad_reports WHERE user_id=? AND region=? ORDER BY product_name",
+            """SELECT DISTINCT p.product_name FROM products p
+               JOIN product_runners pr ON p.id = pr.product_id
+               WHERE pr.user_id=? AND p.region=? AND (p.is_archived IS NULL OR p.is_archived=0)
+               ORDER BY p.product_name""",
             (user_id, region_filter)
         ).fetchall()]
     else:
         products = [r[0] for r in db.execute(
-            "SELECT DISTINCT product_name FROM ad_reports WHERE user_id=? ORDER BY product_name",
+            """SELECT DISTINCT p.product_name FROM products p
+               JOIN product_runners pr ON p.id = pr.product_id
+               WHERE pr.user_id=? AND (p.is_archived IS NULL OR p.is_archived=0)
+               ORDER BY p.product_name""",
             (user_id,)
         ).fetchall()]
     if product_filter:
         regions = [r[0] for r in db.execute(
-            "SELECT DISTINCT region FROM products WHERE product_name=? AND region!='' AND (owner_id=? OR runner_ids LIKE ?) ORDER BY region",
-            (product_filter, user_id, f"%{uid_str}%")
+            """SELECT DISTINCT region FROM products WHERE product_name=?
+               AND region!='' AND (is_archived IS NULL OR is_archived=0)
+               ORDER BY region""",
+            (product_filter,)
         ).fetchall()]
     else:
         regions = [r[0] for r in db.execute(
