@@ -1718,6 +1718,10 @@ def youtube_delete():
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
     is_admin = user and user["role"] in ("developer", "admin")
+    # 清理关联数据：成效素材关联 + 消耗记录
+    placeholders = ",".join(["?"] * len(ids))
+    db.execute(f"DELETE FROM product_assets WHERE video_id IN ({placeholders})", ids)
+    db.execute(f"DELETE FROM video_consumption WHERE video_id IN ({placeholders})", ids)
     deleted = 0
     for vid in ids:
         if is_admin:
@@ -2495,6 +2499,10 @@ def products_merge():
                 )
                 merged_packages += 1
 
+        # 清理副产品关联数据
+        db.execute("DELETE FROM product_assets WHERE product_id=?", (mid,))
+        db.execute("DELETE FROM delist_checks WHERE product_id=?", (mid,))
+        db.execute("DELETE FROM product_runners WHERE product_id=?", (mid,))
         # 删除副产品
         db.execute("DELETE FROM packages WHERE product_id=?", (mid,))
         db.execute("DELETE FROM products WHERE id=?", (mid,))
@@ -2693,8 +2701,9 @@ def products_delete_package(pkg_id):
     if reject: return reject
     db = _yt_db()
 
-    # 先删 delist_checks，否则外键约束阻止删除包
+    # 先删关联表，否则外键约束阻止删除包
     db.execute("DELETE FROM delist_checks WHERE package_id=?", (pkg_id,))
+    db.execute("DELETE FROM delist_notifications WHERE package_id=?", (pkg_id,))
     db.execute("DELETE FROM packages WHERE id=?", (pkg_id,))
     db.commit(); db.close()
     return jsonify({"success": True})
@@ -2713,6 +2722,7 @@ def products_batch_delete_packages():
     db = _yt_db()
     placeholders = ",".join("?" * len(ids))
     db.execute(f"DELETE FROM delist_checks WHERE package_id IN ({placeholders})", ids)
+    db.execute(f"DELETE FROM delist_notifications WHERE package_id IN ({placeholders})", ids)
     db.execute(f"DELETE FROM packages WHERE id IN ({placeholders})", ids)
     db.commit(); db.close()
     return jsonify({"success": True, "deleted": len(ids)})
@@ -3656,6 +3666,10 @@ def accounts_delete(aid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     try:
+        ac = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()
+        if ac:
+            db.execute("DELETE FROM recharge_records WHERE account_id=?", (ac["account_id"],))
+        db.execute("DELETE FROM account_mcc_history WHERE account_id=?", (aid,))
         db.execute("DELETE FROM accounts WHERE id=? AND owner_id=?", (aid, user_id))
         db.commit()
         return jsonify({"success": True})
@@ -3674,6 +3688,10 @@ def accounts_batch_delete():
     db = _yt_db()
     try:
         for aid in ids:
+            ac = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()
+            if ac:
+                db.execute("DELETE FROM recharge_records WHERE account_id=?", (ac["account_id"],))
+            db.execute("DELETE FROM account_mcc_history WHERE account_id=?", (aid,))
             db.execute("DELETE FROM accounts WHERE id=? AND owner_id=?", (aid, user_id))
         db.commit()
         return jsonify({"success": True, "deleted": len(ids)})
@@ -4265,6 +4283,11 @@ def mcc_delete(mid):
     if acct_count > 0:
         db.close()
         return jsonify({"success": False, "error": f"该 MCC 下有 {acct_count} 个直接关联账户，请先解除关联"}), 400
+    # 检查是否有直接关联的产品
+    prod_count = db.execute("SELECT COUNT(*) FROM products WHERE mcc_id=?", (mid,)).fetchone()[0]
+    if prod_count > 0:
+        db.close()
+        return jsonify({"success": False, "error": f"该 MCC 下有 {prod_count} 个关联产品，请先解除关联"}), 400
     db.execute("DELETE FROM mcc WHERE id=?", (mid,))
     db.commit(); db.close()
     return jsonify({"success": True})
@@ -4297,6 +4320,10 @@ def mcc_batch_delete():
         acct_count = db.execute("SELECT COUNT(*) FROM accounts WHERE mcc_id=?", (mid,)).fetchone()[0]
         if acct_count > 0:
             skipped.append({"id": mid, "reason": f"有 {acct_count} 个关联账户"})
+            continue
+        prod_count = db.execute("SELECT COUNT(*) FROM products WHERE mcc_id=?", (mid,)).fetchone()[0]
+        if prod_count > 0:
+            skipped.append({"id": mid, "reason": f"有 {prod_count} 个关联产品"})
             continue
         db.execute("DELETE FROM mcc WHERE id=?", (mid,))
         deleted += 1
@@ -5425,6 +5452,14 @@ def admin_delete_user(uid):
         conn.execute("UPDATE scrape_cache SET scraped_by = NULL WHERE scraped_by = ?", (uid,))
         conn.execute("DELETE FROM import_history WHERE user_id = ?", (uid,))
         conn.execute("DELETE FROM ad_reports WHERE user_id = ?", (uid,))
+        # 补充清理：之前遗漏的关联表
+        conn.execute("DELETE FROM product_runners WHERE user_id = ?", (uid,))
+        conn.execute("UPDATE product_assets SET added_by = NULL WHERE added_by = ?", (uid,))
+        conn.execute("UPDATE video_consumption SET user_id = NULL WHERE user_id = ?", (uid,))
+        conn.execute("UPDATE recharge_records SET created_by = NULL WHERE created_by = ?", (uid,))
+        conn.execute("UPDATE account_mcc_history SET changed_by = NULL WHERE changed_by = ?", (uid,))
+        conn.execute("DELETE FROM audit_log WHERE user_id = ?", (uid,))
+        conn.execute("DELETE FROM delist_notifications WHERE user_id = ?", (uid,))
         # 现在可以安全删除用户
         conn.execute("DELETE FROM users WHERE id = ?", (uid,))
         conn.commit()

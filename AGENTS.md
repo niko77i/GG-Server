@@ -5,7 +5,7 @@
 
 ## 项目概述
 
-谷歌广告运营工具箱的多人协作版本 — 包含图片爬取、AI 视频生成、YouTube 视频管理、产品管理、数据做表、广告账户管理等模块。
+谷歌广告运营工具箱的多人协作版本 — 包含图片爬取、AI 视频生成、YouTube 视频管理、产品管理、数据做表、广告账户管理、充值管理、掉包检测、数据分析、全局任务追踪等模块。
 
 ### 与 ImageCrawling 的关系
 - **ImageCrawling**：单用户本地工具，PyInstaller 打包为独立 EXE
@@ -16,12 +16,15 @@
 
 | 组件 | 选择 | 说明 |
 |------|------|------|
-| 后端框架 | Flask | 纯 API 服务，~2000 行集中在 main.py |
+| 后端框架 | Flask | 纯 API 服务，main.py ~7300 行 + routes/ 目录 |
 | 数据库 | SQLite (WAL 模式) | `temp/app.db`，局域网 20 人以下足够 |
-| 认证 | Flask-JWT-Extended | JWT token，24h 过期 |
+| 认证 | Flask-JWT-Extended | JWT token，24h 过期，支持滑动刷新 |
 | 密码 | Werkzeug pbkdf2:sha256 | Flask 内置哈希 |
 | 前端 | Vue 3 + Vite + Element Plus + Pinia + Vue Router | Composition API |
 | HTTP | axios | 全局拦截器自动携带 JWT token |
+| 定时任务 | 后台 daemon 线程 | 掉包检测（每小时）、每周清理 |
+| 跨标签同步 | BroadcastChannel | 多 Tab 任务状态和通知同步 |
+| 外部通知 | Telegram Bot + Email | 掉包通知推送到群组/邮件 |
 | 部署 | 常开 Python 服务（`python main.py`） | 暂不打包 EXE |
 
 ## 核心架构
@@ -35,6 +38,7 @@
   |  +- API Routes (with user_id scoping)   |
   |  +- SQLite (WAL mode, temp/app.db)      |
   |  +- 前端静态文件 (frontend/dist/)        |
+  |  +- 后台定时线程 (掉包检测/每周清理)      |
   +-----------------------------------------+
           ↑ HTTP / JSON + JWT Bearer Token
   +-----------------------------------------+
@@ -42,6 +46,8 @@
   |  +- Login / Register pages              |
   |  +- Router guards (auth check)          |
   |  +- Per-user data display               |
+  |  +- GlobalTaskPanel (全局任务浮动面板)    |
+  |  +- BroadcastChannel (多标签同步)        |
   +-----------------------------------------+
 
   PC1 浏览器    PC2 浏览器    PC3 浏览器
@@ -62,7 +68,8 @@ CREATE TABLE users (
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     last_login  TEXT,
     created_by  INTEGER REFERENCES users(id),
-    config      TEXT DEFAULT '{}'
+    config      TEXT DEFAULT '{}',
+    telegram_username TEXT DEFAULT ''
 );
 ```
 
@@ -73,6 +80,7 @@ CREATE TABLE users (
 | developer | 全部角色 | 全部 | 全部 | 配置文件中预置 |
 | admin | 仅 user | 管理 user | 全部 | 由 developer 创建 |
 | user | 不能创建 | 不可 | 自己的数据 | 开放注册 |
+| viewer | 只读 | 不可 | 不可 | 由 admin 创建 |
 | hidden | - | - | - | 被停用，无法登录 |
 
 ### 数据隔离设计
@@ -88,12 +96,14 @@ CREATE TABLE users (
 - `scrape_history` — 图片爬取记录
 - `video_history` — AI 视频生成历史
 - `yt_videos`（is_public=0）— YouTube 个人视频库
+- `ad_reports` — 做表数据
+- `recharge_records` — 充值记录（created_by 隔离）
 
 #### YouTube 双层模型
 - `yt_videos` 表有 `owner_id` 和 `is_public` 字段
 - `is_public=1` → 公共库，所有人可查看
 - `is_public=0` → 仅 owner 可见
-- 导入时默认私人，用户可手动标记为公开
+- 导入时 admin/developer 默认私人，普通用户/viewer 默认公开
 
 ## 认证系统
 
@@ -103,61 +113,119 @@ CREATE TABLE users (
 2. 前端 axios 拦截器自动携带 `Authorization: Bearer <token>`
 3. 后端 `@jwt_required()` 装饰器验证 token，`get_jwt_identity()` 获取用户 ID
 4. token 过期（24h）→ 前端自动跳转登录页
+5. **JWT 滑动过期**：每次 API 请求自动刷新 token 过期时间
 
 ### 路由保护
 - 所有 API 路由（除 /api/auth/login 和 /api/auth/register）都需 JWT 认证
 - admin 路由额外检查 `role in ('developer', 'admin')`
+- developer 专属路由检查 `role == 'developer'`
+- viewer 角色对所有写操作返回 403
 - 前端全局路由守卫：未登录 → /login，非 admin → /accounts
 
 ## 项目结构
 
 ```
 GG-Server/
-├── frontend/                  # Vue 3 前端
+├── frontend/                       # Vue 3 前端
 │   ├── src/
-│   │   ├── api/               # axios API 模块
-│   │   │   ├── client.js      # axios 实例 + JWT 拦截器
-│   │   │   ├── auth.js        # 登录/注册 API
-│   │   │   ├── admin.js       # 用户管理 API
-│   │   │   ├── accounts.js    # 账户/MCC API
-│   │   │   ├── products.js    # 产品管理 API
-│   │   │   ├── youtube.js     # YouTube API
-│   │   │   ├── video.js       # 视频生成 API
-│   │   │   └── scrape.js      # 爬取 API
-│   │   ├── stores/            # Pinia 状态管理
-│   │   │   ├── auth.js        # 认证状态
-│   │   │   ├── products.js    # 产品状态
-│   │   │   ├── accounts.js    # 账户状态
-│   │   │   ├── youtube.js     # YouTube 状态
-│   │   │   └── video.js       # 视频状态
-│   │   ├── views/             # 页面组件
+│   │   ├── api/                    # axios API 模块
+│   │   │   ├── client.js           # axios 实例 + JWT 拦截器（滑动过期）
+│   │   │   ├── auth.js             # 登录/注册 API
+│   │   │   ├── admin.js            # 用户管理 API
+│   │   │   ├── accounts.js         # 账户/MCC/充值 API
+│   │   │   ├── products.js         # 产品管理 API（含掉包检测）
+│   │   │   ├── youtube.js          # YouTube API
+│   │   │   ├── video.js            # 视频生成 API
+│   │   │   ├── scrape.js           # 爬取 API
+│   │   │   ├── google-sheets.js    # Google Sheets 配置 API
+│   │   │   ├── reports.js          # 做表数据 API
+│   │   │   ├── data.js             # 数据分析 API
+│   │   │   └── browse.js           # 文件浏览 API
+│   │   ├── stores/                 # Pinia 状态管理
+│   │   │   ├── auth.js             # 认证状态
+│   │   │   ├── products.js         # 产品状态
+│   │   │   ├── accounts.js         # 账户状态
+│   │   │   ├── youtube.js          # YouTube 状态
+│   │   │   ├── video.js            # 视频状态
+│   │   │   └── taskRunner.js       # 全局任务追踪（跨标签同步）
+│   │   ├── utils/                  # 工具函数
+│   │   │   ├── broadcast.js        # BroadcastChannel 封装（多标签同步）
+│   │   │   ├── dedupLoader.js      # 防重复加载 guard
+│   │   │   ├── statusTag.js        # 状态标签工具
+│   │   │   ├── adsParser.js        # 广告数据解析
+│   │   │   ├── clipboard.js        # 剪贴板工具
+│   │   │   └── env.js              # 环境判断
+│   │   ├── views/                  # 页面组件
 │   │   │   ├── LoginView.vue
 │   │   │   ├── RegisterView.vue
 │   │   │   ├── UserManageView.vue
-│   │   │   ├── AccountsView.vue
+│   │   │   ├── UserProfileView.vue     # 用户配置（Google Sheets 等）
+│   │   │   ├── AccountsView.vue        # 账户管理容器
+│   │   │   ├── AdsAccountPanel.vue     # 广告账户面板
+│   │   │   ├── MccPanel.vue            # MCC 管理面板
+│   │   │   ├── ProductPanel.vue        # 产品管理面板
+│   │   │   ├── SettingsPanel.vue       # 系统设置（商务管理/充值表配置）
 │   │   │   ├── ScrapeView.vue
+│   │   │   ├── MediaView.vue           # 统一媒体页面
 │   │   │   ├── VideoView.vue
 │   │   │   ├── YoutubeView.vue
-│   │   │   └── ToolkitView.vue
-│   │   ├── router/index.js    # Vue Router
-│   │   └── App.vue            # 根组件
-│   └── dist/                  # 生产构建产物
+│   │   │   ├── ToolkitView.vue         # 做表数据 + 音频替换
+│   │   │   ├── AnalysisView.vue        # 数据分析看板
+│   │   │   ├── DataManageView.vue      # 数据管理
+│   │   │   └── SchedulerView.vue       # 定时任务手动触发（developer）
+│   │   ├── components/             # 公共组件
+│   │   │   ├── AppSidebar.vue
+│   │   │   ├── ProductCard.vue
+│   │   │   ├── ProductModal.vue
+│   │   │   ├── ProductDetailModal.vue
+│   │   │   ├── AddPackageModal.vue
+│   │   │   ├── AccountModal.vue        # 账户编辑弹窗（含死亡清账提醒）
+│   │   │   ├── AccountDetailModal.vue  # 账户详情（含充值记录+MCC 历史）
+│   │   │   ├── AccountBatchImportModal.vue
+│   │   │   ├── AccountBatchLookupModal.vue  # 批量查户弹窗
+│   │   │   ├── RechargeModal.vue       # 单次充值弹窗
+│   │   │   ├── RechargeBatchModal.vue  # 批量充值弹窗
+│   │   │   ├── MccModal.vue
+│   │   │   ├── MccDetailModal.vue
+│   │   │   ├── CopyImportModal.vue
+│   │   │   ├── GlobalTaskPanel.vue     # 全局任务浮动面板
+│   │   │   └── youtube/
+│   │   │       ├── TagsConfig.vue      # YouTube 标签配置
+│   │   │       ├── ImportTab.vue       # YouTube 导入 Tab
+│   │   │       └── CopywritingTab.vue  # YouTube 文案 Tab
+│   │   ├── router/index.js        # Vue Router
+│   │   └── App.vue                # 根组件（全局通知轮询 + 任务面板）
+│   └── dist/                      # 生产构建产物
 ├── py/
-│   ├── main.py               # Flask API 入口（所有路由）
-│   ├── auth.py               # 认证模块（登录/注册/角色管理）
-│   ├── database.py            # SQLite 统一存储
-│   ├── scraper.py             # Google Play 图片爬取
-│   ├── resizer.py             # 图片缩放处理
-│   ├── utils.py               # 工具函数
-│   ├── video_processor.py     # FFmpeg 视频生成
-│   └── ai_service.py          # AI 视频 API 调用
+│   ├── main.py                    # Flask 入口 + 大量路由（~7300 行，持续拆分中）
+│   ├── auth.py                    # 认证模块（登录/注册/角色管理）
+│   ├── database.py                # SQLite 统一存储（24 张表，自动迁移）
+│   ├── scraper.py                 # Google Play 图片爬取
+│   ├── resizer.py                 # 图片缩放处理
+│   ├── utils.py                   # 工具函数
+│   ├── video_processor.py         # FFmpeg 视频生成
+│   ├── ai_service.py              # AI 视频 API 调用
+│   ├── cache.py                   # 缓存服务
+│   ├── data_service.py            # 数据分析服务
+│   ├── google_sheets_service.py   # Google Sheets API 封装（充值/做表写入）
+│   ├── google_ads_service.py      # Google Ads API 封装
+│   ├── delist_checker.py          # 掉包检测核心逻辑
+│   ├── telegram_sender.py         # Telegram Bot 通知
+│   ├── email_sender.py            # 邮件通知
+│   ├── manage.py                  # 管理工具脚本
+│   ├── routes/
+│   │   ├── __init__.py            # Blueprint 注册
+│   │   ├── decorators.py          # 权限装饰器（_reject_viewer、_require_developer 等）
+│   │   ├── helpers.py             # 公共工具函数（scope_where、can_modify 等）
+│   │   └── auth_routes.py         # 认证相关 Blueprint（已激活）
+│   └── tests/                     # 测试文件
 ├── config/
-│   └── config.json           # 服务器配置（含 developer 账号）
-├── temp/                     # 运行时数据
-│   └── app.db                # SQLite 数据库
-├── fonts/                    # 用户字体文件
+│   └── config.json                # 服务器配置（含 developer 账号）
+├── temp/                          # 运行时数据
+│   └── app.db                     # SQLite 数据库
+├── fonts/                         # 用户字体文件
 ├── requirements.txt
-└── AGENTS.md                 # 本文档
+└── AGENTS.md                      # 本文档
 ```
 
 ## API 路由一览
@@ -178,9 +246,180 @@ GG-Server/
 | POST | /api/admin/users/:id/toggle | 启用/禁用 |
 | DELETE | /api/admin/users/:id | 删除用户 |
 
+### 充值管理
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /api/recharge/submit | 单次充值 |
+| POST | /api/recharge/batch-submit | 批量充值 |
+| GET | /api/recharge/records | 查询充值记录（按账户ID） |
+| PUT | /api/recharge/records/:id | 编辑充值记录 |
+| DELETE | /api/recharge/records/:id | 删除充值记录 |
+
+### 掉包检测
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /api/products/:pid/check-delist | 手动检测产品掉包 |
+| GET | /api/products/delist-status | 获取掉包检测状态 |
+| GET | /api/delist/pending | 获取当前用户待处理通知 |
+| POST | /api/delist/dismiss | 关闭掉包通知 |
+
+### 定时任务（仅 developer）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /api/admin/trigger-delist-check | 手动触发掉包检测 |
+| POST | /api/admin/trigger-weekly-cleanup | 手动触发每周清理 |
+
+### 做表数据 / Google Sheets
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET/POST | /api/config/google-sheets | 用户 Google Sheets 配置 |
+| GET/POST | /api/settings/account | 账户设置（含 recharge_sheet_id） |
+| POST | /api/google-sheets/upsert | 做表数据写入用户表格 |
+
+### 数据分析
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | /api/ad-reports/dashboard | 仪表盘关键指标 |
+| GET | /api/ad-reports/trend | 趋势数据 |
+| GET | /api/ad-reports/compare | 对比分析 |
+| GET | /api/ad-reports/multi-analysis | 多维自由分析（散点图/相关性） |
+| POST | /api/ad-reports/ai-analysis | AI 智能解读 |
+
 ### 其他模块路由
 
-所有路由均需 `@jwt_required()`，返回 `{"success": bool, ...}` 格式。具体路由定义参考 ImageCrawling CLAUDE.md。
+所有路由均需 `@jwt_required()`，返回 `{"success": bool, ...}` 格式。路由总数约 157 个，分布在 15+ 个模块中。
+
+## 新增功能模块
+
+### 充值管理
+
+账户充值功能，支持单次充值和批量充值。采用**数据库 + Google Sheets 双写**方案。
+
+**数据库表**：`recharge_records`
+| 列 | 类型 | 说明 |
+|---|---|---|
+| id | INTEGER | 主键 |
+| account_id | TEXT | 账户ID（如 `123-456-7890`） |
+| amount | TEXT | 金额（数字或 `清`） |
+| agent | TEXT | 代理（自动联动） |
+| operator | TEXT | 运营（当前用户 display_name） |
+| created_by | INTEGER | 提交人 user ID |
+| created_at | TEXT | 创建时间 |
+| status_changed_date | TEXT | 状态变更日期 |
+
+**核心逻辑**：
+- **单次充值**：AdsAccountPanel 操作列「💰」按钮 → RechargeModal 弹窗，账户ID 下拉搜索，代理自动联动
+- **批量充值**：勾选账户后工具栏「💰 批量充值」→ RechargeBatchModal，金额可分别填或统一填
+- **充值表配置**：SettingsPanel 中配置 Google Sheets ID（仅 admin/developer 可见），所有用户共用同一张表
+- **双写顺序**：先写 Google Sheets 成功 → 再写 SQLite（Sheets 失败则数据库也不写入）
+- **死亡清账**：账户状态变为「死亡」时，检查上次变存活后有无充值记录，有则自动追加一条 `amount='清'` 的充值记录
+- **状态变更追踪**：新增 `status_changed_date` 字段记录状态变更时间，用于清账逻辑判断
+- **充值记录编辑**：支持编辑和删除充值记录
+- **非存活账户限制**：非存活状态账户禁止充值
+- **去重规则**：普通充值不做去重；死亡清账按 account_id 去重
+- 从存活变非存活时，检查上次存活后有充值才写清账；从死亡恢复存活时删除旧清账记录
+
+### 掉包检测与通知
+
+自动检测 Google Play 包的上下架状态，通过 Telegram 群组和前端弹窗通知在跑人员。
+
+**数据库表**：`delist_checks`（检测结果）、`delist_notifications`（通知状态，按用户跟踪）
+
+**核心逻辑**：
+- **定时检测**：后台 daemon 线程每小时自动检测所有正常状态产品的正常状态包
+- **手动检测**：产品名后"是否掉包"按钮，点击立即检测
+- **检测方式**：HTTP 请求 Google Play 链接，通过状态码和页面内容判断（404 / "not found" / "找不到请求的网址"）
+- **首次通知**：检测到掉包后，所有在跑人员收到前端弹窗通知
+- **重复提醒**：关闭弹窗后 3 分钟，若包状态未设为"掉包"则再次弹窗
+- **公平通知**：即使有人已将包状态设为"掉包"，其他在跑人员仍要收到第一次提醒
+- **标红提示**：定时检测到掉包的包在列表中标记红色，手动设置状态为"掉包"后恢复
+- **Telegram 通知**：首次检测到掉包时通过 Telegram Bot 向群组发送消息，@在跑人员（需用户绑定 Telegram 用户名）
+- **暂停产品跳过**：暂停状态的产品不参与定时检测
+- **前端轮询**：每 30 秒轮询 `/api/delist/pending` 检查新通知
+
+### 全局任务追踪 & 跨标签同步
+
+解决切换页面进度丢失和多标签页状态不同步的问题。
+
+**核心机制**：
+- **Pinia Store 持久化**：任务状态提升到 `taskRunner` Store，路由切换不影响
+- **localStorage 恢复**：运行中任务持久化，刷新页面后恢复并重新轮询
+- **BroadcastChannel 同步**：`gg-server-sync` 频道跨 Tab 同步任务列表和掉包通知状态
+- **全局浮动面板**：`GlobalTaskPanel.vue` 固定在右下角，任何页面可见，展示运行中/已完成/失败任务
+
+**支持的任务类型**：视频生成（video）、掉包检测（delist）、每周清理（cleanup）
+
+### 数据分析板块
+
+基于做表数据（ad_reports）提供多维度数据分析和 AI 智能解读。
+
+- **仪表盘**：关键指标（花费、展示、安装、CPI、CTR、CVR）
+- **趋势图**：产品/系列维度的数据变化趋势
+- **对比分析**：不同产品/系列的投放效果对比
+- **多维分析**：自由维度组合（X/Y轴指标、气泡大小、分组维度），散点图+相关性探索
+- **AI 解读**：接入 AI 进行智能分析和对话
+
+### 广告账户 MCC 变更历史
+
+追踪广告账户的 MCC 归属变更，类似 git 提交记录。
+
+**数据库表**：`account_mcc_history`
+- 记录 old_mcc_id → new_mcc_id 的变更
+- 支持 5 种变更类型：manual（手动）、batch（批量）、reassign（认领转移）、import（导入）、create（新建）
+- 支持删除错误的历史记录
+- 账户删除时 CASCADE 清理
+
+### 批量查户
+
+在 AdsAccountPanel 工具栏新增「🔍 批量查户」按钮，粘贴一批账户 ID 快速查看归属、状态、代理、MCC 等信息。纯查询操作，不涉及导入/创建。
+
+### 批量导入按账户配置
+
+批量导入新账户时，支持对每个新账户单独设置名称、时区、代理等字段。共用默认值作为初始值，逐行可覆盖编辑。
+
+### 产品管理增强
+
+- **商务字段**：产品新增 `sales_person`（商务）和 `agency_ratio`（代投比例）字段
+- **产品删除审计日志**：软删除模式，`is_archived` 标记 + `audit_log` 表记录操作人和删除内容
+- **产品合并优化**：合并时同步清理副产品的关联数据
+
+### 视频/媒体功能增强
+
+- **图片拖拽排序**：视频生成前可手动拖拽调整图片顺序
+- **音频替换预览**：上传后可用 HTML5 播放器预览视频/音频
+- **音频替换历史**：处理记录持久化到 `audio_replace_history` 表，支持回看和重新下载
+- **视频批量可见性**：admin/developer 可批量设置视频公开/私有
+- **视频消耗追踪**：手动录入广告消耗金额，`video_consumption` 表按人统计
+- **视频上传者标签筛选**：YouTube 页面支持按上传者筛选
+
+### Google Sheets 集成
+
+- **用户表格配置**：每个用户可在 UserProfileView 配置自己的 Google Sheets ID
+- **做表数据写入**：ToolkitView 一键将做表数据 upsert 到用户表格，按 14 列模板映射
+- **充值表**：管理员配置共用充值表，充值记录自动追加
+- **凭据统一**：所有 Google Sheets 操作复用做表同款凭据路径
+
+### 定时任务系统
+
+- **掉包检测**：每小时自动执行，后台 daemon 线程
+- **每周清理**：清理过期爬取图片和生成视频
+- **手动触发**：SchedulerView 页面，仅 developer 角色可见，支持即时执行
+
+### 大规模重构（进行中）
+
+- **后端**：main.py (~7300 行) 逐步拆分为 Flask Blueprint，目标 18 个 route 文件
+- **前端**：大组件（YoutubeView/MediaView/AnalysisView/VideoView）逐步拆分为子组件
+- **已完成**：auth_routes.py Blueprint 激活、helpers 扩展、JWT 滑动过期、前端 3 个 Tab 独立、dedupLoader 公共化
+
+### 数据库完整性改进
+
+- 24 张表之间的关系梳理和孤儿数据清理
+- 视频删除 → 同步清理 product_assets、video_consumption
+- 包删除 → 同步清理 delist_notifications
+- 用户删除 → 补充 7 处遗漏的关联清理
+- MCC 删除 → 增加产品关联检查
+- 产品合并 → 补充关联数据清理
+- 所有改动为补充清理，不改现有业务逻辑
 
 ## 共享功能知识（来自 ImageCrawling）
 
@@ -236,6 +475,7 @@ GG-Server/
 - 文案浮层：最多两条，随机浮现 2-3 秒，淡入淡出 + 阴影描边
 - 任务队列：支持添加多个任务到队列，一键生成全部
 - 视频设置历史：按包名保存/恢复设置（存储在 SQLite `video_history` 表）
+- **全局任务追踪**：任务注册到 taskRunner Store，切换页面不丢进度
 
 | AI Provider | 后端模型 | 特点 |
 |-------------|---------|------|
@@ -262,11 +502,12 @@ GG-Server/
 - 产品-包 两级结构：一个产品可以有多个包
 - 支持搜索（产品名/KPI）、地区筛选、暂停/正常切换
 - 同一产品下相同包名+链接视为重复，只更新系列名
+- **新增字段**：商务（sales_person）、代投比例（agency_ratio）
 
 ### 工具集
 
-- **做表数据**：从 Google Ads 原始竖排数据解析账号/客户ID/广告系列/费用/展示/点击，三种视图（原始清洗/按客户ID+广告系列聚合/按广告系列聚合），一键复制 TSV + 导出 XLSX
-- **音频替换**：FFmpeg `-c:v copy -map 0:v:0 -map 1:a:0 -shortest`，支持音频文件和视频文件作为音频源
+- **做表数据**：从 Google Ads 原始竖排数据解析账号/客户ID/广告系列/费用/展示/点击，三种视图（原始清洗/按客户ID+广告系列聚合/按广告系列聚合），一键复制 TSV + 导出 XLSX，支持写入 Google Sheets
+- **音频替换**：FFmpeg `-c:v copy -map 0:v:0 -map 1:a:0 -shortest`，支持音频文件和视频文件作为音频源，上传预览 + 历史记录
 
 ### 导入约定
 
@@ -311,6 +552,55 @@ GG-Server/
 - [媒体上传](docs/superpowers/specs/2026-07-01-media-upload-design.md)
 - [产品客户字段](docs/superpowers/specs/2026-07-03-product-customer-field-design.md)
 - [数据分析板块](docs/superpowers/specs/2026-07-03-data-analysis-design.md)
+- [多维分析与 AI 智能解读](docs/superpowers/specs/2026-07-03-multi-dimension-analysis-design.md)
+- [数据管理与聚合](docs/superpowers/specs/2026-07-04-data-manage-and-aggregation-design.md)
+- [批量导入按账户配置](docs/superpowers/specs/2026-07-10-batch-import-per-account-config-design.md)
+- [包掉包自动检测与通知](docs/superpowers/specs/2026-07-13-package-delist-detection-design.md)
+- [定时任务手动调用](docs/superpowers/specs/2026-07-13-scheduler-manual-trigger-design.md)
+- [音频替换预览与历史](docs/superpowers/specs/2026-07-14-audio-replace-preview-history-design.md)
+- [产品删除审计日志](docs/superpowers/specs/2026-07-14-product-delete-audit-log-design.md)
+- [视频批量可见性 & 消耗追踪](docs/superpowers/specs/2026-07-14-video-batch-visibility-and-consumption-design.md)
+- [批量查户](docs/superpowers/specs/2026-07-15-batch-account-lookup-design.md)
+- [图片手动拖拽排序](docs/superpowers/specs/2026-07-17-image-sort-drag-design.md)
+- [账户 MCC 变更历史](docs/superpowers/specs/2026-07-20-account-mcc-history-design.md)
+- [掉包 Telegram 群组通知](docs/superpowers/specs/2026-07-20-telegram-delist-notify-design.md)
+- [全局任务进度追踪 & 跨标签同步](docs/superpowers/specs/2026-07-20-global-task-tracker-design.md)
+- [Google Sheets 用户配置](docs/superpowers/specs/2026-07-21-google-sheets-user-config-design.md)
+- [Google Sheets 做表数据写入](docs/superpowers/specs/2026-07-21-google-sheets-toolkit-update-design.md)
+- [账户充值功能](docs/superpowers/specs/2026-07-22-recharge-feature-design.md)
+- [大规模重构设计](docs/superpowers/specs/2026-07-22-large-scale-refactoring-design.md)
+- [数据库完整性改进](docs/superpowers/specs/2026-07-22-db-integrity-improvement-design.md)
+- [优化测试](docs/superpowers/specs/2026-07-22-optimization-tests-design.md)
+- [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
+
+## 数据库表总览
+
+| 表名 | 用途 | 隔离方式 |
+|------|------|----------|
+| `users` | 用户账户 | - |
+| `config` | 键值配置（含 Google Sheets、AI 配置等） | key 含 user_id |
+| `products` | 产品管理 | 共享 |
+| `packages` | 产品包 | 共享 |
+| `product_assets` | 产品成效素材 | 共享 |
+| `product_runners` | 产品在跑人员 | 共享 |
+| `user_accounts` | 广告账户 | owner_id 隔离 |
+| `user_mcc` | MCC 管理 | owner_id 隔离 |
+| `account_mcc_history` | 账户 MCC 变更历史 | 关联 accounts |
+| `scrape_cache` | 爬取缓存 | 共享 |
+| `scrape_history` | 爬取记录 | user_id 隔离 |
+| `video_history` | 视频生成历史 | user_id 隔离 |
+| `video_tasks` | 视频任务追踪（DB 持久化） | 共享 |
+| `yt_videos` | YouTube 视频库 | owner_id + is_public |
+| `video_consumption` | 视频广告消耗 | user_id 关联 |
+| `copywritings` | 视频文案 | owner_id 隔离 |
+| `import_history` | 导入历史 | user_id 隔离 |
+| `ad_reports` | 做表数据 | user_id 隔离 |
+| `recharge_records` | 充值记录 | created_by 隔离 |
+| `delist_checks` | 掉包检测结果 | 关联 packages |
+| `delist_notifications` | 掉包通知状态 | user_id 隔离 |
+| `audio_replace_history` | 音频替换历史 | 共享 |
+| `audit_log` | 产品删除审计日志 | 共享 |
+| `settings` | 系统设置（键值） | 共享 |
 
 ## 启动方式
 
@@ -348,7 +638,11 @@ npm run dev
     "port": 5001,
     "debug": false
   },
-  "scrape_cache_dir": "temp/scrape_cache"
+  "scrape_cache_dir": "temp/scrape_cache",
+  "telegram": {
+    "bot_token": "",
+    "chat_id": ""
+  }
 }
 ```
 
@@ -362,6 +656,8 @@ npm run dev
 - **任何后端代码（py/main.py 等）修改后，必须提醒我重启 Flask 服务才能生效**
 - **每次改完 bug 或完成需求后，提醒我提交 git**
 - **每次新的文档都要建立索引**
-- /test-driven-development  使用这个测试新需求
+- /test-driven-development 使用这个测试新需求
 - SQLite 数据库自动建表 + 迁移，位于 `temp/app.db`
 - 本项目是 ImageCrawling 的独立副本，修改不影响原项目
+- **后端重构进行中**：main.py 正逐步拆分为 Blueprint（`py/routes/`），新增路由优先写入独立 Blueprint 文件
+- **前端大组件拆分进行中**：YoutubeView/MediaView/AnalysisView/VideoView 逐步拆分为子组件
