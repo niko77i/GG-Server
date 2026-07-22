@@ -29,6 +29,46 @@
           <el-button v-if="zbSelectedProduct && zbRaw.length" type="warning" @click="zbUpdateSheet" :loading="zbUpdatingSheet">📊 更新你的表格</el-button>
         </div>
         <div v-if="zbError" style="color:#dc2626;margin-top:8px;">{{ zbError }}</div>
+
+        <!-- 表格同步状态提示条 -->
+        <div v-if="zbSyncStatus && (zbSyncStatus.status === 'failed' || zbSyncStatus.status === 'retry_failed')"
+          :style="{ marginTop: '10px', padding: '10px 14px', borderRadius: '8px', background: zbSyncStatus.status === 'retry_failed' ? '#fef2f2' : '#fffbeb', border: '1px solid ' + (zbSyncStatus.status === 'retry_failed' ? '#fecaca' : '#fde68a') }">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span style="font-weight:600;">
+              {{ zbSyncStatus.status === 'retry_failed' ? '❌ 重试失败，请手动操作' : '⚠️ 填表失败' }}
+            </span>
+            <span v-if="zbSyncStatus.status === 'failed' && zbRetryCountdown > 0" style="color:#d97706;font-size:13px;">
+              {{ zbRetryCountdown }}秒后自动重试...
+            </span>
+            <span v-if="zbSyncStatus.error_msg" style="font-size:12px;color:#999;">{{ zbSyncStatus.error_msg }}</span>
+            <el-button link size="small" type="primary" @click="zbRetrySheetsSync">🔄 重新同步</el-button>
+            <el-button link size="small" @click="zbShowSyncData = !zbShowSyncData">
+              {{ zbShowSyncData ? '收起数据' : '📋 查看数据' }}
+            </el-button>
+          </div>
+          <!-- 展开的数据表格 -->
+          <div v-if="zbShowSyncData && zbSyncStatus.rows && zbSyncStatus.rows.length" style="margin-top:10px;max-height:300px;overflow:auto;">
+            <div style="display:flex;justify-content:flex-end;margin-bottom:4px;">
+              <el-button link size="small" @click="copySyncRows">📋 复制 TSV</el-button>
+            </div>
+            <table style="width:100%;font-size:11px;border-collapse:collapse;">
+              <thead>
+                <tr style="background:#f1f5f9;">
+                  <th v-for="h in ['日期','运营','账号','客户ID','费用','','产品','商务','地区','广告系列','','代投比例','M','N']" :key="h"
+                    style="padding:4px 6px;border:1px solid #e2e8f0;text-align:left;white-space:nowrap;">{{ h }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, i) in zbSyncStatus.rows" :key="i">
+                  <td v-for="(cell, j) in row" :key="j"
+                    style="padding:3px 6px;border:1px solid #e2e8f0;white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis;">
+                    {{ cell ?? '' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       <div style="flex:1;min-height:0;overflow-y:auto;">
@@ -300,6 +340,53 @@ const zbSelectedDate = ref(_yesterday())
 const zbProducts = ref([])
 const zbProductsLoading = ref(false)
 const zbUpdatingSheet = ref(false)
+const zbSyncStatus = ref(null)        // { status, error_msg, rows, retry_count, updated_at }
+const zbSyncChecking = ref(false)
+const zbRetryCountdown = ref(0)       // 30s 倒计时
+const zbShowSyncData = ref(false)
+let _zbSyncTimer = null
+let _zbCountdownTimer = null
+
+// 选择产品时查询是否有未同步记录
+watch(zbSelectedProduct, (name) => {
+  clearZbSyncState()
+  if (name) checkZbSyncStatus()
+})
+
+function clearZbSyncState() {
+  zbSyncStatus.value = null
+  zbRetryCountdown.value = 0
+  if (_zbSyncTimer) { clearTimeout(_zbSyncTimer); _zbSyncTimer = null }
+  if (_zbCountdownTimer) { clearInterval(_zbCountdownTimer); _zbCountdownTimer = null }
+}
+
+async function checkZbSyncStatus() {
+  if (!zbSelectedProduct.value) return
+  zbSyncChecking.value = true
+  try {
+    const res = await googleSheetsApi.syncStatus(zbSelectedProduct.value)
+    zbSyncStatus.value = res.log
+    if (res.log && res.log.status === 'failed') {
+      // 显示 30s 重试中状态
+      zbRetryCountdown.value = 30
+      startZbCountdown()
+    }
+  } catch { zbSyncStatus.value = null }
+  finally { zbSyncChecking.value = false }
+}
+
+function startZbCountdown() {
+  if (_zbCountdownTimer) clearInterval(_zbCountdownTimer)
+  zbRetryCountdown.value = 30
+  _zbCountdownTimer = setInterval(() => {
+    zbRetryCountdown.value--
+    if (zbRetryCountdown.value <= 0) {
+      clearInterval(_zbCountdownTimer)
+      _zbCountdownTimer = null
+      checkZbSyncStatus()  // 检查重试结果
+    }
+  }, 1000)
+}
 
 // 养户关键词（localStorage 持久化，默认值可随时增删）
 const ZB_YANGHU_KEY = 'zb_yanghu_keywords'
@@ -397,6 +484,7 @@ async function zbUpdateSheet() {
       costPerInApp: row.costPerInApp,
       is_yanghu: zbYanghu.value || keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
     }))
+    zbSyncStatus.value = null  // 清除旧状态
     const res = await googleSheetsApi.updateZuobiao({
       product_name: zbSelectedProduct.value,
       region: zbSelectedRegion.value,
@@ -406,13 +494,76 @@ async function zbUpdateSheet() {
       sales_person: p?.sales_person || '',
       agency_ratio: p?.agency_ratio ?? null,
     })
-    const parts = [`表格更新 ${res.updated + res.inserted} 条`]
-    if (res.db_saved) parts.push(`数据库同步 ${res.db_saved} 条`)
-    ElMessage.success(parts.join('，'))
+    ElMessage.success(`数据库已保存 ${res.db_saved || (taggedRows.length)} 条，表格后台同步中...`)
+    // 启动轮询检测同步结果
+    startZbSyncPolling()
   } catch (e) {
     ElMessage.error('更新表格失败: ' + (e.response?.data?.error || e.message))
   }
   zbUpdatingSheet.value = false
+}
+
+function startZbSyncPolling() {
+  let attempts = 0
+  const maxAttempts = 40  // 最多轮询 2 分钟
+  if (_zbSyncTimer) clearTimeout(_zbSyncTimer)
+  const poll = async () => {
+    if (attempts >= maxAttempts) return
+    attempts++
+    try {
+      const res = await googleSheetsApi.syncStatus(zbSelectedProduct.value)
+      const log = res.log
+      if (!log) {
+        // 同步成功（无失败记录）
+        zbSyncStatus.value = null
+        return
+      }
+      zbSyncStatus.value = log
+      if (log.status === 'failed') {
+        ElMessage.warning({ message: '填表失败，30秒后自动重试...', duration: 0, showClose: true })
+        zbRetryCountdown.value = 30
+        startZbCountdown()
+        return  // 等待倒计时结束后再检查
+      }
+      if (log.status === 'retry_failed') {
+        ElMessage.error({ message: '重试失败，请手动操作', duration: 0, showClose: true })
+        return
+      }
+      // 其他状态，继续轮询
+      _zbSyncTimer = setTimeout(poll, 3000)
+    } catch {
+      _zbSyncTimer = setTimeout(poll, 3000)
+    }
+  }
+  // 3 秒后开始第一次检查（给后台线程一点时间）
+  _zbSyncTimer = setTimeout(poll, 3000)
+}
+
+async function zbRetrySheetsSync() {
+  if (!zbSelectedProduct.value) return
+  try {
+    await googleSheetsApi.retrySync({ product_name: zbSelectedProduct.value })
+    ElMessage.success('表格同步成功')
+    zbSyncStatus.value = null
+    zbRetryCountdown.value = 0
+    zbShowSyncData.value = false
+    if (_zbCountdownTimer) { clearInterval(_zbCountdownTimer); _zbCountdownTimer = null }
+  } catch (e) {
+    ElMessage.error('重试失败: ' + (e.response?.data?.error || e.message))
+    checkZbSyncStatus()
+  }
+}
+
+function copySyncRows() {
+  if (!zbSyncStatus.value?.rows?.length) return
+  const tsv = zbSyncStatus.value.rows.map(row =>
+    row.map(cell => (cell ?? '')).join('\t')
+  ).join('\n')
+  navigator.clipboard.writeText(tsv).then(() => {
+    ElMessage.success('已复制 ' + zbSyncStatus.value.rows.length + ' 行 TSV 数据')
+  }).catch(() => {
+    ElMessage.error('复制失败，请手动选择表格内容')
+  })
 }
 
 function resolveDuplicate(idx, decision) {
@@ -517,7 +668,7 @@ function _revokeAudioBlobs() {
   if (audioVideoBlobUrl.value) { URL.revokeObjectURL(audioVideoBlobUrl.value); audioVideoBlobUrl.value = '' }
   if (audioSourceBlobUrl.value) { URL.revokeObjectURL(audioSourceBlobUrl.value); audioSourceBlobUrl.value = '' }
 }
-onUnmounted(_revokeAudioBlobs)
+onUnmounted(() => { _revokeAudioBlobs(); clearZbSyncState() })
 
 function onAudioVideoFileChange(e) {
   audioVideoFile.value = e.target.files?.[0] || null

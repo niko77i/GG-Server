@@ -37,4 +37,5 @@ export const rechargeApi = {
   batchSubmit: (body) => api.post('/recharge/batch-submit', body),
   update: (id, body) => api.put(`/recharge/${id}`, body),
   delete: (id) => api.delete(`/recharge/${id}`),
+  retrySheets: (id) => api.post(`/recharge/${id}/retry-sheets`),
 }

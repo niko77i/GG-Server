@@ -6724,16 +6724,16 @@ def ad_reports_list():
     region_filter = request.args.get("region", "").strip()
     product_filter = request.args.get("product_name", "").strip()
     if region_filter:
-        products = [r[0] for r in db.execute(
-            """SELECT DISTINCT p.product_name FROM products p
+        products = [dict(r) for r in db.execute(
+            """SELECT DISTINCT p.product_name AS name, p.sales_person FROM products p
                JOIN product_runners pr ON p.id = pr.product_id
                WHERE pr.user_id=? AND p.region=? AND (p.is_archived IS NULL OR p.is_archived=0)
                ORDER BY p.product_name""",
             (user_id, region_filter)
         ).fetchall()]
     else:
-        products = [r[0] for r in db.execute(
-            """SELECT DISTINCT p.product_name FROM products p
+        products = [dict(r) for r in db.execute(
+            """SELECT DISTINCT p.product_name AS name, p.sales_person FROM products p
                JOIN product_runners pr ON p.id = pr.product_id
                WHERE pr.user_id=? AND (p.is_archived IS NULL OR p.is_archived=0)
                ORDER BY p.product_name""",

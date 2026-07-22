@@ -9,7 +9,7 @@
     <div class="filter-bar">
       <div class="filter-left">
         <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:160px" @change="loadData">
-          <el-option v-for="p in products" :key="p" :label="p" :value="p" />
+          <el-option v-for="p in products" :key="p.name" :label="p.name + (p.sales_person ? ' - ' + p.sales_person : '')" :value="p.name" />
         </el-select>
         <el-date-picker
           v-model="dateRange" type="daterange" range-separator="~"

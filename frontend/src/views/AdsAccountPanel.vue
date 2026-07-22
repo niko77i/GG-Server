@@ -108,7 +108,7 @@ import AccountBatchLookupModal from '@/components/AccountBatchLookupModal.vue'
 import AccountDetailModal from '@/components/AccountDetailModal.vue'
 import RechargeModal from '@/components/RechargeModal.vue'
 import RechargeBatchModal from '@/components/RechargeBatchModal.vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
 const store = useAccountStore()
@@ -130,10 +130,10 @@ const timezoneOptions = ref([])
 const statusCounts = ref({})
 let searchTimer = null
 
-onMounted(async () => {
-  await store.loadSettings()
+onMounted(() => {
+  store.loadSettings()
   if (!store.acFilters.status) store.acFilters.status = '存活'
-  await load()
+  load()
 })
 
 async function load() {
@@ -176,7 +176,7 @@ function mccRowClass({ row }) {
 
 function search() {
   clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => { store.acPage = 1; load() }, 300)
+  searchTimer = setTimeout(() => { store.acPage = 1; load() }, 500)
 }
 function searchAndLoad() { store.acPage = 1; load() }
 function showModal(id) { acEditId.value = id || null; acModalVisible.value = true }
@@ -205,7 +205,14 @@ async function batchDelete() {
 
 async function doBatchStatus(val) {
   if (!val) return
+  try {
+    await ElMessageBox.confirm(
+      `确定将选中的 ${selected.value.length} 个账户状态改为「${val}」？`,
+      '批量修改状态', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }
+    )
+  } catch { batchStatus.value = ''; return }
   await store.batchUpdateAccounts({ ids: selected.value.map(s => s.id), field: 'status', value: val })
+  ElMessage.success(`已将 ${selected.value.length} 个账户状态改为「${val}」`)
   batchStatus.value = ''
 }
 async function doBatchMcc(val) {

@@ -179,6 +179,22 @@ def _ensure_schema(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_recharge_account ON recharge_records(account_id);
 
+        -- Sheets 同步失败日志（做表数据，用于异步重试 & 前端展示）
+        CREATE TABLE IF NOT EXISTS sheets_sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            product_name TEXT NOT NULL DEFAULT '',
+            spreadsheet_id TEXT NOT NULL DEFAULT '',
+            sheet_gid TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'failed',
+            error_msg TEXT DEFAULT '',
+            rows_json TEXT DEFAULT '',
+            retry_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ssl_user_product ON sheets_sync_log(user_id, product_name);
+
         -- 文案管理
         CREATE TABLE IF NOT EXISTS copywritings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -402,6 +418,8 @@ def _ensure_schema(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "products", "runner_ids", "runner_ids TEXT DEFAULT '[]'")
     _add_column_if_missing(conn, "products", "is_archived", "is_archived INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "recharge_records", "status", "status TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "recharge_records", "sheets_synced", "sheets_synced INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "recharge_records", "sheets_error", "sheets_error TEXT DEFAULT ''")
     # 高频查询字段索引（_add_column_if_missing 之后创建，确保列已存在）
     conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")

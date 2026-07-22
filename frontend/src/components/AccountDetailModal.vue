@@ -52,6 +52,14 @@
           </template>
         </el-table-column>
         <el-table-column prop="operator" label="运营" width="80" />
+        <el-table-column label="表格" width="55" align="center">
+          <template #default="{ row }">
+            <el-tooltip v-if="row.sheets_synced === 0" :content="row.sheets_error || '未同步到表格'" placement="top">
+              <el-button link size="small" type="warning" @click="retryRechargeSheets(row)" :loading="retryingId === row.id">⚠️</el-button>
+            </el-tooltip>
+            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="created_at" label="时间" min-width="120" />
         <el-table-column label="操作" width="70">
           <template #default="{ row }">
@@ -222,6 +230,22 @@ async function deleteRecharge(rid) {
     ElMessage.success('已删除')
   } catch (e) {
     ElMessage.error('删除失败: ' + (e.response?.data?.error || e.message))
+  }
+}
+
+const retryingId = ref(null)
+async function retryRechargeSheets(row) {
+  retryingId.value = row.id
+  try {
+    await rechargeApi.retrySheets(row.id)
+    row.sheets_synced = 1
+    row.sheets_error = ''
+    ElMessage.success('已同步到表格')
+  } catch (e) {
+    row.sheets_error = e.response?.data?.error || e.message || '同步失败'
+    ElMessage.error('同步失败: ' + row.sheets_error)
+  } finally {
+    retryingId.value = null
   }
 }
 </script>

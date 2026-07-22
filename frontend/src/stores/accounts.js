@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { accountsApi, mccApi, settingsApi, rechargeApi } from '@/api/accounts'
-import { dedupLoader } from '@/utils/dedupLoader'
+import { dedupLoader, cachedLoader } from '@/utils/dedupLoader'
 
 export const useAccountStore = defineStore('accounts', {
   state: () => ({
@@ -36,14 +36,14 @@ export const useAccountStore = defineStore('accounts', {
     async batchUpdateAccounts(body) { await accountsApi.batchUpdate(body); return this.loadAccounts() },
 
     async loadMccList() {
-      return dedupLoader(this, 'mcc', () => {
+      return cachedLoader(this, 'mccList', 120000, () => {
         const params = { page: this.mccPage, size: this.mccPageSize, ...this.mccFilters }
         return mccApi.list(params).then(res => {
           this.mccList = res.mcc_list
           this.mccTotal = res.total
           return res
         })
-      })
+      }, () => this.mccList.length > 0)
     },
     async createMcc(body) { return mccApi.create(body) },
     async updateMcc(id, body) { return mccApi.update(id, body) },
@@ -53,13 +53,13 @@ export const useAccountStore = defineStore('accounts', {
     async linkMcc(id) { return mccApi.link(id) },
 
     async loadSettings() {
-      return dedupLoader(this, 'settings', () => {
+      return cachedLoader(this, 'settings', 300000, () => {
         return settingsApi.get().then(res => {
           this.settings = res.settings
           this._settingsLoaded = true
           return res
         })
-      })
+      }, () => this._settingsLoaded)
     },
     async saveSettings(body) { return settingsApi.save(body) },
     async rechargeSubmit(body) { return rechargeApi.submit(body) },

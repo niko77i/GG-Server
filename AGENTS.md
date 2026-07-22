@@ -311,7 +311,7 @@ GG-Server/
 - **单次充值**：AdsAccountPanel 操作列「💰」按钮 → RechargeModal 弹窗，账户ID 下拉搜索，代理自动联动
 - **批量充值**：勾选账户后工具栏「💰 批量充值」→ RechargeBatchModal，金额可分别填或统一填
 - **充值表配置**：SettingsPanel 中配置 Google Sheets ID（仅 admin/developer 可见），所有用户共用同一张表
-- **双写顺序**：先写 Google Sheets 成功 → 再写 SQLite（Sheets 失败则数据库也不写入）
+- **双写顺序**：先写 DB → 后台异步写 Google Sheets（失败 30s 后自动重试一次，仍失败前端提示手动操作）
 - **死亡清账**：账户状态变为「死亡」时，检查上次变存活后有无充值记录，有则自动追加一条 `amount='清'` 的充值记录
 - **状态变更追踪**：新增 `status_changed_date` 字段记录状态变更时间，用于清账逻辑判断
 - **充值记录编辑**：支持编辑和删除充值记录
@@ -571,6 +571,7 @@ GG-Server/
 - [大规模重构设计](docs/superpowers/specs/2026-07-22-large-scale-refactoring-design.md)
 - [数据库完整性改进](docs/superpowers/specs/2026-07-22-db-integrity-improvement-design.md)
 - [优化测试](docs/superpowers/specs/2026-07-22-optimization-tests-design.md)
+- [Sheets 异步化 & 性能优化](docs/superpowers/specs/2026-07-22-async-sheets-performance-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
@@ -599,6 +600,7 @@ GG-Server/
 | `delist_checks` | 掉包检测结果 | 关联 packages |
 | `delist_notifications` | 掉包通知状态 | user_id 隔离 |
 | `audio_replace_history` | 音频替换历史 | 共享 |
+| `sheets_sync_log` | Sheets 同步失败日志 + 行数据 | user_id 隔离 |
 | `audit_log` | 产品删除审计日志 | 共享 |
 | `settings` | 系统设置（键值） | 共享 |
 

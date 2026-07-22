@@ -255,7 +255,7 @@ async function mergeProducts() {
 
 function search() {
   clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => { store.page = 1; load() }, 300)
+  searchTimer = setTimeout(() => { store.page = 1; load() }, 500)
 }
 
 function showProductModal(id) { pmEditId.value = id || null; pmVisible.value = true }
