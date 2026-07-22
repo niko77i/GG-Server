@@ -9,7 +9,7 @@
     <div class="filter-bar">
       <div class="filter-left">
         <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:160px" @change="loadData">
-          <el-option v-for="p in products" :key="p.name" :label="p.label" :value="p.name" />
+          <el-option v-for="p in products" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '') + (p.sales_person ? ' - ' + p.sales_person : '')" :value="p.product_name" />
         </el-select>
         <el-date-picker
           v-model="dateRange" type="daterange" range-separator="~"
@@ -247,7 +247,6 @@ async function loadData() {
     const data = await reportsApi.list(params)
     reports.value = data.reports || []
     total.value = data.total || 0
-    products.value = data.products || []
 
     if (sortProp.value) applyClientSort()
   } catch (e) {
@@ -429,7 +428,15 @@ function formatNum(v) {
   return Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 })
 }
 
+async function loadProducts() {
+  try {
+    const res = await reportsApi.products()
+    products.value = res.products || []
+  } catch { products.value = [] }
+}
+
 onMounted(() => {
+  loadProducts()
   loadData()
 })
 </script>
