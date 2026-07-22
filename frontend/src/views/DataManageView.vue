@@ -9,7 +9,7 @@
     <div class="filter-bar">
       <div class="filter-left">
         <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:160px" @change="loadData">
-          <el-option v-for="p in products" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '') + (p.sales_person ? ' - ' + p.sales_person : '')" :value="p.product_name" />
+          <el-option v-for="o in productOptions" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
         <el-date-picker
           v-model="dateRange" type="daterange" range-separator="~"
@@ -207,6 +207,10 @@ const filterProduct = ref('')
 const dateRange = ref(null)
 const searchKeyword = ref('')
 const products = ref([])
+const productOptions = computed(() => products.value.map(p => ({
+  value: p.product_name,
+  label: p.product_name + (p.region ? ' (' + p.region + ')' : '') + (p.sales_person ? ' - ' + p.sales_person : ''),
+})))
 
 // 表格状态
 const reports = ref([])

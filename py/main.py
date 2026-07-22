@@ -2379,6 +2379,15 @@ def products_update(pid):
         "status": "status", "mcc_id": "mcc_id", "customer": "customer",
         "sales_person": "sales_person", "agency_ratio": "agency_ratio",
     }
+    # 产品改名时同步更新所有关联表（冗余存储的 product_name 字段）
+    if "product_name" in data:
+        old = db.execute("SELECT product_name FROM products WHERE id=?", (pid,)).fetchone()
+        if old and data["product_name"] != old["product_name"]:
+            new_name = data["product_name"]
+            old_name = old["product_name"]
+            db.execute("UPDATE videos SET product_name=? WHERE product_name=?", (new_name, old_name))
+            db.execute("UPDATE ad_reports SET product_name=? WHERE product_name=?", (new_name, old_name))
+            db.execute("UPDATE sheets_sync_log SET product_name=? WHERE product_name=?", (new_name, old_name))
     for key, col in _product_fields.items():
         if key in data:
             db.execute(f"UPDATE products SET {col}=? WHERE id=?", (data[key], pid))
