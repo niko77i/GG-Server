@@ -3517,7 +3517,7 @@ def accounts_update(aid):
     db = _yt_db()
     try:
         user_id = int(get_jwt_identity())
-        old_status = db.execute("SELECT status, agent, account_id FROM accounts WHERE id=?", (aid,)).fetchone()
+        old_status = db.execute("SELECT status, agent, account_id, status_changed_date FROM accounts WHERE id=?", (aid,)).fetchone()
         for f in ["name", "mcc_id", "timezone", "agent", "status", "acquired_date", "death_date"]:
             if f in data:
                 val = data[f]
@@ -3529,22 +3529,26 @@ def accounts_update(aid):
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
 
-        # 状态清账：非存活状态自动追加 amount='清'，回到存活时删除旧记录
+        # 状态变更时间：状态变化时记录
         new_status = data.get("status", "")
-        recharge_note = None
-        if new_status == "存活" and old_status and old_status["status"] != "存活":
-            # 从非存活回到存活：删除该账户所有清账记录
+        if new_status and old_status and new_status != old_status["status"]:
             db.execute(
-                "DELETE FROM recharge_records WHERE account_id=? AND amount='清'",
-                (old_status["account_id"],)
+                "UPDATE accounts SET status_changed_date=datetime('now','localtime') WHERE id=?",
+                (aid,)
             )
-        elif new_status and new_status != "存活" and old_status and old_status["status"] != new_status:
-            # 切换到非存活状态：按 account_id + status 去重后写入
-            existing_clear = db.execute(
-                "SELECT id FROM recharge_records WHERE account_id=? AND amount='清' AND status=?",
-                (old_status["account_id"], new_status)
-            ).fetchone()
-            if not existing_clear:
+
+        # 状态清账：存活切到非存活时，检查上次变存活后有无充值
+        recharge_note = None
+        if new_status and new_status != "存活" and old_status and old_status["status"] == "存活":
+            since = old_status["status_changed_date"] or ""
+            need_clear = not since  # 第一次不用查，直接填清
+            if not need_clear:
+                need_clear = db.execute(
+                    "SELECT COUNT(*) FROM recharge_records "
+                    "WHERE account_id=? AND amount!='清' AND created_at > ?",
+                    (old_status["account_id"], since)
+                ).fetchone()[0] > 0
+            if need_clear:
                 user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                 operator_name = (user["display_name"] or "") if user else ""
                 clear_agent = data.get("agent", old_status["agent"] or "")
@@ -3555,7 +3559,6 @@ def accounts_update(aid):
                     "operator": operator_name,
                     "status": new_status,
                 }
-                # 读配置 — 未配置则跳过清账
                 sheet_id_row = db.execute(
                     "SELECT value FROM tags WHERE key='recharge_sheet_id'"
                 ).fetchone()
@@ -3565,7 +3568,6 @@ def accounts_update(aid):
                         import google_sheets_service as gs
                         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
                         gs.append_recharge(service, sheet_id, [clear_row])
-                        # Sheets 成功后再写数据库
                         db.execute(
                             "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by) "
                             "VALUES (?, '清', ?, ?, ?, ?)",
@@ -3697,12 +3699,72 @@ def accounts_batch_update():
         if field == "mcc_id" and (value is None or value == 0 or value == "0" or (isinstance(value, str) and not value.strip())):
             value = None
         user_id = int(get_jwt_identity())
+        new_clear_rows = []
         for aid in ids:
             if field == "mcc_id":
                 _record_mcc_change(db, aid, value, user_id, "batch")
+
+            # 批量改状态时同步触发清账逻辑 + 死亡时间
+            if field == "status" and value:
+                old = db.execute("SELECT status, account_id, agent, status_changed_date FROM accounts WHERE id=?", (aid,)).fetchone()
+                if not old:
+                    continue
+                # 状态变更时间
+                if old["status"] != value:
+                    db.execute("UPDATE accounts SET status_changed_date=datetime('now','localtime') WHERE id=?", (aid,))
+                # 死亡时间兼容
+                if value == "死亡":
+                    db.execute("UPDATE accounts SET death_date=date('now','localtime') WHERE id=?", (aid,))
+                elif old["status"] == "死亡":
+                    db.execute("UPDATE accounts SET death_date='' WHERE id=?", (aid,))
+                # 清账逻辑：存活切非存活，检查上次变存活后有无充值
+                if value != "存活" and old["status"] == "存活" and old["status"] != value:
+                    since = old["status_changed_date"] or ""
+                    need_clear = not since  # 第一次直接填
+                    if not need_clear:
+                        need_clear = db.execute(
+                            "SELECT COUNT(*) FROM recharge_records "
+                            "WHERE account_id=? AND amount!='清' AND created_at > ?",
+                            (old["account_id"], since)
+                        ).fetchone()[0] > 0
+                    if need_clear:
+                        user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
+                        op = (user["display_name"] or "") if user else ""
+                        db.execute(
+                            "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by) "
+                            "VALUES (?, '清', ?, ?, ?, ?)",
+                            (old["account_id"], old["agent"] or "", op, value, user_id)
+                        )
+                        new_clear_rows.append({
+                            "account_id": old["account_id"],
+                            "agent": old["agent"] or "",
+                        })
+
             db.execute(f"UPDATE accounts SET {field}=?, updated_at=datetime('now','localtime') WHERE id=?",
                        (value, aid))
         db.commit()
+        # 批量改状态时同步写 Google Sheets（仅写入新插入的记录）
+        if field == "status" and value and new_clear_rows:
+            try:
+                sheet_id_row = db.execute(
+                    "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+                ).fetchone()
+                sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+                if sheet_id:
+                    import google_sheets_service as gs
+                    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                    user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
+                    op_name = (user["display_name"] or "") if user else ""
+                    sheet_data = [{
+                        "account_id": r["account_id"],
+                        "amount": "清",
+                        "agent": r["agent"],
+                        "operator": op_name,
+                        "status": value,
+                    } for r in new_clear_rows]
+                    gs.append_recharge(service, sheet_id, sheet_data)
+            except Exception as e:
+                log.warning("批量状态清账 Google Sheets 写入失败: %s", e)
         return jsonify({"success": True, "updated": len(ids)})
     finally:
         db.close()
@@ -3865,6 +3927,51 @@ def accounts_recharge_records(aid):
     ).fetchall()
     db.close()
     return jsonify({"success": True, "records": [dict(r) for r in records]})
+
+
+@app.route("/api/recharge/<int:rid>", methods=["PUT"])
+@jwt_required()
+def recharge_update(rid):
+    """编辑充值记录（金额、代理）。"""
+    data = request.get_json(silent=True) or {}
+    db = _yt_db()
+    try:
+        amount = str(data.get("amount", "")).strip()
+        agent = (data.get("agent") or "").strip()
+        if not amount:
+            db.close()
+            return jsonify({"success": False, "error": "金额不能为空"}), 400
+        db.execute(
+            "UPDATE recharge_records SET amount=?, agent=? WHERE id=?",
+            (amount, agent, rid)
+        )
+        if db.total_changes == 0:
+            db.close()
+            return jsonify({"success": False, "error": "记录不存在"}), 404
+        db.commit()
+        db.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.close()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/recharge/<int:rid>", methods=["DELETE"])
+@jwt_required()
+def recharge_delete(rid):
+    """删除充值记录。"""
+    db = _yt_db()
+    try:
+        db.execute("DELETE FROM recharge_records WHERE id=?", (rid,))
+        if db.total_changes == 0:
+            db.close()
+            return jsonify({"success": False, "error": "记录不存在"}), 404
+        db.commit()
+        db.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.close()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/accounts/<int:aid>/mcc-history", methods=["GET"])
@@ -4453,7 +4560,7 @@ def config_google_sheets_save():
 @app.route("/api/google-sheets/update-zuobiao", methods=["POST"])
 @jwt_required()
 def google_sheets_update_zuobiao():
-    """将做表数据写入用户激活的 Google Sheets 表格。"""
+    """将做表数据写入用户激活的 Google Sheets 表格，并同步到数据库。"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     product_name = (data.get("product_name") or "").strip()
@@ -4462,11 +4569,30 @@ def google_sheets_update_zuobiao():
     rows = data.get("rows") or []
     sales_person = (data.get("sales_person") or "").strip()
     agency_ratio = data.get("agency_ratio")
+    raw_rows = data.get("raw_rows") or []  # 原始清洗数据（用于保存到 DB）
 
     if not product_name:
         return jsonify({"success": False, "error": "产品名不能为空"}), 400
     if not rows:
         return jsonify({"success": False, "error": "做表数据不能为空"}), 400
+
+    # ---------- 产品校验：包的系列名 vs 数据的广告系列 ----------
+    db = _yt_db()
+    pkgs = db.execute(
+        "SELECT series_name FROM packages WHERE product_name=? AND (status IS NULL OR status='' OR status='0')",
+        (product_name,)
+    ).fetchall()
+    db.close()
+    pkg_names = set((p["series_name"] or "").strip() for p in pkgs)
+    if pkg_names:
+        campaigns = set((r.get("campaign") or "").strip() for r in rows)
+        matched = pkg_names & campaigns
+        if not matched:
+            return jsonify({
+                "success": False,
+                "error": f"产品选择有误！「{product_name}」的包系列与数据中的广告系列不匹配，请重新选择产品。"
+            }), 400
+    # --------------------------------------------------------
 
     sheets, active_config = _get_user_sheets_config(user_id)
     if not active_config:
@@ -4508,14 +4634,95 @@ def google_sheets_update_zuobiao():
             agency_ratio=agency_ratio,
             operator_name=operator_name,
         )
-        return jsonify({
-            "success": True,
-            "updated": result["updated"],
-            "inserted": result["inserted"],
-            "total": result["updated"] + result["inserted"],
-        })
     except GoogleSheetsServiceError as e:
         return jsonify({"success": False, "error": f"写入表格失败: {e}"}), 500
+
+    # ---------- 表格更新成功 → 同步到数据库（排除养户行） ----------
+    db_saved = 0
+    if raw_rows:
+        db_rows = [r for r in raw_rows if not r.get("is_yanghu")]
+    else:
+        db_rows = [r for r in rows if not r.get("is_yanghu")]
+    if db_rows and region and report_date:
+        try:
+            db2 = _yt_db()
+            _auto_link_mcc_and_accounts(db2, user_id, product_name, region, db_rows)
+            db2.commit()
+
+            # 聚合
+            aggregated = {}
+            for row in db_rows:
+                account = str(row.get("account", "")).strip()
+                customer_id = str(row.get("customerId", "")).strip()
+                campaign = str(row.get("campaign", "")).strip()
+                if not customer_id or not campaign:
+                    continue
+                key = (report_date, product_name, account, customer_id, campaign)
+                if key not in aggregated:
+                    aggregated[key] = {
+                        "account": account,
+                        "customer_id": customer_id,
+                        "campaign": campaign,
+                        "cost": float(row.get("cost", 0) or 0),
+                        "impressions": int(row.get("impressions", 0) or 0),
+                        "clicks": int(row.get("clicks", 0) or 0),
+                        "installs": float(row.get("installs", 0) or 0),
+                        "in_app_actions": float(row.get("inAppActions", 0) or 0),
+                        "cost_per_in_app": float(row.get("costPerInApp", 0) or 0),
+                    }
+                else:
+                    aggregated[key]["cost"] += float(row.get("cost", 0) or 0)
+                    aggregated[key]["impressions"] += int(row.get("impressions", 0) or 0)
+                    aggregated[key]["clicks"] += int(row.get("clicks", 0) or 0)
+                    aggregated[key]["installs"] += float(row.get("installs", 0) or 0)
+                    aggregated[key]["in_app_actions"] += float(row.get("inAppActions", 0) or 0)
+                    aggregated[key]["cost_per_in_app"] += float(row.get("costPerInApp", 0) or 0)
+
+            for ag in aggregated.values():
+                existing = db2.execute(
+                    """SELECT id FROM ad_reports
+                       WHERE user_id=? AND product_name=? AND account=? AND customer_id=?
+                         AND campaign=? AND report_date=?""",
+                    (user_id, product_name, ag["account"], ag["customer_id"],
+                     ag["campaign"], report_date)
+                ).fetchone()
+                if existing:
+                    db2.execute(
+                        """UPDATE ad_reports SET cost=cost+?, impressions=impressions+?,
+                           clicks=clicks+?, installs=installs+?,
+                           in_app_actions=in_app_actions+?, cost_per_in_app=cost_per_in_app+?,
+                           region=?
+                           WHERE id=?""",
+                        (ag["cost"], ag["impressions"], ag["clicks"],
+                         ag["installs"], ag["in_app_actions"], ag["cost_per_in_app"],
+                         region, existing["id"])
+                    )
+                else:
+                    db2.execute(
+                        """INSERT INTO ad_reports
+                           (user_id, product_name, region, report_date, account,
+                            customer_id, campaign, cost, impressions, clicks,
+                            installs, in_app_actions, cost_per_in_app)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (user_id, product_name, region, report_date,
+                         ag["account"], ag["customer_id"], ag["campaign"],
+                         ag["cost"], ag["impressions"], ag["clicks"],
+                         ag["installs"], ag["in_app_actions"], ag["cost_per_in_app"])
+                    )
+                db_saved += 1
+
+            db2.commit()
+            db2.close()
+        except Exception as e:
+            log.warning("Google Sheets 同步到数据库失败: %s", e)
+
+    return jsonify({
+        "success": True,
+        "updated": result["updated"],
+        "inserted": result["inserted"],
+        "total": result["updated"] + result["inserted"],
+        "db_saved": db_saved,
+    })
 
 
 # ---------- 文件浏览 API ----------

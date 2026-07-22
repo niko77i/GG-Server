@@ -60,13 +60,15 @@
           <template #default="{ row }">
             <div style="display:flex;align-items:center;gap:4px;flex-wrap:nowrap;">
               <el-tag size="small" :type="row.status === '存活' ? 'success' : row.status === '验证' ? 'warning' : row.status === '死亡' ? 'danger' : 'info'">{{ row.status || '未知' }}</el-tag>
-              <span v-if="row.status === '死亡' && row.death_date" style="font-size:10px;color:#dc2626;white-space:nowrap;">{{ row.death_date }}</span>
             </div>
           </template>
         </el-table-column>
         <el-table-column prop="acquired_date" label="到手时间" width="110" show-overflow-tooltip />
-        <el-table-column v-if="store.acFilters.status === '死亡'" label="死亡时间" width="110" show-overflow-tooltip>
-          <template #default="{ row }"><span v-if="row.death_date" style="color:#dc2626;">{{ row.death_date }}</span><span v-else style="color:#ccc;">—</span></template>
+        <el-table-column label="状态变更时间" width="120" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.status_changed_date" style="font-size:12px;">{{ row.status_changed_date }}</span>
+            <span v-else style="color:#ccc;">—</span>
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="200">
           <template #default="{ row }">

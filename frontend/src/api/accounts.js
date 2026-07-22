@@ -35,4 +35,6 @@ export const settingsApi = {
 export const rechargeApi = {
   submit: (body) => api.post('/recharge/submit', body),
   batchSubmit: (body) => api.post('/recharge/batch-submit', body),
+  update: (id, body) => api.put(`/recharge/${id}`, body),
+  delete: (id) => api.delete(`/recharge/${id}`),
 }

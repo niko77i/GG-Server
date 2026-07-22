@@ -29,16 +29,42 @@
       <!-- 充值记录 -->
       <h4>💰 充值记录（{{ rechargeRecords.length }} 条）</h4>
       <el-table :data="rechargeRecords" size="small" border stripe v-if="rechargeRecords.length" style="margin-top:8px;">
-        <el-table-column prop="amount" label="金额" width="80" />
+        <el-table-column prop="amount" label="金额" width="80">
+          <template #default="{ row }">
+            <template v-if="editingId === row.id">
+              <el-input v-model="editForm.amount" size="small" style="width:70px;" @keyup.enter="saveEdit(row)" />
+            </template>
+            <template v-else>{{ row.amount }}</template>
+          </template>
+        </el-table-column>
         <el-table-column prop="status" label="状态" width="80">
           <template #default="{ row }">
             <el-tag v-if="row.status" size="small" type="warning">{{ row.status }}</el-tag>
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column prop="agent" label="代理" width="80" />
+        <el-table-column prop="agent" label="代理" width="80">
+          <template #default="{ row }">
+            <template v-if="editingId === row.id">
+              <el-input v-model="editForm.agent" size="small" style="width:70px;" @keyup.enter="saveEdit(row)" />
+            </template>
+            <template v-else>{{ row.agent }}</template>
+          </template>
+        </el-table-column>
         <el-table-column prop="operator" label="运营" width="80" />
-        <el-table-column prop="created_at" label="时间" min-width="140" />
+        <el-table-column prop="created_at" label="时间" min-width="120" />
+        <el-table-column label="操作" width="70">
+          <template #default="{ row }">
+            <template v-if="editingId === row.id">
+              <el-button link type="success" size="small" @click="saveEdit(row)">保存</el-button>
+              <el-button link size="small" @click="cancelEdit">取消</el-button>
+            </template>
+            <template v-else>
+              <el-button link type="primary" size="small" @click="startEdit(row)">✏️</el-button>
+              <el-button link type="danger" size="small" @click="deleteRecharge(row.id)">✕</el-button>
+            </template>
+          </template>
+        </el-table-column>
       </el-table>
       <el-empty v-else description="暂无充值记录" :image-size="40" />
 
@@ -96,8 +122,8 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { accountsApi } from '@/api/accounts'
+import { ref, reactive } from 'vue'
+import { accountsApi, rechargeApi } from '@/api/accounts'
 import { useAccountStore } from '@/stores/accounts'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -110,6 +136,8 @@ const account = ref(null)
 const history = ref([])
 const rechargeRecords = ref([])
 const deleting = ref(null)
+const editingId = ref(null)
+const editForm = reactive({ amount: '', agent: '' })
 
 function statusTagType(status) {
   const map = { '存活': 'success', '验证': 'warning', '死亡': 'danger' }
@@ -119,6 +147,8 @@ function statusTagType(status) {
 async function load() {
   account.value = null
   history.value = []
+  rechargeRecords.value = []
+  editingId.value = null
   if (!props.accountId) return
   try {
     // 从 store 中查找账户基本信息
@@ -154,6 +184,44 @@ async function deleteHistory(hid) {
     ElMessage.error('删除失败: ' + (e.response?.data?.error || e.message))
   } finally {
     deleting.value = null
+  }
+}
+
+function startEdit(row) {
+  editingId.value = row.id
+  editForm.amount = row.amount
+  editForm.agent = row.agent || ''
+}
+
+function cancelEdit() {
+  editingId.value = null
+}
+
+async function saveEdit(row) {
+  if (!editForm.amount) { ElMessage.warning('金额不能为空'); return }
+  try {
+    await rechargeApi.update(row.id, { amount: editForm.amount, agent: editForm.agent })
+    row.amount = editForm.amount
+    row.agent = editForm.agent
+    editingId.value = null
+    ElMessage.success('已更新')
+  } catch (e) {
+    ElMessage.error('更新失败: ' + (e.response?.data?.error || e.message))
+  }
+}
+
+async function deleteRecharge(rid) {
+  try {
+    await ElMessageBox.confirm('确定删除这条充值记录？', '确认删除', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+    })
+  } catch { return }
+  try {
+    await rechargeApi.delete(rid)
+    rechargeRecords.value = rechargeRecords.value.filter(r => r.id !== rid)
+    ElMessage.success('已删除')
+  } catch (e) {
+    ElMessage.error('删除失败: ' + (e.response?.data?.error || e.message))
   }
 }
 </script>

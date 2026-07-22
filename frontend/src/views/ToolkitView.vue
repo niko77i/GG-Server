@@ -26,8 +26,7 @@
         <div style="display:flex;gap:8px;margin-top:8px;">
           <el-button type="primary" @click="zbProcess">🚀 一键解析并生成所有报表</el-button>
           <el-button @click="zbExportExcel" :disabled="!zbRaw.length">📥 导出全部为 Excel</el-button>
-          <el-button v-if="zbShowSheetButtons" type="success" @click="zbSaveDialogVisible = true">💾 保存到数据库</el-button>
-          <el-button v-if="zbShowSheetButtons" type="warning" @click="zbUpdateSheet" :loading="zbUpdatingSheet">📊 更新你的表格</el-button>
+          <el-button v-if="zbSelectedProduct && zbRaw.length" type="warning" @click="zbUpdateSheet" :loading="zbUpdatingSheet">📊 更新你的表格</el-button>
         </div>
         <div v-if="zbError" style="color:#dc2626;margin-top:8px;">{{ zbError }}</div>
       </div>
@@ -313,9 +312,6 @@ const zbSelectedRegion = computed(() => {
   const p = zbProducts.value.find(x => x.product_name === zbSelectedProduct.value)
   return p ? p.region : ''
 })
-const zbShowSheetButtons = computed(() => {
-  return zbSelectedProduct.value && zbRaw.value.length > 0 && !zbIncludeCampaignId.value && !zbYanghu.value
-})
 
 // ========== 保存到数据库相关状态 ==========
 const zbSaveDialogVisible = ref(false)
@@ -386,17 +382,33 @@ async function zbUpdateSheet() {
     const keywords = zbYanghuKeywords.value.filter(Boolean)
     const taggedRows = zbZuobiao.value.map(row => ({
       ...row,
-      is_yanghu: keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
+      is_yanghu: zbYanghu.value || keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
+    }))
+    // raw 数据也打上养户标记，供后端过滤后保存到数据库
+    const taggedRaw = zbRaw.value.map(row => ({
+      account: row.account,
+      customerId: row.customerId,
+      campaign: row.campaign,
+      cost: row.cost,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      installs: row.installs,
+      inAppActions: row.inAppActions,
+      costPerInApp: row.costPerInApp,
+      is_yanghu: zbYanghu.value || keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
     }))
     const res = await googleSheetsApi.updateZuobiao({
       product_name: zbSelectedProduct.value,
       region: zbSelectedRegion.value,
       report_date: zbSelectedDate.value,
       rows: taggedRows,
+      raw_rows: taggedRaw,
       sales_person: p?.sales_person || '',
       agency_ratio: p?.agency_ratio ?? null,
     })
-    ElMessage.success(`表格已更新！更新 ${res.updated} 条，新增 ${res.inserted} 条`)
+    const parts = [`表格更新 ${res.updated + res.inserted} 条`]
+    if (res.db_saved) parts.push(`数据库同步 ${res.db_saved} 条`)
+    ElMessage.success(parts.join('，'))
   } catch (e) {
     ElMessage.error('更新表格失败: ' + (e.response?.data?.error || e.message))
   }

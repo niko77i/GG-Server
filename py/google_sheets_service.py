@@ -174,7 +174,7 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
             row.get("account", ""), str(row.get("customerId", "")),
             row.get("cost", 0), "",
             g_val, h_val, region,
-            row.get("campaign", ""), "", l_val, "", "",
+            row.get("campaign", ""), "", l_val, None, None,  # M/N 公式稍后填入
         ])
 
     # 5. 分拣
@@ -193,8 +193,11 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
     if updates:
         data = []
         for row_idx, row_data in updates:
+            row_num = row_idx + 1  # 1-indexed
+            row_data[12] = f"=F{row_num}*L{row_num}"
+            row_data[13] = f"=F{row_num}-K{row_num}+M{row_num}"
             data.append({
-                "range": f"'{sheet_name}'!A{row_idx + 1}:N{row_idx + 1}",
+                "range": f"'{sheet_name}'!A{row_num}:N{row_num}",
                 "values": [row_data],
             })
         service.spreadsheets().values().batchUpdate(
@@ -206,6 +209,11 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
     if appends:
         start = last_row + 1
         end = last_row + len(appends)
+        # 填入公式：M=F*L, N=F-K+M
+        for i, row_data in enumerate(appends):
+            row_num = start + i
+            row_data[12] = f"=F{row_num}*L{row_num}"
+            row_data[13] = f"=F{row_num}-K{row_num}+M{row_num}"
         if end > sheet_rows:
             service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,

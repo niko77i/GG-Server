@@ -390,6 +390,7 @@ def _ensure_schema(conn: sqlite3.Connection):
     # 增量迁移（使用公共函数缩减排板代码）
     _add_column_if_missing(conn, "videos", "review_status", "review_status TEXT DEFAULT '能过审'")
     _add_column_if_missing(conn, "accounts", "death_date", "death_date TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "accounts", "status_changed_date", "status_changed_date TEXT DEFAULT ''")
     _add_column_if_missing(conn, "videos", "owner_id", "owner_id INTEGER REFERENCES users(id)")
     _add_column_if_missing(conn, "videos", "is_public", "is_public INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "accounts", "owner_id", "owner_id INTEGER REFERENCES users(id)")
