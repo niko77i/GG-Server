@@ -146,10 +146,12 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
     ).execute()
     existing = result.get("values", [])
     last_row = 0
+    last_date = ""
     for i in range(len(existing) - 1, -1, -1):
         row = existing[i]
         if any(row[j] for j in range(min(10, len(row))) if row[j]):
             last_row = i + 1
+            last_date = (row[0] or "").strip() if len(row) > 0 else ""
             break
 
     # 3. 构建索引
@@ -208,7 +210,10 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
     # 7. 追加新行（用 info 中的 rowCount，不再调 API）
     if appends:
         start = last_row + 1
-        end = last_row + len(appends)
+        # 不同日期之间空一行
+        if last_date and last_date != (report_date or "").strip():
+            start += 1
+        end = start + len(appends) - 1
         # 填入公式：M=F*L, N=F-K+M
         for i, row_data in enumerate(appends):
             row_num = start + i
