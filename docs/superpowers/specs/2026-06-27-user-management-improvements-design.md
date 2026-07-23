@@ -145,3 +145,28 @@ updateProfile(data)              // PUT /auth/profile
 
 - **UserManageView**：操作列增加"编辑"和"改密"按钮，自己的行操作按钮 disabled
 - **UserProfileView（新页面）**：简洁的信息卡片 + 编辑表单，放在导航栏用户下拉菜单中可进入
+
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. `/api/users/names` 缺少 developer 过滤（需关注）
+
+文档要求非 developer 用户调用此接口时不应看到 developer 角色用户。实际代码（`py/main.py:5679` 和 `py/routes/auth_routes.py:177`）仅过滤 `u.role != 'hidden'`，未排除 developer。且此端点存在两份实现代码。
+
+### 2. 删除自己状态码不一致
+
+`DELETE /api/admin/users/<uid>` 禁止删除自己时返回 **400**，而 role 和 toggle 端点正确返回 **403**。
+
+### 3. 超规格实现
+
+| 功能 | 说明 |
+|---|---|
+| Telegram 用户名管理 | 编辑弹窗含 Telegram 用户名字段 + 后端端点 |
+| 导入数据按钮 | UserManageView 增加了导入数据功能 |
+| `_can_modify_user` 权限 | admin 不能操作其他 admin（比规格更严格） |
+| UserProfileView 扩展 | 含 Google Sheets 配置、邮箱通知等额外功能 |
+
+### 4. toggleUser 前端未调用
+
+后端 `POST /api/admin/users/<uid>/toggle` 已实现，前端 `admin.js` 也定义了 `toggleUser`，但 UserManageView 的角色切换通过 role dropdown 实现，toggle 端点未被调用。

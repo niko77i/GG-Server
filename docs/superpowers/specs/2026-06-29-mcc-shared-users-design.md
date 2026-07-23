@@ -231,3 +231,36 @@ WHERE m.mcc_id = ?
 3. **产品没有 MCC**：添加 runner 时跳过 MCC 分配逻辑
 4. **并发创建同名 MCC**：唯一索引兜底，后到的请求返回 IntegrityError
 5. **删除 runner 时**：不移除 MCC 的 shared 权限（用户可能还在其他产品中使用该 MCC）
+
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. shared_user_ids 语义不一致
+
+创建 MCC 时，`shared_user_ids` 初始化为 `[当前用户ID]`（owner 本人也在 shared 中）。但 `_link_mcc_chain_to_user` 排除了 owner，迁移脚本 `_migrate_mcc_dedup` 也排除了 owner。存在数据一致性偏差。
+
+### 2. link 接口幂等行为
+
+文档说重复关联返回 409，代码实际做幂等处理（owner 静默跳过，已 shared 静默跳过），始终返回 200。
+
+### 3. MCC 删除额外约束
+
+代码额外检查：有关联的**账户**（`accounts.mcc_id`）→ 阻止删除；有关联的**产品**（`products.mcc_id`）→ 阻止删除。
+
+### 4. JSON 数组匹配用精确模式
+
+文档说 `LIKE` 简单子串匹配，代码用 5 种精确模式匹配 JSON 数组结构，避免了 `user_id=1` 误匹配 `user_id=12`。
+
+### 5. 外键策略差异
+
+文档说"迁移期间关闭外键约束"，代码实际通过先更新关联引用再删除旧记录的方式绕过，始终保持 `PRAGMA foreign_keys=ON`。
+
+### 6. 代码超出设计的功能
+
+| 功能 | 说明 |
+|---|---|
+| 搜索时祖先链补全 | 自动补全祖先 MCC 保证树形展示完整 |
+| MCC 详情端点 | `/api/mcc/<id>/detail` — 返回上级/子MCC/账户/产品 |
+| 循环引用检测 | 编辑 `parent_mcc_id` 时防止指向自身或子孙 |
+| `_migrate_mcc_share_runners` | 将现有产品 runner 回填到 MCC shared |
