@@ -169,6 +169,87 @@ def _scope_where(scope: str, user_id: int, alias: str = None):
     else:  # all
         return f"({col}is_public = 1 OR {col}owner_id = ?)", [user_id]
 
+
+# ---- 广告投放报告：campaign → 产品 动态映射 ----
+
+def _build_campaign_product_map(db) -> dict:
+    """扫描 packages 表，构建 {series_key: product_name} 映射。
+
+    通过拆分 series_name 提取「系列前缀」，用于匹配 ad_reports.campaign。
+    例如 series_name='55RT-GG-GGB-G6-StardustEscape' → key='55RT-GG-GGB-G6'
+    campaign='55RT-GG-GGB-G6-EchoWard' → 同样提取 key='55RT-GG-GGB-G6' → 匹配成功。
+
+    返回的 dict 键同时包含提取的 key 和原始 series_name。
+    """
+    rows = db.execute("""
+        SELECT pkg.series_name, prod.product_name
+        FROM packages pkg
+        JOIN products prod ON pkg.product_id = prod.id
+        WHERE pkg.series_name != ''
+    """).fetchall()
+
+    mapping = {}
+    for r in rows:
+        sn = r["series_name"]
+        name = r["product_name"]
+        # 存原始值
+        if sn not in mapping:
+            mapping[sn] = name
+        # 提取系列前缀：取 series_name 中 GG/GGB 之前的部分作为键
+        # 例: '55RT-GG-GGB-G6-StardustEscape' → 尝试提取 '55RT-GG-GGB-G6'
+        parts = sn.replace(' ', '-').split('-')
+        # 从后往前找 GG/GGB 段
+        gg_idx = -1
+        for i, p in enumerate(parts):
+            pl = p.upper()
+            if pl in ('GG', 'GGB', 'GGTT', 'TT', 'FB', 'PWA', 'IOS'):
+                gg_idx = i
+        if gg_idx >= 0:
+            # key = 从开头到 GG 段之后一段
+            key_end = min(gg_idx + 2, len(parts))
+            key = '-'.join(parts[:key_end])
+            if key not in mapping:
+                mapping[key] = name
+    return mapping
+
+
+def _resolve_product_name(campaign: str, mapping: dict) -> str:
+    """根据 campaign 在 mapping 中查找对应的产品名，找不到返回空字符串。"""
+    if not campaign:
+        return ""
+    # 1. 精确匹配
+    if campaign in mapping:
+        return mapping[campaign]
+    # 2. 提取 campaign 的系列前缀进行匹配
+    parts = campaign.replace(' ', '-').split('-')
+    gg_idx = -1
+    for i, p in enumerate(parts):
+        pl = p.upper()
+        if pl in ('GG', 'GGB', 'GGTT', 'TT', 'FB', 'PWA', 'IOS'):
+            gg_idx = i
+    if gg_idx >= 0:
+        key_end = min(gg_idx + 2, len(parts))
+        key = '-'.join(parts[:key_end])
+        if key in mapping:
+            return mapping[key]
+    # 3. 模糊匹配：找 mapping 中最长的匹配前缀
+    best = ""
+    best_len = 0
+    for map_key in mapping:
+        if campaign.startswith(map_key) and len(map_key) > best_len:
+            best = mapping[map_key]
+            best_len = len(map_key)
+    if best:
+        return best
+    # 4. 反过来：mapping key 是 campaign 的前缀
+    for map_key in mapping:
+        if map_key.startswith(parts[0]) and len(parts[0]) > best_len:
+            # 宽松匹配：至少前两段相同
+            if len(parts) >= 2 and map_key.startswith('-'.join(parts[:2])):
+                best = mapping[map_key]
+                best_len = len(parts[0])
+    return best
+
 # --- GG-Server: Config ---
 _CONFIG_PATH = os.path.join(os.path.dirname(_current_dir), "config", "config.json")
 try:
@@ -4189,7 +4270,7 @@ def mcc_list():
 
         # Step 2: 加载用户可访问的所有 MCC 的 id→parent_mcc_id 映射
         all_mcc = db.execute(
-            f"SELECT id, parent_mcc_id FROM mcc WHERE {perm_where}", perm_params
+            f"SELECT id, parent_mcc_id FROM mcc m WHERE {perm_where}", perm_params
         ).fetchall()
         parent_map = {r["id"]: r["parent_mcc_id"] for r in all_mcc}
 
@@ -4202,14 +4283,7 @@ def mcc_list():
                 needed_ids.add(pid)
                 pid = parent_map.get(pid)
 
-        # Step 4: 对每个祖先节点，加入它的所有直系子节点（保证树展开后层级完整）
-        ancestor_ids = list(needed_ids)
-        for aid in ancestor_ids:
-            for cid, p in parent_map.items():
-                if p == aid:
-                    needed_ids.add(cid)
-
-        # Step 5: 批量查询所有需要的 MCC（不可超过 2000 条）
+        # Step 4: 批量查询所有需要的 MCC（不可超过 2000 条）
         if len(needed_ids) > 2000:
             needed_ids = set(list(needed_ids)[:2000])
         placeholders = ",".join("?" * len(needed_ids))
@@ -4723,10 +4797,13 @@ def google_sheets_update_zuobiao():
         campaigns = set((r.get("campaign") or "").strip() for r in rows)
         matched = pkg_names & campaigns
         if not matched:
-            return jsonify({
-                "success": False,
-                "error": f"产品选择有误！「{product_name}」的包系列与数据中的广告系列不匹配，请重新选择产品。"
-            }), 400
+            # 系列名没匹配上，检查是否有养户行（符合养户关键词的也放行）
+            has_yanghu = any(r.get("is_yanghu") for r in rows)
+            if not has_yanghu:
+                return jsonify({
+                    "success": False,
+                    "error": f"产品选择有误！「{product_name}」的包系列与数据中的广告系列不匹配，请重新选择产品。"
+                }), 400
 
     sheets, active_config = _get_user_sheets_config(user_id)
     if not active_config:
@@ -6436,9 +6513,7 @@ def ad_reports_products():
         SELECT DISTINCT p.id, p.product_name, p.region, p.sales_person, p.agency_ratio
         FROM products p
         LEFT JOIN product_runners pr ON p.id = pr.product_id
-        WHERE (p.is_archived IS NULL OR p.is_archived = 0)
-          AND (p.status IS NULL OR p.status = '' OR p.status = '0')
-          AND pr.user_id = ?
+        WHERE pr.user_id = ?
         ORDER BY p.product_name
     """, (user_id,)).fetchall()
     db.close()
@@ -6697,10 +6772,26 @@ def ad_reports_list():
     size = int(request.args.get("size", 50))
 
     db = _yt_db()
+
+    # 构建 campaign → 产品 动态映射（通过 packages.series_name 匹配）
+    campaign_map = _build_campaign_product_map(db)
+
     where = ["user_id=?"]; params = [user_id]
     if product_name:
         names = [n.strip() for n in product_name.split(",") if n.strip()]
-        if len(names) == 1:
+        # 找出所有 campaign 解析后匹配目标产品名的行
+        matching_campaigns = [c for c, p in campaign_map.items() if p in names]
+        if matching_campaigns:
+            cp_placeholders = ",".join(["?"] * len(matching_campaigns))
+            if len(names) == 1:
+                where.append(f"(product_name=? OR campaign IN ({cp_placeholders}))")
+                params.append(names[0])
+            else:
+                np_placeholders = ",".join(["?"] * len(names))
+                where.append(f"(product_name IN ({np_placeholders}) OR campaign IN ({cp_placeholders}))")
+                params.extend(names)
+            params.extend(matching_campaigns)
+        elif len(names) == 1:
             where.append("product_name=?"); params.append(names[0])
         else:
             where.append(f"product_name IN ({','.join(['?']*len(names))})"); params.extend(names)
@@ -6737,10 +6828,10 @@ def ad_reports_list():
             """SELECT DISTINCT p.product_name AS name,
                p.product_name ||
                CASE WHEN p.sales_person IS NOT NULL AND p.sales_person != ''
-                    THEN ' - ' || p.sales_person ELSE '' END AS label
+                    THEN ' ' || p.sales_person ELSE '' END AS label
                FROM products p
                JOIN product_runners pr ON p.id = pr.product_id
-               WHERE pr.user_id=? AND p.region=? AND (p.is_archived IS NULL OR p.is_archived=0)
+               WHERE pr.user_id=? AND p.region=?
                ORDER BY p.product_name""",
             (user_id, region_filter)
         ).fetchall()]
@@ -6749,10 +6840,10 @@ def ad_reports_list():
             """SELECT DISTINCT p.product_name AS name,
                p.product_name ||
                CASE WHEN p.sales_person IS NOT NULL AND p.sales_person != ''
-                    THEN ' - ' || p.sales_person ELSE '' END AS label
+                    THEN ' ' || p.sales_person ELSE '' END AS label
                FROM products p
                JOIN product_runners pr ON p.id = pr.product_id
-               WHERE pr.user_id=? AND (p.is_archived IS NULL OR p.is_archived=0)
+               WHERE pr.user_id=?
                ORDER BY p.product_name""",
             (user_id,)
         ).fetchall()]
@@ -6769,10 +6860,17 @@ def ad_reports_list():
             (user_id,)
         ).fetchall()]
 
+    # 为每行注入动态解析的产品名（通过 campaign → series → product）
+    enriched = []
+    for r in rows:
+        d = dict(r)
+        d["resolved_product_name"] = _resolve_product_name(d.get("campaign", ""), campaign_map) or ""
+        enriched.append(d)
+
     db.close()
     return jsonify({
         "success": True,
-        "reports": [dict(r) for r in rows],
+        "reports": enriched,
         "total": total,
         "products": products,
         "regions": regions

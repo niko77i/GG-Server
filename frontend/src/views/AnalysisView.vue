@@ -5,7 +5,7 @@
     <!-- 筛选栏 -->
     <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
       <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:200px;" filterable multiple collapse-tags @change="onGlobalProductChange">
-        <el-option v-for="p in filterProducts" :key="p" :label="p" :value="p" />
+        <el-option v-for="p in filterProducts" :key="p.name" :label="p.label" :value="p.name" />
       </el-select>
       <el-select v-model="filterRegion" placeholder="全部地区" clearable style="width:140px;" @change="refreshAll">
         <el-option v-for="r in filterRegions" :key="r" :label="r" :value="r" />
@@ -483,7 +483,7 @@ const trendProducts = ref([])
 const trendProductOptions = computed(() => {
   // 全局选了产品则趋势下拉只显示那些产品
   if (filterProduct.value.length) return filterProduct.value
-  return filterProducts.value
+  return filterProducts.value.map(p => p.name)
 })
 const trendMetric = ref('cpi')
 const trendGroupBy = ref('campaign')
@@ -538,7 +538,7 @@ const multiMetrics = [
 ]
 const multiProductOptions = computed(() => {
   if (filterProduct.value.length) return filterProduct.value
-  return filterProducts.value
+  return filterProducts.value.map(p => p.name)
 })
 const multiXAxis = ref('cost')
 const multiYAxis = ref('cpi')

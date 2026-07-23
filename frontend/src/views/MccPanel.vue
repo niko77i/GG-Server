@@ -9,8 +9,8 @@
       </div>
 
       <div style="display:flex;gap:8px;margin-bottom:8px;">
-        <el-input v-model="store.mccFilters.search" placeholder="🔍 搜索名称/ID..." @input="search" style="flex:1;" clearable />
-        <el-input v-model="store.mccFilters.level" placeholder="等级关键词..." @input="search" style="width:150px;" clearable />
+        <el-input v-model="store.mccFilters.search" placeholder="🔍 搜索名称/ID..." @input="onFilterChange" style="flex:1;" clearable />
+        <el-input v-model="store.mccFilters.level" placeholder="等级关键词..." @input="onFilterChange" style="width:150px;" clearable />
       </div>
     </div>
 
@@ -73,6 +73,11 @@ onMounted(async () => { await store.loadSettings(); load() })
 
 function load() { store.loadMccList() }
 
+function onFilterChange() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => { store.mccPage = 1; load() }, 300)
+}
+
 // Build tree recursively with _depth for color coding
 const mccTree = computed(() => {
   const list = store.mccList || []
@@ -90,10 +95,6 @@ function mccRowClass({ row }) {
   return `mcc-level-${Math.min(row._depth || 0, 4)}`
 }
 
-function search() {
-  clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => { store.mccPage = 1; load() }, 300)
-}
 function showModal(id) { editId.value = id || null; modalVisible.value = true }
 function showDetail(id) { detailId.value = id; detailVisible.value = true }
 

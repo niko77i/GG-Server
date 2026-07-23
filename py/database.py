@@ -40,6 +40,10 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+
+    # 列级迁移每次连接都执行（_add_column_if_missing 是幂等的，只 PRAGMA table_info）
+    _ensure_columns(conn)
+
     if not _schema_verified or _schema_verified_path != db_path:
         with _schema_lock:
             if not _schema_verified or _schema_verified_path != db_path:
@@ -70,6 +74,49 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, col_name: str, 
     cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if col_name not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+
+
+def _ensure_columns(conn: sqlite3.Connection):
+    """每次数据库连接都执行的列级迁移（幂等，仅 PRAGMA + 条件 ALTER TABLE）。"""
+    # 产品表迁移：补 mcc_id 和兼容 is_paused→status
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+    if "mcc_id" not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN mcc_id INTEGER REFERENCES mcc(id)")
+    for t in ["products", "packages"]:
+        tcols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})").fetchall()]
+        if "is_paused" in tcols and "status" not in tcols:
+            conn.execute(f"ALTER TABLE {t} RENAME COLUMN is_paused TO status")
+
+    # 增量迁移（使用公共函数缩减排板代码）
+    _add_column_if_missing(conn, "videos", "review_status", "review_status TEXT DEFAULT '能过审'")
+    _add_column_if_missing(conn, "accounts", "death_date", "death_date TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "accounts", "status_changed_date", "status_changed_date TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "videos", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "videos", "is_public", "is_public INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "accounts", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "mcc", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "mcc", "shared_user_ids", "shared_user_ids TEXT DEFAULT '[]'")
+
+    # 增量迁移：产品/文案/用户 补列
+    _add_column_if_missing(conn, "products", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "products", "runner_ids", "runner_ids TEXT DEFAULT '[]'")
+    _add_column_if_missing(conn, "products", "is_archived", "is_archived INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "recharge_records", "status", "status TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "recharge_records", "sheets_synced", "sheets_synced INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "recharge_records", "sheets_error", "sheets_error TEXT DEFAULT ''")
+    # 高频查询字段索引（_add_column_if_missing 之后创建，确保列已存在）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
+    _add_column_if_missing(conn, "products", "customer", "customer TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "products", "deleted_at", "deleted_at TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "products", "sales_person", "sales_person TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "products", "agency_ratio", "agency_ratio REAL DEFAULT NULL")
+    _add_column_if_missing(conn, "copywritings", "owner_id", "owner_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "copywritings", "effectiveness", "effectiveness TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "copywritings", "is_public", "is_public INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "users", "custom_name", "custom_name TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
 
 
 def _ensure_schema(conn: sqlite3.Connection):
@@ -133,6 +180,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             mcc_id TEXT NOT NULL,
             level TEXT DEFAULT '',
             parent_mcc_id INTEGER REFERENCES mcc(id),
+            owner_id INTEGER REFERENCES users(id),
             shared_user_ids TEXT DEFAULT '[]',
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
@@ -148,6 +196,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             status TEXT DEFAULT '存活',
             acquired_date TEXT DEFAULT (date('now','localtime')),
             death_date TEXT DEFAULT '',
+            owner_id INTEGER REFERENCES users(id),
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         );
@@ -394,45 +443,7 @@ def _ensure_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at);
     """)
 
-    # 产品表迁移：补 mcc_id 和兼容 is_paused→status
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
-    if "mcc_id" not in cols:
-        conn.execute("ALTER TABLE products ADD COLUMN mcc_id INTEGER REFERENCES mcc(id)")
-    for t in ["products", "packages"]:
-        tcols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})").fetchall()]
-        if "is_paused" in tcols and "status" not in tcols:
-            conn.execute(f"ALTER TABLE {t} RENAME COLUMN is_paused TO status")
-
-    # 增量迁移（使用公共函数缩减排板代码）
-    _add_column_if_missing(conn, "videos", "review_status", "review_status TEXT DEFAULT '能过审'")
-    _add_column_if_missing(conn, "accounts", "death_date", "death_date TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "accounts", "status_changed_date", "status_changed_date TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "videos", "owner_id", "owner_id INTEGER REFERENCES users(id)")
-    _add_column_if_missing(conn, "videos", "is_public", "is_public INTEGER DEFAULT 0")
-    _add_column_if_missing(conn, "accounts", "owner_id", "owner_id INTEGER REFERENCES users(id)")
-    _add_column_if_missing(conn, "mcc", "owner_id", "owner_id INTEGER REFERENCES users(id)")
-    _add_column_if_missing(conn, "mcc", "shared_user_ids", "shared_user_ids TEXT DEFAULT '[]'")
-
-    # 增量迁移：产品/文案/用户 补列
-    _add_column_if_missing(conn, "products", "owner_id", "owner_id INTEGER REFERENCES users(id)")
-    _add_column_if_missing(conn, "products", "runner_ids", "runner_ids TEXT DEFAULT '[]'")
-    _add_column_if_missing(conn, "products", "is_archived", "is_archived INTEGER DEFAULT 0")
-    _add_column_if_missing(conn, "recharge_records", "status", "status TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "recharge_records", "sheets_synced", "sheets_synced INTEGER DEFAULT 0")
-    _add_column_if_missing(conn, "recharge_records", "sheets_error", "sheets_error TEXT DEFAULT ''")
-    # 高频查询字段索引（_add_column_if_missing 之后创建，确保列已存在）
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
-    _add_column_if_missing(conn, "products", "customer", "customer TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "products", "deleted_at", "deleted_at TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "products", "sales_person", "sales_person TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "products", "agency_ratio", "agency_ratio REAL DEFAULT NULL")
-    _add_column_if_missing(conn, "copywritings", "owner_id", "owner_id INTEGER REFERENCES users(id)")
-    _add_column_if_missing(conn, "copywritings", "effectiveness", "effectiveness TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "copywritings", "is_public", "is_public INTEGER DEFAULT 0")
-    _add_column_if_missing(conn, "users", "custom_name", "custom_name TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
-    _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
+    # 列迁移已移至 _ensure_columns()（每次连接都执行）
 
     # 初始化默认标签
     for k, v in [("regions", '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),

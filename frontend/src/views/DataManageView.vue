@@ -9,7 +9,11 @@
     <div class="filter-bar">
       <div class="filter-left">
         <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:160px" @change="loadData">
-          <el-option v-for="o in productOptions" :key="o.value" :label="o.label" :value="o.value" />
+          <el-option
+            v-for="p in products" :key="p.product_name"
+            :label="p.product_name + (p.sales_person ? ' ' + p.sales_person : '')"
+            :value="p.product_name"
+          />
         </el-select>
         <el-date-picker
           v-model="dateRange" type="daterange" range-separator="~"
@@ -143,7 +147,7 @@ import { reportsApi } from '../api/reports'
 const COL_STORAGE_KEY = 'gg_data_manage_columns'
 
 const allColumns = [
-  { prop: 'product_name', label: '产品', minWidth: 100 },
+  { prop: 'display_product', label: '产品', minWidth: 100 },
   { prop: 'report_date', label: '日期', minWidth: 100 },
   { prop: 'region', label: '地区', minWidth: 70 },
   { prop: 'account', label: '账户', minWidth: 110 },
@@ -207,10 +211,6 @@ const filterProduct = ref('')
 const dateRange = ref(null)
 const searchKeyword = ref('')
 const products = ref([])
-const productOptions = computed(() => products.value.map(p => ({
-  value: p.product_name,
-  label: p.product_name + (p.region ? ' (' + p.region + ')' : '') + (p.sales_person ? ' - ' + p.sales_person : ''),
-})))
 
 // 表格状态
 const reports = ref([])
@@ -249,7 +249,10 @@ async function loadData() {
     if (searchKeyword.value) params.search = searchKeyword.value
 
     const data = await reportsApi.list(params)
-    reports.value = data.reports || []
+    reports.value = (data.reports || []).map(r => ({
+      ...r,
+      display_product: r.resolved_product_name || r.product_name
+    }))
     total.value = data.total || 0
 
     if (sortProp.value) applyClientSort()
@@ -290,7 +293,7 @@ function openEditDialog(row) {
   dialogTitle.value = '编辑数据'
   editingId.value = row.id
   Object.assign(form, {
-    product_name: row.product_name,
+    product_name: row.display_product || row.product_name,
     report_date: row.report_date,
     region: row.region || '',
     account: row.account || '',

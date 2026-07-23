@@ -7,6 +7,7 @@
         <el-tab-pane v-if="auth.isAdmin" label="广告账户" name="ads" />
         <el-tab-pane v-if="auth.isAdmin" label="MCC 管理" name="mcc" />
         <el-tab-pane v-if="auth.isAdmin" label="设置" name="settings" />
+
       </el-tabs>
     </div>
     <div style="flex:1;min-height:0;overflow-y:auto;">
@@ -32,6 +33,7 @@ const activeTab = computed(() => {
   if (p.includes('/settings')) return 'settings'
   if (p.includes('/mcc')) return 'mcc'
   if (p.includes('/ads')) return 'ads'
+
   return 'products'
 })
 

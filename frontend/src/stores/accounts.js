@@ -36,14 +36,14 @@ export const useAccountStore = defineStore('accounts', {
     async batchUpdateAccounts(body) { await accountsApi.batchUpdate(body); return this.loadAccounts() },
 
     async loadMccList() {
-      return cachedLoader(this, 'mccList', 120000, () => {
+      return dedupLoader(this, 'mccList', () => {
         const params = { page: this.mccPage, size: this.mccPageSize, ...this.mccFilters }
         return mccApi.list(params).then(res => {
           this.mccList = res.mcc_list
           this.mccTotal = res.total
           return res
         })
-      }, () => this.mccList.length > 0)
+      })
     },
     async createMcc(body) { return mccApi.create(body) },
     async updateMcc(id, body) { return mccApi.update(id, body) },

@@ -99,7 +99,7 @@ def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
     operator = ""
     year_month = ""
     if title:
-        m = re.match(r'^(\D+)(\d{6})$', title)
+        m = re.match(r'^(\D+)(\d{4}\.?\d{2})$', title)
         if m:
             operator = m.group(1)
             year_month = m.group(2)

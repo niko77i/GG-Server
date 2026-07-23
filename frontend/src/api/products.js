@@ -22,4 +22,5 @@ export const productsApi = {
   // 审计日志
   auditLogList: (params) => api.get('/audit-log/list', { params }),
   auditLogRestore: (logId) => api.post(`/audit-log/restore/${logId}`),
+
 }
