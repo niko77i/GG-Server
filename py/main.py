@@ -5679,9 +5679,18 @@ def translate_text():
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required(optional=True)
 def users_names():
-    """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。"""
+    """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。
+    非 developer 用户看不到 developer 角色用户。"""
+    current_user_id = get_jwt_identity()
     db = database.get_db()
-    rows = db.execute("""
+    dev_filter = ""
+    if current_user_id:
+        cur_user = db.execute("SELECT role FROM users WHERE id=?", (int(current_user_id),)).fetchone()
+        if not cur_user or cur_user["role"] != "developer":
+            dev_filter = " AND u.role != 'developer'"
+    else:
+        dev_filter = " AND u.role != 'developer'"
+    rows = db.execute(f"""
         SELECT DISTINCT u.id, u.username, u.display_name
         FROM users u
         JOIN products p ON (
@@ -5691,7 +5700,7 @@ def users_names():
             OR p.runner_ids LIKE '%, ' || u.id || ',%'
             OR p.runner_ids LIKE '%, ' || u.id || ']'
         )
-        WHERE u.role != 'hidden'
+        WHERE u.role != 'hidden'{dev_filter}
         ORDER BY u.id
     """).fetchall()
     db.close()
@@ -5796,7 +5805,7 @@ def admin_delete_user(uid):
     if not user or user["role"] not in ("developer", "admin"):
         return jsonify(success=False, error="Permission denied"), 403
     if uid == user_id:
-        return jsonify(success=False, error="Cannot delete yourself"), 400
+        return jsonify(success=False, error="不能删除自己"), 403
     target = auth.get_user_by_id(uid)
     if not target:
         return jsonify(success=False, error="User not found"), 404
