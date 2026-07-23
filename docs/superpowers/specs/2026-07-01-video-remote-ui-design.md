@@ -118,3 +118,37 @@ multipart 上传，保存到 `temp/music/`。返回 `{ name, path }`。
 - `v-if="isRemote"` / `v-else` 切换 UI
 - `onMounted` 远程时加载 packages、music 列表
 - bridge 桥接有值时优先选中对应包
+
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. 音乐上传支持视频文件提取音频
+
+设计文档只说上传背景音乐。实际 `POST /api/video/upload-music` 支持上传 MP4 视频文件，自动用 FFmpeg 提取音轨转为 MP3，然后删除原始 MP4 文件。支持的格式：`.mp3`, `.wav`, `.aac`, `.m4a`, `.ogg`, `.flac`, `.mp4`。
+
+### 2. 音频流有路径安全校验
+
+`GET /api/audio` 除了检查文件存在，还调用 `_is_safe_path(path)` 做路径遍历防护，防止读取服务器任意文件。
+
+### 3. 新增音频替换功能体系（文档未提及）
+
+设计文档之后新增了完整的音频替换功能模块：
+
+| 端点 | 功能 |
+|---|---|
+| `POST /api/audio-replace` | 上传视频+音频，FFmpeg 替换音轨，返回下载链接 |
+| `GET /api/audio-replace/download?path=` | 下载替换后的视频 |
+| `GET /api/audio-replace/history` | 查看历史替换记录 |
+| `DELETE /api/audio-replace/history/<id>` | 删除单条历史（同步删文件） |
+| `DELETE /api/audio-replace/history` | 清空所有历史 |
+
+历史记录存储在 `py/database.py` 的 `audio_replace_history` 表中。FFmpeg 处理有 10 分钟超时。
+
+### 4. ScrapeView 下载功能
+
+`/api/scrape` 爬取接口返回的 `files` 中每个文件含下载链接 `/api/scrape/download?path=`，远程用户可通过此链接下载爬取的图片。拥有 `_is_safe_path()` 路径安全校验。
+
+### 5. 音乐列表无需认证
+
+`GET /api/video/music-list` 未加 `@jwt_required()`，无需登录即可获取音乐列表。

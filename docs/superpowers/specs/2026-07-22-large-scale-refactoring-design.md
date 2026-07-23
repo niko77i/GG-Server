@@ -1,21 +1,22 @@
 # 大规模重构设计：拆分 main.py + 前端大组件
 
-> **执行状态**：已完成 Phase 1-2 + 部分 Phase 6。剩余见文末 TODO 清单。
-> **最后更新**：2026-07-22
+> **执行状态**：Phase 1-2 完成 + Phase 3 仅迁移了 auth。大量 Blueprint 拆分未执行，main.py 反而从 7306 增长至 8165 行。剩余见文末 TODO 清单。
+> **最后更新**：2026-07-23（代码审计后补充）
 
 ## 零、已完成项
 
 ### 后端
 | 完成项 | 详情 |
 |--------|------|
-| helpers.py 扩展 | `scope_where`、`can_modify`、`can_modify_user`、`runner_ids_where`、`MCC_CHANGE_TYPE_LABELS` 已迁移 |
-| auth_routes.py Blueprint | ✅ 已激活，main.py 旧路由已删除 |
-| `_reject_viewer` 统一 | 删除 main.py 中的重复，统一用 decorators 版本 |
-| `_can_modify` 优化 | db 连接由调用方传入，消除双连接 |
+| helpers.py 扩展 | `scope_where`、`can_modify`、`can_modify_user`、`runner_ids_where`、`MCC_CHANGE_TYPE_LABELS` 已迁移 ⚠️ 但 main.py 仍保留副本 |
+| auth_routes.py Blueprint | ✅ 已激活，main.py 旧 auth 路由已删除（实际命名 `auth_routes.py` 非 `auth.py`） |
+| `_reject_viewer` 统一 | ✅ 删除 main.py 中的重复定义，main.py 统一用 `from routes.decorators import reject_viewer as _reject_viewer` |
+| `_can_modify` 优化 | db 连接由调用方传入，消除双连接 ⚠️ helpers.py 有优化版但 main.py 保留旧版副本 |
 | 多余 import 清理 | json x8, datetime x6 已从函数体移除 |
 | JWT 滑动过期 | `_refresh_jwt` after_request 钩子 |
-| 测试 | 29 个新测试，127/127 全通过 |
+| 测试 | 127 个测试（10 个文件），新增 test_helpers / test_decorators / test_auth |
 | sales_person 列 | database.py 添加 `_add_column_if_missing` |
+| agency_ratio 列 | database.py 添加 `_add_column_if_missing` |
 
 ### 前端
 | 完成项 | 详情 |
@@ -62,39 +63,60 @@
 
 ## 一、现状分析
 
-### 1.1 main.py — 7306 行（从 7462 缩减）
+### 1.1 main.py — 8165 行（审计时实测，较初始 7462 已增长 703 行）
 
-| 指标 | 数值 |
-|------|------|
-| 总行数 | 7306 |
-| 路由总数 | 157 |
-| `@jwt_required()` 调用 | 114 |
-| `_yt_db()` 调用 | 90 |
-| `int(get_jwt_identity())` | 92 |
+| 指标 | 设计文档旧值 | 审计实测值 | 变化 |
+|------|-------------|-----------|------|
+| 总行数 | 7306 | **8165** | +859 |
+| 路由总数（main.py 内） | 157 | **154** | -3 (auth 路由已迁出) |
+| 路由总数（含 auth_routes.py） | — | **166** | +9 |
+| `@jwt_required()` 调用 | 114 | **119** | +5 |
+| `_yt_db()` 调用 | 90 | **100** | +10 |
+| `int(get_jwt_identity())` | 92 | **87** | -5 (auth 迁出) |
 
-**路由按模块分布**：
+> **趋势说明**：虽然 Phase 1-2 将 auth 路由迁出（减少 ~300 行并减去部分样板），但同期新增的功能代码远超拆分节省量，导致 main.py 净增 859 行。新功能仍在 main.py 中添加而非按 Blueprint 模式放入独立模块。
 
-| 模块 | 路由数 | 行数估算 |
-|------|--------|----------|
-| `/api/products` | 18 | ~900 |
-| `/api/ad-reports` | 17 | ~1200 |
-| `/api/youtube` | 15 | ~600 |
-| `/api/admin` | 12 | ~500 |
-| `/api/accounts` | 12 | ~700 |
-| `/api/auth` | 11 | ~300 |
-| `/api/video` | 10 | ~500 |
-| `/api/mcc` | 8 | ~400 |
-| `/api/fonts` | 6 | ~150 |
-| `/api/scrape` | 5 | ~200 |
-| `/api/copywriting` | 5 | ~200 |
-| `/api/audio-replace` | 5 | ~150 |
-| `/api/regions` | 4 | ~100 |
-| `/api/config` | 4 | ~150 |
-| `/api/data` | 3 | ~150 |
-| 其他（delist/google-sheets/google-ads等） | 12 | ~400 |
-| 全局钩子+辅助函数+启动代码 | 10 (非路由) | ~500 |
+**路由按模块分布**（main.py 内，实际计数）：
 
-**routes/ 目录现状**：仅 3 个文件（`__init__.py`、`decorators.py`、`helpers.py`）
+| 模块 | 路由数 | 备注 |
+|------|--------|------|
+| `/api/ad-reports` | 18 | 最多路由的模块 |
+| `/api/products` | 17 | 含 delist/assets/runners |
+| `/api/youtube` | 15 | 含 consumption |
+| `/api/admin` | 12 | 用户管理 |
+| `/api/accounts` | 14 | 含 recharge |
+| `/api/video` | 12 | 含 history/tasks |
+| `/api/mcc` | 8 | |
+| `/api/fonts` | 6 | |
+| `/api/scrape` | 5 | |
+| `/api/copywriting` | 5 | |
+| `/api/audio-replace` | 4 | |
+| `/api/regions` | 4 | |
+| `/api/data` | 3 | |
+| `/api/config` | 2 | |
+| `/api/delist` | 2 | |
+| `/api/google-sheets` | 4 | |
+| `/api/google-ads` | 2 | |
+| `/api/browse-*` | 3 | |
+| 全局钩子+辅助函数+启动代码 | ~15 非路由 | 含 scheduler/cleanup |
+| **main.py 小计** | **154** | |
+| **auth_routes.py** | **12** | /api/auth/* |
+| **总计** | **166** | |
+
+**routes/ 目录现状**：4 个文件（`__init__.py`（空）、`decorators.py`、`helpers.py`、`auth_routes.py`）
+
+**关键问题：helper 函数重复定义**
+
+以下函数在 `routes/helpers.py` 中已实现，但 main.py 中仍保留了一份完全相同的副本（定义在模块级），且 main.py 内的路由调用的是本地版本而非 helpers 版本，未挂接到 `routes.helpers`：
+
+| 函数 | helpers.py 位置 | main.py 重复位置 | 状态 |
+|------|----------------|-----------------|------|
+| `runner_ids_where` / `_runner_ids_where` | helpers.py:73 | main.py:152 | **重复** |
+| `scope_where` / `_scope_where` | helpers.py:83 | main.py:162 | **重复** |
+| `can_modify` / `_can_modify` | helpers.py:94 | main.py:1768 | **重复** |
+| `can_modify_user` / `_can_modify_user` | helpers.py:116 | main.py:5743 | **重复** |
+
+main.py 仅从 routes 导入了 `reject_viewer`（第 38 行），没有导入 helpers 中的任何函数。这意味着一旦 helpers.py 中的版本被修改，main.py 中的副本不会同步更新，存在维护风险。
 
 ### 1.2 前端大组件
 
@@ -110,6 +132,8 @@
 ## 二、后端拆分方案：Flask Blueprint
 
 ### 2.1 目标目录结构
+
+> **实际进度**：仅 `auth_routes.py` 已实现并激活。`routes/__init__.py` 为空（未实现 `register_blueprints`），main.py 直接 `app.register_blueprint(auth_bp, url_prefix="/api/auth")`。其余 15 个 Blueprint 文件全部未创建。
 
 ```
 py/
@@ -224,15 +248,15 @@ if __name__ == "__main__":
 - `_assign_mcc_to_users()` → `helpers.assign_mcc_to_users()`
 - `_MCC_CHANGE_TYPE_LABELS` → `helpers.MCC_CHANGE_TYPE_LABELS`
 
-### 2.6 实施步骤（分 5 阶段）
+### 2.6 实施步骤（分 5 阶段）— 附实际状态
 
-| 阶段 | 内容 | 风险 |
-|------|------|------|
-| **1** | 迁移公共辅助函数到 helpers.py | 低 |
-| **2** | 创建 `routes/auth.py` Blueprint（auth 路由 + JWT 回调） | 低 |
-| **3** | 逐个迁移独立模块：regions → scrape → fonts → browse → delist → google_* → config_routes | 低 |
-| **4** | 迁移核心模块：products → ad_reports → accounts → mcc → youtube → copywriting → video | 中 |
-| **5** | 迁移 admin 模块，清理 main.py | 中 |
+| 阶段 | 内容 | 风险 | 实际状态 |
+|------|------|------|----------|
+| **1** | 迁移公共辅助函数到 helpers.py | 低 | **已完成** — 6 个函数 + MCC_CHANGE_TYPE_LABELS 已迁移，但 main.py 中保留副本未删除 |
+| **2** | 创建 `routes/auth.py` Blueprint（auth 路由 + JWT 回调） | 低 | **已完成** — 实际命名为 `auth_routes.py`（避免与 `py/auth.py` 冲突），已激活 |
+| **3** | 逐个迁移独立模块：regions → scrape → fonts → browse → delist → google_* → config_routes | 低 | **未开始** |
+| **4** | 迁移核心模块：products → ad_reports → accounts → mcc → youtube → copywriting → video | 中 | **未开始** |
+| **5** | 迁移 admin 模块，清理 main.py | 中 | **未开始** |
 
 每阶段迁移完成后运行 `pytest tests/` 确保无回归。
 
@@ -240,23 +264,34 @@ if __name__ == "__main__":
 
 ## 三、前端拆分方案：组件抽离
 
-### 3.1 YoutubeView.vue（1085 行 → 4 个子组件）
+### 3.1 YoutubeView.vue（1085 行 → 849 行，已部分拆分）
 
-**现状**：4 个 Tab 全部内联在一个 SFC 中。
+**实际状态**：YoutubeView.vue 已缩减至 849 行。3 个子组件已独立，但 **VideoTable.vue 未拆分**（视频列表/批量操作/消耗弹窗逻辑仍在 YoutubeView.vue 内）。
 
-**方案**：
+```
+实际目录：
+views/
+├── YoutubeView.vue           # 849行 保留视频列表 Tab 内联 + Tab 容器
+└── youtube/                  # 仅 3 个组件（原计划 4 个）
+    ├── CopywritingTab.vue    # ✅ 已独立
+    ├── ImportTab.vue         # ✅ 已独立
+    └── TagsConfig.vue        # ✅ 已独立
+    （VideoTable.vue          # ❌ 未拆分 — 代码仍在 YoutubeView.vue 中）
+```
+
+计划方案：
 
 ```
 views/
 ├── YoutubeView.vue           # ~80行 仅保留 Tab 容器 + 路由
 └── youtube/
-    ├── VideoTable.vue        # ~400行 视频列表 + 批量操作 + 消耗弹窗
-    ├── CopywritingTab.vue    # ~200行 文案展示 + 树形表格
-    ├── ImportTab.vue         # ~150行 导入视频/文案表单
-    └── TagsConfig.vue        # ~100行 标签配置
+    ├── VideoTable.vue        # ~400行 视频列表 + 批量操作 + 消耗弹窗 ❌ 未实现
+    ├── CopywritingTab.vue    # ~200行 文案展示 + 树形表格 ✅
+    ├── ImportTab.vue         # ~150行 导入视频/文案表单 ✅
+    └── TagsConfig.vue        # ~100行 标签配置 ✅
 ```
 
-**YoutubeView.vue 瘦身后**：
+**YoutubeView.vue 瘦身后（目标）**：
 ```vue
 <template>
   <el-tabs :model-value="activeTab" @update:model-value="switchTab">
@@ -340,12 +375,89 @@ views/
 
 ---
 
-## 五、预期收益
+## 五、预期收益 vs 实际进度
 
-| 指标 | 改前 | 改后 |
-|------|------|------|
-| main.py 行数 | 7462 | ~500 |
-| 单文件最大行数 | 7462 | ~1200（ad_reports.py） |
-| 前端最大组件行数 | 1085 | ~400 |
-| 代码导航时间 | 全文搜索 | 按模块定位 |
-| 新路由添加 | 在 7000+ 行中找位置 | 在对应 ~200 行模块中加 |
+| 指标 | 改前 | 目标 | 当前实际 |
+|------|------|------|----------|
+| main.py 行数 | 7462 | ~500 | **8165** (+703) |
+| 单文件最大行数 | 7462 | ~1200（ad_reports.py） | **8165**（仍是 main.py） |
+| 前端最大组件行数 | 1085 | ~400 | **849**（YoutubeView.vue，已改善） |
+| 代码导航时间 | 全文搜索 | 按模块定位 | 仍是全文搜索 |
+| 新路由添加 | 在 7000+ 行中找位置 | 在对应 ~200 行模块中加 | 仍在 main.py 中找位置添加 |
+| Blueprint 模块数 | 0 | 18 | **1**（auth_routes） |
+| helper 函数去重 | 无 | 全量使用 helpers 版本 | main.py 仍保留副本 |
+
+---
+
+## 六、审计发现（2026-07-23）
+
+### 6.1 代码与设计文档不一致
+
+| 发现 | 详情 |
+|------|------|
+| main.py 不减反增 | 设计文档记录 7306 行，实际 8165 行。新功能仍在 main.py 中叠加 |
+| helper 函数重复 | `runner_ids_where`、`scope_where`、`can_modify`、`can_modify_user` 在 main.py 中有独立副本，未使用 helpers 版本 |
+| `routes/__init__.py` 为空 | 未实现 `register_blueprints` 函数，main.py 直接调用 `app.register_blueprint` |
+| Blueprint 拆分停滞 | 仅完成 auth_routes.py，计划中 15 个模块均未创建 |
+| VideoTable.vue 未拆分 | YoutubeView.vue 的视频列表 Tab 逻辑仍未抽离 |
+| 文末 TODO 清单缺失 | 文档头部引用"文末 TODO 清单"但该清单不存在 |
+
+### 6.2 测试实际状态
+
+| 指标 | 文档值 | 实测值 |
+|------|--------|--------|
+| 测试文件 | — | 10 个 |
+| 测试用例 | 127 | 127（`def test_` 函数数匹配） |
+| 新增测试文件 | 29 个（文档说） | test_helpers / test_decorators / test_auth 为新增 |
+
+---
+
+## 七、TODO 清单
+
+### 紧急：消除 helper 函数重复
+
+- [ ] **删除 main.py 中的 `_runner_ids_where`**（152 行），main.py 路由改用 `from routes.helpers import runner_ids_where`
+- [ ] **删除 main.py 中的 `_scope_where`**（162 行），main.py 路由改用 `from routes.helpers import scope_where`
+- [ ] **删除 main.py 中的 `_can_modify`**（1768 行），main.py 路由改用 `from routes.helpers import can_modify`
+- [ ] **删除 main.py 中的 `_can_modify_user`**（5743 行），main.py 路由改用 `from routes.helpers import can_modify_user`
+- [ ] 将 `from routes.helpers import` 添加到受影响的 main.py 路由函数中
+
+### Phase 3：低风险独立模块 Blueprint 化
+
+- [ ] 实现 `routes/__init__.py` 中的 `register_blueprints(app)` 工厂函数
+- [ ] 创建 `routes/regions.py` — 迁移 `/api/regions/*`（4 路由）
+- [ ] 创建 `routes/scrape.py` — 迁移 `/api/scrape/*`（5 路由）
+- [ ] 创建 `routes/fonts.py` — 迁移 `/api/fonts/*`（6 路由）
+- [ ] 创建 `routes/browse.py` — 迁移 `/api/browse-*`（3 路由）
+- [ ] 创建 `routes/delist.py` — 迁移 `/api/delist/*`（2 路由）
+- [ ] 创建 `routes/google_sheets.py` — 迁移 `/api/google-sheets/*`（4 路由）
+- [ ] 创建 `routes/google_ads.py` — 迁移 `/api/google-ads/*`（2 路由）
+- [ ] 创建 `routes/config_routes.py` — 迁移 `/api/config/*`（2 路由）
+- [ ] 创建 `routes/data_routes.py` — 迁移 `/api/data/*`（3 路由）
+
+### Phase 4：核心模块 Blueprint 化
+
+- [ ] 创建 `routes/products.py` — 迁移 `/api/products/*`（17 路由）
+- [ ] 创建 `routes/ad_reports.py` — 迁移 `/api/ad-reports/*`（18 路由）
+- [ ] 创建 `routes/accounts.py` — 迁移 `/api/accounts/*` + `/api/recharge/*`（14 路由）
+- [ ] 创建 `routes/mcc.py` — 迁移 `/api/mcc/*`（8 路由）
+- [ ] 创建 `routes/youtube.py` — 迁移 `/api/youtube/*`（15 路由）
+- [ ] 创建 `routes/copywriting.py` — 迁移 `/api/copywriting/*`（5 路由）
+- [ ] 创建 `routes/video.py` — 迁移 `/api/video/*` + `/api/audio-replace/*`（16 路由）
+
+### Phase 5：Admin 模块
+
+- [ ] 创建 `routes/admin.py` — 迁移 `/api/admin/*` + `/api/users/names`（13 路由）
+
+### 前端
+
+- [ ] 拆分 YoutubeView.vue 中的 VideoTable.vue（剩余 ~400 行视频列表逻辑）
+- [ ] 拆分 MediaView.vue（1084 行 → 子组件）
+- [ ] 拆分 AnalysisView.vue（1054 行 → 子组件）
+- [ ] 抽离共享 composables（useTableSelection 等）
+
+### 基础设施
+
+- [ ] 补全 `routes/__init__.py` 的 `register_blueprints(app)` 统一注册入口
+- [ ] 各 Blueprint 迁移完成后移除 main.py 中对应路由代码
+- [ ] 每次迁移后运行 `pytest py/tests/` 确保无回归

@@ -80,6 +80,31 @@ triggerWeeklyCleanup: () => api.post('/admin/trigger-weekly-cleanup'),
 | `frontend/src/router/index.js` | 修改 | 新增路由 + 路由守卫 developer 检查 |
 | `frontend/src/components/AppSidebar.vue` | 修改 | 新增菜单项 + developer 过滤 |
 
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. SchedulerView 实际 UI 更丰富
+
+代码中的 SchedulerView 比设计草图的静态卡片多了：
+- 执行中的 loading 动画（`running` class）
+- 结果展示区域（`task-result`）：绿色成功 / 红色失败，展示检测数量、掉包数量
+- "启动时立即执行一次"标签 —— 说明掉包检测在服务启动时会立即跑一次
+
+### 2. API 返回格式
+
+`trigger-weekly-cleanup` 返回 `{success: true, message: "每周清理已执行完成"}`，与设计一致。
+
+`trigger-delist-check` 返回 `{success: true, **result}`，实际 result 包含 `total`（检测数）、`delisted`（掉包数）、`results`（详细结果列表）。
+
+### 3. 掉包检测定时任务首次行为变化
+
+设计文档说"复用现有 `_start_delist_scheduler` 中的检测逻辑"。实际代码中，定时任务启动后会**先等待 1 小时**才首次执行（首次立即执行的代码被注释掉了），手动触发不受此影响。
+
+### 4. 出错有自动重试
+
+定时任务出错后会 60 秒后自动重试，这是文档未提及的容错机制。
+
 ## 4. UI 草图
 
 ```

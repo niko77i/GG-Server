@@ -62,3 +62,48 @@ temp/scraped_images/<display_name>/_uploads/<时间戳>/
 |---|---|
 | `py/main.py` | 新增 `/api/scrape/upload-images` |
 | `MediaView.vue` | 上传区域 + ③ 始终可见 |
+
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. 图片自动转格式
+
+设计文档未提及图片格式转换。代码实际使用 PIL 将上传图片统一转为 **RGBA PNG**：
+
+```python
+img = PILImage.open(f.stream)
+img = img.convert("RGBA")
+img.save(fp, "PNG")
+```
+
+支持的上传格式：`.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`。
+
+### 2. 存储路径格式
+
+文档写的路径格式为 `_uploads/<timestamp>/`，实际代码使用 `_upload_{timestamp}`（单数 `upload`，非 `uploads`）：
+
+```
+temp/scraped_images/<display_name>/_upload_20260723_143000/
+```
+
+### 3. 返回数据结构
+
+实际 API 返回比设计文档更丰富：
+
+```json
+{
+  "success": true,
+  "saved_path": "temp/scraped_images/...",
+  "image_count": 3,
+  "images": [
+    {"filename": "photo.png", "path": "...", "width": 1920, "height": 1080}
+  ]
+}
+```
+
+每个图片返回文件名、路径、宽高，前端可直接用于预览。
+
+### 4. 文件名安全处理
+
+空格替换为 `_`，反斜杠替换为 `_`，文件名截取扩展名之前的部分（`rsplit('.', 1)[0]`）。

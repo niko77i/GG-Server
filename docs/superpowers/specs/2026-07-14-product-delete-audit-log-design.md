@@ -124,6 +124,59 @@ DELETE product_assets → DELETE packages → DELETE products → 返回成功
 - **不处理恢复功能**：软删除后数据在库里，可以通过 SQLite 直接操作恢复，暂不做 UI
 - **包删除（`DELETE /api/products/packages/<pkg_id>`）暂不改动**：只改产品级删除
 
+### 不做的（实际已实现）
+
+- ~~**不建 UI 查看审计日志**~~ → 已实现 `GET /api/audit-log/list`（分页、JOIN users 显示操作人）
+- ~~**不处理恢复功能**~~ → 已实现 `POST /api/audit-log/restore/<log_id>`（仅 developer），完整恢复产品+包+runner 关联
+
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. 审计日志查看 API（文档标记"不做"但已实现）
+
+`GET /api/audit-log/list` — 所有登录用户可查看。分页返回审计日志，JOIN `users` 表同时返回 `username` 和 `display_name`。`detail` 字段自动 JSON 解析后返回。
+
+### 2. 产品恢复 API（文档标记"不做"但已实现）
+
+`POST /api/audit-log/restore/<log_id>` — 仅 **developer** 角色可操作。恢复逻辑：
+
+- **软删除的产品**：`UPDATE products SET is_archived=0, deleted_at=''`
+- **物理删除的产品**：从快照重建完整的 products 行（保留原始 ID）
+- 恢复 `product_runners` 关联（`INSERT OR IGNORE`）
+- 恢复 packages（从快照中的包列表）
+
+### 3. 权限控制
+
+| 操作 | 权限 |
+|---|---|
+| 删除产品 | `_reject_viewer()` — viewer 不可操作 |
+| 查看审计日志 | 所有登录用户 |
+| 恢复产品 | 仅 developer |
+
+### 4. 用户删除时审计日志处理
+
+用户被删除时，`audit_log` 表该用户的记录 `user_id` 被设为 NULL（而非级联删除），保留审计轨迹。
+
+### 5. 还有包级批量删除
+
+代码额外实现了 `POST /api/products/packages/batch-delete` — 批量删除包，设计文档未提及。
+
+### 6. 删除步骤完整顺序（与设计一致 + 补充）
+
+```
+1. 查询产品信息 + 关联包列表 + 素材数量
+2. 生成完整 JSON 快照（product + packages + asset_count）
+3. INSERT INTO audit_log
+4. DELETE FROM delist_checks WHERE product_id=?  -- 修复孤立行
+5. DELETE FROM product_assets WHERE product_id=?
+6. DELETE FROM packages WHERE product_id=?
+7. UPDATE products SET is_archived=1, deleted_at=now() WHERE id=?  -- 软删除
+8. commit + 返回成功
+```
+
+与设计方案一致，全部 8 步均已实现。
+
 ## 数据结构
 
 ### audit_log.detail JSON 格式

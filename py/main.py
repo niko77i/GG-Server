@@ -1785,8 +1785,8 @@ def _can_modify(db, user_id, table, item_id):
         if row["is_public"] == 1:
             return True, None
         return False, "无权限：仅可操作自己的或公开的内容"
-    finally:
-        db.close()
+    except Exception:
+        return False, "查询出错"
 
 
 @app.route("/api/youtube/delete", methods=["POST"])

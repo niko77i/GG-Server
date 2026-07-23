@@ -306,3 +306,45 @@ getConsumptionDates(params)
 - 产品管理、账户管理不受影响
 - 视频生成、素材管理不受影响
 - 已有视频编辑/删除权限逻辑不变
+
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. batch-edit 白名单字段
+
+代码中 batch-edit 允许的字段为：`region`, `frame_type`, `effectiveness`, `product_name`, `review_status`, `is_public`。共 6 个字段，比设计文档只讨论 `is_public` 更全面。
+
+### 2. 删除视频级联清理
+
+删除视频时（`DELETE /api/youtube/<id>`），代码自动级联删除：
+- `product_assets` 表中关联的素材记录
+- `video_consumption` 表中关联的消耗记录
+
+这是文档完全未提及的重要行为，防止孤儿数据。
+
+### 3. batch-edit 的 is_public 权限实现
+
+代码与设计文档一致：任何人（含 admin）只能改自己上传视频的可见性（`WHERE id=? AND owner_id=?`）。其余 5 个字段 admin 可改任何视频，普通用户只能改自己的或公开的视频（`owner_id=? OR is_public=1`）。
+
+### 4. 消耗记录写入用户限制
+
+`POST /api/youtube/<vid>/consumption` 实际代码中 `user_id` 取当前登录用户，**无法为他人录入消耗**。文档描述「仅 admin/developer 可调用」，代码实现是「所有用户可调用，但记录的 user_id 固定为当前用户」。
+
+### 5. 消耗列表返回 user 而非按 user 分组
+
+代码实际返回结构是平铺的 records 列表，每条包含 `display_name`、`username`，而非文档描述的「按用户分组嵌套」。若需分组，前端自行处理。
+
+### 6. 额外 API
+
+`GET /api/youtube/consumption/list` — 返回当前用户的所有消耗记录（不分视频），与 `GET /api/youtube/<vid>/consumption`（按视频查询）不同。
+
+`GET /api/products/runner-products` — 返回当前用户作为 runner 的产品列表，用于消耗录入时的产品下拉框。查询条件 `user_id` 通过 `product_runners` 表过滤。
+
+### 7. 用户删除时消耗记录处理
+
+用户删除时（`/api/admin/users/<uid>` DELETE），该用户的 `video_consumption` 记录 `user_id` 被设为 NULL 而非删除，以保留消耗统计。
+
+### 8. 有测试覆盖
+
+`py/tests/test_video_consumption.py` 包含消耗追踪的回归测试。

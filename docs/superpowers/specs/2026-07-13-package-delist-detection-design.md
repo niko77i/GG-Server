@@ -243,3 +243,114 @@ delist_checks 表记录：package_id=X, is_delisted=1
 ---
 
 请审阅以上设计，确认后我将制定实现计划并开始编码。
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+以下内容基于 `py/delist_checker.py`、`py/main.py`、`py/telegram_sender.py`、`py/email_sender.py`、`py/database.py` 实际代码与设计文档之间的差异。仅补充文档未提及或与设计有明显偏差的部分。
+
+### 1. 多通道通知（设计未提及）
+
+设计文档仅规划了前端弹窗通知。实际实现增加了两个额外的通知渠道：
+
+| 通知渠道 | 文件 | 触发时机 | 去重逻辑 |
+|-----------|------|----------|----------|
+| **Telegram 群组** | `py/telegram_sender.py` | 手动检测 + 定时检测 | 仅对新发现的掉包（`was_delisted=False`）发送 |
+| **邮件 (SMTP)** | `py/email_sender.py` | 仅定时检测 | 所有掉包都发送（不去重），从 `APP_CONFIG["smtp"]` 读取配置 |
+
+- **Telegram 通知**：通过 `_send_telegram_notifications()` 辅助函数（`main.py` L6118-6152），从 `APP_CONFIG["telegram"]` 读取 `bot_token` 和 `chat_id`，按 `runner_ids` 查询 `users.telegram_username` 做 @提及。
+- **邮件通知**：定时检测中调用 `_email_sender.send_delist_notification()`，按 `runner_ids` 查询 `users.email` 后批量发送。
+- **手动检测**：`POST /api/products/<pid>/check-delist` 中仅触发 Telegram，不触发邮件。
+- **配置项**：`APP_CONFIG` 中需配置 `telegram.bot_token`、`telegram.chat_id`、`smtp.host`、`smtp.user` 等字段，任一缺失则该渠道静默跳过。
+
+### 2. 定时任务启动行为变更
+
+- 设计文档（第 4.3 节）开放式提问"是否在服务启动后立即执行一次"。
+- **实际代码**：`_start_delist_scheduler()`（`main.py` L6299-6325）中首次执行的代码被**注释掉**。当前行为是：启动后**先等待 1 小时**，然后执行第一次检测。如需立即执行，需取消 L6304-6308 的注释。
+- **出错重试**：单次检测失败后等待 60 秒自动重试一次（L6317-6322），重试仍失败才记录 error 日志并继续下一个周期。设计文档未提及此重试机制。
+
+### 3. 并发数动态调整
+
+- 设计文档声明定时任务使用 `ThreadPoolExecutor(max_workers=3)`。
+- **实际代码**（`main.py` L6195）：`max_workers = min(len(pkgs), 10)`，即并发数按包数量动态调整，上限 10。
+- **手动检测**（`delist_checker.py` 的 `check_product_packages`）：纯顺序执行，无并发，一次性只检测单个产品下的包。
+
+### 4. 新掉包去重逻辑（定时检测专用）
+
+设计文档未提及去重。实际定时检测（`_run_delist_check_once`，`main.py` L6212-6218）实现了：
+
+- 检测到掉包时，先查询 `delist_checks` 表中该包此前是否已标记为 `is_delisted=1`。
+- **已标记过的掉包**：仍然写 DB、仍然发邮件，但**不触发 Telegram 通知**（只有 `newly_delisted_list` 触发 Telegram）。
+- 手动检测不走此逻辑——手动检测中所有掉包均按新掉包处理，直接触发 Telegram。
+
+### 5. API 端点新增（第 5 个端点）
+
+设计文档规划了 4 个端点，实际增加了第 5 个管理端点：
+
+```
+POST /api/admin/trigger-delist-check
+```
+- **权限**：仅 `role == "developer"` 的用户可调用。
+- **行为**：立即执行一次完整的定时检测（含邮件 + Telegram 通知）。
+- 代码位置：`main.py` L6347-6359。
+
+### 6. 日志屏蔽
+
+高频轮询接口 `GET /api/delist/pending` 的日志被专门屏蔽：
+- `main.py` L11：通过 Werkzeug 的 log filter 过滤掉含该路径的日志记录。
+- `main.py` L88：`_LOG_SKIP_PATHS` 集合中包含该路径，自定义日志中间件跳过打印。
+- 设计文档未提及此优化。
+
+### 7. 包状态查询条件差异
+
+不同场景下对"正常状态包"的 SQL 过滤条件存在细微差异：
+
+| 场景 | SQL 过滤 | 位置 |
+|------|----------|------|
+| 手动检测 | `status IS NULL OR status='' OR status='0' OR status='normal'` | `main.py` L2946 |
+| 定时检测 | `status IS NULL OR status='' OR status='0'`（无 `status='normal'`） | `main.py` L6179 |
+| pending/delist-status | `NOT IN ('dropped', 'paused')`（反向排除） | `main.py` L3018, L3094 |
+
+**影响**：如果一个包的 `status='normal'`，会被手动检测覆盖、被 pending/delist-status 覆盖，但**不会被定时检测覆盖**。建议统一条件或明确说明差异意图。
+
+### 8. runner 查询方式
+
+设计文档笼统描述"当前用户作为 runner 的产品"。实际代码使用**双重匹配**：
+
+1. **关联表** `product_runners`（`main.py` L3019）：`EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = prod.id AND pr.user_id = ?)`
+2. **JSON 数组** `products.runner_ids`（`main.py` L3020）：通过 `LIKE` 匹配 JSON 数组中的用户 ID（`[uid]`、`[uid,%`、`%, uid,%`、`%, uid]`），兼容 JSON 序列化后带空格和不带空格两种格式。
+
+### 9. 级联清理（更积极的策略）
+
+设计文档称"delist_checks 中的孤立记录定期清理"。实际代码采用**即时级联删除**而非定期清理：
+
+- 删除产品时：`DELETE FROM delist_checks WHERE product_id=?`（L2512, L2594）
+- 删除包时：同时删除 `delist_checks` 和 `delist_notifications`（L2795-2796）
+- 批量删除包时：同步清理两张表（L2814-2815）
+- 删除用户时：清理该用户的 `delist_notifications`（L5826）
+
+### 10. dismissed_at 时区处理
+
+- 设计文档描述为"ISO格式"。
+- **实际代码**（L3047）：使用 `datetime.datetime.now(datetime.timezone.utc).isoformat()`，存储的是**带 UTC 时区偏移的 ISO 格式**（如 `2026-07-23T10:30:00+00:00`）。
+- `pending` 接口解析时（L3125-3127）兼容无时区信息的字符串，自动补充 `timezone.utc`。
+
+### 11. 数据库表定义与设计一致
+
+实际 `database.py`（L396-418）中的 `delist_checks` 和 `delist_notifications` 表定义与设计文档完全一致，且额外增加了 `idx_delist_notif_user` 索引（设计文档 SQL 中未写但合理）。
+
+### 12. 设计文档中未实现的细节
+
+以下设计文档中的内容在代码中**未找到对应实现**（可能在前端尚未完成，或设计阶段被调整）：
+
+- **2.5 第 3 条"去重：同一 URL 在一个周期内只检测一次"**：代码中未找到 URL 级别的去重逻辑（仅有包级别的新掉包去重）。
+- **2.5 第 1 条"使用 requests.Session 复用连接"**：`delist_checker.py` 使用 `requests.get()` 一次性请求，未使用 `Session`。
+- **2.3.1 前端通知弹窗组件**和 **2.3.2 轮询机制**：因本次审计只检查后端代码，无法验证前端实现情况。但后端 API 完全支持设计中的前端轮询模式。
+
+### 审计结论
+
+整体实现质量较高，与设计文档的核心意图一致。主要偏差集中在：
+1. 增加了 Telegram + 邮件双通道通知（增强，设计未覆盖但合理）
+2. 定时任务启动不立即执行（与设计文档待确认问题的"首次执行"预期不同，代码中注释掉了）
+3. 定时检测缺失 `status='normal'` 条件的覆盖
+4. 并发数从固定 3 改为动态 min(N, 10)
+5. `requests.Session` 和 URL 去重未实现（性能小节中的两项）

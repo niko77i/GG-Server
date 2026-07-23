@@ -174,3 +174,57 @@ POST /api/ad-reports/save ──► ad_reports 表
 - 做表数据保存（ToolkitView）是数据来源，用户在工具集中录入 Google Ads 原始数据
 - 数据分析（AnalysisView）是消费端，读取 ad_reports 表进行多维度分析
 - 两者共享 `ad_reports` 表和 `/api/ad-reports/` API 路径
+
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. AI 配置为按用户隔离（非全局）
+
+文档描述 AI 开关从 `config` 表读取 `ai_analysis.enabled`。实际代码读取的是 `ai_analysis_{user_id}`（如 `ai_analysis_1`），即**按用户隔离**而非全局配置。同时支持 `provider` 字段（默认 `"atlas"`）指定 AI 提供商。
+
+### 2. 异常检测非单日对比
+
+文档说「单日花费暴涨 > 50%」，实际逻辑更精细：
+
+- **不是单日**：取最近 3 天的日聚合数据（`GROUP BY campaign, report_date`）的平均值 vs 前 7 天（排除最近 3 天）的平均值
+- **花费异常**：最近 3 天平均花费 > 前 7 天平均花费 × 1.5 **且**安装量下降
+- **CPI 异常**：最近 3 天平均 CPI > 前 7 天平均 CPI × 1.3
+- 一个 campaign 至少有 3 个数据点才参与检测
+
+### 3. 所有端点支持多产品逗号分隔
+
+`product_name` 参数在所有端点（dashboard/trends/compare/cross-user/multi-analysis 等）中均支持逗号分隔多值（如 `"产品A,产品B"` → `WHERE product_name IN (...)`）。文档只描述了单选。
+
+### 4. Trends 端点支持的指标比文档多
+
+文档列出 CPI / 花费 / 安装 / CTR 四种指标。实际代码还支持：
+
+- `impressions`（展示）
+- `clicks`（点击）
+- `cvr`（转化率）
+- 默认回退到 CPI
+
+### 5. Dashboard campaign 分组返回字段更多
+
+文档说 campaign 分组返回 `avg_cpi`。实际还返回 `ctr`、`cvr`、`total_in_app` 三个字段。
+
+### 6. KPI 对比来源
+
+文档说「从 products 表获取产品 KPI，按 CPI（cost_per_in_app）vs KPI 判断达标」。实际代码：
+
+- 从 `products.kpi` 列读取目标 KPI 值
+- 比较的是 `avg_cpi <= product_kpi`（仪表盘聚合 CPI vs 产品预设 KPI）
+- 不涉及 `cost_per_in_app` 字段
+
+### 7. 环比计算需要 `from_date` + `to_date`
+
+环比仅在同时提供 `from_date` 和 `to_date` 时才计算，比较前一个等长周期（如选了 7 天，就比较前 7 天）。同时返回 `cost_change_pct`、`installs_change_pct`、`cpi_change_pct` 三个环比指标。
+
+### 8. Compare 端点支持排序
+
+文档未提及排序参数。实际代码支持 `sort_by` 参数（默认 `"cpi"`），在后端 SQL 中 `ORDER BY`。
+
+### 9. analyze 端点注入数据摘要
+
+AI 分析请求中，后端自动收集当前筛选条件下的数据摘要（总花费/展示/点击/安装/应用内操作/记录数），一并发送给 AI 模型，而非仅发送用户问题。

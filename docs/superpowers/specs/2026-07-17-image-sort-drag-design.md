@@ -84,12 +84,71 @@ const orderedImages = ref([])  // Array<{filename, path}>
 ```js
 // 原来：
 images: sel.map(img => img.path)
-// 改为：
-images: orderedImages.value.map(img => img.path)
+// 改为（带 fallback）：
+const ordered = orderedImages.value.length > 0
+  ? orderedImages.value.map(img => img.path)
+  : images.value.filter(img => selectedImgs[img.filename]).map(img => img.path)
+return {
+  images: ordered,
+  random_order: false,  // 排序面板已确定顺序，不需后端再随机
+  // ...
+}
 ```
+
+**设计决策**：`getSettings` 优先使用 `orderedImages`，但当排序面板为空时回退到勾选的图片（保持网格顺序）。这保证了用户在未使用排序面板时仍能正常生成视频。
+
+### toggleSelectAll 增强
+
+原来 `toggleSelectAll` 只是简单反转 `allSelected`，现在支持 `force` 参数：
+
+```js
+function toggleSelectAll(force) {
+  const val = force !== undefined ? force : !allSelected.value
+  // force=true  → 全选，排序面板同步为全部图片（保持网格顺序）
+  // force=false → 取消全选，清空排序面板
+}
+```
+
+`scanDir()` 扫描新目录后调用 `toggleSelectAll(true)`，自动全选并填充排序面板。
+
+### 随机排序的增强行为（shuffleOrdered）
+
+设计文档中 `shuffleOrdered` 只打乱已有 `orderedImages`。实现中增加了**面板为空时的自动填充逻辑**：
+
+```
+shuffleOrdered() 被调用 →
+  ├── orderedImages 非空 → 仅打乱现有顺序（Fisher-Yates）
+  └── orderedImages 为空但 images 有数据 → 把所有图片随机打乱塞入面板，同时全选
+```
+
+这覆盖了"排序面板为空时点击🎲随机排序"的场景。
+
+### onRandomOrderChange 联动
+
+当用户点击网格下方的 `randomOrder` checkbox 时：
+
+```js
+function onRandomOrderChange(val) {
+  if (val) shuffleOrdered()  // 勾选随机排序 → 自动填充并打乱排序面板
+}
+```
+
+注意 `getSettings` 始终传 `random_order: false` 给后端，因为排序已在 `orderedImages` 中确定，无需后端再次随机。
+
+### CSS 拖拽样式
+
+```css
+.sort-card.dragging { opacity: 0.4; transform: scale(0.95); }   /* 拖拽中的卡片半透明 + 缩小 */
+.sort-card.drag-over { border-color: #0891b2 !important; transform: scale(1.05); }  /* 目标位置高亮 + 放大 */
+```
+
+拖拽状态通过两个 ref 控制：
+- `dragIndex`：当前被拖拽卡片的索引（-1 表示无拖拽）
+- `dragOverIndex`：鼠标悬停的目标位置索引（-1 表示无悬停）
 
 ### 与现有功能的兼容
 
-- `randomOrder`：排序面板有独立的随机按钮，勾选后只打乱 `orderedImages`，不影响原始勾选状态
-- 历史恢复：从历史恢复时不改变排序面板（历史只恢复设置，图片从当前扫描结果重新选）
-- 队列：加入队列时捕获当前 `orderedImages` 的快照
+- `randomOrder` checkbox：点击后自动调用 `shuffleOrdered()` 填充排序面板。`getSettings` 始终传 `random_order: false` 给后端，排序由前端控制。
+- 历史恢复：`applyHistory()` 恢复设置中 `random_order` 字段会同步到 `randomOrder.value`（见代码第 1001 行），但不影响 `orderedImages`（排序面板仍为空，用户需要手动操作或点击随机排序）。
+- 队列：`addToQueue()` 调用 `getSettings()` 捕获当前 `orderedImages` 的快照，队列中每个任务独立保存排序结果。
+- 后端兼容：后端 `/api/video/generate` 仍保留 `random_order` 处理逻辑（行 691-693），前端传 `false` 来绕过。后端无需修改，向后兼容。

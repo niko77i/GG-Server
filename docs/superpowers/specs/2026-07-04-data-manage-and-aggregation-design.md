@@ -265,3 +265,100 @@ ON ad_reports(user_id, product_name, customer_id, campaign, report_date);
 7. **导出 CSV**：下载文件内容与当前筛选结果一致
 8. **新增**：空白表单填写 → 保存 → 表格出现新记录
 9. **向后兼容**：现有仪表盘/趋势/对比/多维分析功能不受影响
+
+---
+
+## 7. 实际代码逻辑补充（2026-07-23 审计）
+
+以下逻辑已在代码中实现，但原始设计文档未覆盖或描述有差异。
+
+### 7.1 保存 API 实际逻辑（`POST /api/ad-reports/save`）
+
+**a) `override_ids` 覆盖机制（文档未提及）**
+
+代码支持 `override_ids` 参数（整数数组）。在聚合之前，先删除 `override_ids` 对应的旧行（仅限当前用户），再执行正常 upsert。这允许前端在发现重复数据时提供「覆盖旧数据」选项。
+
+```python
+override_set = set(override_ids)
+if override_set:
+    DELETE FROM ad_reports WHERE id IN (...) AND user_id=?
+```
+
+**b) upsert 三路分支（文档描述为两路）**
+
+代码实际有三路分支，取决于旧记录是否存在以及是否在 `override_set` 中：
+
+| 条件 | 行为 |
+|---|---|
+| 旧记录存在 且 id 不在 `override_set` | **UPDATE 累加**：数值字段用 `field = field + ?` |
+| 旧记录存在 且 id 在 `override_set` | **INSERT 新记录**：旧记录已被 override 删除 |
+| 旧记录不存在 | **INSERT 新记录** |
+
+**c) `cost_per_in_app` 字段（文档未提及）**
+
+代码聚合和 upsert 中包含 `cost_per_in_app`（= cost ÷ in_app_actions）字段，前端传入字段名为 `inAppActions` 和 `costPerInApp`（camelCase）。
+
+**d) 空 customer_id / campaign 行自动跳过**
+
+聚合循环中，`customer_id` 或 `campaign` 任一个为空的行直接 `continue`，不参与聚合也不保存。文档未说明此行为。
+
+**e) 自动关联 MCC/账户/时区（文档未提及）**
+
+保存前调用 `_auto_link_mcc_and_accounts()`，自动为行数据关联 MCC、账户信息、地区时区，并 `db.commit()` 提交关联写入。
+
+### 7.2 重复检查 API（文档未提及）
+
+`POST /api/ad-reports/check-duplicates` — 在保存前检查哪些行与已有数据重复（同 `user_id + product_name + customer_id + campaign + report_date`），返回 `{existing, incoming}` 对，供前端决定覆盖还是跳过。此 API 在 `reports.js` 中对应 `checkDuplicates()`。
+
+### 7.3 产品下拉 API（文档未提及）
+
+`GET /api/ad-reports/products` — 返回当前用户有权限的产品列表，用于「数据管理」页和「做表保存」弹窗的产品下拉框。实际查询逻辑：
+
+- 通过 `product_runners` 表 JOIN 过滤（而非旧的 `runner_ids` JSON 列）
+- 返回字段含 `sales_person` 和 `agency_ratio`
+- 前端下拉 label 拼接格式：`"{product_name} {sales_person}"`（如 `"产品A 张三"`）
+
+### 7.4 List API 实际逻辑（`GET /api/ad-reports/list`）
+
+**a) 多产品过滤**
+
+`product_name` 参数支持逗号分隔的多个产品名：`product_name=A,B` → `WHERE product_name IN ('A','B')`。
+
+**b) campaign→产品动态映射**
+
+调用 `_build_campaign_product_map(db)` 建立 campaign → product_name 的映射（通过 `packages.series_name` 拆分匹配 `ad_reports.campaign`），使得选择产品时也能查出通过 campaign 名称关联的行。这是 `ae64329` 提交引入的特性。
+
+**c) 默认每页 50 条**
+
+文档说"每页 20 条"，代码实际默认 `size=50`，且前端分页选项为 `[20, 50, 100, 200]`。
+
+### 7.5 日期分布 API（文档未提及）
+
+`GET /api/ad-reports/dates` — 返回有数据的日期及每日记录数，用于前端日期选择器标记有数据的日期。
+
+### 7.6 前端实际实现差异
+
+| 文档描述 | 实际代码 |
+|---|---|
+| 产品下拉只有产品名 | 产品下拉拼接 `product_name + sales_person` |
+| 搜索 debounce 300ms | 使用 `useDebounce` composable（配置文件化） |
+| 表格列固定 12 列 | 增加「📊 列显示」按钮，可自定义显示/隐藏列（`visibleColumns`） |
+| 编辑/新增弹窗所有字段可填 | 实际包含 `cost_per_in_app` 字段 |
+| 前端排序 | 实际使用 `@sort-change="onSortChange"`，触发后端 `sort_by`/`sort_order` 参数（后端排序），非纯前端排序 |
+| 无删除 `dates` API | 实际有 `dates` API |
+
+### 7.7 数据库索引
+
+设计文档要求将 `UNIQUE INDEX idx_ad_reports_dedup` 降级为普通 `INDEX`，迁移标记 `migrated_ad_reports_dedup_v3`。实际生效与否取决于迁移是否被执行。
+
+### 7.8 涉及文件补充
+
+实际新增/修改文件超过文档列出的范围：
+
+| 文件 | 实际变更 |
+|---|---|
+| `py/main.py` | save/list/products/check-duplicates/dates/export/update/delete/batch-delete/dashboard/trends/compare/cross-user/multi-analysis/multi-ai-chat/analyze |
+| `frontend/src/views/DataManageView.vue` | 新建（含列选择器、debounce 搜索、产品下拉拼接 sales_person） |
+| `frontend/src/api/reports.js` | 含 16 个 API 函数（文档只列了 3 个新增） |
+| `frontend/src/composables/useDebounce.js` | 新建（文档未提及） |
+| `frontend/src/composables/usePagination.js` | 新建（文档未提及） |

@@ -174,3 +174,29 @@ updateUserTelegram: (uid, username) => api.put(`/admin/users/${uid}/telegram-use
 7. **部署配置**：打包为 exe 后 config.json 在 exe 同级目录，修改配置需重启服务
 8. **重复检测**：定时任务每小时运行，已掉包的包再次被检测到时不再重复发 Telegram（通过 `delist_checks` 表中已有记录判断）
 9. **不参与提醒循环**：Telegram 通知只在后端检测到掉包时发一次，不参与前端的 3 分钟重复提醒机制（邮件也不参与，但邮件的逻辑是每次定时检测都会发）
+
+---
+
+## 实际代码逻辑补充（2026-07-23 审计）
+
+### 1. 管理员修改 telegram_username 有同级保护
+
+设计文档说「admin/developer（复用现有权限控制）」。实际代码额外调用了 `_can_modify_user(user, target)` 检查，**同一级别的管理员不能互相修改对方的 telegram_username**（防止 admin 改另一个 admin 的设置）。
+
+### 2. 通知的去重判断细化了
+
+设计文档中说的是通过 `delist_checks` 表已有记录判断是否新掉包。代码实际还区分了：
+- **定时检测**：`was_delisted` 去重 → 已标记掉包的包不发 Telegram（避免重复骚扰），邮件照发
+- **手动检测**：仅发 Telegram
+
+### 3. 定时检测通知只发 Telegram（不发邮件）
+
+代码中定时检测对掉包只发 Telegram 和邮件两种通道，但 Telegram 只对**本轮新掉包**发送，邮件的逻辑保持不变（每次定时检测都对所有掉包发邮件）。
+
+### 4. 消息超时 10 秒与设计一致
+
+`requests.post` 超时 10 秒，失败静默打印日志不抛异常，不阻塞检测流程。
+
+### 5. 获取在跑人员的双重匹配
+
+查询 runner 时使用 `product_runners` 关联表 + `runner_ids` JSON LIKE 双重匹配，确保不遗漏任何在跑人员。
