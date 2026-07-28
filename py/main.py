@@ -5167,7 +5167,7 @@ def sales_persons_delete(sid):
 # ---------- 账户设置 API ----------
 
 # 内置 sheet 映射 key（全局共享，admin 可修改）
-_BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts", "my_dashboard"}
+_BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts"}
 _BUILTIN_SHEET_DEFAULTS = {
     "recharge": "充值表",
     "received_accounts": "已接账户明细",
