@@ -3836,12 +3836,14 @@ def accounts_update(aid):
                     "SELECT value FROM tags WHERE key='recharge_sheet_id'"
                 ).fetchone()
                 sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+                recharge_sheet_name = _get_recharge_sheet_name(db)
                 if sheet_id and clear_record_id:
                     _rid = clear_record_id
+                    _sheet_name = recharge_sheet_name
                     def _do_sync():
                         import google_sheets_service as gs
                         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                        gs.append_recharge(service, sheet_id, [clear_row])
+                        gs.append_recharge(service, sheet_id, _sheet_name, [clear_row])
                     def _on_fail(status, err_msg):
                         _db = database.get_db()
                         if status == "synced":
@@ -4056,6 +4058,7 @@ def accounts_batch_update():
                 "SELECT value FROM tags WHERE key='recharge_sheet_id'"
             ).fetchone()
             sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+            recharge_sheet_name = _get_recharge_sheet_name(db)
             if sheet_id:
                 user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                 op_name = (user["display_name"] or "") if user else ""
@@ -4067,10 +4070,11 @@ def accounts_batch_update():
                     "status": status_value_effective,
                 } for r in new_clear_rows]
                 _rids = [r["rid"] for r in new_clear_rows]
+                _sname = recharge_sheet_name
                 def _do_sync():
                     import google_sheets_service as gs
                     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                    gs.append_recharge(service, sheet_id, _sheet_data)
+                    gs.append_recharge(service, sheet_id, _sname, _sheet_data)
                 def _on_fail(status, err_msg):
                     _db = database.get_db()
                     if status == "synced":
@@ -4165,13 +4169,15 @@ def recharge_submit():
             "SELECT value FROM tags WHERE key='recharge_sheet_id'"
         ).fetchone()
         sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+        recharge_sheet_name = _get_recharge_sheet_name(db)
         db.close()
 
         if sheet_id:
+            _sheet_name = recharge_sheet_name
             def _do_sync():
                 import google_sheets_service as gs
                 service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                gs.append_recharge(service, sheet_id, [{
+                gs.append_recharge(service, sheet_id, _sheet_name, [{
                     "account_id": account_id, "amount": amount,
                     "agent": agent, "operator": operator,
                 }])
@@ -4260,14 +4266,16 @@ def recharge_batch_submit():
             "SELECT value FROM tags WHERE key='recharge_sheet_id'"
         ).fetchone()
         sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+        recharge_sheet_name = _get_recharge_sheet_name(db)
         db.close()
 
         if sheet_id:
             _ids = list(inserted_ids)
+            _sname = recharge_sheet_name
             def _do_sync():
                 import google_sheets_service as gs
                 service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                gs.append_recharge(service, sheet_id, valid_rows)
+                gs.append_recharge(service, sheet_id, _sname, valid_rows)
 
             def _on_fail(status, err_msg):
                 _db = database.get_db()
@@ -4377,13 +4385,14 @@ def recharge_retry_sheets(rid):
             "SELECT value FROM tags WHERE key='recharge_sheet_id'"
         ).fetchone()
         sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+        recharge_sheet_name = _get_recharge_sheet_name(db)
         if not sheet_id:
             db.close()
             return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
 
         import google_sheets_service as gs
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        gs.append_recharge(service, sheet_id, [{
+        gs.append_recharge(service, sheet_id, recharge_sheet_name, [{
             "account_id": rec["account_id"],
             "amount": rec["amount"],
             "agent": rec["agent"] or "",
