@@ -5170,6 +5170,11 @@ def sales_persons_delete(sid):
 
 # 内置 sheet 映射 key（全局共享，admin 可修改）
 _BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts", "my_dashboard"}
+_BUILTIN_SHEET_DEFAULTS = {
+    "recharge": "充值表",
+    "received_accounts": "已接账户明细",
+    "my_dashboard": "我的看板",
+}
 
 def _get_user_sheet_mappings(user_id: int) -> dict:
     """读取用户私有的 sheet 映射覆盖值（config 表）。"""
@@ -5222,17 +5227,14 @@ def account_settings_get():
         except Exception:
             result["recharge_sheet_id"] = row["value"]
 
-    # 全局默认 sheet_mappings
+    # sheet_mappings：内置默认 → 全局 tags 覆盖 → 用户私有 config 覆盖
+    mappings = dict(_BUILTIN_SHEET_DEFAULTS)
     sm_row = db.execute("SELECT value FROM tags WHERE key='sheet_mappings'").fetchone()
     if sm_row and sm_row["value"]:
         try:
-            mappings = _json.loads(sm_row["value"])
+            mappings.update(_json.loads(sm_row["value"]))
         except Exception:
-            mappings = {"recharge": "充值表", "received_accounts": "已接账户明细", "my_dashboard": "我的看板"}
-    else:
-        mappings = {"recharge": "充值表", "received_accounts": "已接账户明细", "my_dashboard": "我的看板"}
-
-    # 叠加用户私有覆盖值
+            pass
     user_id_raw = get_jwt_identity()
     if user_id_raw:
         user_mappings = _get_user_sheet_mappings(int(user_id_raw))
