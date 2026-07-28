@@ -4891,25 +4891,23 @@ def agents_rename(aid):
 @app.route("/api/agents/<int:aid>", methods=["DELETE"])
 @jwt_required()
 def agents_delete(aid):
-    """删除代理 — 有引用则阻止。"""
+    """删除代理 — 账户引用阻止删除，充值记录自动清空关联。"""
     user_id = int(get_jwt_identity())
     db = _yt_db()
     row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "代理不存在或无权操作"}), 404
-    # 检查引用
-    refs = []
+    # 账户引用检查：有账户在使用则阻止
     ac = db.execute("SELECT COUNT(*) FROM accounts WHERE agent_id=?", (aid,)).fetchone()[0]
     if ac > 0:
-        refs.append(f"{ac} 个账户")
-    rc = db.execute("SELECT COUNT(*) FROM recharge_records WHERE agent_id=?", (aid,)).fetchone()[0]
-    if rc > 0:
-        refs.append(f"{rc} 条充值记录")
-    if refs:
         db.close()
-        return jsonify({"success": False, "error": f"无法删除：被 {'、'.join(refs)} 引用，请先解除关联"}), 409
+        return jsonify({"success": False, "error": f"无法删除：被 {ac} 个账户引用，请先为这些账户更换代理"}), 409
+    # 充值记录引用：自动清空 agent_id（充值记录是历史数据，不阻止删除）
+    db.execute("UPDATE recharge_records SET agent_id=NULL WHERE agent_id=?", (aid,))
+    db.execute("PRAGMA foreign_keys=OFF")
     db.execute("DELETE FROM agents WHERE id=?", (aid,))
+    db.execute("PRAGMA foreign_keys=ON")
     db.commit()
     _app_cache.delete(f"accounts:agents:{user_id}")
     db.close()
