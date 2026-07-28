@@ -20,6 +20,7 @@
           <strong>状态：</strong>
           <el-tag size="small" :type="statusTagType(account.status)">{{ account.status || '未知' }}</el-tag>
         </div>
+        <div><strong>状态变更时间：</strong>{{ account.status_changed_date || '-' }}</div>
         <div><strong>到手时间：</strong>{{ account.acquired_date || '-' }}</div>
         <div v-if="account.death_date"><strong>死亡时间：</strong><span class="text-danger">{{ account.death_date }}</span></div>
       </div>

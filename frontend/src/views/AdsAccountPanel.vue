@@ -7,6 +7,7 @@
         <el-button @click="batchVisible = true">📥 批量导入</el-button>
         <el-button @click="lookupVisible = true">🔍 批量查户</el-button>
         <el-button @click="batchRechargeVisible = true" :disabled="!selected.length">💰 批量充值</el-button>
+        <el-button @click="syncVisible = true">🔄 同步</el-button>
         <span style="color:#888;font-size:12px;">已选 {{ selected.length }} 条</span>
         <el-select v-model="batchStatus" @change="doBatchStatus" placeholder="批量修改状态..."
           style="width:160px;" :disabled="!selected.length" clearable filterable>
@@ -96,6 +97,7 @@
     <AccountDetailModal v-model:visible="detailVisible" :account-id="detailAccountId" />
     <RechargeModal v-model:visible="rechargeVisible" :default-account-id="rechargeAccountId" @saved="load" />
     <RechargeBatchModal v-model:visible="batchRechargeVisible" :accounts="selected" @saved="onBatchRecharged" />
+    <AccountSyncModal v-model:visible="syncVisible" @synced="load" />
   </div>
 </template>
 
@@ -108,6 +110,7 @@ import AccountBatchLookupModal from '@/components/AccountBatchLookupModal.vue'
 import AccountDetailModal from '@/components/AccountDetailModal.vue'
 import RechargeModal from '@/components/RechargeModal.vue'
 import RechargeBatchModal from '@/components/RechargeBatchModal.vue'
+import AccountSyncModal from '@/components/AccountSyncModal.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
@@ -122,6 +125,7 @@ const detailAccountId = ref(null)
 const rechargeVisible = ref(false)
 const rechargeAccountId = ref('')
 const batchRechargeVisible = ref(false)
+const syncVisible = ref(false)
 const batchStatus = ref('')
 const batchMcc = ref('')
 const mccOptions = ref([])
