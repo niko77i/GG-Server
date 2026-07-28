@@ -346,7 +346,7 @@ def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -
     return {"appended": len(new_rows)}
 
 
-def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: str) -> list:
+def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: str) -> list[list]:
     """通用读取 Google Sheet 指定范围的值。
 
     Args:
