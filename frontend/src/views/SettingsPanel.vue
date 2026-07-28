@@ -4,95 +4,62 @@
     <el-tabs v-model="activeTab">
       <!-- Tab 1: 账户设置 -->
       <el-tab-pane label="账户设置" name="account">
-        <p style="color:#888;margin-bottom:20px;">自定义下拉框选项，点击名称即可编辑，修改即时保存</p>
-        <!-- 账户状态 & 代理名 并排 -->
+        <p style="color:#909399;font-size:13px;margin-bottom:20px;">自定义下拉框选项，双击标签编辑名称，点击 × 删除</p>
+
+        <!-- 4 张选项卡片 2x2 网格 -->
         <el-row :gutter="16">
-          <el-col :span="12">
-            <h4 style="margin-bottom:8px;">账户状态选项</h4>
-            <el-table :data="store.options.statuses" size="small" border stripe style="max-width:450px;" @cell-click="(row, col, cell, ev) => startEdit(row, col, cell, ev, 'statuses')">
-              <el-table-column prop="name" label="名称">
-                <template #default="{ row, $index }">
-                  <el-input v-if="editing.statuses === $index" v-model="row._editName" size="small"
-                    @blur="finishEdit('statuses', row)" @keyup.enter="finishEdit('statuses', row)" />
-                  <span v-else>{{ row.name }}</span>
+          <el-col :span="12" v-for="card in optionCards" :key="card.key">
+            <el-card shadow="never" style="margin-bottom:16px;">
+              <template #header>
+                <div style="display:flex;align-items:center;justify-content:space-between;">
+                  <span style="font-weight:600;font-size:14px;">{{ card.icon }} {{ card.label }}</span>
+                  <el-tag size="small" type="info" round>{{ store.options[card.key].length }} 项</el-tag>
+                </div>
+              </template>
+
+              <!-- Tag 标签区 -->
+              <div style="display:flex;flex-wrap:wrap;gap:8px;min-height:32px;align-items:center;">
+                <template v-if="store.options[card.key].length">
+                  <el-tag
+                    v-for="item in store.options[card.key]"
+                    :key="item.id"
+                    :type="card.tagType"
+                    closable
+                    size="default"
+                    @close="handleDelete(card.key, item)"
+                    @dblclick="startTagEdit(card.key, item)"
+                    style="cursor:pointer;user-select:none;"
+                  >
+                    <template v-if="editingTagId[card.key] === item.id">
+                      <el-input
+                        v-model="item._editName"
+                        size="small"
+                        style="width:80px;"
+                        @blur="finishTagEdit(card.key, item)"
+                        @keyup.enter="finishTagEdit(card.key, item)"
+                        @click.stop
+                      />
+                    </template>
+                    <span v-else>{{ item.name }}</span>
+                  </el-tag>
                 </template>
-              </el-table-column>
-              <el-table-column label="操作" width="80">
-                <template #default="{ row }">
-                  <el-button size="small" type="danger" @click="deleteOption('statuses', row)">🗑</el-button>
+                <span v-else style="color:#c0c4cc;font-size:13px;">暂无选项</span>
+
+                <!-- 新增：展开输入或 + 按钮 -->
+                <template v-if="addingOption[card.key]">
+                  <el-input
+                    v-model="newOptionNames[card.key]"
+                    size="small"
+                    :placeholder="card.addPlaceholder"
+                    style="width:100px;"
+                    @keyup.enter="addOption(card.key)"
+                    @blur="cancelAddOption(card.key)"
+                  />
+                  <el-button size="small" type="primary" @click="addOption(card.key)" :loading="addingLoading">确认</el-button>
                 </template>
-              </el-table-column>
-            </el-table>
-            <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
-              <el-input v-model="newOptionNames.statuses" placeholder="新状态名" size="small" style="flex:1;" @keyup.enter="addOption('statuses')" />
-              <el-button size="small" type="primary" @click="addOption('statuses')">新增</el-button>
-            </div>
-          </el-col>
-          <el-col :span="12">
-            <h4 style="margin-bottom:8px;">代理名选项</h4>
-            <el-table :data="store.options.agents" size="small" border stripe style="max-width:450px;" @cell-click="(row, col, cell, ev) => startEdit(row, col, cell, ev, 'agents')">
-              <el-table-column prop="name" label="名称">
-                <template #default="{ row, $index }">
-                  <el-input v-if="editing.agents === $index" v-model="row._editName" size="small"
-                    @blur="finishEdit('agents', row)" @keyup.enter="finishEdit('agents', row)" />
-                  <span v-else>{{ row.name }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="80">
-                <template #default="{ row }">
-                  <el-button size="small" type="danger" @click="deleteOption('agents', row)">🗑</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-            <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
-              <el-input v-model="newOptionNames.agents" placeholder="新代理名" size="small" style="flex:1;" @keyup.enter="addOption('agents')" />
-              <el-button size="small" type="primary" @click="addOption('agents')">新增</el-button>
-            </div>
-          </el-col>
-        </el-row>
-        <!-- MCC 等级 & 商务人员 并排 -->
-        <el-row :gutter="16" style="margin-top:20px;">
-          <el-col :span="12">
-            <h4 style="margin-bottom:8px;">MCC 等级选项</h4>
-            <el-table :data="store.options.mccLevels" size="small" border stripe style="max-width:450px;" @cell-click="(row, col, cell, ev) => startEdit(row, col, cell, ev, 'mccLevels')">
-              <el-table-column prop="name" label="名称">
-                <template #default="{ row, $index }">
-                  <el-input v-if="editing.mccLevels === $index" v-model="row._editName" size="small"
-                    @blur="finishEdit('mccLevels', row)" @keyup.enter="finishEdit('mccLevels', row)" />
-                  <span v-else>{{ row.name }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="80">
-                <template #default="{ row }">
-                  <el-button size="small" type="danger" @click="deleteOption('mccLevels', row)">🗑</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-            <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
-              <el-input v-model="newOptionNames.mccLevels" placeholder="新等级名" size="small" style="flex:1;" @keyup.enter="addOption('mccLevels')" />
-              <el-button size="small" type="primary" @click="addOption('mccLevels')">新增</el-button>
-            </div>
-          </el-col>
-          <el-col :span="12">
-            <h4 style="margin-bottom:8px;">商务人员选项</h4>
-            <el-table :data="store.options.salesPersons" size="small" border stripe style="max-width:450px;" @cell-click="(row, col, cell, ev) => startEdit(row, col, cell, ev, 'salesPersons')">
-              <el-table-column prop="name" label="名称">
-                <template #default="{ row, $index }">
-                  <el-input v-if="editing.salesPersons === $index" v-model="row._editName" size="small"
-                    @blur="finishEdit('salesPersons', row)" @keyup.enter="finishEdit('salesPersons', row)" />
-                  <span v-else>{{ row.name }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="80">
-                <template #default="{ row }">
-                  <el-button size="small" type="danger" @click="deleteOption('salesPersons', row)">🗑</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-            <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
-              <el-input v-model="newOptionNames.salesPersons" placeholder="新商务人名" size="small" style="flex:1;" @keyup.enter="addOption('salesPersons')" />
-              <el-button size="small" type="primary" @click="addOption('salesPersons')">新增</el-button>
-            </div>
+                <el-button v-else size="small" circle @click="showAddInput(card.key)" style="width:24px;height:24px;font-size:14px;">+</el-button>
+              </div>
+            </el-card>
           </el-col>
         </el-row>
         <template v-if="authStore.isAdmin || authStore.isDeveloper">
@@ -248,7 +215,7 @@ import { useAuthStore } from '@/stores/auth'
 import { dataApi } from '@/api/data'
 import { googleSheetsApi } from '@/api/google-sheets'
 import { UploadFilled } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api/client'
 
 // Sheet 映射功能注册表 — 已知 key 的显示名（未知 key 直接显示 key 名）
@@ -268,7 +235,17 @@ const form = reactive({
 })
 
 const newOptionNames = reactive({ statuses: '', agents: '', mccLevels: '', salesPersons: '' })
-const editing = reactive({ statuses: -1, agents: -1, mccLevels: -1, salesPersons: -1 })
+const editingTagId = reactive({ statuses: null, agents: null, mccLevels: null, salesPersons: null })
+const addingOption = reactive({ statuses: false, agents: false, mccLevels: false, salesPersons: false })
+const addingLoading = ref(false)
+
+// ---- 选项卡片配置 ----
+const optionCards = [
+  { key: 'statuses',     icon: '📊', label: '账户状态选项',  tagType: '',        addPlaceholder: '新状态名' },
+  { key: 'agents',       icon: '🏷', label: '代理名选项',    tagType: 'success', addPlaceholder: '新代理名' },
+  { key: 'mccLevels',    icon: '📈', label: 'MCC 等级选项',  tagType: 'warning', addPlaceholder: '新等级名' },
+  { key: 'salesPersons', icon: '👤', label: '商务人员选项',  tagType: 'info',    addPlaceholder: '新商务人名' },
+]
 
 // Sheet 读取
 const readingSheets = ref(false)
@@ -336,22 +313,38 @@ async function addRegion() {
   } catch (e) { ElMessage.error('添加失败: ' + (e.message || '')) }
 }
 
-// ---- 选项行内编辑 ----
-function startEdit(row, _column, _cell, _event, type) {
-  row._editName = row.name
-  const arr = store.options[type]
-  editing[type] = arr.indexOf(row)
+// ---- Tag 标签交互 ----
+function startTagEdit(type, item) {
+  item._editName = item.name
+  editingTagId[type] = item.id
 }
 
-async function finishEdit(type, row) {
-  editing[type] = -1
-  const newName = (row._editName || '').trim()
-  if (!newName || newName === row.name) return
+function cancelTagEdit(type, item) {
+  editingTagId[type] = null
+  delete item._editName
+}
+
+async function finishTagEdit(type, item) {
+  const newName = (item._editName || '').trim()
+  editingTagId[type] = null
+  delete item._editName
+  if (!newName || newName === item.name) return
+
   const actions = { statuses: 'renameStatus', agents: 'renameAgent', mccLevels: 'renameMccLevel', salesPersons: 'renameSalesPerson' }
   try {
-    await store[actions[type]](row.id, newName)
+    await store[actions[type]](item.id, newName)
     ElMessage.success('已更新')
   } catch (e) { ElMessage.error(e.response?.data?.error || '更新失败') }
+}
+
+function showAddInput(type) {
+  addingOption[type] = true
+  newOptionNames[type] = ''
+}
+
+function cancelAddOption(type) {
+  if (newOptionNames[type].trim()) return
+  addingOption[type] = false
 }
 
 async function addOption(type) {
@@ -361,14 +354,23 @@ async function addOption(type) {
   try {
     await store[actions[type]](name)
     newOptionNames[type] = ''
+    addingOption[type] = false
     ElMessage.success('已添加')
   } catch (e) { ElMessage.error(e.response?.data?.error || '添加失败') }
 }
 
-async function deleteOption(type, row) {
+async function handleDelete(type, item) {
+  try {
+    await ElMessageBox.confirm(`确定删除「${item.name}」吗？`, '确认删除', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch { return }
+
   const actions = { statuses: 'deleteStatus', agents: 'deleteAgent', mccLevels: 'deleteMccLevel', salesPersons: 'deleteSalesPerson' }
   try {
-    await store[actions[type]](row.id)
+    await store[actions[type]](item.id)
     ElMessage.success('已删除')
   } catch (e) {
     if (e.response?.status === 409) {
