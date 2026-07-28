@@ -4085,6 +4085,40 @@ def accounts_batch_update():
                                         (err_msg, rid))
                     _db.commit(); _db.close()
                 _sync_sheets_background(_do_sync, _on_fail)
+                # 新增：批量状态变更时同步「我的看板」
+                dashboard_name = _get_my_dashboard_name(db, user_id)
+                if dashboard_name:
+                    _dname = dashboard_name
+                    _sid = sheet_id
+                    # 收集所有发生状态变更的账户
+                    _status_updates = []
+                    for aid in ids:
+                        old = db.execute(
+                            "SELECT a.account_id, COALESCE(st.name, '存活') AS status_name "
+                            "FROM accounts a "
+                            "LEFT JOIN account_statuses st ON a.status_id = st.id "
+                            "WHERE a.id=?", (aid,)
+                        ).fetchone()
+                        if old and old["status_name"] != status_value_effective:
+                            _status_updates.append({
+                                "account_id": old["account_id"],
+                                "new_status": status_value_effective,
+                            })
+                    if _status_updates:
+                        def _sync_batch_dashboard():
+                            import google_sheets_service as gs
+                            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                            for u in _status_updates:
+                                try:
+                                    gs.update_cell_by_account_id(
+                                        service, _sid, _dname,
+                                        u["account_id"], u["new_status"]
+                                    )
+                                except Exception as e:
+                                    log.warning("我的看板同步失败 account_id=%s: %s",
+                                                u["account_id"], e)
+                        _sync_sheets_background(_sync_batch_dashboard,
+                                                lambda s, e: log.warning("我的看板同步失败: %s", e) if e else None)
         return jsonify({"success": True, "updated": len(ids)})
     finally:
         db.close()
