@@ -121,24 +121,60 @@
 
       <!-- Tab 2: 地区时区 -->
       <el-tab-pane label="地区时区" name="region">
-        <p style="color:#888;margin-bottom:12px;">地区对应的时区，产品数据分析时使用</p>
-        <el-table :data="regionList" size="small" border stripe style="max-width:450px;">
-          <el-table-column prop="name" label="地区" width="120" />
-          <el-table-column label="时区" min-width="200">
-            <template #default="{ row }">
-              <el-select v-model="row._editTz" placeholder="选择时区" size="small" style="width:100%;" filterable @change="v => saveRegionTz(row, v)">
+        <p style="color:#909399;font-size:13px;margin-bottom:16px;">地区对应的时区，产品数据分析时使用</p>
+
+        <el-card shadow="never" style="max-width:600px;">
+          <template #header>
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <span style="font-weight:600;font-size:14px;">🌍 地区时区配置</span>
+              <el-tag size="small" type="info" round>{{ regionList.length }} 个地区</el-tag>
+            </div>
+          </template>
+
+          <!-- 地区列表 -->
+          <div v-if="regionList.length">
+            <div
+              v-for="row in regionList"
+              :key="row.id"
+              style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid #f3f4f6;transition:background 0.15s;"
+              class="region-row"
+            >
+              <span style="flex:0 0 100px;font-size:14px;font-weight:500;color:#374151;">{{ row.name }}</span>
+              <el-select
+                v-model="row._editTz"
+                placeholder="选择时区"
+                size="small"
+                style="flex:1;"
+                filterable
+                @change="v => saveRegionTz(row, v)"
+              >
                 <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
               </el-select>
-            </template>
-          </el-table-column>
-        </el-table>
-        <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
-          <el-input v-model="newRegionName" placeholder="新地区名" size="small" style="flex:1;" />
-          <el-select v-model="newRegionTz" placeholder="时区" size="small" style="width:170px;" filterable>
-            <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
-          </el-select>
-          <el-button size="small" type="primary" @click="addRegion">新增</el-button>
-        </div>
+              <el-button
+                size="small"
+                type="danger"
+                :icon="Delete"
+                circle
+                text
+                @click="deleteRegion(row)"
+                style="opacity:0;transition:opacity 0.15s;"
+                class="region-delete-btn"
+              />
+            </div>
+          </div>
+          <div v-else style="text-align:center;padding:20px;color:#c0c4cc;">
+            <span style="font-size:13px;">暂无地区配置</span>
+          </div>
+
+          <!-- 新增行 -->
+          <div style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:#f9fafb;border-radius:6px;margin-top:8px;">
+            <el-input v-model="newRegionName" placeholder="新地区名" size="small" style="flex:0 0 100px;" @keyup.enter="addRegion" />
+            <el-select v-model="newRegionTz" placeholder="时区" size="small" style="flex:1;" filterable>
+              <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+            </el-select>
+            <el-button size="small" type="primary" @click="addRegion">新增</el-button>
+          </div>
+        </el-card>
       </el-tab-pane>
 
       <!-- Tab 3: 数据管理 -->
@@ -216,7 +252,7 @@ import { useAccountStore } from '@/stores/accounts'
 import { useAuthStore } from '@/stores/auth'
 import { dataApi } from '@/api/data'
 import { googleSheetsApi } from '@/api/google-sheets'
-import { UploadFilled } from '@element-plus/icons-vue'
+import { UploadFilled, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api/client'
 
@@ -313,6 +349,23 @@ async function addRegion() {
     newRegionTz.value = ''
     ElMessage.success('地区已添加')
   } catch (e) { ElMessage.error('添加失败: ' + (e.message || '')) }
+}
+
+async function deleteRegion(row) {
+  try {
+    await ElMessageBox.confirm(`确定删除地区「${row.name}」吗？`, '确认删除', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch { return }
+
+  try {
+    await api.delete(`/regions/${row.id}`)
+    const idx = regionList.value.findIndex(r => r.id === row.id)
+    if (idx >= 0) regionList.value.splice(idx, 1)
+    ElMessage.success('已删除')
+  } catch (e) { ElMessage.error('删除失败: ' + (e.response?.data?.error || e.message)) }
 }
 
 // ---- Tag 标签交互 ----
@@ -481,3 +534,12 @@ async function loadImportHistory() {
   } catch (e) { /* 静默失败 */ }
 }
 </script>
+
+<style scoped>
+.region-row:hover {
+  background: #f9fafb;
+}
+.region-row:hover .region-delete-btn {
+  opacity: 1 !important;
+}
+</style>
