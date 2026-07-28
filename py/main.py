@@ -4068,6 +4068,292 @@ def accounts_batch_update():
         db.close()
 
 
+@app.route("/api/accounts/sync-from-sheet", methods=["POST"])
+@jwt_required()
+def accounts_sync_from_sheet():
+    """从「我的看板」Sheet 同步账户数据到系统。
+
+    dry_run=true: 仅比对，返回差异报告
+    dry_run=false: 执行确认后的同步操作
+    """
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    dry_run = data.get("dry_run", True)
+
+    db = _yt_db()
+
+    # 1. 获取 spreadsheet_id
+    sheet_id = _get_sync_spreadsheet_id(db)
+    if not sheet_id:
+        db.close()
+        return jsonify({"success": False, "error": "请先在设置中配置表格链接"}), 400
+
+    # 2. 获取 my_dashboard sheet 名
+    dashboard_name = _get_my_dashboard_name(db, user_id)
+
+    # 3. 检查 Google Sheets 配置
+    creds_path = _GOOGLE_SHEETS_CONFIG.get("credentials_path", "")
+    if not creds_path or not os.path.isfile(creds_path):
+        db.close()
+        return jsonify({"success": False, "error": "Google Sheets 未配置"}), 400
+
+    # 4. 读取 Sheet 数据
+    try:
+        import google_sheets_service as gs
+        service = gs.build_service(creds_path)
+        rows = gs.read_sheet_values(service, sheet_id, dashboard_name, "A:G")
+    except gs.GoogleSheetsServiceError as e:
+        db.close()
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        db.close()
+        return jsonify({"success": False, "error": f"无法读取表格: {e}"}), 400
+
+    if not rows or len(rows) < 2:
+        db.close()
+        return jsonify({"success": False, "error": f"「{dashboard_name}」工作表中没有数据"}), 400
+
+    # 5. 门禁校验：运营列（A列）必须匹配当前用户 display_name
+    user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
+    current_display_name = (user["display_name"] or "").strip() if user else ""
+
+    # 检查数据行中运营列的值（跳过表头第一行）
+    sheet_operators = set()
+    for row in rows[1:]:
+        op = (row[0] or "").strip() if len(row) > 0 else ""
+        if op:
+            sheet_operators.add(op)
+
+    if current_display_name not in sheet_operators:
+        db.close()
+        operators_str = "、".join(sheet_operators) if sheet_operators else "(空)"
+        return jsonify({
+            "success": False,
+            "error": f"这不是你的私有看板表，请修改。Sheet 中运营为「{operators_str}」，当前登录用户为「{current_display_name}」"
+        }), 400
+
+    # 6. 解析 Sheet 数据（跳过表头第一行）
+    sheet_accounts = []
+    warnings = []
+    for i, row in enumerate(rows[1:], start=2):
+        account_id = (row[1] or "").strip() if len(row) > 1 else ""
+        if not account_id:
+            warnings.append({"row": i, "message": "账户ID为空，跳过"})
+            continue
+        sheet_accounts.append({
+            "account_id": account_id,
+            "operator": (row[0] or "").strip() if len(row) > 0 else "",
+            "agent": (row[2] or "").strip() if len(row) > 2 else "",
+            "timezone": (row[4] or "").strip() if len(row) > 4 else "",
+            "remark": (row[5] or "").strip() if len(row) > 5 else "",
+            "blocked": (row[6] or "").strip() if len(row) > 6 else "",
+        })
+
+    # 7. 批量查询系统现有账户
+    sheet_ids = [a["account_id"] for a in sheet_accounts]
+    placeholders = ",".join(["?" for _ in sheet_ids])
+    existing_rows = db.execute(
+        f"""SELECT a.id, a.account_id, a.timezone, a.agent_id, a.status_id,
+                   ag.name AS agent_name, st.name AS status_name
+            FROM accounts a
+            LEFT JOIN agents ag ON a.agent_id = ag.id
+            LEFT JOIN account_statuses st ON a.status_id = st.id
+            WHERE a.account_id IN ({placeholders}) AND a.owner_id = ?""",
+        sheet_ids + [user_id]
+    ).fetchall()
+
+    existing_map = {}
+    for r in existing_rows:
+        existing_map[r["account_id"]] = dict(r)
+
+    # 8. 逐行比对
+    to_create = []
+    to_update = []
+    unchanged = 0
+
+    for sa in sheet_accounts:
+        aid = sa["account_id"]
+        existing = existing_map.get(aid)
+
+        if existing is None:
+            # 系统没有 → 新增
+            to_create.append({
+                "account_id": aid,
+                "agent": sa["agent"],
+                "timezone": sa["timezone"],
+                "operator": sa["operator"],
+            })
+        else:
+            # 系统有 → 根据"是否封户"判断是否需要状态变更
+            blocked = sa["blocked"]
+            current_status = existing["status_name"] or "存活"
+
+            if blocked == "是":
+                if current_status != "死亡":
+                    to_update.append({
+                        "account_id": aid,
+                        "existing_id": existing["id"],
+                        "current_status": current_status,
+                        "suggested_status": "死亡",
+                        "封户值": blocked,
+                    })
+                else:
+                    unchanged += 1
+            elif blocked in ("否", "可用"):
+                if blocked == "否" and current_status != "存活":
+                    to_update.append({
+                        "account_id": aid,
+                        "existing_id": existing["id"],
+                        "current_status": current_status,
+                        "suggested_status": "存活",
+                        "封户值": blocked,
+                    })
+                elif blocked == "可用" and current_status == "死亡":
+                    to_update.append({
+                        "account_id": aid,
+                        "existing_id": existing["id"],
+                        "current_status": current_status,
+                        "suggested_status": "存活",
+                        "封户值": blocked,
+                    })
+                else:
+                    unchanged += 1
+            else:
+                unchanged += 1
+
+    # 9. dry_run → 返回差异报告
+    if dry_run:
+        db.close()
+        return jsonify({
+            "success": True,
+            "diff": {
+                "to_create": to_create,
+                "to_update": to_update,
+                "unchanged": unchanged,
+                "warnings": warnings,
+            },
+            "summary": {
+                "total_in_sheet": len(sheet_accounts),
+                "new_accounts": len(to_create),
+                "status_changes_pending": len(to_update),
+                "unchanged": unchanged,
+            }
+        })
+
+    # 10. execute → 执行同步
+    confirmed = data.get("confirmed", {})
+    created_count = 0
+    updated_count = 0
+    errors = []
+
+    # 10a. 创建新账户
+    for item in confirmed.get("create", []):
+        try:
+            _execute_sync_create(db, item, user_id)
+            created_count += 1
+        except Exception as e:
+            errors.append({"account_id": item, "error": str(e)})
+
+    # 10b. 执行状态更新
+    for item in confirmed.get("update", []):
+        try:
+            account_id = item.get("account_id", "")
+            new_status = item.get("new_status", "")
+            if account_id and new_status:
+                # 查找状态 ID
+                st = db.execute(
+                    "SELECT id FROM account_statuses WHERE name=? AND owner_id=?",
+                    (new_status, user_id)
+                ).fetchone()
+                if not st:
+                    db.execute(
+                        "INSERT INTO account_statuses(name, owner_id) VALUES(?,?)",
+                        (new_status, user_id)
+                    )
+                    st_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                else:
+                    st_id = st["id"]
+
+                # 更新账户状态（不触发清账逻辑）
+                db.execute(
+                    "UPDATE accounts SET status_id=?, status_changed_date=datetime('now','localtime'), "
+                    "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
+                    (st_id, account_id, user_id)
+                )
+                updated_count += 1
+        except Exception as e:
+            errors.append({"account_id": item.get("account_id", ""), "error": str(e)})
+
+    db.commit()
+    db.close()
+
+    return jsonify({
+        "success": True,
+        "result": {
+            "created": created_count,
+            "updated": updated_count,
+            "errors": errors,
+        }
+    })
+
+
+def _execute_sync_create(db, item: dict, user_id: int):
+    """执行同步创建账户（内部函数，不触发清账等副作用）。"""
+    account_id = item.get("account_id", "").strip()
+    agent_name = item.get("agent", "").strip()
+    timezone = item.get("timezone", "").strip()
+
+    if not account_id:
+        raise ValueError("账户ID不能为空")
+
+    # 检查是否已存在（并发安全）
+    existing = db.execute(
+        "SELECT id FROM accounts WHERE account_id=? AND owner_id=?",
+        (account_id, user_id)
+    ).fetchone()
+    if existing:
+        return  # 已存在，跳过
+
+    # 自动创建代理
+    agent_id = None
+    if agent_name:
+        ag = db.execute(
+            "SELECT id FROM agents WHERE name=? AND owner_id=?",
+            (agent_name, user_id)
+        ).fetchone()
+        if ag:
+            agent_id = ag["id"]
+        else:
+            db.execute(
+                "INSERT INTO agents(name, owner_id) VALUES(?,?)",
+                (agent_name, user_id)
+            )
+            agent_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    # 默认状态为"存活"
+    st = db.execute(
+        "SELECT id FROM account_statuses WHERE name='存活' AND owner_id=?",
+        (user_id,)
+    ).fetchone()
+    if st:
+        status_id = st["id"]
+    else:
+        db.execute(
+            "INSERT INTO account_statuses(name, owner_id) VALUES('存活',?)",
+            (user_id,)
+        )
+        status_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    db.execute(
+        "INSERT INTO accounts(name, account_id, timezone, agent_id, status_id, "
+        "acquired_date, created_at, updated_at, owner_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        ("", account_id, timezone, agent_id, status_id,
+         datetime.date.today().isoformat(), now, now, user_id)
+    )
+
+
 # ---------- 充值 API ----------
 
 def _parse_sheet_id(raw: str) -> str:
