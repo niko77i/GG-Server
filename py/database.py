@@ -35,7 +35,7 @@ def get_db() -> sqlite3.Connection:
     db_path = _db_path()
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -723,12 +723,21 @@ def _migrate_if_needed(conn: sqlite3.Connection):
         conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_font_recent','1')")
 
     # 4. 迁移 videos 表为复合主键 (id, owner_id) — 支持多人私有同一视频
-    migrated_videos_pk = conn.execute(
+    # 先用 INSERT OR IGNORE 抢占标记，避免并发时多个连接同时执行 DDL 导致锁冲突
+    conn.execute("INSERT OR IGNORE INTO config(key,value) VALUES('migrated_videos_composite_pk','0')")
+    conn.commit()
+    claimed = conn.execute(
         "SELECT value FROM config WHERE key='migrated_videos_composite_pk'"
     ).fetchone()
-    if not migrated_videos_pk:
-        _migrate_videos_composite_pk(conn)
-        conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_videos_composite_pk','1')")
+    if claimed and claimed["value"] == "0":
+        try:
+            _migrate_videos_composite_pk(conn)
+            conn.execute("UPDATE config SET value='1' WHERE key='migrated_videos_composite_pk'")
+            conn.commit()
+        except Exception as e:
+            # 迁移失败（如并发锁冲突），清除标记让下次重试
+            print(f"[Migrate] videos composite PK migration failed: {e}")
+            conn.rollback()
 
     conn.commit()
 

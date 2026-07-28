@@ -8180,6 +8180,10 @@ if __name__ == "__main__":
     port = 5001
     _start_weekly_cleanup()
     _start_delist_scheduler()
+    # 预初始化数据库（在请求到达前完成所有迁移，避免并发DDL锁冲突）
+    print("正在初始化数据库...")
+    database.get_db().close()
+    print("数据库初始化完成。")
     # 全局 500 处理器，开发时返回详细错误
     @app.errorhandler(500)
     def _internal_error(e):
