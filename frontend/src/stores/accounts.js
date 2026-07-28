@@ -14,7 +14,7 @@ export const useAccountStore = defineStore('accounts', {
     mccPage: 1,
     mccPageSize: 20,
     mccFilters: { search: '', level: '', parent_filter: '' },
-    settings: { recharge_sheet_id: '', sheet_mappings: { recharge: '充值表', received_accounts: '已接账户明细' } },
+    settings: { recharge_sheet_id: '', sheet_mappings: { recharge: '充值表', received_accounts: '已接账户明细', my_dashboard: '我的看板' } },
     options: {
       agents: [],
       statuses: [],
@@ -63,7 +63,7 @@ export const useAccountStore = defineStore('accounts', {
         return settingsApi.get().then(res => {
           this.settings = {
             recharge_sheet_id: (res.settings && res.settings.recharge_sheet_id) || '',
-            sheet_mappings: (res.settings && res.settings.sheet_mappings) || { recharge: '充值表', received_accounts: '已接账户明细' },
+            sheet_mappings: (res.settings && res.settings.sheet_mappings) || { recharge: '充值表', received_accounts: '已接账户明细', my_dashboard: '我的看板' },
           }
           this._settingsLoaded = true
           return res

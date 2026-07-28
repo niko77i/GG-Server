@@ -5169,7 +5169,7 @@ def sales_persons_delete(sid):
 # ---------- 账户设置 API ----------
 
 # 内置 sheet 映射 key（全局共享，admin 可修改）
-_BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts"}
+_BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts", "my_dashboard"}
 
 def _get_user_sheet_mappings(user_id: int) -> dict:
     """读取用户私有的 sheet 映射覆盖值（config 表）。"""
@@ -5228,9 +5228,9 @@ def account_settings_get():
         try:
             mappings = _json.loads(sm_row["value"])
         except Exception:
-            mappings = {"recharge": "充值表", "received_accounts": "已接账户明细"}
+            mappings = {"recharge": "充值表", "received_accounts": "已接账户明细", "my_dashboard": "我的看板"}
     else:
-        mappings = {"recharge": "充值表", "received_accounts": "已接账户明细"}
+        mappings = {"recharge": "充值表", "received_accounts": "已接账户明细", "my_dashboard": "我的看板"}
 
     # 叠加用户私有覆盖值
     user_id_raw = get_jwt_identity()
