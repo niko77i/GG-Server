@@ -3328,12 +3328,21 @@ def accounts_list():
     if mcc_id:
         where.append("a.mcc_id = ?"); params.append(mcc_id)
     if status:
-        where.append("a.status = ?"); params.append(status)
+        where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND owner_id=?)")
+        params += [status, user_id]
     if agent:
-        where.append("a.agent LIKE ?"); params.append(f"%{agent}%")
+        where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
+        params += [f"%{agent}%", user_id]
     if timezone:
         where.append("a.timezone = ?"); params.append(timezone)
-    sql = "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code FROM accounts a LEFT JOIN mcc m ON a.mcc_id=m.id"
+    sql = """
+        SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code,
+               ag.name AS agent_name, st.name AS status_name
+        FROM accounts a
+        LEFT JOIN mcc m ON a.mcc_id = m.id
+        LEFT JOIN agents ag ON a.agent_id = ag.id
+        LEFT JOIN account_statuses st ON a.status_id = st.id
+    """
     if where:
         sql += " WHERE " + " AND ".join(where)
     # 排序
@@ -3352,9 +3361,21 @@ def accounts_list():
         count_sql += " WHERE " + " AND ".join(where)
     total = db.execute(count_sql, params).fetchone()[0]
     accounts = [dict(r) for r in rows]
+    # 兼容：同时提供 agent/status 文本字段（前端过渡期使用）
+    for a in accounts:
+        if a.get("agent_name"):
+            a["agent"] = a["agent_name"]
+        if a.get("status_name"):
+            a["status"] = a["status_name"]
     # 各状态的计数
     status_counts = {}
-    for r in db.execute("SELECT status, COUNT(*) as cnt FROM accounts WHERE owner_id=? GROUP BY status", (user_id,)).fetchall():
+    for r in db.execute("""
+        SELECT COALESCE(st.name, a.status) as status, COUNT(*) as cnt
+        FROM accounts a
+        LEFT JOIN account_statuses st ON a.status_id = st.id
+        WHERE a.owner_id=?
+        GROUP BY COALESCE(st.name, a.status)
+    """, (user_id,)).fetchall():
         s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
     # 筛选下拉数据（缓存低频查询结果）
     uid_str = str(user_id)
@@ -3370,7 +3391,14 @@ def accounts_list():
     agents_cache_key = f"accounts:agents:{user_id}"
     agents = _app_cache.get(agents_cache_key)
     if agents is None:
-        agents = [r["agent"] for r in db.execute("SELECT DISTINCT agent FROM accounts WHERE agent!='' AND owner_id=? ORDER BY agent", (user_id,)).fetchall()]
+        agents = [r["name"] for r in db.execute(
+            "SELECT DISTINCT ag.name FROM agents ag "
+            "INNER JOIN accounts a ON a.agent_id = ag.id "
+            "WHERE a.owner_id=? "
+            "UNION "
+            "SELECT DISTINCT a.agent FROM accounts a WHERE a.agent!='' AND a.agent_id IS NULL AND a.owner_id=? "
+            "ORDER BY 1", (user_id, user_id)
+        ).fetchall()]
         _app_cache.set(agents_cache_key, agents, ttl=120)
     tz_cache_key = f"accounts:tz:{user_id}"
     timezone_options = _app_cache.get(tz_cache_key)
@@ -3390,10 +3418,13 @@ def accounts_lookup():
         return jsonify({"success": False, "error": "缺少 account_id"}), 400
     db = _yt_db()
     existing = db.execute(
-        "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name "
+        "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name, "
+        "ag.name AS agent_name, st.name AS status_name "
         "FROM accounts a "
         "LEFT JOIN mcc m ON a.mcc_id = m.id "
         "LEFT JOIN users u ON a.owner_id = u.id "
+        "LEFT JOIN agents ag ON a.agent_id = ag.id "
+        "LEFT JOIN account_statuses st ON a.status_id = st.id "
         "WHERE a.account_id = ?",
         (account_id,)
     ).fetchone()
@@ -3408,8 +3439,10 @@ def accounts_lookup():
             "name": e["name"],
             "account_id": e["account_id"],
             "timezone": e.get("timezone", ""),
-            "agent": e.get("agent", ""),
-            "status": e.get("status", ""),
+            "agent": e.get("agent_name") or e.get("agent", ""),
+            "status": e.get("status_name") or e.get("status", ""),
+            "agent_name": e.get("agent_name", ""),
+            "status_name": e.get("status_name", ""),
             "acquired_date": e.get("acquired_date", ""),
             "mcc_id": e.get("mcc_id"),
             "mcc_name": e.get("mcc_name", ""),
@@ -3424,8 +3457,12 @@ def _account_row_to_dict(e):
     """将 accounts 查询行转为统一返回格式。"""
     return {
         "id": e["id"], "name": e["name"], "account_id": e["account_id"],
-        "timezone": e.get("timezone", ""), "agent": e.get("agent", ""),
-        "status": e.get("status", ""), "acquired_date": e.get("acquired_date", ""),
+        "timezone": e.get("timezone", ""),
+        "agent": e.get("agent_name") or e.get("agent", ""),
+        "agent_name": e.get("agent_name", ""),
+        "status": e.get("status_name") or e.get("status", ""),
+        "status_name": e.get("status_name", ""),
+        "acquired_date": e.get("acquired_date", ""),
         "mcc_id": e.get("mcc_id"), "mcc_name": e.get("mcc_name", ""),
         "mcc_code": e.get("mcc_code", ""), "owner_id": e.get("owner_id"),
         "owner_name": (e.get("display_name") or e.get("username") or "未知"),
@@ -3449,10 +3486,13 @@ def accounts_batch_lookup():
     db = _yt_db()
     placeholders = ",".join(["?"] * len(clean_ids))
     rows = db.execute(
-        f"SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name "
+        f"SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name, "
+        f"ag.name AS agent_name, st.name AS status_name "
         f"FROM accounts a "
         f"LEFT JOIN mcc m ON a.mcc_id = m.id "
         f"LEFT JOIN users u ON a.owner_id = u.id "
+        f"LEFT JOIN agents ag ON a.agent_id = ag.id "
+        f"LEFT JOIN account_statuses st ON a.status_id = st.id "
         f"WHERE a.account_id IN ({placeholders})",
         clean_ids
     ).fetchall()
@@ -3477,13 +3517,43 @@ def accounts_create():
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
+        # --- agent_id / status_id 兼容处理 ---
+        agent_id = data.get("agent_id")
+        if agent_id is None and data.get("agent"):
+            agent_name = data.get("agent", "").strip()
+            if agent_name:
+                existing_ag = db.execute(
+                    "SELECT id FROM agents WHERE name=? AND owner_id=?", (agent_name, user_id)
+                ).fetchone()
+                if existing_ag:
+                    agent_id = existing_ag["id"]
+                else:
+                    db.execute("INSERT INTO agents(name, owner_id) VALUES(?,?)", (agent_name, user_id))
+                    agent_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        status_id = data.get("status_id")
+        if status_id is None and data.get("status"):
+            status_name = data.get("status", "").strip()
+            if status_name:
+                existing_st = db.execute(
+                    "SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (status_name, user_id)
+                ).fetchone()
+                if existing_st:
+                    status_id = existing_st["id"]
+                else:
+                    db.execute("INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (status_name, user_id))
+                    status_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
         db.execute(
-            "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,status,acquired_date,death_date,created_at,updated_at,owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,agent_id,status,status_id,acquired_date,death_date,created_at,updated_at,owner_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (name, account_id,
              data.get("mcc_id") or None,
              (data.get("timezone") or "").strip(),
-             (data.get("agent") or "").strip(),
-             (data.get("status") or "存活").strip(),
+             (data.get("agent") or "").strip(),     # 旧文本字段，填兼容值
+             agent_id,
+             (data.get("status") or "存活").strip(),  # 旧文本字段，填兼容值
+             status_id,
              (data.get("acquired_date") or datetime.date.today().isoformat()),
              (data.get("death_date") or "").strip(),
              now, now, user_id))
@@ -3510,10 +3580,13 @@ def accounts_create():
         if "account_id" in err_msg or "unique" in err_msg:
             # 查询已有账户详细信息
             existing = db.execute(
-                "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name "
+                "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name, "
+                "ag.name AS agent_name, st.name AS status_name "
                 "FROM accounts a "
                 "LEFT JOIN mcc m ON a.mcc_id = m.id "
                 "LEFT JOIN users u ON a.owner_id = u.id "
+                "LEFT JOIN agents ag ON a.agent_id = ag.id "
+                "LEFT JOIN account_statuses st ON a.status_id = st.id "
                 "WHERE a.account_id = ?",
                 (account_id,)
             ).fetchone()
@@ -3528,8 +3601,10 @@ def accounts_create():
                         "name": e["name"],
                         "account_id": e["account_id"],
                         "timezone": e.get("timezone", ""),
-                        "agent": e.get("agent", ""),
-                        "status": e.get("status", ""),
+                        "agent": e.get("agent_name") or e.get("agent", ""),
+                        "agent_name": e.get("agent_name", ""),
+                        "status": e.get("status_name") or e.get("status", ""),
+                        "status_name": e.get("status_name", ""),
                         "acquired_date": e.get("acquired_date", ""),
                         "mcc_name": e.get("mcc_name", ""),
                         "mcc_code": e.get("mcc_code", ""),
@@ -3557,7 +3632,9 @@ def accounts_batch_create():
         "mcc_id": data.get("mcc_id") or None,
         "timezone": (data.get("timezone") or "").strip(),
         "agent": (data.get("agent") or "").strip(),
+        "agent_id": data.get("agent_id") or None,
         "status": (data.get("status") or "存活").strip(),
+        "status_id": data.get("status_id") or None,
         "acquired_date": (data.get("acquired_date") or datetime.date.today().isoformat()),
         "death_date": "",
     }
@@ -3582,14 +3659,40 @@ def accounts_batch_create():
         mcc_id = ov.get("mcc_id") if "mcc_id" in ov else common["mcc_id"]
         timezone = ov.get("timezone") if "timezone" in ov else common["timezone"]
         agent = ov.get("agent") if "agent" in ov else common["agent"]
+        agent_id = ov.get("agent_id") if "agent_id" in ov else common["agent_id"]
         status = ov.get("status") if "status" in ov else common["status"]
+        status_id = ov.get("status_id") if "status_id" in ov else common["status_id"]
         acquired_date = ov.get("acquired_date") if "acquired_date" in ov else common["acquired_date"]
+
+        # agent_id 文本回退
+        if agent_id is None and agent:
+            existing_ag = db.execute(
+                "SELECT id FROM agents WHERE name=? AND owner_id=?", (agent, user_id)
+            ).fetchone()
+            if existing_ag:
+                agent_id = existing_ag["id"]
+            else:
+                db.execute("INSERT INTO agents(name, owner_id) VALUES(?,?)", (agent, user_id))
+                agent_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # status_id 文本回退
+        if status_id is None and status:
+            existing_st = db.execute(
+                "SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (status, user_id)
+            ).fetchone()
+            if existing_st:
+                status_id = existing_st["id"]
+            else:
+                db.execute("INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (status, user_id))
+                status_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
         try:
             db.execute(
-                "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,status,acquired_date,death_date,created_at,updated_at,owner_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,agent_id,status,status_id,acquired_date,death_date,created_at,updated_at,owner_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, aid, mcc_id, timezone, agent,
-                 status, acquired_date, common["death_date"], now, now, user_id))
+                 agent_id, status, status_id,
+                 acquired_date, common["death_date"], now, now, user_id))
             db.commit()
             created.append(aid)
             # 记录 MCC 变更历史（首次分配 — 直接写入）
@@ -3636,8 +3739,8 @@ def accounts_update(aid):
     db = _yt_db()
     try:
         user_id = int(get_jwt_identity())
-        old_status = db.execute("SELECT status, agent, account_id, status_changed_date FROM accounts WHERE id=?", (aid,)).fetchone()
-        for f in ["name", "mcc_id", "timezone", "agent", "status", "acquired_date", "death_date"]:
+        old_status = db.execute("SELECT status, agent, account_id, status_changed_date, agent_id, status_id FROM accounts WHERE id=?", (aid,)).fetchone()
+        for f in ["name", "mcc_id", "timezone", "agent", "agent_id", "status", "status_id", "acquired_date", "death_date"]:
             if f in data:
                 val = data[f]
                 # mcc_id 空字符串/0 转 None，避免 FK 约束失败
@@ -3645,11 +3748,30 @@ def accounts_update(aid):
                     if val is None or val == 0 or val == "0" or (isinstance(val, str) and not val.strip()):
                         val = None
                     _record_mcc_change(db, aid, val, user_id, "manual")
+                # agent_id 更新时，同步 agent 文本列
+                elif f == "agent_id" and "agent" not in data:
+                    if val:
+                        ag_name = db.execute("SELECT name FROM agents WHERE id=?", (val,)).fetchone()
+                        if ag_name:
+                            db.execute("UPDATE accounts SET agent=?, updated_at=datetime('now','localtime') WHERE id=?",
+                                       (ag_name["name"], aid))
+                # status_id 更新时，同步 status 文本列
+                elif f == "status_id" and "status" not in data:
+                    if val:
+                        st_name = db.execute("SELECT name FROM account_statuses WHERE id=?", (val,)).fetchone()
+                        if st_name:
+                            db.execute("UPDATE accounts SET status=?, updated_at=datetime('now','localtime') WHERE id=?",
+                                       (st_name["name"], aid))
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
 
         # 状态变更时间：状态变化时记录
         new_status = data.get("status", "")
+        # 如果只传了 status_id 没传 status，从 DB 解析名称
+        if not new_status and "status_id" in data and data.get("status_id"):
+            st_name = db.execute("SELECT name FROM account_statuses WHERE id=?", (data["status_id"],)).fetchone()
+            if st_name:
+                new_status = st_name["name"]
         if new_status and old_status and new_status != old_status["status"]:
             db.execute(
                 "UPDATE accounts SET status_changed_date=datetime('now','localtime') WHERE id=?",
@@ -3830,7 +3952,7 @@ def accounts_batch_update():
     value = data.get("value")
     if not ids or not field:
         return jsonify({"success": False, "error": "缺少参数"}), 400
-    allowed = ["status", "agent", "mcc_id", "timezone"]
+    allowed = ["status", "status_id", "agent", "agent_id", "mcc_id", "timezone"]
     if field not in allowed:
         return jsonify({"success": False, "error": f"不允许修改字段: {field}"}), 400
     db = _yt_db()
@@ -3840,25 +3962,47 @@ def accounts_batch_update():
             value = None
         user_id = int(get_jwt_identity())
         new_clear_rows = []
+
+        # status_id 解析为 status_name，用于清账比较
+        status_name_for_clear = None
+        if field == "status_id" and value:
+            st_name = db.execute("SELECT name FROM account_statuses WHERE id=?", (value,)).fetchone()
+            if st_name:
+                status_name_for_clear = st_name["name"]
+
         for aid in ids:
             if field == "mcc_id":
                 _record_mcc_change(db, aid, value, user_id, "batch")
 
+            # 同步旧文本列：agent_id 更新时同步 agent
+            if field == "agent_id" and value:
+                ag_name = db.execute("SELECT name FROM agents WHERE id=?", (value,)).fetchone()
+                if ag_name:
+                    db.execute("UPDATE accounts SET agent=?, updated_at=datetime('now','localtime') WHERE id=?",
+                               (ag_name["name"], aid))
+            # 同步旧文本列：status_id 更新时同步 status
+            if field == "status_id" and value:
+                if status_name_for_clear:
+                    db.execute("UPDATE accounts SET status=?, updated_at=datetime('now','localtime') WHERE id=?",
+                               (status_name_for_clear, aid))
+
             # 批量改状态时同步触发清账逻辑 + 死亡时间
-            if field == "status" and value:
+            status_field_effective = field in ("status", "status_id")
+            status_value_effective = value if field == "status" else status_name_for_clear
+            if status_field_effective and status_value_effective:
                 old = db.execute("SELECT status, account_id, agent, status_changed_date FROM accounts WHERE id=?", (aid,)).fetchone()
                 if not old:
                     continue
                 # 状态变更时间
-                if old["status"] != value:
+                if old["status"] != status_value_effective:
                     db.execute("UPDATE accounts SET status_changed_date=datetime('now','localtime') WHERE id=?", (aid,))
                 # 死亡时间兼容
-                if value == "死亡":
+                if status_value_effective == "死亡":
                     db.execute("UPDATE accounts SET death_date=date('now','localtime') WHERE id=?", (aid,))
                 elif old["status"] == "死亡":
                     db.execute("UPDATE accounts SET death_date='' WHERE id=?", (aid,))
                 # 清账逻辑：存活切非存活，检查上次变存活后有无充值
-                if value != "存活" and old["status"] == "存活" and old["status"] != value:
+                if status_value_effective != "存活" and old["status"] == "存活" and old["status"] != status_value_effective:
                     since = old["status_changed_date"] or ""
                     need_clear = not since  # 第一次直接填
                     if not need_clear:
@@ -3873,7 +4017,7 @@ def accounts_batch_update():
                         db.execute(
                             "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by, sheets_synced) "
                             "VALUES (?, '清', ?, ?, ?, ?, 0)",
-                            (old["account_id"], old["agent"] or "", op, value, user_id)
+                            (old["account_id"], old["agent"] or "", op, status_value_effective, user_id)
                         )
                         new_clear_rows.append({
                             "account_id": old["account_id"],
@@ -3885,7 +4029,7 @@ def accounts_batch_update():
                        (value, aid))
         db.commit()
         # 后台同步 Google Sheets（仅写入新插入的记录）
-        if field == "status" and value and new_clear_rows:
+        if field in ("status", "status_id") and value and new_clear_rows:
             sheet_id_row = db.execute(
                 "SELECT value FROM tags WHERE key='recharge_sheet_id'"
             ).fetchone()
