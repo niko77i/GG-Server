@@ -5202,9 +5202,9 @@ def account_settings_get():
         try:
             result["sheet_mappings"] = _json.loads(sm_row["value"])
         except Exception:
-            result["sheet_mappings"] = {"recharge": "充值表"}
+            result["sheet_mappings"] = {"recharge": "充值表", "received_accounts": "已接账户明细"}
     else:
-        result["sheet_mappings"] = {"recharge": "充值表"}
+        result["sheet_mappings"] = {"recharge": "充值表", "received_accounts": "已接账户明细"}
     db.close()
     return jsonify({"success": True, "settings": result})
 

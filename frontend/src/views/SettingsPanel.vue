@@ -223,6 +223,7 @@ import api from '@/api/client'
 // Sheet 映射功能注册表 — 已知 key 的显示名（未知 key 直接显示 key 名）
 const SHEET_MAPPING_META = {
   recharge: { label: '充值表', description: '充值记录写入目标 sheet' },
+  received_accounts: { label: '已接账户明细', description: '已接账户明细 sheet' },
 }
 
 const store = useAccountStore()
@@ -233,7 +234,7 @@ const activeTab = ref('account')
 
 const form = reactive({
   recharge_sheet_id: '',
-  sheet_mappings: { recharge: '充值表' },
+  sheet_mappings: { recharge: '充值表', received_accounts: '已接账户明细' },
 })
 
 const newOptionNames = reactive({ statuses: '', agents: '', mccLevels: '', salesPersons: '' })
