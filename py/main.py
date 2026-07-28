@@ -2447,8 +2447,6 @@ def products_create():
         pid = existing["id"]
         if mcc_id is not None:
             db.execute("UPDATE products SET mcc_id=? WHERE id=?", (mcc_id, pid))
-        if sales_person:
-            db.execute("UPDATE products SET sales_person=? WHERE id=?", (sales_person, pid))
         if sales_person_id:
             db.execute("UPDATE products SET sales_person_id=? WHERE id=?", (sales_person_id, pid))
         if agency_ratio is not None:
@@ -2506,13 +2504,6 @@ def products_update(pid):
     for key, col in _product_fields.items():
         if key in data:
             db.execute(f"UPDATE products SET {col}=? WHERE id=?", (data[key], pid))
-    # 当 sales_person_id 变化时自动同步 sales_person 文本列
-    if "sales_person_id" in data and "sales_person" not in data:
-        if data["sales_person_id"]:
-            sp_name = db.execute("SELECT name FROM sales_persons WHERE id=?", (data["sales_person_id"],)).fetchone()
-            if sp_name:
-                db.execute("UPDATE products SET sales_person=?, updated_at=datetime('now','localtime') WHERE id=?",
-                           (sp_name["name"], pid))
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -3759,8 +3750,15 @@ def accounts_update(aid):
     db = _yt_db()
     try:
         user_id = int(get_jwt_identity())
-        old_status = db.execute("SELECT status, agent, account_id, status_changed_date, agent_id, status_id FROM accounts WHERE id=?", (aid,)).fetchone()
-        for f in ["name", "mcc_id", "timezone", "agent", "agent_id", "status", "status_id", "acquired_date", "death_date"]:
+        old_status = db.execute(
+            "SELECT a.account_id, a.status_changed_date, a.agent_id, a.status_id, "
+            "ag.name AS agent_name, st.name AS status_name "
+            "FROM accounts a "
+            "LEFT JOIN agents ag ON a.agent_id = ag.id "
+            "LEFT JOIN account_statuses st ON a.status_id = st.id "
+            "WHERE a.id=?", (aid,)
+        ).fetchone()
+        for f in ["name", "mcc_id", "timezone", "agent_id", "status_id", "acquired_date", "death_date"]:
             if f in data:
                 val = data[f]
                 # mcc_id 空字符串/0 转 None，避免 FK 约束失败
@@ -3768,20 +3766,6 @@ def accounts_update(aid):
                     if val is None or val == 0 or val == "0" or (isinstance(val, str) and not val.strip()):
                         val = None
                     _record_mcc_change(db, aid, val, user_id, "manual")
-                # agent_id 更新时，同步 agent 文本列
-                elif f == "agent_id" and "agent" not in data:
-                    if val:
-                        ag_name = db.execute("SELECT name FROM agents WHERE id=?", (val,)).fetchone()
-                        if ag_name:
-                            db.execute("UPDATE accounts SET agent=?, updated_at=datetime('now','localtime') WHERE id=?",
-                                       (ag_name["name"], aid))
-                # status_id 更新时，同步 status 文本列
-                elif f == "status_id" and "status" not in data:
-                    if val:
-                        st_name = db.execute("SELECT name FROM account_statuses WHERE id=?", (val,)).fetchone()
-                        if st_name:
-                            db.execute("UPDATE accounts SET status=?, updated_at=datetime('now','localtime') WHERE id=?",
-                                       (st_name["name"], aid))
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
 
@@ -3792,7 +3776,7 @@ def accounts_update(aid):
             st_name = db.execute("SELECT name FROM account_statuses WHERE id=?", (data["status_id"],)).fetchone()
             if st_name:
                 new_status = st_name["name"]
-        if new_status and old_status and new_status != old_status["status"]:
+        if new_status and old_status and new_status != old_status["status_name"]:
             db.execute(
                 "UPDATE accounts SET status_changed_date=datetime('now','localtime') WHERE id=?",
                 (aid,)
@@ -3800,7 +3784,7 @@ def accounts_update(aid):
 
         # 状态清账：存活切到非存活时，检查上次变存活后有无充值
         recharge_note = None
-        if new_status and new_status != "存活" and old_status and old_status["status"] == "存活":
+        if new_status and new_status != "存活" and old_status and old_status["status_name"] == "存活":
             since = old_status["status_changed_date"] or ""
             need_clear = not since  # 第一次不用查，直接填清
             if not need_clear:
@@ -3812,19 +3796,20 @@ def accounts_update(aid):
             if need_clear:
                 user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                 operator_name = (user["display_name"] or "") if user else ""
-                clear_agent = data.get("agent", old_status["agent"] or "")
+                clear_agent_name = data.get("agent_name", old_status["agent_name"] or "")
+                clear_agent_id = old_status["agent_id"]
                 clear_row = {
                     "account_id": old_status["account_id"],
                     "amount": "清",
-                    "agent": clear_agent,
+                    "agent": clear_agent_name,
                     "operator": operator_name,
                     "status": new_status,
                 }
                 # 先写 DB
                 db.execute(
-                    "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by, sheets_synced) "
+                    "INSERT INTO recharge_records (account_id, amount, agent_id, operator, status, created_by, sheets_synced) "
                     "VALUES (?, '清', ?, ?, ?, ?, 0)",
-                    (old_status["account_id"], clear_agent, operator_name, new_status, user_id)
+                    (old_status["account_id"], clear_agent_id, operator_name, new_status, user_id)
                 )
                 recharge_note = "已追加清账记录"
                 clear_record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -3996,35 +3981,31 @@ def accounts_batch_update():
             if field == "mcc_id":
                 _record_mcc_change(db, aid, value, user_id, "batch")
 
-            # 同步旧文本列：agent_id 更新时同步 agent
-            if field == "agent_id" and value:
-                ag_name = db.execute("SELECT name FROM agents WHERE id=?", (value,)).fetchone()
-                if ag_name:
-                    db.execute("UPDATE accounts SET agent=?, updated_at=datetime('now','localtime') WHERE id=?",
-                               (ag_name["name"], aid))
-            # 同步旧文本列：status_id 更新时同步 status
-            if field == "status_id" and value:
-                if status_name_for_clear:
-                    db.execute("UPDATE accounts SET status=?, updated_at=datetime('now','localtime') WHERE id=?",
-                               (status_name_for_clear, aid))
 
             # 批量改状态时同步触发清账逻辑 + 死亡时间
             status_field_effective = field in ("status", "status_id")
             status_value_effective = value if field == "status" else status_name_for_clear
             if status_field_effective and status_value_effective:
-                old = db.execute("SELECT status, account_id, agent, status_changed_date FROM accounts WHERE id=?", (aid,)).fetchone()
+                old = db.execute(
+                    "SELECT a.account_id, a.status_changed_date, a.agent_id, "
+                    "COALESCE(st.name, '存活') AS status_name, COALESCE(ag.name, '') AS agent_name "
+                    "FROM accounts a "
+                    "LEFT JOIN account_statuses st ON a.status_id = st.id "
+                    "LEFT JOIN agents ag ON a.agent_id = ag.id "
+                    "WHERE a.id=?", (aid,)
+                ).fetchone()
                 if not old:
                     continue
                 # 状态变更时间
-                if old["status"] != status_value_effective:
+                if old["status_name"] != status_value_effective:
                     db.execute("UPDATE accounts SET status_changed_date=datetime('now','localtime') WHERE id=?", (aid,))
                 # 死亡时间兼容
                 if status_value_effective == "死亡":
                     db.execute("UPDATE accounts SET death_date=date('now','localtime') WHERE id=?", (aid,))
-                elif old["status"] == "死亡":
+                elif old["status_name"] == "死亡":
                     db.execute("UPDATE accounts SET death_date='' WHERE id=?", (aid,))
                 # 清账逻辑：存活切非存活，检查上次变存活后有无充值
-                if status_value_effective != "存活" and old["status"] == "存活" and old["status"] != status_value_effective:
+                if status_value_effective != "存活" and old["status_name"] == "存活" and old["status_name"] != status_value_effective:
                     since = old["status_changed_date"] or ""
                     need_clear = not since  # 第一次直接填
                     if not need_clear:
@@ -4037,13 +4018,13 @@ def accounts_batch_update():
                         user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                         op = (user["display_name"] or "") if user else ""
                         db.execute(
-                            "INSERT INTO recharge_records (account_id, amount, agent, operator, status, created_by, sheets_synced) "
+                            "INSERT INTO recharge_records (account_id, amount, agent_id, operator, status, created_by, sheets_synced) "
                             "VALUES (?, '清', ?, ?, ?, ?, 0)",
-                            (old["account_id"], old["agent"] or "", op, status_value_effective, user_id)
+                            (old["account_id"], old["agent_id"], op, status_value_effective, user_id)
                         )
                         new_clear_rows.append({
                             "account_id": old["account_id"],
-                            "agent": old["agent"] or "",
+                            "agent": old["agent_name"] or "",
                             "rid": db.execute("SELECT last_insert_rowid()").fetchone()[0],
                         })
 
@@ -4372,7 +4353,10 @@ def recharge_retry_sheets(rid):
     db = _yt_db()
     try:
         rec = db.execute(
-            "SELECT id, account_id, amount, agent, operator FROM recharge_records WHERE id=?",
+            "SELECT r.id, r.account_id, r.amount, COALESCE(ag.name, '') AS agent, r.operator "
+            "FROM recharge_records r "
+            "LEFT JOIN agents ag ON r.agent_id = ag.id "
+            "WHERE r.id=?",
             (rid,)
         ).fetchone()
         if not rec:
@@ -4683,13 +4667,6 @@ def mcc_update(mid):
         if key in data:
             db.execute(f"UPDATE mcc SET {col}=?, updated_at=datetime('now','localtime') WHERE id=?",
                        (data[key], mid))
-    # 当 level_id 变化时自动同步 level 文本列
-    if "level_id" in data and "level" not in data:
-        if data["level_id"]:
-            lvl_name = db.execute("SELECT name FROM mcc_levels WHERE id=?", (data["level_id"],)).fetchone()
-            if lvl_name:
-                db.execute("UPDATE mcc SET level=?, updated_at=datetime('now','localtime') WHERE id=?",
-                           (lvl_name["name"], mid))
     db.commit(); db.close()
     return jsonify({"success": True})
 
