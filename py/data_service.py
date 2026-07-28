@@ -26,16 +26,20 @@ def _read_source_db(db_path: str) -> dict:
     src.row_factory = sqlite3.Row
 
     tables = {
-        "products":      {"pk": "auto"},
-        "packages":      {"pk": "auto"},
-        "mcc":           {"pk": "auto"},
-        "accounts":      {"pk": "auto"},
-        "videos":        {"pk": "text", "pk_col": "id"},
-        "video_history": {"pk": "auto"},
-        "video_tasks":   {"pk": "auto"},
-        "copywritings":  {"pk": "auto"},
-        "tags":          {"pk": "text", "pk_col": "key"},
-        "config":        {"pk": "text", "pk_col": "key"},
+        "products":        {"pk": "auto"},
+        "packages":        {"pk": "auto"},
+        "mcc":             {"pk": "auto"},
+        "accounts":        {"pk": "auto"},
+        "videos":          {"pk": "text", "pk_col": "id"},
+        "video_history":   {"pk": "auto"},
+        "video_tasks":     {"pk": "auto"},
+        "copywritings":    {"pk": "auto"},
+        "tags":            {"pk": "text", "pk_col": "key"},
+        "config":          {"pk": "text", "pk_col": "key"},
+        "agents":          {"pk": "auto"},
+        "account_statuses":{"pk": "auto"},
+        "mcc_levels":      {"pk": "auto"},
+        "sales_persons":   {"pk": "auto"},
     }
 
     data = {}
@@ -75,7 +79,9 @@ def preview_import(file_path: str, file_type: str) -> dict:
 
     summary = {}
     for table in ["products", "packages", "accounts", "mcc", "videos",
-                   "video_history", "video_tasks", "copywritings", "tags", "config"]:
+                   "video_history", "video_tasks", "copywritings",
+                   "agents", "account_statuses", "mcc_levels", "sales_persons",
+                   "tags", "config"]:
         rows = data.get(table, [])
         if table == "config":
             rows = [r for r in rows if r.get("key") not in GG_CONFIG_KEYS]
@@ -101,9 +107,52 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
         "products": 0, "packages": 0, "accounts": 0, "mcc": 0,
         "videos": 0, "video_history": 0, "video_tasks": 0,
         "copywritings": {"imported": 0, "skipped": 0},
+        "agents": {"imported": 0, "skipped": 0},
+        "account_statuses": {"imported": 0, "skipped": 0},
+        "mcc_levels": {"imported": 0, "skipped": 0},
+        "sales_persons": {"imported": 0, "skipped": 0},
         "tags": {"imported": 0, "skipped": 0},
         "skipped_config_keys": [],
     }
+
+    # === 选项表：先导入，供业务表外键映射 ===
+    def _import_option_table(table_name: str, report_key: str) -> dict:
+        """导入单张选项表，返回 old_id -> new_id 映射字典。"""
+        id_map = {}
+        for r in data.get(table_name, []):
+            d = dict(r)
+            old_id = d.pop("id", None)
+            name = d.get("name", "")
+            if not name:
+                continue
+            d["owner_id"] = target_user_id
+            existing = db.execute(
+                f"SELECT id FROM {table_name} WHERE name=? AND owner_id=?",
+                (name, target_user_id)
+            ).fetchone()
+            if existing:
+                if old_id is not None:
+                    id_map[old_id] = existing["id"]
+                report[report_key]["skipped"] += 1
+            else:
+                tbl_cols = [c[1] for c in db.execute(f"PRAGMA table_info({table_name})").fetchall()]
+                insert_cols = [k for k in d if k in tbl_cols]
+                placeholders = ", ".join(["?"] * len(insert_cols))
+                vals = [d[c] for c in insert_cols]
+                db.execute(
+                    f"INSERT INTO {table_name}({', '.join(insert_cols)}) VALUES({placeholders})",
+                    vals
+                )
+                new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                if old_id is not None:
+                    id_map[old_id] = new_id
+                report[report_key]["imported"] += 1
+        return id_map
+
+    agent_map   = _import_option_table("agents",         "agents")
+    status_map  = _import_option_table("account_statuses","account_statuses")
+    level_map   = _import_option_table("mcc_levels",     "mcc_levels")
+    sales_person_map = _import_option_table("sales_persons","sales_persons")
 
     # === products + packages: 归导入用户，跟踪 ID 映射 ===
     pid_map = {}  # old_product_id -> new_product_id
@@ -114,6 +163,12 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
         old_id = d.pop("id", None)
         d["owner_id"] = target_user_id
         d["runner_ids"] = json.dumps([target_user_id])
+        # 映射 sales_person_id
+        old_sp_id = d.get("sales_person_id")
+        if old_sp_id is not None and old_sp_id in sales_person_map:
+            d["sales_person_id"] = sales_person_map[old_sp_id]
+        elif old_sp_id is not None:
+            d["sales_person_id"] = None
         cols = [k for k in d if k in product_cols]
         placeholders = ", ".join(["?"] * len(cols))
         vals = [d[c] for c in cols]
@@ -150,6 +205,12 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
         d = dict(r)
         old_id = d.pop("id", None)
         d["owner_id"] = target_user_id
+        # 映射 level_id
+        old_level_id = d.get("level_id")
+        if old_level_id is not None and old_level_id in level_map:
+            d["level_id"] = level_map[old_level_id]
+        elif old_level_id is not None:
+            d["level_id"] = None
         cols = [k for k in d if k in mcc_cols]
         placeholders = ", ".join(["?"] * len(cols))
         vals = [d[c] for c in cols]
@@ -179,6 +240,18 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
             d["mcc_id"] = mcc_map[old_mcc]
         elif old_mcc is not None:
             d["mcc_id"] = None  # 映射不到，清空
+        # 映射 agent_id
+        old_agent_id = d.get("agent_id")
+        if old_agent_id is not None and old_agent_id in agent_map:
+            d["agent_id"] = agent_map[old_agent_id]
+        elif old_agent_id is not None:
+            d["agent_id"] = None
+        # 映射 status_id
+        old_status_id = d.get("status_id")
+        if old_status_id is not None and old_status_id in status_map:
+            d["status_id"] = status_map[old_status_id]
+        elif old_status_id is not None:
+            d["status_id"] = None
         cols = [k for k in d if k in account_cols]
         placeholders = ", ".join(["?"] * len(cols))
         vals = [d[c] for c in cols]
@@ -308,6 +381,12 @@ def export_user_data(user_id: int) -> dict:
     data["copywritings"] = [dict(r) for r in db.execute(
         "SELECT * FROM copywritings WHERE owner_id=?", (user_id,)
     ).fetchall()]
+
+    # 选项表: 每个用户的选项数据
+    for table in ["agents", "account_statuses", "mcc_levels", "sales_persons"]:
+        data[table] = [dict(r) for r in db.execute(
+            f"SELECT * FROM {table} WHERE owner_id=?", (user_id,)
+        ).fetchall()]
 
     # tags, config (共享数据也导出，方便备份)
     for table in ["tags"]:
