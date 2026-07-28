@@ -738,6 +738,118 @@ def _migrate_mcc_dedup(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _migrate_options_tables(conn: sqlite3.Connection):
+    """将旧 TEXT 列中的选项值迁移到新选项表，并填充外键列。"""
+    # 检查是否已迁移：如果 accounts 表已有 agent_id 不为 NULL 的记录，跳过
+    count = conn.execute("SELECT COUNT(*) FROM accounts WHERE agent_id IS NOT NULL").fetchone()[0]
+    if count > 0:
+        return
+
+    # === agents ===
+    # 从 accounts 迁移
+    conn.execute("""
+        INSERT OR IGNORE INTO agents(name, owner_id)
+        SELECT DISTINCT agent, owner_id FROM accounts
+        WHERE agent IS NOT NULL AND agent != ''
+    """)
+    # 从 recharge_records 迁移（通过 accounts 关联 owner_id）
+    conn.execute("""
+        INSERT OR IGNORE INTO agents(name, owner_id)
+        SELECT DISTINCT r.agent, a.owner_id
+        FROM recharge_records r
+        JOIN accounts a ON a.account_id = r.account_id
+        WHERE r.agent IS NOT NULL AND r.agent != ''
+    """)
+    # 填充 accounts.agent_id
+    conn.execute("""
+        UPDATE accounts SET agent_id = (
+            SELECT agents.id FROM agents
+            WHERE agents.name = accounts.agent AND agents.owner_id = accounts.owner_id
+        ) WHERE accounts.agent IS NOT NULL AND accounts.agent != ''
+    """)
+    # 填充 recharge_records.agent_id
+    conn.execute("""
+        UPDATE recharge_records SET agent_id = (
+            SELECT agents.id FROM agents
+            JOIN accounts a ON a.account_id = recharge_records.account_id
+            WHERE agents.name = recharge_records.agent AND agents.owner_id = a.owner_id
+        ) WHERE recharge_records.agent IS NOT NULL AND recharge_records.agent != ''
+    """)
+
+    # === account_statuses ===
+    conn.execute("""
+        INSERT OR IGNORE INTO account_statuses(name, owner_id)
+        SELECT DISTINCT status, owner_id FROM accounts
+        WHERE status IS NOT NULL AND status != ''
+    """)
+    conn.execute("""
+        UPDATE accounts SET status_id = (
+            SELECT account_statuses.id FROM account_statuses
+            WHERE account_statuses.name = accounts.status
+              AND account_statuses.owner_id = accounts.owner_id
+        ) WHERE accounts.status IS NOT NULL AND accounts.status != ''
+    """)
+
+    # === mcc_levels ===
+    conn.execute("""
+        INSERT OR IGNORE INTO mcc_levels(name, owner_id)
+        SELECT DISTINCT m.level, m.owner_id FROM mcc m
+        WHERE m.level IS NOT NULL AND m.level != ''
+    """)
+    conn.execute("""
+        UPDATE mcc SET level_id = (
+            SELECT mcc_levels.id FROM mcc_levels
+            WHERE mcc_levels.name = mcc.level AND mcc_levels.owner_id = mcc.owner_id
+        ) WHERE mcc.level IS NOT NULL AND mcc.level != ''
+    """)
+
+    # === sales_persons ===
+    conn.execute("""
+        INSERT OR IGNORE INTO sales_persons(name, owner_id)
+        SELECT DISTINCT p.sales_person, p.owner_id FROM products p
+        WHERE p.sales_person IS NOT NULL AND p.sales_person != ''
+    """)
+    conn.execute("""
+        UPDATE products SET sales_person_id = (
+            SELECT sales_persons.id FROM sales_persons
+            WHERE sales_persons.name = products.sales_person
+              AND sales_persons.owner_id = products.owner_id
+        ) WHERE products.sales_person IS NOT NULL AND products.sales_person != ''
+    """)
+
+    # === 回退：recharge_records 孤儿记录（account_id 无匹配账户）===
+    # 先插入缺失的 agent（用 owner_id=1 兜底）
+    conn.execute("""
+        INSERT OR IGNORE INTO agents(name, owner_id)
+        SELECT DISTINCT r.agent, 1
+        FROM recharge_records r
+        WHERE r.agent IS NOT NULL AND r.agent != ''
+          AND r.agent_id IS NULL
+    """)
+    # 对仍未填充的记录，仅按名称匹配（不再要求 JOIN accounts）
+    conn.execute("""
+        UPDATE recharge_records SET agent_id = (
+            SELECT agents.id FROM agents
+            WHERE agents.name = recharge_records.agent
+            ORDER BY agents.owner_id ASC LIMIT 1
+        ) WHERE recharge_records.agent IS NOT NULL AND recharge_records.agent != ''
+          AND recharge_records.agent_id IS NULL
+    """)
+
+    # === 回退：products 的 owner_id 为 NULL 时按 IS NULL 匹配 ===
+    conn.execute("""
+        UPDATE products SET sales_person_id = (
+            SELECT sales_persons.id FROM sales_persons
+            WHERE sales_persons.name = products.sales_person
+              AND sales_persons.owner_id IS NULL
+        ) WHERE products.sales_person IS NOT NULL AND products.sales_person != ''
+          AND products.owner_id IS NULL
+          AND products.sales_person_id IS NULL
+    """)
+
+    conn.commit()
+
+
 def _migrate_if_needed(conn: sqlite3.Connection):
     """首次启动时从旧格式导入数据。"""
     root = os.path.dirname(os.path.dirname(_db_path()))
@@ -782,6 +894,8 @@ def _migrate_if_needed(conn: sqlite3.Connection):
             # 迁移失败（如并发锁冲突），清除标记让下次重试
             print(f"[Migrate] videos composite PK migration failed: {e}")
             conn.rollback()
+
+    _migrate_options_tables(conn)
 
     conn.commit()
 
