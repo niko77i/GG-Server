@@ -120,6 +120,12 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "users", "custom_name", "custom_name TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
+    # 选项表外键列（从 TEXT 迁移到 ID 引用）
+    _add_column_if_missing(conn, "accounts", "agent_id", "agent_id INTEGER REFERENCES agents(id)")
+    _add_column_if_missing(conn, "accounts", "status_id", "status_id INTEGER REFERENCES account_statuses(id)")
+    _add_column_if_missing(conn, "recharge_records", "agent_id", "agent_id INTEGER REFERENCES agents(id)")
+    _add_column_if_missing(conn, "mcc", "level_id", "level_id INTEGER REFERENCES mcc_levels(id)")
+    _add_column_if_missing(conn, "products", "sales_person_id", "sales_person_id INTEGER REFERENCES sales_persons(id)")
 
 
 def _ensure_schema(conn: sqlite3.Connection):
@@ -451,6 +457,44 @@ def _ensure_schema(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
         CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at);
+    """)
+
+    # 选项表（设置面板下拉选项独立管理，支持外键关联和重命名自动生效）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_id INTEGER REFERENCES users(id),
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(name, owner_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS account_statuses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_id INTEGER REFERENCES users(id),
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(name, owner_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS mcc_levels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_id INTEGER REFERENCES users(id),
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(name, owner_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sales_persons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_id INTEGER REFERENCES users(id),
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(name, owner_id)
+        )
     """)
 
     # 列迁移已移至 _ensure_columns()（每次连接都执行）
