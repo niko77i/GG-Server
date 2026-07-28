@@ -5217,7 +5217,10 @@ def account_settings_get():
     }
     row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
     if row:
-        result["recharge_sheet_id"] = row["value"]
+        try:
+            result["recharge_sheet_id"] = _json.loads(row["value"])
+        except Exception:
+            result["recharge_sheet_id"] = row["value"]
 
     # 全局默认 sheet_mappings
     sm_row = db.execute("SELECT value FROM tags WHERE key='sheet_mappings'").fetchone()
