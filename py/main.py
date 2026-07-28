@@ -2417,6 +2417,18 @@ def products_create():
         except (ValueError, TypeError):
             agency_ratio = None
     packages = data.get("packages") or []
+
+    # --- sales_person_id 兼容处理 ---
+    sales_person_id = data.get("sales_person_id")
+    if sales_person_id is None and sales_person:
+        existing_sp = db.execute(
+            "SELECT id FROM sales_persons WHERE name=? AND owner_id=?", (sales_person, user_id)
+        ).fetchone()
+        if existing_sp:
+            sales_person_id = existing_sp["id"]
+        else:
+            db.execute("INSERT INTO sales_persons(name, owner_id) VALUES(?,?)", (sales_person, user_id))
+            sales_person_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     if not product_name:
         return jsonify({"success": False, "error": "产品名不能为空"}), 400
     db = _yt_db()
@@ -2437,6 +2449,8 @@ def products_create():
             db.execute("UPDATE products SET mcc_id=? WHERE id=?", (mcc_id, pid))
         if sales_person:
             db.execute("UPDATE products SET sales_person=? WHERE id=?", (sales_person, pid))
+        if sales_person_id:
+            db.execute("UPDATE products SET sales_person_id=? WHERE id=?", (sales_person_id, pid))
         if agency_ratio is not None:
             db.execute("UPDATE products SET agency_ratio=? WHERE id=?", (agency_ratio, pid))
         # 将当前用户加入 runner
@@ -2454,8 +2468,8 @@ def products_create():
                     _assign_mcc_to_users(db, mcc_id, [user_id])
     else:
         runner_ids = _json.dumps([user_id]) if user_id else "[]"
-        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,customer,sales_person,agency_ratio,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                   (product_name, kpi, region, mcc_id, customer, sales_person, agency_ratio, user_id, runner_ids, now))
+        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,customer,sales_person,sales_person_id,agency_ratio,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                   (product_name, kpi, region, mcc_id, customer, sales_person, sales_person_id, agency_ratio, user_id, runner_ids, now))
         pid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         if user_id:
             db.execute("INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)", (pid, user_id))
@@ -2477,7 +2491,8 @@ def products_update(pid):
     _product_fields = {
         "product_name": "product_name", "kpi": "kpi", "region": "region",
         "status": "status", "mcc_id": "mcc_id", "customer": "customer",
-        "sales_person": "sales_person", "agency_ratio": "agency_ratio",
+        "sales_person": "sales_person", "sales_person_id": "sales_person_id",
+        "agency_ratio": "agency_ratio",
     }
     # 产品改名时同步更新所有关联表（冗余存储的 product_name 字段）
     if "product_name" in data:
@@ -2491,6 +2506,13 @@ def products_update(pid):
     for key, col in _product_fields.items():
         if key in data:
             db.execute(f"UPDATE products SET {col}=? WHERE id=?", (data[key], pid))
+    # 当 sales_person_id 变化时自动同步 sales_person 文本列
+    if "sales_person_id" in data and "sales_person" not in data:
+        if data["sales_person_id"]:
+            sp_name = db.execute("SELECT name FROM sales_persons WHERE id=?", (data["sales_person_id"],)).fetchone()
+            if sp_name:
+                db.execute("UPDATE products SET sales_person=?, updated_at=datetime('now','localtime') WHERE id=?",
+                           (sp_name["name"], pid))
     db.commit(); db.close()
     return jsonify({"success": True})
 
@@ -4092,6 +4114,18 @@ def recharge_submit():
     amount = str(data.get("amount", "")).strip()
     agent = (data.get("agent") or "").strip()
 
+    # --- agent_id 兼容处理 ---
+    agent_id = data.get("agent_id")
+    if agent_id is None and agent:
+        existing_ag = db.execute(
+            "SELECT id FROM agents WHERE name=? AND owner_id=?", (agent, user_id)
+        ).fetchone()
+        if existing_ag:
+            agent_id = existing_ag["id"]
+        else:
+            db.execute("INSERT INTO agents(name, owner_id) VALUES(?,?)", (agent, user_id))
+            agent_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
     if not account_id or not amount:
         db.close()
         return jsonify({"success": False, "error": "账户ID和金额不能为空"}), 400
@@ -4105,9 +4139,9 @@ def recharge_submit():
     try:
         # 1. 先写数据库（立即完成）
         db.execute(
-            "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by, sheets_synced) "
-            "VALUES (?, ?, ?, ?, ?, 0)",
-            (account_id, amount, agent, operator, user_id)
+            "INSERT INTO recharge_records (account_id, amount, agent, agent_id, operator, created_by, sheets_synced) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (account_id, amount, agent, agent_id, operator, user_id)
         )
         db.commit()
         record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -4172,6 +4206,17 @@ def recharge_batch_submit():
             account_id = (r.get("account_id") or "").strip()
             amount = str(r.get("amount", "")).strip()
             agent = (r.get("agent") or "").strip()
+            # --- agent_id 兼容处理 ---
+            agent_id = r.get("agent_id")
+            if agent_id is None and agent:
+                existing_ag = db.execute(
+                    "SELECT id FROM agents WHERE name=? AND owner_id=?", (agent, user_id)
+                ).fetchone()
+                if existing_ag:
+                    agent_id = existing_ag["id"]
+                else:
+                    db.execute("INSERT INTO agents(name, owner_id) VALUES(?,?)", (agent, user_id))
+                    agent_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             if not account_id or not amount:
                 continue
             ac = db.execute("SELECT status FROM accounts WHERE account_id=?", (account_id,)).fetchone()
@@ -4179,7 +4224,7 @@ def recharge_batch_submit():
                 continue
             valid_rows.append({
                 "account_id": account_id, "amount": amount,
-                "agent": agent, "operator": operator,
+                "agent": agent, "agent_id": agent_id, "operator": operator,
             })
 
         if not valid_rows:
@@ -4189,9 +4234,9 @@ def recharge_batch_submit():
         inserted_ids = []
         for r in valid_rows:
             db.execute(
-                "INSERT INTO recharge_records (account_id, amount, agent, operator, created_by, sheets_synced) "
-                "VALUES (?, ?, ?, ?, ?, 0)",
-                (r["account_id"], r["amount"], r["agent"], r["operator"], user_id)
+                "INSERT INTO recharge_records (account_id, amount, agent, agent_id, operator, created_by, sheets_synced) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (r["account_id"], r["amount"], r["agent"], r["agent_id"], r["operator"], user_id)
             )
             inserted_ids.append(db.execute("SELECT last_insert_rowid()").fetchone()[0])
         db.commit()
@@ -4258,12 +4303,18 @@ def recharge_update(rid):
     try:
         amount = str(data.get("amount", "")).strip()
         agent = (data.get("agent") or "").strip()
+        agent_id = data.get("agent_id")
         if not amount:
             db.close()
             return jsonify({"success": False, "error": "金额不能为空"}), 400
+        # agent_id 同步 agent 文本列
+        if agent_id is not None and not agent:
+            ag_name = db.execute("SELECT name FROM agents WHERE id=?", (agent_id,)).fetchone()
+            if ag_name:
+                agent = ag_name["name"]
         db.execute(
-            "UPDATE recharge_records SET amount=?, agent=? WHERE id=?",
-            (amount, agent, rid)
+            "UPDATE recharge_records SET amount=?, agent=?, agent_id=? WHERE id=?",
+            (amount, agent, agent_id, rid)
         )
         if db.total_changes == 0:
             db.close()
@@ -4545,13 +4596,27 @@ def mcc_create():
             return jsonify({"success": False, "error": "上级 MCC 不存在"}), 400
 
 
+    # --- level_id 兼容处理 ---
+    level = (data.get("level") or "").strip()
+    level_id = data.get("level_id")
+    if level_id is None and level:
+        existing_lvl = db.execute(
+            "SELECT id FROM mcc_levels WHERE name=? AND owner_id=?", (level, user_id)
+        ).fetchone()
+        if existing_lvl:
+            level_id = existing_lvl["id"]
+        else:
+            db.execute("INSERT INTO mcc_levels(name, owner_id) VALUES(?,?)", (level, user_id))
+            level_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
         db.execute(
-            "INSERT INTO mcc(name,mcc_id,level,parent_mcc_id,shared_user_ids,created_at,updated_at,owner_id) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO mcc(name,mcc_id,level,level_id,parent_mcc_id,shared_user_ids,created_at,updated_at,owner_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
             (name, mcc_id,
-             (data.get("level") or "").strip(),
+             level,
+             level_id,
              parent_mcc_id,
              json.dumps([user_id]),
              now, now, user_id))
@@ -4592,11 +4657,18 @@ def mcc_update(mid):
         if not parent_row:
             db.close()
             return jsonify({"success": False, "error": "上级 MCC 不存在"}), 400
-    _mcc_fields = {"name": "name", "level": "level", "parent_mcc_id": "parent_mcc_id"}
+    _mcc_fields = {"name": "name", "level": "level", "level_id": "level_id", "parent_mcc_id": "parent_mcc_id"}
     for key, col in _mcc_fields.items():
         if key in data:
             db.execute(f"UPDATE mcc SET {col}=?, updated_at=datetime('now','localtime') WHERE id=?",
                        (data[key], mid))
+    # 当 level_id 变化时自动同步 level 文本列
+    if "level_id" in data and "level" not in data:
+        if data["level_id"]:
+            lvl_name = db.execute("SELECT name FROM mcc_levels WHERE id=?", (data["level_id"],)).fetchone()
+            if lvl_name:
+                db.execute("UPDATE mcc SET level=?, updated_at=datetime('now','localtime') WHERE id=?",
+                           (lvl_name["name"], mid))
     db.commit(); db.close()
     return jsonify({"success": True})
 
