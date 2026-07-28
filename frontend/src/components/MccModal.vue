@@ -9,8 +9,8 @@
         <el-input v-model="form.mcc_id" :disabled="!!editId" />
       </el-form-item>
       <el-form-item label="等级">
-        <el-select v-model="form.level" filterable allow-create placeholder="输入或选择" style="width:100%;">
-          <el-option v-for="l in store.settings.mcc_levels" :key="l" :label="l" :value="l" />
+        <el-select v-model="form.level_id" filterable placeholder="选择等级" style="width:100%;">
+          <el-option v-for="l in store.options.mccLevels" :key="l.id" :label="l.name" :value="l.id" />
         </el-select>
       </el-form-item>
       <el-form-item label="上级 MCC">
@@ -38,16 +38,16 @@ const emit = defineEmits(['update:visible', 'saved'])
 const store = useAccountStore()
 const saving = ref(false)
 const parentOpts = ref([])
-const form = reactive({ name: '', mcc_id: '', level: '', parent_mcc_id: '' })
+const form = reactive({ name: '', mcc_id: '', level_id: '', parent_mcc_id: '' })
 
 async function init() {
   const res = await mccApi.options()
   parentOpts.value = (res.options || []).filter(m => m.id !== props.editId)
   if (props.editId) {
     const mcc = store.mccList.find(m => m.id === props.editId)
-    if (mcc) Object.assign(form, { name: mcc.name || '', mcc_id: mcc.mcc_id || '', level: mcc.level || '', parent_mcc_id: mcc.parent_mcc_id || '' })
+    if (mcc) Object.assign(form, { name: mcc.name || '', mcc_id: mcc.mcc_id || '', level_id: mcc.level_id || '', parent_mcc_id: mcc.parent_mcc_id || '' })
   } else {
-    Object.assign(form, { name: '', mcc_id: '', level: '', parent_mcc_id: '' })
+    Object.assign(form, { name: '', mcc_id: '', level_id: '', parent_mcc_id: '' })
   }
 }
 
@@ -56,7 +56,7 @@ async function submit() {
   saving.value = true
   try {
     if (props.editId) {
-      await store.updateMcc(props.editId, { name: form.name, level: form.level, parent_mcc_id: form.parent_mcc_id || null })
+      await store.updateMcc(props.editId, { name: form.name, level_id: form.level_id, parent_mcc_id: form.parent_mcc_id || null })
     } else {
       const res = await store.createMcc(form)
       // 处理 MCC 已存在的情况

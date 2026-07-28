@@ -17,9 +17,9 @@
         <el-input v-model="form.customer" placeholder="产品所属客户" />
       </el-form-item>
       <el-form-item label="商务">
-        <el-select v-model="form.sales_person" filterable allow-create clearable
-          placeholder="选择或输入商务人员" style="width:100%;">
-          <el-option v-for="sp in salesPersonOptions" :key="sp" :label="sp" :value="sp" />
+        <el-select v-model="form.sales_person_id" filterable clearable
+          placeholder="选择商务人员" style="width:100%;">
+          <el-option v-for="sp in salesPersonOptions" :key="sp.id" :label="sp.name" :value="sp.id" />
         </el-select>
       </el-form-item>
       <el-form-item label="代投比例">
@@ -50,9 +50,9 @@ const store = useProductStore()
 const accountStore = useAccountStore()
 const saving = ref(false)
 const regionOptions = ref([])
-const form = reactive({ product_name: '', kpi: '', region: '', customer: '', sales_person: '', agency_ratio: null, mcc_id: '' })
+const form = reactive({ product_name: '', kpi: '', region: '', customer: '', sales_person_id: '', agency_ratio: null, mcc_id: '' })
 
-const salesPersonOptions = computed(() => accountStore.settings.sales_persons || [])
+const salesPersonOptions = computed(() => accountStore.options.salesPersons || [])
 
 async function loadRegions() {
   try {
@@ -69,10 +69,10 @@ function init() {
     if (p) Object.assign(form, {
       product_name: p.product_name || '', kpi: p.kpi || '',
       region: p.region || '', customer: p.customer || '',
-      sales_person: p.sales_person || '', agency_ratio: p.agency_ratio ?? null, mcc_id: p.mcc_id || '',
+      sales_person_id: p.sales_person_id || '', agency_ratio: p.agency_ratio ?? null, mcc_id: p.mcc_id || '',
     })
   } else {
-    Object.assign(form, { product_name: '', kpi: '', region: '', customer: '', sales_person: '', agency_ratio: null, mcc_id: '' })
+    Object.assign(form, { product_name: '', kpi: '', region: '', customer: '', sales_person_id: '', agency_ratio: null, mcc_id: '' })
   }
 }
 
