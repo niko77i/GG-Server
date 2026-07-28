@@ -410,15 +410,18 @@ def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
     # 更新备注列（F 列 = 索引 5）
     rows[target_row][5] = new_status
 
-    # 写回全表
+    # 写回 F 列（备注列）
     row_num = target_row + 1  # 1-indexed
-    range_write = f"'{sheet_name}'!A{row_num}:G{row_num}"
-    service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id,
-        range=range_write,
-        valueInputOption="USER_ENTERED",
-        body={"values": [rows[target_row]]},
-    ).execute()
+    range_write = f"'{sheet_name}'!F{row_num}"
+    try:
+        service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=range_write,
+            valueInputOption="USER_ENTERED",
+            body={"values": [[new_status]]},
+        ).execute()
+    except Exception as e:
+        raise GoogleSheetsServiceError(f"更新备注列失败: {e}") from e
 
     log.info("update_cell_by_account_id: account_id=%s 备注列已更新为 '%s'", account_id, new_status)
     return {"updated": 1}
