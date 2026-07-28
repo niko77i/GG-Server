@@ -3835,6 +3835,28 @@ def accounts_update(aid):
                         _db.commit(); _db.close()
                     _sync_sheets_background(_do_sync, _on_fail)
 
+                # 新增：状态变更时同步「我的看板」备注列
+                dashboard_name = _get_my_dashboard_name(db, user_id)
+                sync_sheet_id = _get_sync_spreadsheet_id(db)
+                if new_status and old_status and new_status != old_status["status_name"] \
+                        and sync_sheet_id and dashboard_name:
+                    _sync_account_id = old_status["account_id"]
+                    _sync_new_status = new_status
+                    _dash_name = dashboard_name
+                    _s_id = sync_sheet_id
+
+                    def _sync_dashboard():
+                        import google_sheets_service as gs
+                        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                        gs.update_cell_by_account_id(service, _s_id, _dash_name,
+                                                      _sync_account_id, _sync_new_status)
+
+                    def _on_dash_fail(status, err_msg):
+                        if err_msg:
+                            log.warning("我的看板同步失败: %s", err_msg)
+
+                    _sync_sheets_background(_sync_dashboard, _on_dash_fail)
+
         db.commit()
 
         resp = {"success": True}
