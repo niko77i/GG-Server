@@ -5193,7 +5193,10 @@ def account_settings_get():
     }
     row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
     if row:
-        result["recharge_sheet_id"] = row["value"]
+        try:
+            result["recharge_sheet_id"] = _json.loads(row["value"])
+        except Exception:
+            result["recharge_sheet_id"] = row["value"]
     sm_row = db.execute("SELECT value FROM tags WHERE key='sheet_mappings'").fetchone()
     if sm_row and sm_row["value"]:
         try:
@@ -5214,7 +5217,7 @@ def account_settings_save():
         db = database.get_db()
         if "recharge_sheet_id" in data:
             db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
-                       ("recharge_sheet_id", str(data["recharge_sheet_id"])))
+                       ("recharge_sheet_id", _json.dumps(data["recharge_sheet_id"], ensure_ascii=False)))
         if "sheet_mappings" in data:
             db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
                        ("sheet_mappings", _json.dumps(data["sheet_mappings"], ensure_ascii=False)))
