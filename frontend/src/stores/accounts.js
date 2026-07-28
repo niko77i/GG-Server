@@ -73,6 +73,9 @@ export const useAccountStore = defineStore('accounts', {
     async saveSettings(body) { return settingsApi.save(body) },
     async rechargeSubmit(body) { return rechargeApi.submit(body) },
     async rechargeBatchSubmit(body) { return rechargeApi.batchSubmit(body) },
+    async syncFromSheet(body) {
+      return accountsApi.syncFromSheet(body)
+    },
 
     // ---- option actions: agents ----
     async loadAgents() {
