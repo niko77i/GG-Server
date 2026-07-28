@@ -1,7 +1,7 @@
 # 设置面板选项改为独立数据库表 + 外键关联
 
 **日期**: 2026-07-28  
-**状态**: 设计中  
+**状态**: 已实现（文档已同步实际实现差异）  
 **方案**: 方案 A — 独立选项表 + 外键引用
 
 ---
@@ -142,13 +142,26 @@ if refs:
 db.execute("DELETE FROM agents WHERE id=?", (aid,))
 ```
 
-### 3.4 旧设置 API 兼容
+### 3.4 设置 API 兼容
 
-`GET/POST /api/settings/account` 改为从新表读写，过渡期间保持兼容。
+`GET/POST /api/settings/account` 改为从新选项表读取（4 表），`recharge_sheet_id` 仍从 `tags` 表读写。
+
+**重要**：`recharge_sheet_id` 在 `tags` 表中以 JSON 字符串格式存储（历史遗留），GET 必须用 `_json.loads()` 解包，POST 必须用 `_json.dumps()` 编码。否则会出现双引号被 URL 编码导致 Google Sheets API 404 的问题。
+
+```python
+# GET - 从新选项表读取 + tags 表读取 recharge_sheet_id/sheet_mappings
+result["recharge_sheet_id"] = _json.loads(row["value"])  # JSON 解包
+
+# POST - 只保存 recharge_sheet_id 和 sheet_mappings
+db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
+           ("recharge_sheet_id", _json.dumps(data["recharge_sheet_id"], ensure_ascii=False)))
+```
 
 ### 3.5 业务 API 适配
 
-现有接口涉及 `agent`、`status`、`level`、`sales_person` 文本字段的，创建/更新时改为写入对应的 `_id` 列，查询时 JOIN 选项表返回 `name`：
+所有涉及旧文本字段的 API 改为读写 `_id` 列：
+
+**查询时 JOIN 选项表返回名称**（全部使用 LEFT JOIN，避免 agent_id/status_id 为 NULL 的记录丢失）：
 
 ```python
 # 账户列表查询示例
@@ -158,12 +171,37 @@ db.execute("""
     LEFT JOIN agents ag ON a.agent_id = ag.id
     LEFT JOIN account_statuses st ON a.status_id = st.id
 """)
+```
 
-# 创建账户
+**筛选改为外键子查询**：
+
+```python
+# 状态筛选 — 通过 status_id 匹配
+if status:
+    where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND owner_id=?)")
+
+# 代理筛选 — 通过 agent_id 匹配
+if agent:
+    where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
+```
+
+**创建/更新时只写 `_id` 列**（移除旧文本列的读写）：
+
+```python
+# INSERT — 不含 agent/status 文本列
 db.execute(
     "INSERT INTO accounts(name,account_id,agent_id,status_id,...) VALUES(?,?,?,?,...)",
-    (name, account_id, agent_id, status_id, ...)
-)
+    (name, account_id, agent_id, status_id, ...))
+
+# UPDATE — 只更新 _id 列
+allowed = ["status_id", "agent_id", "mcc_id", "timezone"]
+```
+
+**状态排序**：`account_statuses` 列表按固定顺序返回（存活→死亡→验证→限额→其他），通过 CASE 表达式实现：
+
+```python
+ORDER BY CASE name WHEN '存活' THEN 1 WHEN '死亡' THEN 2
+WHEN '验证' THEN 3 WHEN '限额' THEN 4 ELSE 5 END, id
 ```
 
 ### 3.6 缓存清理
@@ -171,7 +209,6 @@ db.execute(
 修改选项后清除相关缓存：
 ```python
 _app_cache.delete(f"accounts:agents:{user_id}")
-_app_cache.delete(f"accounts:statuses:{user_id}")
 ```
 
 ---
@@ -187,35 +224,35 @@ _app_cache.delete(f"accounts:statuses:{user_id}")
 
 ### 4.2 下拉框消费方 — 按选项分类
 
+**所有下拉框统一改为 ID 模式**：`:value="item.id"` `:label="item.name"`，移除 `allow-create`（选项统一在设置面板管理）。
+
 #### account_agents (代理名)
 
 | 文件 | 行号 | 改动 |
 |------|------|------|
-| [AccountModal.vue](frontend/src/components/AccountModal.vue#L30) | L30 | 下拉 `:value` 从文本改为 `a.id`，`:label="a.name"` |
-| [AccountModal.vue](frontend/src/components/AccountModal.vue#L196-L200) | L196-200 | **移除**自动追加新名称到 settings 的逻辑 |
-| [AccountBatchImportModal.vue](frontend/src/components/AccountBatchImportModal.vue#L94) | L94, L185, L245 | 三处下拉 `:value` 改为 `a.id` |
-| [AccountBatchImportModal.vue](frontend/src/components/AccountBatchImportModal.vue#L636-L648) | L636-648 | **移除**自动追加逻辑 |
-| [AdsAccountPanel.vue](frontend/src/views/AdsAccountPanel.vue#L142) | L142 | 筛选下拉改为从 API 拉取，不再手动合并 `store.settings` |
+| [AccountModal.vue](frontend/src/components/AccountModal.vue#L30) | 多处 | 下拉 `:value="a.id"` `:label="a.name"`；提交用 `agent_id`；**移除**自动追加逻辑 |
+| [AccountBatchImportModal.vue](frontend/src/components/AccountBatchImportModal.vue#L94) | 3 处下拉 | 同上 + 表格显示用 `agentNameById` 辅助函数 |
+| [AdsAccountPanel.vue](frontend/src/views/AdsAccountPanel.vue#L142) | 筛选+批量 | 筛选从 `store.options.agents` 读取；批量改代理传 `agent_id` |
 
 #### account_statuses (账户状态)
 
 | 文件 | 行号 | 改动 |
 |------|------|------|
-| [AccountModal.vue](frontend/src/components/AccountModal.vue#L35) | L35 | 下拉 `:value` 改为 `s.id`，`:label="s.name"` |
-| [AccountBatchImportModal.vue](frontend/src/components/AccountBatchImportModal.vue#L103) | L103, L194, L252 | 三处下拉改为 ID 模式 |
-| [AdsAccountPanel.vue](frontend/src/views/AdsAccountPanel.vue#L13) | L13 | 筛选下拉改为 API 模式，L150 状态合并逻辑调整 |
+| [AccountModal.vue](frontend/src/components/AccountModal.vue#L35) | 多处 | 下拉 `:value="s.id"` `:label="s.name"`；提交用 `status_id` |
+| [AccountBatchImportModal.vue](frontend/src/components/AccountBatchImportModal.vue#L103) | 3 处下拉 | 同上 + `statusNameById` 辅助函数 |
+| [AdsAccountPanel.vue](frontend/src/views/AdsAccountPanel.vue#L13) | 筛选+批量 | `store.options.statuses`；批量改状态传 `status_id`，确认对话框显示名称而非 ID；`availableStatuses` 适配 `{id, name}[]` |
 
 #### mcc_levels (MCC 等级)
 
 | 文件 | 行号 | 改动 |
 |------|------|------|
-| [MccModal.vue](frontend/src/components/MccModal.vue#L13) | L13 | 下拉 `:value` 改为 `l.id`，`:label="l.name"` |
+| [MccModal.vue](frontend/src/components/MccModal.vue#L13) | 下拉+提交 | `store.options.mccLevels`；提交用 `level_id` |
 
 #### sales_persons (商务人员)
 
 | 文件 | 行号 | 改动 |
 |------|------|------|
-| [ProductModal.vue](frontend/src/components/ProductModal.vue#L55) | L55 | `salesPersonOptions` computed 改为从 store 读取 `{id, name}[]`，下拉用 ID |
+| [ProductModal.vue](frontend/src/components/ProductModal.vue#L55) | 下拉+提交 | `accountStore.options.salesPersons`；提交用 `sales_person_id` |
 
 ### 4.3 Store 适配
 
@@ -311,16 +348,32 @@ SELECT COUNT(*) AS unmatched FROM products WHERE sales_person != '' AND sales_pe
 -- 全部应返回 0
 ```
 
-### 5.3 保障措施
+### 5.3 边缘情况处理（实际发现）
+
+**recharge_records 孤儿记录**：部分 `recharge_records` 的 `account_id` 在 `accounts` 表中无匹配。回退策略：
+1. 以 `owner_id=1`（管理员）插入缺失的 agent 名称
+2. 再按纯名称匹配（`ORDER BY owner_id ASC LIMIT 1`）填充 `agent_id`
+
+**products owner_id 为 NULL**：SQLite 中 `NULL = NULL` 不成立，导致子查询无结果。添加回退 UPDATE：当 `products.owner_id IS NULL` 时，使用 `sales_persons.owner_id IS NULL` 进行匹配。
+
+**SQLite UNIQUE 约束中 NULL 的特殊处理**：SQLite 在 UNIQUE 约束中把每个 NULL 视为不同值，因此 `owner_id=NULL` 的同名记录可能产生重复行。当前数据未触发，但需注意。
+
+### 5.4 保障措施
 
 - Step 1~2 期间旧列和新列并存，现有代码照常运行
 - 迁移在事务中执行，失败回滚
-- 迁移脚本预留 dry-run 模式，先验证再执行
+- 采用幂等性门控 `COUNT(*) WHERE agent_id IS NOT NULL > 0` 确保只执行一次
 - recharge_records 没有 `owner_id`，通过 `JOIN accounts ON account_id` 关联
+- 同一代理名可能在不同用户下是不同的代理，迁移时通过 `accounts.owner_id` 区分
 
-### 5.4 特殊处理：recharge_records 存在跨用户同名代理
+### 5.5 关键注意事项：`_add_column_if_missing` 冲突
 
-同一代理名可能在不同用户下是不同的代理，迁移时通过 `accounts.owner_id` 区分。
+**`_ensure_columns()` 中的 `_add_column_if_missing(conn, "products", "sales_person", ...)` 必须在代码中移除**。因为：
+1. 迁移 → cleanup 删除了 `products.sales_person` 列
+2. `_ensure_columns()` 在每次数据库连接时执行
+3. 如果该行保留，下次连接时 `sales_person` 列会被自动复活
+
+此问题已确认：部署后发现 `products.sales_person` 列被意外复活（0 条非空数据但列存在）。修复后删除该行，并手动 DROP COLUMN 清理。
 
 ---
 
@@ -349,8 +402,11 @@ SELECT COUNT(*) AS unmatched FROM products WHERE sales_person != '' AND sales_pe
 
 ## 7. 风险与注意事项
 
-1. **recharge_records 迁移**：没有 owner_id，需 JOIN accounts 获取，同名跨用户需谨慎
-2. **导入/导出功能**：`dataApi.importFile/exportData` 需要适配新字段结构
-3. **Google Sheets 同步**：充值表同步如果涉及 agent 字段需要适配
-4. **默认数据**：`account_statuses` 有默认值 `["存活","死亡","验证","限额"]`，迁移时需预置
-5. **SQLite 版本**：当前环境 3.45.1，支持 `ALTER TABLE DROP COLUMN`，可直接删除旧列
+1. **recharge_records 迁移**：没有 owner_id，需 JOIN accounts 获取。孤儿记录（account_id 在 accounts 表中无匹配）通过 owner_id=1 兜底 + 纯名称回退匹配处理。
+2. **导入/导出功能**：`dataApi.importFile/exportData` 需要适配新字段结构。导入时选项表先于业务表导入，建立 ID 映射后重映射外键。
+3. **Google Sheets 同步**：充值表同步的 `agent` 文本字段通过 JOIN agents 表获取名称，`status` 使用已解析的文本名（非原始 ID）。
+4. **默认数据**：`account_statuses` 有默认值 `["存活","死亡","验证","限额"]`，迁移时通过 `INSERT OR IGNORE ... SELECT DISTINCT` 从旧数据导入。状态列表排序通过 CASE 表达式确保固定顺序。
+5. **SQLite 版本**：当前环境 3.45.1，支持 `ALTER TABLE DROP COLUMN`，可直接删除旧列。
+6. **`_add_column_if_missing` 冲突**（已修复）：`_ensure_columns()` 中 `products.sales_person` 的 `_add_column_if_missing` 会在每次连接时复活已被 cleanup 删除的列，必须移除。其他旧列（accounts.agent, accounts.status 等）无此问题，因为 `_ensure_columns()` 中没有对应的 `_add_column_if_missing` 调用。
+7. **`recharge_sheet_id` JSON 编码**（已修复）：旧代码以 `_json.dumps()` 存储，新 settings API 必须用 `_json.loads()` 读取。否则会返回带引号的 JSON 字符串，导致 Google Sheets API 收到 URL 编码的假 ID。
+8. **`_ensure_schema` CREATE TABLE 定义**：建表语句中仍定义了已删除的旧列（`accounts.agent`, `accounts.status`, `mcc.level`, `recharge_records.agent`），对已有数据库无害（IF NOT EXISTS），但新部署时会先创建再被 cleanup 删除，属于不必要的操作。建议后续清理。
