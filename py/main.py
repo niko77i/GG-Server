@@ -4098,6 +4098,20 @@ def _parse_sheet_id(raw: str) -> str:
     return m.group(1) if m else raw.strip()
 
 
+def _get_recharge_sheet_name(db) -> str:
+    """从 tags 表读取 sheet_mappings，提取 recharge 对应的 sheet 名。
+    不存在时默认返回 '充值表'（向后兼容）。"""
+    row = db.execute("SELECT value FROM tags WHERE key='sheet_mappings'").fetchone()
+    if row and row["value"]:
+        try:
+            mappings = _json.loads(row["value"])
+            if isinstance(mappings, dict):
+                return (mappings.get("recharge") or "").strip() or "充值表"
+        except Exception:
+            pass
+    return "充值表"
+
+
 @app.route("/api/recharge/submit", methods=["POST"])
 @jwt_required()
 def recharge_submit():
@@ -6088,6 +6102,35 @@ def google_sheets_status():
         return jsonify(result)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/google-sheets/sheets", methods=["GET"])
+@jwt_required()
+def google_sheets_list_sheets():
+    """读取指定 spreadsheet 中的所有 sheet 名称列表。"""
+    spreadsheet_id = (request.args.get("spreadsheet_id") or "").strip()
+    if not spreadsheet_id:
+        return jsonify({"success": False, "error": "缺少 spreadsheet_id"}), 400
+
+    # 提取纯 ID（兼容完整 URL）
+    sid = _parse_sheet_id(spreadsheet_id)
+    if not sid:
+        return jsonify({"success": False, "error": "无效的 spreadsheet ID"}), 400
+
+    # 检查 Google Sheets 是否已配置
+    creds_path = _GOOGLE_SHEETS_CONFIG.get("credentials_path", "")
+    if not creds_path or not os.path.isfile(creds_path):
+        return jsonify({"success": False, "error": "Google Sheets 未配置"}), 400
+
+    try:
+        import google_sheets_service as gs
+        service = gs.build_service(creds_path)
+        info = gs.get_spreadsheet_info(service, sid)
+        return jsonify({"success": True, "sheets": info.get("sheets", [])})
+    except gs.GoogleSheetsServiceError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": f"无法访问表格: {e}"}), 400
 
 
 # ---------- 文案管理 API ----------
