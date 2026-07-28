@@ -99,7 +99,34 @@
           <el-divider />
           <h4 style="margin-bottom:8px;">📊 充值表配置（仅管理员可见）</h4>
           <el-form-item label="Google Sheets（URL 或 ID）">
-            <el-input v-model="form.recharge_sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" />
+            <div style="display:flex;gap:8px;width:100%;">
+              <el-input v-model="form.recharge_sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" style="flex:1;" />
+              <el-button @click="readSheets" :loading="readingSheets">📋 读取工作表</el-button>
+            </div>
+          </el-form-item>
+          <el-form-item label="Sheet 映射">
+            <div style="width:100%;">
+              <div v-for="(meta, key) in SHEET_MAPPING_META" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                <span style="white-space:nowrap;font-size:13px;min-width:60px;">{{ meta.label }}</span>
+                <el-select
+                  v-model="form.sheet_mappings[key]"
+                  filterable
+                  allow-create
+                  default-first-option
+                  placeholder="选择或输入 sheet 名"
+                  style="flex:1;"
+                >
+                  <el-option
+                    v-for="name in sheetOptions"
+                    :key="name"
+                    :label="name"
+                    :value="name"
+                  />
+                </el-select>
+              </div>
+              <span v-if="!sheetOptionsLoaded" style="font-size:11px;color:#909399;">点击「📋 读取工作表」加载可选 sheet 列表，也可直接手动输入</span>
+              <span v-else style="font-size:11px;color:#059669;">已加载 {{ sheetOptions.length }} 个工作表可供选择</span>
+            </div>
           </el-form-item>
         </template>
         <el-button type="primary" @click="save" :loading="saving" style="margin-top:16px;">💾 保存配置</el-button>
@@ -202,9 +229,15 @@ import { ref, reactive, onMounted } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
 import { useAuthStore } from '@/stores/auth'
 import { dataApi } from '@/api/data'
+import { googleSheetsApi } from '@/api/google-sheets'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import api from '@/api/client'
+
+// Sheet 映射功能注册表（新增功能只需在此加一行，UI 自动渲染）
+const SHEET_MAPPING_META = {
+  recharge: { label: '充值表', description: '充值记录写入目标 sheet' },
+}
 
 const store = useAccountStore()
 const authStore = useAuthStore()
@@ -214,10 +247,16 @@ const activeTab = ref('account')
 
 const form = reactive({
   recharge_sheet_id: '',
+  sheet_mappings: { recharge: '充值表' },
 })
 
 const newOptionNames = reactive({ statuses: '', agents: '', mccLevels: '', salesPersons: '' })
 const editing = reactive({ statuses: -1, agents: -1, mccLevels: -1, salesPersons: -1 })
+
+// Sheet 读取
+const readingSheets = ref(false)
+const sheetOptions = ref([])
+const sheetOptionsLoaded = ref(false)
 
 // 数据管理
 const exporting = ref(false)
@@ -244,6 +283,7 @@ onMounted(async () => {
   await Promise.all([store.loadAgents(), store.loadStatuses(), store.loadMccLevels(), store.loadSalesPersons()])
   await store.loadSettings()
   form.recharge_sheet_id = store.settings.recharge_sheet_id || ''
+  form.sheet_mappings = store.settings.sheet_mappings || { recharge: '充值表' }
   loadImportHistory()
   loadRegions()
 })
@@ -320,14 +360,39 @@ async function deleteOption(type, row) {
   }
 }
 
+async function readSheets() {
+  const rawId = form.recharge_sheet_id.trim()
+  if (!rawId) {
+    ElMessage.warning('请先输入表格链接或 ID')
+    return
+  }
+  const m = rawId.match(/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)
+  const sid = m ? m[1] : rawId
+
+  readingSheets.value = true
+  sheetOptionsLoaded.value = false
+  try {
+    const res = await googleSheetsApi.listSheets(sid)
+    sheetOptions.value = (res.sheets || []).map(s => s.name)
+    sheetOptionsLoaded.value = true
+    ElMessage.success(`已读取 ${sheetOptions.value.length} 个工作表`)
+  } catch (e) {
+    sheetOptions.value = []
+    ElMessage.error('读取工作表失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    readingSheets.value = false
+  }
+}
+
 async function save() {
   saving.value = true
   const rawId = form.recharge_sheet_id.trim()
   const m = rawId.match(/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)
   const sheetId = m ? m[1] : rawId
   try {
-    await store.saveSettings({ recharge_sheet_id: sheetId })
+    await store.saveSettings({ recharge_sheet_id: sheetId, sheet_mappings: form.sheet_mappings })
     store.settings.recharge_sheet_id = sheetId
+    store.settings.sheet_mappings = { ...form.sheet_mappings }
     msg.value = '✅ 已保存'
     setTimeout(() => msg.value = '', 2000)
   } catch (e) { ElMessage.error('保存失败: ' + (e.response?.data?.error || e.message)) }
