@@ -4937,7 +4937,9 @@ def statuses_list():
     user_id = int(get_jwt_identity())
     db = _yt_db()
     rows = db.execute(
-        "SELECT id, name FROM account_statuses WHERE owner_id=? ORDER BY id",
+        "SELECT id, name FROM account_statuses WHERE owner_id=? "
+        "ORDER BY CASE name WHEN '存活' THEN 1 WHEN '死亡' THEN 2 "
+        "WHEN '验证' THEN 3 WHEN '限额' THEN 4 ELSE 5 END, id",
         (user_id,)
     ).fetchall()
     db.close()
@@ -5181,28 +5183,30 @@ def sales_persons_delete(sid):
 
 @app.route("/api/settings/account", methods=["GET"])
 def account_settings_get():
-    """返回账户管理相关的可配置项（状态、代理、MCC 等级等）。"""
-    db = _yt_db()
-    keys = ["account_statuses", "account_agents", "mcc_levels", "sales_persons", "recharge_sheet_id"]
-    result = {}
-    for k in keys:
-        row = db.execute("SELECT value FROM tags WHERE key=?", (k,)).fetchone()
-        if row:
-            try:
-                result[k] = _json.loads(row["value"])
-            except Exception:
-                result[k] = [] if k != "recharge_sheet_id" else ""
-        else:
-            # 默认值
-            defaults = {
-                "account_statuses": ["存活", "死亡", "验证", "限额"],
-                "account_agents": [],
-                "mcc_levels": [],
-                "sales_persons": [],
-                "recharge_sheet_id": "",
-            }
-            result[k] = defaults.get(k, [] if k != "recharge_sheet_id" else "")
-    # sheet_mappings 特殊处理：不存在时返回默认值
+    """返回账户管理相关的可配置项（从新选项表读取）。"""
+    db = database.get_db()
+    result = {
+        "account_agents": [
+            r["name"] for r in db.execute("SELECT name FROM agents ORDER BY id").fetchall()
+        ],
+        "account_statuses": [
+            r["name"] for r in db.execute(
+                "SELECT name FROM account_statuses ORDER BY "
+                "CASE name WHEN '存活' THEN 1 WHEN '死亡' THEN 2 "
+                "WHEN '验证' THEN 3 WHEN '限额' THEN 4 ELSE 5 END, id"
+            ).fetchall()
+        ],
+        "mcc_levels": [
+            r["name"] for r in db.execute("SELECT name FROM mcc_levels ORDER BY id").fetchall()
+        ],
+        "sales_persons": [
+            r["name"] for r in db.execute("SELECT name FROM sales_persons ORDER BY id").fetchall()
+        ],
+        "recharge_sheet_id": "",
+    }
+    row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
+    if row:
+        result["recharge_sheet_id"] = row["value"]
     sm_row = db.execute("SELECT value FROM tags WHERE key='sheet_mappings'").fetchone()
     if sm_row and sm_row["value"]:
         try:
@@ -5217,15 +5221,18 @@ def account_settings_get():
 
 @app.route("/api/settings/account", methods=["POST"])
 def account_settings_save():
-    """保存账户管理相关的可配置项。"""
+    """仅保存 recharge_sheet_id 和 sheet_mappings（选项由各自 CRUD API 管理）。"""
     data = request.get_json(silent=True) or {}
-    db = _yt_db()
-    for key in ["account_statuses", "account_agents", "mcc_levels", "sales_persons", "recharge_sheet_id", "sheet_mappings"]:
-        if key in data:
+    if "recharge_sheet_id" in data or "sheet_mappings" in data:
+        db = database.get_db()
+        if "recharge_sheet_id" in data:
             db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
-                       (key, _json.dumps(data[key], ensure_ascii=False)))
-    db.commit()
-    db.close()
+                       ("recharge_sheet_id", str(data["recharge_sheet_id"])))
+        if "sheet_mappings" in data:
+            db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
+                       ("sheet_mappings", _json.dumps(data["sheet_mappings"], ensure_ascii=False)))
+        db.commit()
+        db.close()
     return jsonify({"success": True})
 
 
