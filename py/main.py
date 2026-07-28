@@ -5177,6 +5177,51 @@ _BUILTIN_SHEET_DEFAULTS = {
     "my_dashboard": "我的看板",
 }
 
+
+def _get_my_dashboard_name(db, user_id: int) -> str:
+    """三层叠加获取当前用户的「我的看板」sheet 名。
+
+    优先级：用户私有 config > 全局 tags > 内置默认
+    """
+    name = _BUILTIN_SHEET_DEFAULTS.get("my_dashboard", "我的看板")
+
+    # 全局 tags 覆盖
+    row = db.execute("SELECT value FROM tags WHERE key='sheet_mappings'").fetchone()
+    if row and row["value"]:
+        try:
+            mappings = _json.loads(row["value"])
+            if isinstance(mappings, dict) and mappings.get("my_dashboard"):
+                name = mappings["my_dashboard"]
+        except Exception:
+            pass
+
+    # 用户私有 config 覆盖
+    row = db.execute("SELECT value FROM config WHERE key=?",
+                     (f"sheet_mappings_{user_id}",)).fetchone()
+    if row and row["value"]:
+        try:
+            mappings = _json.loads(row["value"])
+            if isinstance(mappings, dict) and mappings.get("my_dashboard"):
+                name = mappings["my_dashboard"]
+        except Exception:
+            pass
+
+    return name
+
+
+def _get_sync_spreadsheet_id(db) -> str:
+    """从 tags 表获取 spreadsheet ID（复用充值表同一个表格）。
+
+    Returns:
+        spreadsheet ID 字符串，未配置时返回空字符串
+    """
+    row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
+    if row and row["value"]:
+        raw = _json.loads(row["value"]) if row["value"] else ""
+        return _parse_sheet_id(raw)
+    return ""
+
+
 def _get_user_sheet_mappings(user_id: int) -> dict:
     """读取用户私有的 sheet 映射覆盖值（config 表）。"""
     db = database.get_db()
