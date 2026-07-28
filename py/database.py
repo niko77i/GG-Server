@@ -850,6 +850,29 @@ def _migrate_options_tables(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _cleanup_old_option_columns(conn: sqlite3.Connection):
+    """在所有代码切换到外键列之后，删除旧 TEXT 列和 tags 中的旧配置。"""
+    conn.execute("PRAGMA foreign_keys=OFF")
+
+    for table, col in [
+        ("accounts", "agent"),
+        ("accounts", "status"),
+        ("mcc", "level"),
+        ("products", "sales_person"),
+        ("recharge_records", "agent"),
+    ]:
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if col in cols:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+
+    conn.execute("PRAGMA foreign_keys=ON")
+
+    for key in ["account_agents", "account_statuses", "mcc_levels", "sales_persons"]:
+        conn.execute("DELETE FROM tags WHERE key=?", (key,))
+
+    conn.commit()
+
+
 def _migrate_if_needed(conn: sqlite3.Connection):
     """首次启动时从旧格式导入数据。"""
     root = os.path.dirname(os.path.dirname(_db_path()))
@@ -896,6 +919,7 @@ def _migrate_if_needed(conn: sqlite3.Connection):
             conn.rollback()
 
     _migrate_options_tables(conn)
+    _cleanup_old_option_columns(conn)
 
     conn.commit()
 
