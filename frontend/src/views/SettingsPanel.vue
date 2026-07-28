@@ -4,29 +4,97 @@
     <el-tabs v-model="activeTab">
       <!-- Tab 1: 账户设置 -->
       <el-tab-pane label="账户设置" name="account">
-        <p style="color:#888;margin-bottom:20px;">自定义下拉框选项，修改后全局生效</p>
+        <p style="color:#888;margin-bottom:20px;">自定义下拉框选项，点击名称即可编辑，修改即时保存</p>
+        <!-- 账户状态 & 代理名 并排 -->
         <el-row :gutter="16">
           <el-col :span="12">
-            <el-form-item label="账户状态选项">
-              <el-input v-model="form.account_statuses" type="textarea" :rows="5"
-                placeholder="每行一个" />
-            </el-form-item>
+            <h4 style="margin-bottom:8px;">账户状态选项</h4>
+            <el-table :data="store.options.statuses" size="small" border stripe style="max-width:450px;" @cell-click="(row, col, cell, ev) => startEdit(row, col, cell, ev, 'statuses')">
+              <el-table-column prop="name" label="名称">
+                <template #default="{ row, $index }">
+                  <el-input v-if="editing.statuses === $index" v-model="row._editName" size="small"
+                    @blur="finishEdit('statuses', row)" @keyup.enter="finishEdit('statuses', row)" />
+                  <span v-else>{{ row.name }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="80">
+                <template #default="{ row }">
+                  <el-button size="small" type="danger" @click="deleteOption('statuses', row)">🗑</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
+              <el-input v-model="newOptionNames.statuses" placeholder="新状态名" size="small" style="flex:1;" @keyup.enter="addOption('statuses')" />
+              <el-button size="small" type="primary" @click="addOption('statuses')">新增</el-button>
+            </div>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="代理名选项">
-              <el-input v-model="form.account_agents" type="textarea" :rows="5"
-                placeholder="每行一个（留空则自由输入）" />
-            </el-form-item>
+            <h4 style="margin-bottom:8px;">代理名选项</h4>
+            <el-table :data="store.options.agents" size="small" border stripe style="max-width:450px;" @cell-click="(row, col, cell, ev) => startEdit(row, col, cell, ev, 'agents')">
+              <el-table-column prop="name" label="名称">
+                <template #default="{ row, $index }">
+                  <el-input v-if="editing.agents === $index" v-model="row._editName" size="small"
+                    @blur="finishEdit('agents', row)" @keyup.enter="finishEdit('agents', row)" />
+                  <span v-else>{{ row.name }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="80">
+                <template #default="{ row }">
+                  <el-button size="small" type="danger" @click="deleteOption('agents', row)">🗑</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
+              <el-input v-model="newOptionNames.agents" placeholder="新代理名" size="small" style="flex:1;" @keyup.enter="addOption('agents')" />
+              <el-button size="small" type="primary" @click="addOption('agents')">新增</el-button>
+            </div>
           </el-col>
         </el-row>
-        <el-form-item label="MCC 等级选项">
-          <el-input v-model="form.mcc_levels" type="textarea" :rows="3"
-            placeholder="每行一个（留空则自由输入）" />
-        </el-form-item>
-        <el-form-item label="商务人员选项">
-          <el-input v-model="form.sales_persons" type="textarea" :rows="4"
-            placeholder="每行一个，用于产品编辑时选择商务人员" />
-        </el-form-item>
+        <!-- MCC 等级 & 商务人员 并排 -->
+        <el-row :gutter="16" style="margin-top:20px;">
+          <el-col :span="12">
+            <h4 style="margin-bottom:8px;">MCC 等级选项</h4>
+            <el-table :data="store.options.mccLevels" size="small" border stripe style="max-width:450px;" @cell-click="(row, col, cell, ev) => startEdit(row, col, cell, ev, 'mccLevels')">
+              <el-table-column prop="name" label="名称">
+                <template #default="{ row, $index }">
+                  <el-input v-if="editing.mccLevels === $index" v-model="row._editName" size="small"
+                    @blur="finishEdit('mccLevels', row)" @keyup.enter="finishEdit('mccLevels', row)" />
+                  <span v-else>{{ row.name }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="80">
+                <template #default="{ row }">
+                  <el-button size="small" type="danger" @click="deleteOption('mccLevels', row)">🗑</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
+              <el-input v-model="newOptionNames.mccLevels" placeholder="新等级名" size="small" style="flex:1;" @keyup.enter="addOption('mccLevels')" />
+              <el-button size="small" type="primary" @click="addOption('mccLevels')">新增</el-button>
+            </div>
+          </el-col>
+          <el-col :span="12">
+            <h4 style="margin-bottom:8px;">商务人员选项</h4>
+            <el-table :data="store.options.salesPersons" size="small" border stripe style="max-width:450px;" @cell-click="(row, col, cell, ev) => startEdit(row, col, cell, ev, 'salesPersons')">
+              <el-table-column prop="name" label="名称">
+                <template #default="{ row, $index }">
+                  <el-input v-if="editing.salesPersons === $index" v-model="row._editName" size="small"
+                    @blur="finishEdit('salesPersons', row)" @keyup.enter="finishEdit('salesPersons', row)" />
+                  <span v-else>{{ row.name }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="80">
+                <template #default="{ row }">
+                  <el-button size="small" type="danger" @click="deleteOption('salesPersons', row)">🗑</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div style="display:flex;gap:8px;margin-top:8px;max-width:450px;">
+              <el-input v-model="newOptionNames.salesPersons" placeholder="新商务人名" size="small" style="flex:1;" @keyup.enter="addOption('salesPersons')" />
+              <el-button size="small" type="primary" @click="addOption('salesPersons')">新增</el-button>
+            </div>
+          </el-col>
+        </el-row>
         <template v-if="authStore.isAdmin || authStore.isDeveloper">
           <el-divider />
           <h4 style="margin-bottom:8px;">📊 充值表配置（仅管理员可见）</h4>
@@ -34,7 +102,7 @@
             <el-input v-model="form.recharge_sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" />
           </el-form-item>
         </template>
-        <el-button type="primary" @click="save" :loading="saving">💾 保存配置</el-button>
+        <el-button type="primary" @click="save" :loading="saving" style="margin-top:16px;">💾 保存配置</el-button>
         <span v-if="msg" style="margin-left:8px;font-size:11px;color:#059669;">{{ msg }}</span>
       </el-tab-pane>
 
@@ -145,12 +213,11 @@ const msg = ref('')
 const activeTab = ref('account')
 
 const form = reactive({
-  account_statuses: '',
-  account_agents: '',
-  mcc_levels: '',
-  sales_persons: '',
   recharge_sheet_id: '',
 })
+
+const newOptionNames = reactive({ statuses: '', agents: '', mccLevels: '', salesPersons: '' })
+const editing = reactive({ statuses: -1, agents: -1, mccLevels: -1, salesPersons: -1 })
 
 // 数据管理
 const exporting = ref(false)
@@ -174,11 +241,8 @@ function _buildTimezoneOptions() {
 const timezoneOptions = _buildTimezoneOptions()
 
 onMounted(async () => {
+  await Promise.all([store.loadAgents(), store.loadStatuses(), store.loadMccLevels(), store.loadSalesPersons()])
   await store.loadSettings()
-  form.account_statuses = (store.settings.account_statuses || []).join('\n')
-  form.account_agents = (store.settings.account_agents || []).join('\n')
-  form.mcc_levels = (store.settings.mcc_levels || []).join('\n')
-  form.sales_persons = (store.settings.sales_persons || []).join('\n')
   form.recharge_sheet_id = store.settings.recharge_sheet_id || ''
   loadImportHistory()
   loadRegions()
@@ -213,23 +277,60 @@ async function addRegion() {
   } catch (e) { ElMessage.error('添加失败: ' + (e.message || '')) }
 }
 
+// ---- 选项行内编辑 ----
+function startEdit(row, _column, _cell, _event, type) {
+  row._editName = row.name
+  const arr = store.options[type]
+  editing[type] = arr.indexOf(row)
+}
+
+async function finishEdit(type, row) {
+  editing[type] = -1
+  const newName = (row._editName || '').trim()
+  if (!newName || newName === row.name) return
+  const actions = { statuses: 'renameStatus', agents: 'renameAgent', mccLevels: 'renameMccLevel', salesPersons: 'renameSalesPerson' }
+  try {
+    await store[actions[type]](row.id, newName)
+    ElMessage.success('已更新')
+  } catch (e) { ElMessage.error(e.response?.data?.error || '更新失败') }
+}
+
+async function addOption(type) {
+  const name = newOptionNames[type].trim()
+  if (!name) { ElMessage.warning('请输入名称'); return }
+  const actions = { statuses: 'createStatus', agents: 'createAgent', mccLevels: 'createMccLevel', salesPersons: 'createSalesPerson' }
+  try {
+    await store[actions[type]](name)
+    newOptionNames[type] = ''
+    ElMessage.success('已添加')
+  } catch (e) { ElMessage.error(e.response?.data?.error || '添加失败') }
+}
+
+async function deleteOption(type, row) {
+  const actions = { statuses: 'deleteStatus', agents: 'deleteAgent', mccLevels: 'deleteMccLevel', salesPersons: 'deleteSalesPerson' }
+  try {
+    await store[actions[type]](row.id)
+    ElMessage.success('已删除')
+  } catch (e) {
+    if (e.response?.status === 409) {
+      ElMessage.warning(e.response?.data?.error || '无法删除')
+    } else {
+      ElMessage.error(e.response?.data?.error || '删除失败')
+    }
+  }
+}
+
 async function save() {
   saving.value = true
-  // 从 URL 中提取 spreadsheet ID（支持直接粘贴表格链接）
   const rawId = form.recharge_sheet_id.trim()
   const m = rawId.match(/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)
   const sheetId = m ? m[1] : rawId
-  const body = {
-    account_statuses: form.account_statuses.split('\n').map(s => s.trim()).filter(Boolean),
-    account_agents: form.account_agents.split('\n').map(s => s.trim()).filter(Boolean),
-    mcc_levels: form.mcc_levels.split('\n').map(s => s.trim()).filter(Boolean),
-    sales_persons: form.sales_persons.split('\n').map(s => s.trim()).filter(Boolean),
-    recharge_sheet_id: sheetId,
-  }
-  await store.saveSettings(body)
-  store.settings = body
-  msg.value = '✅ 已保存'
-  setTimeout(() => msg.value = '', 2000)
+  try {
+    await store.saveSettings({ recharge_sheet_id: sheetId })
+    store.settings.recharge_sheet_id = sheetId
+    msg.value = '✅ 已保存'
+    setTimeout(() => msg.value = '', 2000)
+  } catch (e) { ElMessage.error('保存失败: ' + (e.response?.data?.error || e.message)) }
   saving.value = false
 }
 
