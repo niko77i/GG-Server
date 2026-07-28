@@ -114,6 +114,9 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "copywritings", "owner_id", "owner_id INTEGER REFERENCES users(id)")
     _add_column_if_missing(conn, "copywritings", "effectiveness", "effectiveness TEXT DEFAULT ''")
     _add_column_if_missing(conn, "copywritings", "is_public", "is_public INTEGER DEFAULT 0")
+    # videos 复合主键后，关联表需 video_owner_id 列
+    _add_column_if_missing(conn, "product_assets", "video_owner_id", "video_owner_id INTEGER NOT NULL DEFAULT 1")
+    _add_column_if_missing(conn, "video_consumption", "video_owner_id", "video_owner_id INTEGER NOT NULL DEFAULT 1")
     _add_column_if_missing(conn, "users", "custom_name", "custom_name TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
@@ -150,7 +153,8 @@ def _ensure_schema(conn: sqlite3.Connection):
 
         -- YouTube 视频（从 youtube.db 迁移）
         CREATE TABLE IF NOT EXISTS videos (
-            id TEXT PRIMARY KEY,
+            id TEXT NOT NULL,
+            owner_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
             url TEXT,
             title TEXT,
             region TEXT DEFAULT '通用',
@@ -158,7 +162,9 @@ def _ensure_schema(conn: sqlite3.Connection):
             effectiveness TEXT DEFAULT '',
             product_name TEXT DEFAULT '',
             review_status TEXT DEFAULT '能过审',
-            imported_at TEXT
+            is_public INTEGER DEFAULT 0,
+            imported_at TEXT,
+            PRIMARY KEY (id, owner_id)
         );
 
         -- 标签（通用 key-value，含 YouTube tags + 全局 config）
@@ -295,10 +301,12 @@ def _ensure_schema(conn: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS product_assets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL REFERENCES products(id),
-            video_id TEXT NOT NULL REFERENCES videos(id),
+            video_id TEXT NOT NULL,
+            video_owner_id INTEGER NOT NULL DEFAULT 1,
             added_by INTEGER REFERENCES users(id),
             added_at TEXT DEFAULT (datetime('now','localtime')),
-            UNIQUE(product_id, video_id)
+            UNIQUE(product_id, video_id),
+            FOREIGN KEY (video_id, video_owner_id) REFERENCES videos(id, owner_id)
         );
         CREATE INDEX IF NOT EXISTS idx_product_assets_product ON product_assets(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_assets_video ON product_assets(video_id);
@@ -306,12 +314,14 @@ def _ensure_schema(conn: sqlite3.Connection):
         -- 视频消耗追踪（手动录入广告消耗）
         CREATE TABLE IF NOT EXISTS video_consumption (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            video_id TEXT NOT NULL REFERENCES videos(id),
+            video_id TEXT NOT NULL,
+            video_owner_id INTEGER NOT NULL DEFAULT 1,
             user_id INTEGER NOT NULL REFERENCES users(id),
             product_id INTEGER REFERENCES products(id),
             amount REAL NOT NULL DEFAULT 0,
             consume_date TEXT NOT NULL DEFAULT (date('now','localtime')),
-            created_at TEXT DEFAULT (datetime('now','localtime'))
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (video_id, video_owner_id) REFERENCES videos(id, owner_id)
         );
         CREATE INDEX IF NOT EXISTS idx_vc_video ON video_consumption(video_id);
         CREATE INDEX IF NOT EXISTS idx_vc_user ON video_consumption(user_id);
@@ -712,6 +722,14 @@ def _migrate_if_needed(conn: sqlite3.Connection):
         _migrate_font_recent(conn, root)
         conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_font_recent','1')")
 
+    # 4. 迁移 videos 表为复合主键 (id, owner_id) — 支持多人私有同一视频
+    migrated_videos_pk = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_videos_composite_pk'"
+    ).fetchone()
+    if not migrated_videos_pk:
+        _migrate_videos_composite_pk(conn)
+        conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_videos_composite_pk','1')")
+
     conn.commit()
 
 
@@ -835,6 +853,63 @@ def _migrate_youtube_json(conn: sqlite3.Connection, json_path: str):
              v.get("effectiveness", ""), v.get("product_name", ""),
              v.get("review_status", "能过审"), v.get("imported_at", ""))
         )
+
+
+def _migrate_videos_composite_pk(conn: sqlite3.Connection):
+    """将 videos 表从单主键 (id) 改为复合主键 (id, owner_id)。
+    同时为 product_assets / video_consumption 加 video_owner_id 并回填。"""
+    # 检测是否已是新结构
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()]
+    pks = [r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()
+           if r[5]]  # pk column
+    if "owner_id" not in cols:
+        return  # 尚未添加 owner_id 列，等下次 _ensure_columns 后再迁移
+    if len(pks) > 1:
+        return  # 已是复合主键
+
+    # 1. 创建新表
+    conn.execute("""CREATE TABLE videos_new (
+        id TEXT NOT NULL,
+        owner_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+        url TEXT,
+        title TEXT,
+        region TEXT DEFAULT '通用',
+        frame_type TEXT DEFAULT '非融帧',
+        effectiveness TEXT DEFAULT '',
+        product_name TEXT DEFAULT '',
+        review_status TEXT DEFAULT '能过审',
+        is_public INTEGER DEFAULT 0,
+        imported_at TEXT,
+        PRIMARY KEY (id, owner_id)
+    )""")
+
+    # 2. 复制数据（owner_id 为空的设默认值 1）
+    conn.execute("""
+        INSERT INTO videos_new (id, owner_id, url, title, region, frame_type,
+            effectiveness, product_name, review_status, is_public, imported_at)
+        SELECT id, COALESCE(owner_id, 1), url, title, region, frame_type,
+            COALESCE(effectiveness, ''), COALESCE(product_name, ''),
+            COALESCE(review_status, '能过审'), COALESCE(is_public, 0), imported_at
+        FROM videos
+    """)
+
+    # 3. 替换表
+    conn.execute("DROP TABLE videos")
+    conn.execute("ALTER TABLE videos_new RENAME TO videos")
+
+    # 4. 回填 product_assets.video_owner_id
+    conn.execute("""
+        UPDATE product_assets SET video_owner_id = (
+            SELECT owner_id FROM videos WHERE videos.id = product_assets.video_id LIMIT 1
+        )
+    """)
+
+    # 5. 回填 video_consumption.video_owner_id
+    conn.execute("""
+        UPDATE video_consumption SET video_owner_id = (
+            SELECT owner_id FROM videos WHERE videos.id = video_consumption.video_id LIMIT 1
+        )
+    """)
 
 
 def _migrate_font_recent(conn: sqlite3.Connection, root: str):

@@ -1586,30 +1586,17 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
     if not parsed:
         return 0, [], []
 
-    # 2. 批量查库：哪些已存在
+    # 2. 批量查库：当前用户已导入的视频（同用户同视频才算重复）
     placeholders = ",".join(["?"] * len(parsed))
     existing_rows = db.execute(
-        f"SELECT id, title, owner_id, is_public FROM videos WHERE id IN ({placeholders})", parsed
+        f"SELECT id, title FROM videos WHERE id IN ({placeholders}) AND owner_id=?",
+        parsed + [user_id]
     ).fetchall()
-    existing_map = {r["id"]: r for r in existing_rows}
-
-    # 分类：用户可见的才算重复；不可见（别人私有）的改成按本次导入可见
-    duplicates = []
-    visible_existing_ids = set()
-    for vid in parsed:
-        er = existing_map.get(vid)
-        if not er:
-            continue
-        if er["owner_id"] == user_id or er["is_public"] == 1:
-            # 用户可见 → 真正重复
-            duplicates.append({"id": vid, "title": er["title"]})
-            visible_existing_ids.add(vid)
-        else:
-            # 别人私有 → 用户不可见，按本次请求更新可见性
-            db.execute("UPDATE videos SET is_public=? WHERE id=?", (is_public, vid))
-
+    existing_ids = {r["id"] for r in existing_rows}
     existing_titles = {r["id"]: r["title"] for r in existing_rows}
-    new_vids = [vid for vid in parsed if vid not in visible_existing_ids]
+
+    duplicates = [{"id": vid, "title": existing_titles.get(vid, vid)} for vid in parsed if vid in existing_ids]
+    new_vids = [vid for vid in parsed if vid not in existing_ids]
 
     # 3. 并行 oEmbed 获取标题（只有新视频需要）
     titles = {}
@@ -1632,25 +1619,17 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
                 vid, title = future.result()
                 titles[vid] = title
 
-    # 4. 批量 INSERT 新视频 + 统计已转为可见的旧视频
+    # 4. 批量 INSERT 新视频（复合主键确保同用户不重复，不同用户各自独立）
     ts = imported_at if imported_at else _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     imported = 0
     results = []
-    unhidden = set()
     for vid in parsed:
-        if vid in visible_existing_ids:
-            # 用户可见的已有视频 → 真正重复
+        if vid in existing_ids:
             results.append((vid, existing_titles.get(vid, vid), False))
-        elif vid in existing_map:
-            # 别人私有 → 已在上一步改为可见，算作导入成功
-            imported += 1
-            unhidden.add(vid)
-            results.append((vid, existing_titles.get(vid, vid), True))
         else:
-            # 全新视频 → INSERT
             title = titles.get(vid, vid)
             db.execute(
-                "INSERT INTO videos(id,url,title,region,frame_type,effectiveness,"
+                "INSERT OR IGNORE INTO videos(id,url,title,region,frame_type,effectiveness,"
                 "product_name,review_status,imported_at,owner_id,is_public) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (vid, f"https://www.youtube.com/watch?v={vid}", title, region,
@@ -1659,12 +1638,6 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
             )
             imported += 1
             results.append((vid, title, True))
-    if unhidden:
-        db.execute(
-            f"UPDATE videos SET region=?, frame_type=?, effectiveness=?, "
-            f"product_name=?, review_status=? WHERE id IN ({','.join(['?']*len(unhidden))})",
-            [region, frame_type, effectiveness, product_name, review_status] + list(unhidden)
-        )
 
     return imported, duplicates, results
 
@@ -1734,7 +1707,7 @@ def youtube_list():
     if uploader_id:
         where.append("v.owner_id = ?"); params.append(int(uploader_id))
 
-    query = "SELECT v.*, u.display_name AS owner_display_name, u.username AS owner_username, COALESCE(vc.total_consumption, 0) AS total_consumption FROM videos v LEFT JOIN users u ON v.owner_id = u.id LEFT JOIN (SELECT video_id, SUM(amount) AS total_consumption FROM video_consumption GROUP BY video_id) vc ON v.id = vc.video_id"
+    query = "SELECT v.*, u.display_name AS owner_display_name, u.username AS owner_username, COALESCE(vc.total_consumption, 0) AS total_consumption FROM videos v LEFT JOIN users u ON v.owner_id = u.id LEFT JOIN (SELECT video_id, video_owner_id, SUM(amount) AS total_consumption FROM video_consumption GROUP BY video_id, video_owner_id) vc ON v.id = vc.video_id AND v.owner_id = vc.video_owner_id"
     if where: query += " WHERE " + " AND ".join(where)
     query += " ORDER BY CASE v.review_status WHEN '不能过审' THEN 1 ELSE 0 END, CASE v.effectiveness WHEN '成效' THEN 0 WHEN '一般' THEN 1 ELSE 2 END, v.imported_at DESC"
 
@@ -1803,9 +1776,16 @@ def _can_modify(db, user_id, table, item_id):
     if user and user["role"] in ("developer", "admin"):
         return True, None
     try:
-        row = db.execute(
-            f"SELECT owner_id, is_public FROM {table} WHERE id=?", (item_id,)
-        ).fetchone()
+        # videos 表用复合主键 (id, owner_id)，需限定 owner 或可见范围
+        if table == "videos":
+            row = db.execute(
+                f"SELECT owner_id, is_public FROM {table} WHERE id=? AND (owner_id=? OR is_public=1) LIMIT 1",
+                (item_id, user_id)
+            ).fetchone()
+        else:
+            row = db.execute(
+                f"SELECT owner_id, is_public FROM {table} WHERE id=?", (item_id,)
+            ).fetchone()
         if not row:
             return False, "记录不存在"
         if row["owner_id"] == user_id:
@@ -1827,10 +1807,15 @@ def youtube_delete():
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
     is_admin = user and user["role"] in ("developer", "admin")
-    # 清理关联数据：成效素材关联 + 消耗记录
+    # 清理关联数据：成效素材关联 + 消耗记录（匹配 owner_id）
     placeholders = ",".join(["?"] * len(ids))
-    db.execute(f"DELETE FROM product_assets WHERE video_id IN ({placeholders})", ids)
-    db.execute(f"DELETE FROM video_consumption WHERE video_id IN ({placeholders})", ids)
+    if is_admin:
+        db.execute(f"DELETE FROM product_assets WHERE video_id IN ({placeholders})", ids)
+        db.execute(f"DELETE FROM video_consumption WHERE video_id IN ({placeholders})", ids)
+    else:
+        for vid in ids:
+            db.execute("DELETE FROM product_assets WHERE video_id=? AND video_owner_id=?", (vid, user_id))
+            db.execute("DELETE FROM video_consumption WHERE video_id=? AND video_owner_id=?", (vid, user_id))
     deleted = 0
     for vid in ids:
         if is_admin:
@@ -1857,7 +1842,8 @@ def youtube_edit():
     for f in ["region", "frame_type", "effectiveness", "product_name", "review_status", "is_public"]:
         if f in data: db.execute(f"UPDATE videos SET {f}=? WHERE id=?", (data[f], vid))
     db.commit()
-    row = db.execute("SELECT * FROM videos WHERE id=?", (vid,)).fetchone()
+    row = db.execute("SELECT * FROM videos WHERE id=? AND (owner_id=? OR is_public=1) LIMIT 1",
+                     (vid, user_id)).fetchone()
     db.close()
     return jsonify({"success": True, "video": dict(row)} if row else {"success": False, "error": "未找到"})
 
@@ -1916,8 +1902,12 @@ def youtube_consumption_get(vid):
     """获取视频的消耗明细（所有角色可查看）。"""
     db = _yt_db()
 
-    # 验证视频存在且用户有权限查看
-    video = db.execute("SELECT id, title, owner_id, is_public FROM videos WHERE id=?", (vid,)).fetchone()
+    # 验证视频存在且用户有权限查看（复合主键后取第一条可见的）
+    user_id = int(get_jwt_identity())
+    video = db.execute(
+        "SELECT id, title, owner_id, is_public FROM videos WHERE id=? AND (owner_id=? OR is_public=1) LIMIT 1",
+        (vid, user_id)
+    ).fetchone()
     if not video:
         db.close()
         return jsonify({"success": False, "error": "视频不存在"}), 404
@@ -1986,15 +1976,16 @@ def youtube_consumption_add(vid):
         return jsonify({"success": False, "error": "请选择日期"}), 400
 
     db = _yt_db()
-    # 验证视频存在
-    video = db.execute("SELECT id FROM videos WHERE id=?", (vid,)).fetchone()
+    # 验证当前用户的视频副本存在
+    video = db.execute("SELECT id, owner_id FROM videos WHERE id=? AND owner_id=?",
+                       (vid, user_id)).fetchone()
     if not video:
         db.close()
-        return jsonify({"success": False, "error": "视频不存在"}), 404
+        return jsonify({"success": False, "error": "你尚未导入该视频"}), 404
 
     cur = db.execute(
-        "INSERT INTO video_consumption (video_id, user_id, product_id, amount, consume_date) VALUES (?, ?, ?, ?, ?)",
-        (vid, user_id, product_id, float(amount), consume_date)
+        "INSERT INTO video_consumption (video_id, video_owner_id, user_id, product_id, amount, consume_date) VALUES (?, ?, ?, ?, ?, ?)",
+        (vid, video["owner_id"], user_id, product_id, float(amount), consume_date)
     )
     record_id = cur.lastrowid
     db.commit()
@@ -2121,7 +2112,7 @@ def youtube_consumption_dates():
     query = """
         SELECT vc.consume_date, COUNT(DISTINCT vc.video_id) AS cnt
         FROM video_consumption vc
-        JOIN videos v ON vc.video_id = v.id
+        JOIN videos v ON vc.video_id = v.id AND vc.video_owner_id = v.owner_id
         WHERE """ + " AND ".join(video_where) + """
         GROUP BY vc.consume_date
         ORDER BY vc.consume_date DESC
@@ -5848,7 +5839,11 @@ def admin_delete_user(uid):
         conn.execute("UPDATE products SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE accounts SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE mcc SET owner_id = NULL WHERE owner_id = ?", (uid,))
-        conn.execute("UPDATE videos SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        # videos 复合主键 (id, owner_id)，需级联删除关联数据而非置空
+        for vrow in conn.execute("SELECT id, owner_id FROM videos WHERE owner_id = ?", (uid,)).fetchall():
+            conn.execute("DELETE FROM product_assets WHERE video_id=? AND video_owner_id=?", (vrow["id"], uid))
+            conn.execute("DELETE FROM video_consumption WHERE video_id=? AND video_owner_id=?", (vrow["id"], uid))
+        conn.execute("DELETE FROM videos WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE copywritings SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE scrape_cache SET scraped_by = NULL WHERE scraped_by = ?", (uid,))
         conn.execute("DELETE FROM import_history WHERE user_id = ?", (uid,))
@@ -6408,7 +6403,7 @@ def product_assets_list(pid):
     rows = db.execute("""
         SELECT v.*, pa.added_by, pa.added_at, u.display_name AS added_by_name
         FROM product_assets pa
-        JOIN videos v ON pa.video_id = v.id
+        JOIN videos v ON pa.video_id = v.id AND pa.video_owner_id = v.owner_id
         LEFT JOIN users u ON pa.added_by = u.id
         WHERE pa.product_id = ?
         ORDER BY pa.added_by, pa.added_at DESC
@@ -6463,8 +6458,8 @@ def product_assets_add(pid):
             asset_dupes.append({"id": vid, "title": title})
         else:
             db.execute(
-                "INSERT INTO product_assets(product_id, video_id, added_by) VALUES(?,?,?)",
-                (pid, vid, user_id)
+                "INSERT INTO product_assets(product_id, video_id, video_owner_id, added_by) VALUES(?,?,?,?)",
+                (pid, vid, user_id, user_id)
             )
             asset_imported += 1
 
