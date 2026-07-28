@@ -39,3 +39,18 @@ export const rechargeApi = {
   delete: (id) => api.delete(`/recharge/${id}`),
   retrySheets: (id) => api.post(`/recharge/${id}/retry-sheets`),
 }
+
+export const optionApi = {
+  // agents
+  agents:    { list: () => api.get('/agents/list'), create: (name) => api.post('/agents/create', {name}),
+               rename: (id, name) => api.put(`/agents/${id}`, {name}), delete: (id) => api.delete(`/agents/${id}`) },
+  // statuses
+  statuses:  { list: () => api.get('/statuses/list'), create: (name) => api.post('/statuses/create', {name}),
+               rename: (id, name) => api.put(`/statuses/${id}`, {name}), delete: (id) => api.delete(`/statuses/${id}`) },
+  // mcc levels
+  mccLevels: { list: () => api.get('/mcc-levels/list'), create: (name) => api.post('/mcc-levels/create', {name}),
+               rename: (id, name) => api.put(`/mcc-levels/${id}`, {name}), delete: (id) => api.delete(`/mcc-levels/${id}`) },
+  // sales persons
+  salesPersons: { list: () => api.get('/sales-persons/list'), create: (name) => api.post('/sales-persons/create', {name}),
+                  rename: (id, name) => api.put(`/sales-persons/${id}`, {name}), delete: (id) => api.delete(`/sales-persons/${id}`) },
+}

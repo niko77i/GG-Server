@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { accountsApi, mccApi, settingsApi, rechargeApi } from '@/api/accounts'
+import { accountsApi, mccApi, settingsApi, rechargeApi, optionApi } from '@/api/accounts'
 import { dedupLoader, cachedLoader } from '@/utils/dedupLoader'
 
 export const useAccountStore = defineStore('accounts', {
@@ -14,7 +14,13 @@ export const useAccountStore = defineStore('accounts', {
     mccPage: 1,
     mccPageSize: 20,
     mccFilters: { search: '', level: '', parent_filter: '' },
-    settings: { account_statuses: ['存活','死亡','验证','限额'], account_agents: [], mcc_levels: [], sales_persons: [] },
+    settings: { recharge_sheet_id: '' },
+    options: {
+      agents: [],
+      statuses: [],
+      mccLevels: [],
+      salesPersons: [],
+    },
   }),
 
   actions: {
@@ -55,7 +61,7 @@ export const useAccountStore = defineStore('accounts', {
     async loadSettings() {
       return cachedLoader(this, 'settings', 300000, () => {
         return settingsApi.get().then(res => {
-          this.settings = res.settings
+          this.settings = { recharge_sheet_id: (res.settings && res.settings.recharge_sheet_id) || '' }
           this._settingsLoaded = true
           return res
         })
@@ -64,5 +70,45 @@ export const useAccountStore = defineStore('accounts', {
     async saveSettings(body) { return settingsApi.save(body) },
     async rechargeSubmit(body) { return rechargeApi.submit(body) },
     async rechargeBatchSubmit(body) { return rechargeApi.batchSubmit(body) },
+
+    // ---- option actions: agents ----
+    async loadAgents() {
+      const res = await optionApi.agents.list()
+      this.options.agents = res.agents || []
+      return this.options.agents
+    },
+    async createAgent(name) { const res = await optionApi.agents.create(name); await this.loadAgents(); return res },
+    async renameAgent(id, name) { await optionApi.agents.rename(id, name); await this.loadAgents() },
+    async deleteAgent(id) { await optionApi.agents.delete(id); await this.loadAgents() },
+
+    // ---- option actions: statuses ----
+    async loadStatuses() {
+      const res = await optionApi.statuses.list()
+      this.options.statuses = res.statuses || []
+      return this.options.statuses
+    },
+    async createStatus(name) { const res = await optionApi.statuses.create(name); await this.loadStatuses(); return res },
+    async renameStatus(id, name) { await optionApi.statuses.rename(id, name); await this.loadStatuses() },
+    async deleteStatus(id) { await optionApi.statuses.delete(id); await this.loadStatuses() },
+
+    // ---- option actions: mcc levels ----
+    async loadMccLevels() {
+      const res = await optionApi.mccLevels.list()
+      this.options.mccLevels = res.mcc_levels || []
+      return this.options.mccLevels
+    },
+    async createMccLevel(name) { const res = await optionApi.mccLevels.create(name); await this.loadMccLevels(); return res },
+    async renameMccLevel(id, name) { await optionApi.mccLevels.rename(id, name); await this.loadMccLevels() },
+    async deleteMccLevel(id) { await optionApi.mccLevels.delete(id); await this.loadMccLevels() },
+
+    // ---- option actions: sales persons ----
+    async loadSalesPersons() {
+      const res = await optionApi.salesPersons.list()
+      this.options.salesPersons = res.sales_persons || []
+      return this.options.salesPersons
+    },
+    async createSalesPerson(name) { const res = await optionApi.salesPersons.create(name); await this.loadSalesPersons(); return res },
+    async renameSalesPerson(id, name) { await optionApi.salesPersons.rename(id, name); await this.loadSalesPersons() },
+    async deleteSalesPerson(id) { await optionApi.salesPersons.delete(id); await this.loadSalesPersons() },
   },
 })
