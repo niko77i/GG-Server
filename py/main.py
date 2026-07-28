@@ -1589,13 +1589,27 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
     # 2. 批量查库：哪些已存在
     placeholders = ",".join(["?"] * len(parsed))
     existing_rows = db.execute(
-        f"SELECT id, title FROM videos WHERE id IN ({placeholders})", parsed
+        f"SELECT id, title, owner_id, is_public FROM videos WHERE id IN ({placeholders})", parsed
     ).fetchall()
-    existing_ids = {r["id"] for r in existing_rows}
-    existing_titles = {r["id"]: r["title"] for r in existing_rows}
+    existing_map = {r["id"]: r for r in existing_rows}
 
-    duplicates = [{"id": vid, "title": existing_titles.get(vid, vid)} for vid in parsed if vid in existing_ids]
-    new_vids = [vid for vid in parsed if vid not in existing_ids]
+    # 分类：用户可见的才算重复；不可见（别人私有）的改成按本次导入可见
+    duplicates = []
+    visible_existing_ids = set()
+    for vid in parsed:
+        er = existing_map.get(vid)
+        if not er:
+            continue
+        if er["owner_id"] == user_id or er["is_public"] == 1:
+            # 用户可见 → 真正重复
+            duplicates.append({"id": vid, "title": er["title"]})
+            visible_existing_ids.add(vid)
+        else:
+            # 别人私有 → 用户不可见，按本次请求更新可见性
+            db.execute("UPDATE videos SET is_public=? WHERE id=?", (is_public, vid))
+
+    existing_titles = {r["id"]: r["title"] for r in existing_rows}
+    new_vids = [vid for vid in parsed if vid not in visible_existing_ids]
 
     # 3. 并行 oEmbed 获取标题（只有新视频需要）
     titles = {}
@@ -1618,14 +1632,22 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
                 vid, title = future.result()
                 titles[vid] = title
 
-    # 4. 批量 INSERT 新视频
+    # 4. 批量 INSERT 新视频 + 统计已转为可见的旧视频
     ts = imported_at if imported_at else _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     imported = 0
     results = []
+    unhidden = set()
     for vid in parsed:
-        if vid in existing_ids:
+        if vid in visible_existing_ids:
+            # 用户可见的已有视频 → 真正重复
             results.append((vid, existing_titles.get(vid, vid), False))
+        elif vid in existing_map:
+            # 别人私有 → 已在上一步改为可见，算作导入成功
+            imported += 1
+            unhidden.add(vid)
+            results.append((vid, existing_titles.get(vid, vid), True))
         else:
+            # 全新视频 → INSERT
             title = titles.get(vid, vid)
             db.execute(
                 "INSERT INTO videos(id,url,title,region,frame_type,effectiveness,"
@@ -1637,6 +1659,12 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
             )
             imported += 1
             results.append((vid, title, True))
+    if unhidden:
+        db.execute(
+            f"UPDATE videos SET region=?, frame_type=?, effectiveness=?, "
+            f"product_name=?, review_status=? WHERE id IN ({','.join(['?']*len(unhidden))})",
+            [region, frame_type, effectiveness, product_name, review_status] + list(unhidden)
+        )
 
     return imported, duplicates, results
 
