@@ -10,7 +10,7 @@
         <span style="color:#888;font-size:12px;">已选 {{ selected.length }} 条</span>
         <el-select v-model="batchStatus" @change="doBatchStatus" placeholder="批量修改状态..."
           style="width:160px;" :disabled="!selected.length" clearable filterable>
-          <el-option v-for="s in store.settings.account_statuses" :key="s" :label="s" :value="s" />
+          <el-option v-for="s in store.options.statuses" :key="s.id" :label="s.name" :value="s.id" />
         </el-select>
         <el-select v-model="batchMcc" @change="doBatchMcc" placeholder="批量修改 MCC..."
           style="width:180px;" :disabled="!selected.length" clearable filterable>
@@ -149,11 +149,10 @@ async function load() {
 function filterByTimezone() { store.acPage = 1; load() }
 
 const availableStatuses = computed(() => {
-  const configStatuses = store.settings.account_statuses || []
-  const all = new Set([...Object.keys(statusCounts.value), ...configStatuses])
-  // 只显示实际有账户的状态（count > 0），按 settings 配置顺序排列
-  const orderMap = Object.fromEntries(configStatuses.map((s, i) => [s, i]))
-  return [...all].filter(s => (statusCounts.value[s] || 0) > 0)
+  const configStatuses = store.options.statuses || []
+  const allNames = new Set([...Object.keys(statusCounts.value), ...configStatuses.map(s => s.name)])
+  const orderMap = Object.fromEntries(configStatuses.map((s, i) => [s.name, i]))
+  return [...allNames].filter(s => (statusCounts.value[s] || 0) > 0)
     .sort((a, b) => (orderMap[a] ?? 999) - (orderMap[b] ?? 999))
 })
 
@@ -207,14 +206,16 @@ async function batchDelete() {
 
 async function doBatchStatus(val) {
   if (!val) return
+  const st = store.options.statuses.find(s => s.id === val)
+  const stName = st ? st.name : val
   try {
     await ElMessageBox.confirm(
-      `确定将选中的 ${selected.value.length} 个账户状态改为「${val}」？`,
+      `确定将选中的 ${selected.value.length} 个账户状态改为「${stName}」？`,
       '批量修改状态', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }
     )
   } catch { batchStatus.value = ''; return }
-  await store.batchUpdateAccounts({ ids: selected.value.map(s => s.id), field: 'status', value: val })
-  ElMessage.success(`已将 ${selected.value.length} 个账户状态改为「${val}」`)
+  await store.batchUpdateAccounts({ ids: selected.value.map(s => s.id), field: 'status_id', value: val })
+  ElMessage.success(`已将 ${selected.value.length} 个账户状态改为「${stName}」`)
   batchStatus.value = ''
 }
 async function doBatchMcc(val) {

@@ -3373,7 +3373,7 @@ def accounts_list():
         "mcc_tz": "m.name ASC, a.timezone ASC, a.name ASC",
         "tz": "m.name ASC, a.timezone ASC, a.name ASC",
         "name": "m.name ASC, a.name ASC",
-        "agent": "m.name ASC, a.agent ASC, a.name ASC",
+        "agent": "m.name ASC, ag.name ASC, a.name ASC",
         "created": "m.name ASC, a.created_at DESC",
     }
     sql += " ORDER BY " + sort_map.get(sort, sort_map["mcc_tz"]) + " LIMIT ? OFFSET ?"
@@ -3392,11 +3392,11 @@ def accounts_list():
     # 各状态的计数
     status_counts = {}
     for r in db.execute("""
-        SELECT COALESCE(st.name, a.status) as status, COUNT(*) as cnt
+        SELECT COALESCE(st.name, '存活') as status, COUNT(*) as cnt
         FROM accounts a
         LEFT JOIN account_statuses st ON a.status_id = st.id
         WHERE a.owner_id=?
-        GROUP BY COALESCE(st.name, a.status)
+        GROUP BY st.name
     """, (user_id,)).fetchall():
         s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
     # 筛选下拉数据（缓存低频查询结果）
@@ -3417,9 +3417,7 @@ def accounts_list():
             "SELECT DISTINCT ag.name FROM agents ag "
             "INNER JOIN accounts a ON a.agent_id = ag.id "
             "WHERE a.owner_id=? "
-            "UNION "
-            "SELECT DISTINCT a.agent FROM accounts a WHERE a.agent!='' AND a.agent_id IS NULL AND a.owner_id=? "
-            "ORDER BY 1", (user_id, user_id)
+            "ORDER BY 1", (user_id,)
         ).fetchall()]
         _app_cache.set(agents_cache_key, agents, ttl=120)
     tz_cache_key = f"accounts:tz:{user_id}"
@@ -4496,9 +4494,9 @@ def mcc_list():
             where.append("(m.name LIKE ? OR m.mcc_id LIKE ?)")
             params += [f"%{search}%", f"%{search}%"]
         if level:
-            where.append("m.level LIKE ?")
+            where.append("ml.name LIKE ?")
             params.append(f"%{level}%")
-        sql = "SELECT m.* FROM mcc m WHERE " + " AND ".join(where) + " ORDER BY m.created_at DESC"
+        sql = "SELECT m.* FROM mcc m LEFT JOIN mcc_levels ml ON m.level_id=ml.id WHERE " + " AND ".join(where) + " ORDER BY m.created_at DESC"
         matched_rows = db.execute(sql, params).fetchall()
 
         if not matched_rows:
@@ -7165,8 +7163,9 @@ def ad_reports_products():
     user_id = int(get_jwt_identity())
     db = _yt_db()
     rows = db.execute("""
-        SELECT DISTINCT p.id, p.product_name, p.region, p.sales_person, p.agency_ratio
+        SELECT DISTINCT p.id, p.product_name, p.region, COALESCE(sp.name, '') as sales_person, p.agency_ratio
         FROM products p
+        LEFT JOIN sales_persons sp ON p.sales_person_id = sp.id
         LEFT JOIN product_runners pr ON p.id = pr.product_id
         WHERE pr.user_id = ?
         ORDER BY p.product_name
@@ -7482,9 +7481,10 @@ def ad_reports_list():
         products = [dict(r) for r in db.execute(
             """SELECT DISTINCT p.product_name AS name,
                p.product_name ||
-               CASE WHEN p.sales_person IS NOT NULL AND p.sales_person != ''
-                    THEN ' ' || p.sales_person ELSE '' END AS label
+               CASE WHEN sp.name IS NOT NULL AND sp.name != ''
+                    THEN ' ' || sp.name ELSE '' END AS label
                FROM products p
+               LEFT JOIN sales_persons sp ON p.sales_person_id = sp.id
                JOIN product_runners pr ON p.id = pr.product_id
                WHERE pr.user_id=? AND p.region=?
                ORDER BY p.product_name""",
@@ -7494,9 +7494,10 @@ def ad_reports_list():
         products = [dict(r) for r in db.execute(
             """SELECT DISTINCT p.product_name AS name,
                p.product_name ||
-               CASE WHEN p.sales_person IS NOT NULL AND p.sales_person != ''
-                    THEN ' ' || p.sales_person ELSE '' END AS label
+               CASE WHEN sp.name IS NOT NULL AND sp.name != ''
+                    THEN ' ' || sp.name ELSE '' END AS label
                FROM products p
+               LEFT JOIN sales_persons sp ON p.sales_person_id = sp.id
                JOIN product_runners pr ON p.id = pr.product_id
                WHERE pr.user_id=?
                ORDER BY p.product_name""",
