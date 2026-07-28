@@ -12,7 +12,7 @@
 
     <div v-else-if="diff">
       <el-alert type="info" :closable="false" style="margin-bottom:16px;">
-        Sheet 中共 <strong>{{ diff.summary?.total_in_sheet || 0 }}</strong> 条记录
+        Sheet 中共 <strong>{{ summary?.total_in_sheet || 0 }}</strong> 条记录
       </el-alert>
 
       <!-- 新增 -->
@@ -77,6 +77,7 @@ const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
 const diff = ref(null)
+const summary = ref(null)
 const selectedUpdates = ref([])
 
 const canSync = computed(() => {
@@ -101,6 +102,7 @@ async function startSync() {
     const res = await store.syncFromSheet({ dry_run: true })
     if (res.success) {
       diff.value = res.diff
+      summary.value = res.summary
       // 默认全选状态变更项
       selectedUpdates.value = [...(res.diff?.to_update || [])]
     } else {
