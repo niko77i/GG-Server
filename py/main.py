@@ -5217,8 +5217,11 @@ def _get_sync_spreadsheet_id(db) -> str:
     """
     row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
     if row and row["value"]:
-        raw = _json.loads(row["value"]) if row["value"] else ""
-        return _parse_sheet_id(raw)
+        try:
+            raw = _json.loads(row["value"])
+            return _parse_sheet_id(raw)
+        except Exception:
+            return ""
     return ""
 
 
