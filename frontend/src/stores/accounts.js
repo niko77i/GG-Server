@@ -14,7 +14,7 @@ export const useAccountStore = defineStore('accounts', {
     mccPage: 1,
     mccPageSize: 20,
     mccFilters: { search: '', level: '', parent_filter: '' },
-    settings: { recharge_sheet_id: '' },
+    settings: { recharge_sheet_id: '', sheet_mappings: { recharge: '充值表' } },
     options: {
       agents: [],
       statuses: [],

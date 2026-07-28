@@ -29,5 +29,10 @@ export const googleSheetsApi = {
   /** 手动重试做表数据 Sheets 同步 */
   retrySync(body) {
     return api.post('/google-sheets/retry-sync', body)
-  }
+  },
+
+  /** 读取指定 spreadsheet 中的所有 sheet 列表 */
+  listSheets(spreadsheetId) {
+    return api.get('/google-sheets/sheets', { params: { spreadsheet_id: spreadsheetId } })
+  },
 }
