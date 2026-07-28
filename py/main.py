@@ -4594,6 +4594,188 @@ def mcc_detail(mid):
     return jsonify({"success": True, "mcc": mcc_data})
 
 
+# ========== Agents 选项 API ==========
+
+@app.route("/api/agents/list", methods=["GET"])
+@jwt_required()
+def agents_list():
+    """返回当前用户的代理名选项列表。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    rows = db.execute(
+        "SELECT id, name FROM agents WHERE owner_id=? ORDER BY id",
+        (user_id,)
+    ).fetchall()
+    db.close()
+    return jsonify({"success": True, "agents": [dict(r) for r in rows]})
+
+
+@app.route("/api/agents/create", methods=["POST"])
+@jwt_required()
+def agents_create():
+    """新增代理名。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "名称不能为空"}), 400
+    db = _yt_db()
+    existing = db.execute(
+        "SELECT id FROM agents WHERE name=? AND owner_id=?", (name, user_id)
+    ).fetchone()
+    if existing:
+        db.close()
+        return jsonify({"success": False, "error": f"代理「{name}」已存在"}), 409
+    db.execute("INSERT INTO agents(name, owner_id) VALUES(?,?)", (name, user_id))
+    db.commit()
+    new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.close()
+    return jsonify({"success": True, "id": new_id})
+
+
+@app.route("/api/agents/<int:aid>", methods=["PUT"])
+@jwt_required()
+def agents_rename(aid):
+    """重命名代理 — 所有 JOIN 引用自动生效。"""
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "名称不能为空"}), 400
+    db = _yt_db()
+    # 检查是否存在
+    row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "代理不存在或无权修改"}), 404
+    # 检查重名
+    dup = db.execute(
+        "SELECT id FROM agents WHERE name=? AND owner_id=? AND id!=?",
+        (name, user_id, aid)
+    ).fetchone()
+    if dup:
+        db.close()
+        return jsonify({"success": False, "error": f"代理「{name}」已存在"}), 409
+    db.execute("UPDATE agents SET name=? WHERE id=?", (name, aid))
+    db.commit()
+    # 清除缓存
+    _app_cache.delete(f"accounts:agents:{user_id}")
+    db.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/agents/<int:aid>", methods=["DELETE"])
+@jwt_required()
+def agents_delete(aid):
+    """删除代理 — 有引用则阻止。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "代理不存在或无权操作"}), 404
+    # 检查引用
+    refs = []
+    ac = db.execute("SELECT COUNT(*) FROM accounts WHERE agent_id=?", (aid,)).fetchone()[0]
+    if ac > 0:
+        refs.append(f"{ac} 个账户")
+    rc = db.execute("SELECT COUNT(*) FROM recharge_records WHERE agent_id=?", (aid,)).fetchone()[0]
+    if rc > 0:
+        refs.append(f"{rc} 条充值记录")
+    if refs:
+        db.close()
+        return jsonify({"success": False, "error": f"无法删除：被 {'、'.join(refs)} 引用，请先解除关联"}), 409
+    db.execute("DELETE FROM agents WHERE id=?", (aid,))
+    db.commit()
+    _app_cache.delete(f"accounts:agents:{user_id}")
+    db.close()
+    return jsonify({"success": True})
+
+
+# ========== Account Statuses 选项 API ==========
+
+@app.route("/api/statuses/list", methods=["GET"])
+@jwt_required()
+def statuses_list():
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    rows = db.execute(
+        "SELECT id, name FROM account_statuses WHERE owner_id=? ORDER BY id",
+        (user_id,)
+    ).fetchall()
+    db.close()
+    return jsonify({"success": True, "statuses": [dict(r) for r in rows]})
+
+
+@app.route("/api/statuses/create", methods=["POST"])
+@jwt_required()
+def statuses_create():
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "名称不能为空"}), 400
+    db = _yt_db()
+    existing = db.execute(
+        "SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (name, user_id)
+    ).fetchone()
+    if existing:
+        db.close()
+        return jsonify({"success": False, "error": f"状态「{name}」已存在"}), 409
+    db.execute("INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (name, user_id))
+    db.commit()
+    new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.close()
+    return jsonify({"success": True, "id": new_id})
+
+
+@app.route("/api/statuses/<int:sid>", methods=["PUT"])
+@jwt_required()
+def statuses_rename(sid):
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "名称不能为空"}), 400
+    db = _yt_db()
+    row = db.execute("SELECT id FROM account_statuses WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "状态不存在或无权修改"}), 404
+    dup = db.execute(
+        "SELECT id FROM account_statuses WHERE name=? AND owner_id=? AND id!=?",
+        (name, user_id, sid)
+    ).fetchone()
+    if dup:
+        db.close()
+        return jsonify({"success": False, "error": f"状态「{name}」已存在"}), 409
+    db.execute("UPDATE account_statuses SET name=? WHERE id=?", (name, sid))
+    db.commit()
+    _app_cache.delete(f"accounts:statuses:{user_id}")
+    db.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/statuses/<int:sid>", methods=["DELETE"])
+@jwt_required()
+def statuses_delete(sid):
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    row = db.execute("SELECT id FROM account_statuses WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "状态不存在或无权操作"}), 404
+    ac = db.execute("SELECT COUNT(*) FROM accounts WHERE status_id=?", (sid,)).fetchone()[0]
+    if ac > 0:
+        db.close()
+        return jsonify({"success": False, "error": f"无法删除：被 {ac} 个账户引用，请先解除关联"}), 409
+    db.execute("DELETE FROM account_statuses WHERE id=?", (sid,))
+    db.commit()
+    _app_cache.delete(f"accounts:statuses:{user_id}")
+    db.close()
+    return jsonify({"success": True})
+
+
 # ---------- 账户设置 API ----------
 
 @app.route("/api/settings/account", methods=["GET"])
