@@ -4292,8 +4292,11 @@ def accounts_recharge_records(aid):
         db.close()
         return jsonify({"success": False, "error": "账户不存在"}), 404
     records = db.execute(
-        "SELECT id, account_id, amount, agent, operator, status, sheets_synced, sheets_error, created_at FROM recharge_records "
-        "WHERE account_id=? ORDER BY created_at DESC",
+        "SELECT r.id, r.account_id, r.amount, COALESCE(a.name, '') AS agent, "
+        "r.operator, r.status, r.sheets_synced, r.sheets_error, r.created_at "
+        "FROM recharge_records r "
+        "LEFT JOIN agents a ON r.agent_id = a.id "
+        "WHERE r.account_id=? ORDER BY r.created_at DESC",
         (account["account_id"],)
     ).fetchall()
     db.close()
