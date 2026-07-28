@@ -44,12 +44,12 @@
             <template #default="{ row }">{{ getClaimEdit(row, 'timezone') || '-' }}</template>
           </el-table-column>
           <el-table-column label="代理" width="55" align="center" show-overflow-tooltip>
-            <template #default="{ row }">{{ getClaimEdit(row, 'agent') || '-' }}</template>
+            <template #default="{ row }">{{ agentNameById(getClaimEdit(row, 'agent')) }}</template>
           </el-table-column>
           <el-table-column label="状态" width="55" align="center">
             <template #default="{ row }">
-              <el-tag size="small" :type="getClaimEdit(row, 'status') === '死亡' ? 'danger' : getClaimEdit(row, 'status') === '存活' ? 'success' : 'info'">
-                {{ getClaimEdit(row, 'status') }}
+              <el-tag size="small" :type="statusNameById(getClaimEdit(row, 'status')) === '死亡' ? 'danger' : statusNameById(getClaimEdit(row, 'status')) === '存活' ? 'success' : 'info'">
+                {{ statusNameById(getClaimEdit(row, 'status')) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -90,8 +90,8 @@
             </el-col>
             <el-col :span="8">
               <el-form-item label="代理" style="margin-bottom:8px;">
-                <el-select v-model="claimEdits[editingId].agent" size="small" filterable allow-create style="width:100%;">
-                  <el-option v-for="a in store.settings.account_agents" :key="a" :label="a" :value="a" />
+                <el-select v-model="claimEdits[editingId].agent" size="small" filterable style="width:100%;">
+                  <el-option v-for="a in store.options.agents" :key="a.id" :label="a.name" :value="a.id" />
                 </el-select>
               </el-form-item>
             </el-col>
@@ -100,7 +100,7 @@
             <el-col :span="8">
               <el-form-item label="状态" style="margin-bottom:0;">
                 <el-select v-model="claimEdits[editingId].status" size="small" filterable style="width:100%;">
-                  <el-option v-for="s in store.settings.account_statuses" :key="s" :label="s" :value="s" />
+                  <el-option v-for="s in store.options.statuses" :key="s.id" :label="s.name" :value="s.id" />
                 </el-select>
               </el-form-item>
             </el-col>
@@ -137,12 +137,12 @@
             <template #default="{ row }">{{ getNewEdit(row.account_id, 'timezone') || '-' }}</template>
           </el-table-column>
           <el-table-column label="代理" width="60" align="center" show-overflow-tooltip>
-            <template #default="{ row }">{{ getNewEdit(row.account_id, 'agent') || '-' }}</template>
+            <template #default="{ row }">{{ agentNameById(getNewEdit(row.account_id, 'agent')) }}</template>
           </el-table-column>
           <el-table-column label="状态" width="55" align="center">
             <template #default="{ row }">
-              <el-tag size="small" :type="getNewEdit(row.account_id, 'status') === '死亡' ? 'danger' : getNewEdit(row.account_id, 'status') === '存活' ? 'success' : 'info'">
-                {{ getNewEdit(row.account_id, 'status') }}
+              <el-tag size="small" :type="statusNameById(getNewEdit(row.account_id, 'status')) === '死亡' ? 'danger' : statusNameById(getNewEdit(row.account_id, 'status')) === '存活' ? 'success' : 'info'">
+                {{ statusNameById(getNewEdit(row.account_id, 'status')) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -181,8 +181,8 @@
             </el-col>
             <el-col :span="8">
               <el-form-item label="代理" style="margin-bottom:8px;">
-                <el-select v-model="newAccountEdits[newEditingId].agent" size="small" filterable allow-create style="width:100%;">
-                  <el-option v-for="a in store.settings.account_agents" :key="a" :label="a" :value="a" />
+                <el-select v-model="newAccountEdits[newEditingId].agent" size="small" filterable style="width:100%;">
+                  <el-option v-for="a in store.options.agents" :key="a.id" :label="a.name" :value="a.id" />
                 </el-select>
               </el-form-item>
             </el-col>
@@ -191,7 +191,7 @@
             <el-col :span="8">
               <el-form-item label="状态" style="margin-bottom:0;">
                 <el-select v-model="newAccountEdits[newEditingId].status" size="small" filterable style="width:100%;">
-                  <el-option v-for="s in store.settings.account_statuses" :key="s" :label="s" :value="s" />
+                  <el-option v-for="s in store.options.statuses" :key="s.id" :label="s.name" :value="s.id" />
                 </el-select>
               </el-form-item>
             </el-col>
@@ -241,15 +241,15 @@
               </el-col>
               <el-col :span="8">
                 <el-form-item label="代理" required style="margin-bottom:8px;">
-                  <el-select v-model="defaultForm.agent" size="small" filterable allow-create placeholder="输入或选择" style="width:100%;">
-                    <el-option v-for="a in store.settings.account_agents" :key="a" :label="a" :value="a" />
+                  <el-select v-model="defaultForm.agent" size="small" filterable placeholder="选择代理" style="width:100%;">
+                    <el-option v-for="a in store.options.agents" :key="a.id" :label="a.name" :value="a.id" />
                   </el-select>
                 </el-form-item>
               </el-col>
               <el-col :span="8">
                 <el-form-item label="状态" style="margin-bottom:8px;">
                   <el-select v-model="defaultForm.status" size="small" style="width:100%;" filterable>
-                    <el-option v-for="s in store.settings.account_statuses" :key="s" :label="s" :value="s" />
+                    <el-option v-for="s in store.options.statuses" :key="s.id" :label="s.name" :value="s.id" />
                   </el-select>
                 </el-form-item>
               </el-col>
@@ -381,8 +381,8 @@ const form = reactive({
   name_prefix: '',
   mcc_id: '',
   timezone: '',
-  agent: '',
-  status: '存活',
+  agent: null,
+  status: null,
   acquired_date: '',
 })
 const defaultForm = form  // 共用默认值（保持原名兼容）
@@ -495,11 +495,13 @@ watch(newIds, (ids) => {
 // ===== 已有账户编辑 =====
 function initClaimEdits(row) {
   if (!claimEdits[row.account_id]) {
+    const matchedAgent = store.options.agents.find(a => a.name === row.agent)
+    const matchedStatus = store.options.statuses.find(s => s.name === row.status)
     claimEdits[row.account_id] = {
       name: row.name,
       timezone: row.timezone || '',
-      agent: row.agent || '',
-      status: row.status || '存活',
+      agent: matchedAgent ? matchedAgent.id : null,
+      status: matchedStatus ? matchedStatus.id : null,
       mcc_id: row.mcc_id || '',
       acquired_date: row.acquired_date || '',
     }
@@ -520,6 +522,18 @@ function mccNameById(mccId) {
   if (!mccId) return null
   const m = mccOptions.value.find(o => o.id === mccId)
   return m ? m.name + ' (' + m.mcc_id + ')' : null
+}
+
+function agentNameById(id) {
+  if (!id) return '-'
+  const a = store.options.agents.find(a => a.id === id)
+  return a ? a.name : '-'
+}
+
+function statusNameById(id) {
+  if (!id) return '-'
+  const s = store.options.statuses.find(s => s.id === id)
+  return s ? s.name : '-'
 }
 
 function existingRowClass({ row }) {
@@ -557,13 +571,17 @@ async function doLookup() {
 
 // ===== 初始化 =====
 function init() {
+  // 确保选项已加载
+  if (!store.options.agents.length) store.loadAgents()
+  if (!store.options.statuses.length) store.loadStatuses()
   const d = new Date()
+  const defaultStatusId = store.options.statuses.find(s => s.name === '存活')?.id ?? null
   form.acquired_date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   form.name_prefix = ''
   form.mcc_id = ''
   form.timezone = ''
-  form.agent = ''
-  form.status = '存活'
+  form.agent = null
+  form.status = defaultStatusId
   idText.value = ''
   allFound.value = []
   claimSelection.value = []
@@ -613,8 +631,8 @@ async function submit() {
       const diff = {}
       if (cur.name !== def.name) diff.name = cur.name
       if (cur.timezone !== def.timezone) diff.timezone = cur.timezone
-      if (cur.agent !== def.agent) diff.agent = cur.agent
-      if (cur.status !== def.status) diff.status = cur.status
+      if (cur.agent !== def.agent) diff.agent_id = cur.agent
+      if (cur.status !== def.status) diff.status_id = cur.status
       if (cur.mcc_id !== def.mcc_id) diff.mcc_id = cur.mcc_id
       if (cur.acquired_date !== def.acquired_date) diff.acquired_date = cur.acquired_date
       if (Object.keys(diff).length) overrides[aid] = diff
@@ -625,29 +643,13 @@ async function submit() {
         name_prefix: defaultForm.name_prefix,
         mcc_id: defaultForm.mcc_id || null,
         timezone: defaultForm.timezone,
-        agent: defaultForm.agent,
-        status: defaultForm.status,
+        agent_id: defaultForm.agent,
+        status_id: defaultForm.status,
         acquired_date: defaultForm.acquired_date,
         overrides: Object.keys(overrides).length ? overrides : undefined,
       })
       created = res.created || 0
       if (res.skipped) skipped.push(...res.skipped)
-      if (created > 0) {
-        const agents = [...(store.settings.account_agents || [])]
-        if (defaultForm.agent && !agents.includes(defaultForm.agent)) {
-          agents.push(defaultForm.agent)
-        }
-        // 也收集 overrides 中的新代理
-        for (const ov of Object.values(overrides)) {
-          if (ov.agent && !agents.includes(ov.agent)) {
-            agents.push(ov.agent)
-          }
-        }
-        if (agents.length > (store.settings.account_agents || []).length) {
-          await store.saveSettings({ account_agents: agents })
-          store.settings.account_agents = agents
-        }
-      }
     } catch (e) {
       ElMessage.error('批量创建失败：' + (e.response?.data?.error || e.message))
     }
@@ -661,8 +663,8 @@ async function submit() {
       await accountsApi.reassign(row.id, {
         name: edits.name !== row.name ? edits.name : undefined,
         timezone: edits.timezone,
-        agent: edits.agent,
-        status: edits.status,
+        agent_id: edits.agent,
+        status_id: edits.status,
         mcc_id: edits.mcc_id,
         acquired_date: edits.acquired_date,
       })

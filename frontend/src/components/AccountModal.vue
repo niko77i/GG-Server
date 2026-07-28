@@ -26,13 +26,13 @@
         </el-select>
       </el-form-item>
       <el-form-item label="代理" required>
-        <el-select v-model="form.agent" filterable allow-create placeholder="输入或选择" style="width:100%;">
-          <el-option v-for="a in store.settings.account_agents" :key="a" :label="a" :value="a" />
+        <el-select v-model="form.agent" filterable placeholder="选择代理" style="width:100%;">
+          <el-option v-for="a in store.options.agents" :key="a.id" :label="a.name" :value="a.id" />
         </el-select>
       </el-form-item>
       <el-form-item label="状态" required>
         <el-select v-model="form.status" style="width:100%;" filterable>
-          <el-option v-for="s in store.settings.account_statuses" :key="s" :label="s" :value="s" />
+          <el-option v-for="s in store.options.statuses" :key="s.id" :label="s.name" :value="s.id" />
         </el-select>
       </el-form-item>
       <el-form-item label="到手时间">
@@ -63,7 +63,7 @@ const mccOptions = ref([])
 const accountIdError = ref('')
 const claimExistingId = ref(null)   // DB 中已有账户的 id，非空表示认领模式
 const claimOwnerName = ref('')
-const form = reactive({ name: '', account_id: '', mcc_id: '', timezone: '', agent: '', status: '存活', acquired_date: '', death_date: '' })
+const form = reactive({ name: '', account_id: '', mcc_id: '', timezone: '', agent: null, status: null, acquired_date: '', death_date: '' })
 
 // Google Ads 账户 ID 格式：XXX-XXX-XXXX（10位数字，含分隔符）
 const ACCOUNT_ID_PATTERN = /^\d{3}-\d{3}-\d{4}$/
@@ -94,13 +94,15 @@ async function onAccountIdBlur() {
     if (res.found && res.existing) {
       const ex = res.existing
       // 预填表单
+      const matchedAgent = store.options.agents.find(a => a.name === ex.agent)
+      const matchedStatus = store.options.statuses.find(s => s.name === ex.status)
       Object.assign(form, {
         name: ex.name || '',
         account_id: ex.account_id,
         mcc_id: ex.mcc_id || '',
         timezone: ex.timezone || '',
-        agent: ex.agent || '',
-        status: ex.status || '存活',
+        agent: matchedAgent ? matchedAgent.id : null,
+        status: matchedStatus ? matchedStatus.id : null,
         acquired_date: ex.acquired_date || '',
         death_date: '',
       })
@@ -141,10 +143,11 @@ watch(() => form.status, (newStatus, oldStatus) => {
   // 获取本地当前日期，避免时区问题
   const d = new Date()
   const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  if (newStatus === '死亡' && oldStatus !== '死亡') {
+  const deathId = store.options.statuses.find(s => s.name === '死亡')?.id ?? null
+  if (newStatus === deathId && oldStatus !== deathId) {
     // 切换到死亡状态，自动设置死亡时间为今天
     form.death_date = today
-  } else if (oldStatus === '死亡' && newStatus !== '死亡') {
+  } else if (oldStatus === deathId && newStatus !== deathId) {
     // 从死亡状态切换到其他状态，清空死亡时间
     form.death_date = ''
   }
@@ -153,51 +156,62 @@ watch(() => form.status, (newStatus, oldStatus) => {
 async function init() {
   const res = await mccApi.options()
   mccOptions.value = res.options || []
+  // 确保选项已加载
+  if (!store.options.agents.length) await store.loadAgents()
+  if (!store.options.statuses.length) await store.loadStatuses()
   // 重置认领状态
   claimExistingId.value = null
   claimOwnerName.value = ''
   accountIdError.value = ''
   if (props.editId) {
     const a = store.accounts.find(a => a.id === props.editId)
-    if (a) Object.assign(form, {
-      name: a.name || '', account_id: a.account_id || '', mcc_id: a.mcc_id || '',
-      timezone: a.timezone || '', agent: a.agent || '', status: a.status || '存活',
-      acquired_date: a.acquired_date || '', death_date: a.death_date || '',
-    })
+    if (a) {
+      const matchedAgent = store.options.agents.find(x => x.name === a.agent)
+      const matchedStatus = store.options.statuses.find(x => x.name === a.status)
+      Object.assign(form, {
+        name: a.name || '', account_id: a.account_id || '', mcc_id: a.mcc_id || '',
+        timezone: a.timezone || '', agent: matchedAgent ? matchedAgent.id : null,
+        status: matchedStatus ? matchedStatus.id : null,
+        acquired_date: a.acquired_date || '', death_date: a.death_date || '',
+      })
+    }
   } else {
     // 获取本地当前日期，避免时区问题
     const d = new Date()
     const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    Object.assign(form, { name: '', account_id: '', mcc_id: '', timezone: '', agent: '', status: '存活',
+    const defaultStatusId = store.options.statuses.find(s => s.name === '存活')?.id ?? null
+    Object.assign(form, { name: '', account_id: '', mcc_id: '', timezone: '', agent: null, status: defaultStatusId,
       acquired_date: today, death_date: '' })
   }
 }
 
 async function submit() {
-  if (!form.name || !form.account_id || !form.agent) { ElMessage.warning('账号名称、ID 和代理不能为空'); return }
+  if (!form.name || !form.account_id) { ElMessage.warning('账号名称和 ID 不能为空'); return }
+  if (!form.agent) { ElMessage.warning('请选择代理'); return }
   if (!validateAccountId()) { ElMessage.warning('账号 ID 格式错误，应为 XXX-XXX-XXXX'); return }
   saving.value = true
   try {
     if (claimExistingId.value) {
       // 认领模式：转移归属权 + 更新字段
       await store.reassignAccount(claimExistingId.value, {
-        name: form.name, timezone: form.timezone, agent: form.agent,
-        status: form.status, acquired_date: form.acquired_date, mcc_id: form.mcc_id,
+        name: form.name, timezone: form.timezone, agent_id: form.agent,
+        status_id: form.status, acquired_date: form.acquired_date, mcc_id: form.mcc_id,
       })
     } else if (props.editId) {
-      const res = await store.updateAccount(props.editId, form)
+      const res = await store.updateAccount(props.editId, {
+        name: form.name, mcc_id: form.mcc_id, timezone: form.timezone,
+        agent_id: form.agent, status_id: form.status,
+        acquired_date: form.acquired_date, death_date: form.death_date,
+      })
       if (res.recharge_note === '已追加清账记录') {
         ElMessage.success('该账户已自动追加清账记录')
       }
     } else {
-      await store.createAccount(form)
-    }
-    // 自动保存新代理名到设置
-    const agents = [...(store.settings.account_agents || [])]
-    if (form.agent && !agents.includes(form.agent)) {
-      agents.push(form.agent)
-      await store.saveSettings({ account_agents: agents })
-      store.settings.account_agents = agents
+      await store.createAccount({
+        name: form.name, account_id: form.account_id, mcc_id: form.mcc_id || null,
+        timezone: form.timezone, agent_id: form.agent, status_id: form.status,
+        acquired_date: form.acquired_date, death_date: form.death_date,
+      })
     }
     emit('update:visible', false)
     emit('saved')

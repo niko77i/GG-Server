@@ -31,7 +31,7 @@
           <el-option v-for="m in mccOptions" :key="m.id" :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
         </el-select>
         <el-select v-model="store.acFilters.agent" @change="searchAndLoad" placeholder="全部代理" style="width:130px;" clearable filterable>
-          <el-option v-for="a in agentOptions" :key="a" :label="a" :value="a" />
+          <el-option v-for="a in agentOptions" :key="a.id" :label="a.name" :value="a.name" />
         </el-select>
         <el-select v-model="store.acFilters.timezone" @change="filterByTimezone" placeholder="全部时区" style="width:140px;" clearable filterable>
           <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
@@ -132,6 +132,8 @@ let searchTimer = null
 
 onMounted(() => {
   store.loadSettings()
+  store.loadAgents()
+  store.loadStatuses()
   if (!store.acFilters.status) store.acFilters.status = '存活'
   load()
 })
@@ -139,7 +141,7 @@ onMounted(() => {
 async function load() {
   const res = await store.loadAccounts()
   mccOptions.value = res.mcc_options || []
-  agentOptions.value = [...new Set([...store.settings.account_agents, ...(res.agents||[])])].filter(Boolean).sort()
+  agentOptions.value = store.options.agents.map(a => ({ id: a.id, name: a.name }))
   timezoneOptions.value = res.timezone_options || []
   if (res.status_counts) statusCounts.value = res.status_counts
 }
