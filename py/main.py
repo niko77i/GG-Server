@@ -4275,11 +4275,20 @@ def accounts_sync_from_sheet():
                     st_id = st["id"]
 
                 # 更新账户状态（不触发清账逻辑）
-                db.execute(
-                    "UPDATE accounts SET status_id=?, status_changed_date=datetime('now','localtime'), "
-                    "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
-                    (st_id, account_id, user_id)
-                )
+                # 同步死亡时间
+                if new_status == "死亡":
+                    db.execute(
+                        "UPDATE accounts SET status_id=?, death_date=date('now','localtime'), "
+                        "status_changed_date=datetime('now','localtime'), "
+                        "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
+                        (st_id, account_id, user_id)
+                    )
+                else:
+                    db.execute(
+                        "UPDATE accounts SET status_id=?, status_changed_date=datetime('now','localtime'), "
+                        "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
+                        (st_id, account_id, user_id)
+                    )
                 updated_count += 1
         except Exception as e:
             errors.append({"account_id": item.get("account_id", ""), "error": str(e)})
