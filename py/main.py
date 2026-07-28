@@ -3988,6 +3988,7 @@ def accounts_batch_update():
             value = None
         user_id = int(get_jwt_identity())
         new_clear_rows = []
+        dashboard_sync_rows = []  # 收集状态变更账户，供 my_dashboard 后台同步
 
         # status_id 解析为 status_name，用于清账比较
         status_name_for_clear = None
@@ -4018,6 +4019,8 @@ def accounts_batch_update():
                 # 状态变更时间
                 if old["status_name"] != status_value_effective:
                     db.execute("UPDATE accounts SET status_changed_date=datetime('now','localtime') WHERE id=?", (aid,))
+                    # 收集状态变更，供 db.commit() 后 my_dashboard 后台同步
+                    dashboard_sync_rows.append((old["account_id"], status_value_effective))
                 # 死亡时间兼容
                 if status_value_effective == "死亡":
                     db.execute("UPDATE accounts SET death_date=date('now','localtime') WHERE id=?", (aid,))
@@ -4085,40 +4088,33 @@ def accounts_batch_update():
                                         (err_msg, rid))
                     _db.commit(); _db.close()
                 _sync_sheets_background(_do_sync, _on_fail)
-                # 新增：批量状态变更时同步「我的看板」
-                dashboard_name = _get_my_dashboard_name(db, user_id)
-                if dashboard_name:
-                    _dname = dashboard_name
-                    _sid = sheet_id
-                    # 收集所有发生状态变更的账户
-                    _status_updates = []
-                    for aid in ids:
-                        old = db.execute(
-                            "SELECT a.account_id, COALESCE(st.name, '存活') AS status_name "
-                            "FROM accounts a "
-                            "LEFT JOIN account_statuses st ON a.status_id = st.id "
-                            "WHERE a.id=?", (aid,)
-                        ).fetchone()
-                        if old and old["status_name"] != status_value_effective:
-                            _status_updates.append({
-                                "account_id": old["account_id"],
-                                "new_status": status_value_effective,
-                            })
-                    if _status_updates:
-                        def _sync_batch_dashboard():
-                            import google_sheets_service as gs
-                            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                            for u in _status_updates:
-                                try:
-                                    gs.update_cell_by_account_id(
-                                        service, _sid, _dname,
-                                        u["account_id"], u["new_status"]
-                                    )
-                                except Exception as e:
-                                    log.warning("我的看板同步失败 account_id=%s: %s",
-                                                u["account_id"], e)
-                        _sync_sheets_background(_sync_batch_dashboard,
-                                                lambda s, e: log.warning("我的看板同步失败: %s", e) if e else None)
+        # 新增：批量状态变更时同步「我的看板」（独立于清账逻辑）
+        if field in ("status", "status_id") and value and dashboard_sync_rows:
+            dashboard_name = _get_my_dashboard_name(db, user_id)
+            sheet_id_row = db.execute(
+                "SELECT value FROM tags WHERE key='recharge_sheet_id'"
+            ).fetchone()
+            sync_sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+            if sync_sheet_id and dashboard_name:
+                _dname = dashboard_name
+                _sid = sync_sheet_id
+                _status_updates = [{"account_id": aid, "new_status": st} for aid, st in dashboard_sync_rows]
+
+                def _sync_batch_dashboard():
+                    import google_sheets_service as gs
+                    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                    for u in _status_updates:
+                        try:
+                            gs.update_cell_by_account_id(
+                                service, _sid, _dname,
+                                u["account_id"], u["new_status"]
+                            )
+                        except Exception as e:
+                            log.warning("我的看板同步失败 account_id=%s: %s",
+                                        u["account_id"], e)
+
+                _sync_sheets_background(_sync_batch_dashboard,
+                                        lambda s, e: log.warning("我的看板同步失败: %s", e) if e else None)
         return jsonify({"success": True, "updated": len(ids)})
     finally:
         db.close()
@@ -4341,7 +4337,7 @@ def accounts_sync_from_sheet():
                     )
                 else:
                     db.execute(
-                        "UPDATE accounts SET status_id=?, status_changed_date=datetime('now','localtime'), "
+                        "UPDATE accounts SET status_id=?, death_date='', status_changed_date=datetime('now','localtime'), "
                         "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
                         (st_id, account_id, user_id)
                     )
@@ -4411,10 +4407,10 @@ def _execute_sync_create(db, item: dict, user_id: int):
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     db.execute(
-        "INSERT INTO accounts(name, account_id, timezone, agent_id, status_id, "
+        "INSERT INTO accounts(name, account_id, mcc_id, timezone, agent_id, status_id, "
         "acquired_date, created_at, updated_at, owner_id) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
-        ("", account_id, timezone, agent_id, status_id,
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        ("", account_id, None, timezone, agent_id, status_id,
          datetime.date.today().isoformat(), now, now, user_id)
     )
 

@@ -117,7 +117,7 @@ async function doSync() {
   submitting.value = true
   try {
     const confirmed = {
-      create: (diff.value?.to_create || []).map(c => c.account_id),
+      create: diff.value?.to_create || [],
       update: selectedUpdates.value.map(u => ({
         account_id: u.account_id,
         new_status: u.suggested_status,
