@@ -344,3 +344,26 @@ def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -
 
     log.info("充值记录已追加到 Google Sheets: %d 行", len(new_rows))
     return {"appended": len(new_rows)}
+
+
+def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: str) -> list:
+    """通用读取 Google Sheet 指定范围的值。
+
+    Args:
+        service: Google Sheets API service 对象
+        spreadsheet_id: 表格 ID
+        sheet_name: sheet 名称
+        range_str: 范围字符串，如 'A:G'
+
+    Returns:
+        二维列表，每行为一个 list[str]，不包含空行之后的数据
+    """
+    range_full = f"'{sheet_name}'!{range_str}"
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=range_full,
+        ).execute()
+        return result.get("values", [])
+    except Exception as e:
+        raise GoogleSheetsServiceError(f"读取工作表失败: {e}") from e
