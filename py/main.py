@@ -4042,7 +4042,7 @@ def accounts_batch_update():
                     "amount": "清",
                     "agent": r["agent"],
                     "operator": op_name,
-                    "status": value,
+                    "status": status_value_effective,
                 } for r in new_clear_rows]
                 _rids = [r["rid"] for r in new_clear_rows]
                 def _do_sync():
