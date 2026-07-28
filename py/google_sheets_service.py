@@ -263,20 +263,22 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
     return {"updated": len(updates), "inserted": len(appends)}
 
 
-def append_recharge(service, spreadsheet_id: str, rows: list) -> dict:
-    """将充值记录追加到 Google Sheets「充值表」sheet。
+def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -> dict:
+    """将充值记录追加到 Google Sheets 指定 sheet 表。
 
+    sheet_name: 目标 sheet 名，为空时回退到「充值表」
     rows: [{"account_id": "123-456-7890", "amount": "1000",
             "agent": "卡尔", "operator": "张三", "status": "死亡"}, ...]
 
     A=账户ID, B=金额, C=代理, D=运营, E=留空, F=留空, G=状态
     """
-    # 1. 获取表格信息，找到名为「充值表」的 sheet
+    # 1. 按传入的 sheet_name 查找目标 sheet（为空时回退到「充值表」）
+    effective_name = sheet_name.strip() if sheet_name else "充值表"
     ss = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     target_sheet = None
     for s in ss.get("sheets", []):
         props = s.get("properties", {})
-        if props.get("title", "") == "充值表":
+        if props.get("title", "") == effective_name:
             target_sheet = {
                 "name": props["title"],
                 "gid": props["sheetId"],
@@ -285,7 +287,7 @@ def append_recharge(service, spreadsheet_id: str, rows: list) -> dict:
             break
 
     if not target_sheet:
-        raise GoogleSheetsServiceError("表格中未找到「充值表」工作表")
+        raise GoogleSheetsServiceError(f"表格中未找到「{effective_name}」工作表")
 
     sheet_name = target_sheet["name"]
     sheet_id_int = target_sheet["gid"]
