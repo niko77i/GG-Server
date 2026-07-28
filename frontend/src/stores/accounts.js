@@ -61,7 +61,10 @@ export const useAccountStore = defineStore('accounts', {
     async loadSettings() {
       return cachedLoader(this, 'settings', 300000, () => {
         return settingsApi.get().then(res => {
-          this.settings = { recharge_sheet_id: (res.settings && res.settings.recharge_sheet_id) || '' }
+          this.settings = {
+            recharge_sheet_id: (res.settings && res.settings.recharge_sheet_id) || '',
+            sheet_mappings: (res.settings && res.settings.sheet_mappings) || { recharge: '充值表', received_accounts: '已接账户明细' },
+          }
           this._settingsLoaded = true
           return res
         })

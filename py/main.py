@@ -5168,7 +5168,31 @@ def sales_persons_delete(sid):
 
 # ---------- 账户设置 API ----------
 
+# 内置 sheet 映射 key（全局共享，admin 可修改）
+_BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts"}
+
+def _get_user_sheet_mappings(user_id: int) -> dict:
+    """读取用户私有的 sheet 映射覆盖值（config 表）。"""
+    db = database.get_db()
+    row = db.execute("SELECT value FROM config WHERE key=?", (f"sheet_mappings_{user_id}",)).fetchone()
+    db.close()
+    if row and row["value"]:
+        try:
+            return _json.loads(row["value"])
+        except Exception:
+            pass
+    return {}
+
+def _save_user_sheet_mappings(user_id: int, mappings: dict) -> None:
+    """保存用户私有的 sheet 映射覆盖值（config 表）。"""
+    db = database.get_db()
+    db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+               (f"sheet_mappings_{user_id}", _json.dumps(mappings, ensure_ascii=False)))
+    db.commit()
+    db.close()
+
 @app.route("/api/settings/account", methods=["GET"])
+@jwt_required(optional=True)
 def account_settings_get():
     """返回账户管理相关的可配置项（从新选项表读取）。"""
     db = database.get_db()
@@ -5194,30 +5218,58 @@ def account_settings_get():
     row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
     if row:
         result["recharge_sheet_id"] = row["value"]
+
+    # 全局默认 sheet_mappings
     sm_row = db.execute("SELECT value FROM tags WHERE key='sheet_mappings'").fetchone()
     if sm_row and sm_row["value"]:
         try:
-            result["sheet_mappings"] = _json.loads(sm_row["value"])
+            mappings = _json.loads(sm_row["value"])
         except Exception:
-            result["sheet_mappings"] = {"recharge": "充值表"}
+            mappings = {"recharge": "充值表", "received_accounts": "已接账户明细"}
     else:
-        result["sheet_mappings"] = {"recharge": "充值表"}
+        mappings = {"recharge": "充值表", "received_accounts": "已接账户明细"}
+
+    # 叠加用户私有覆盖值
+    user_id_raw = get_jwt_identity()
+    if user_id_raw:
+        user_mappings = _get_user_sheet_mappings(int(user_id_raw))
+        mappings.update(user_mappings)
+
+    result["sheet_mappings"] = mappings
     db.close()
     return jsonify({"success": True, "settings": result})
 
 
 @app.route("/api/settings/account", methods=["POST"])
+@jwt_required()
 def account_settings_save():
-    """仅保存 recharge_sheet_id 和 sheet_mappings（选项由各自 CRUD API 管理）。"""
+    """保存 recharge_sheet_id 和 sheet_mappings（选项由各自 CRUD API 管理）。"""
+    user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
-    if "recharge_sheet_id" in data or "sheet_mappings" in data:
-        db = database.get_db()
-        if "recharge_sheet_id" in data:
-            db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
-                       ("recharge_sheet_id", str(data["recharge_sheet_id"])))
-        if "sheet_mappings" in data:
-            db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
-                       ("sheet_mappings", _json.dumps(data["sheet_mappings"], ensure_ascii=False)))
+    db = database.get_db()
+    if "recharge_sheet_id" in data:
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
+                   ("recharge_sheet_id", str(data["recharge_sheet_id"])))
+    if "sheet_mappings" in data:
+        mappings = data["sheet_mappings"]
+        if not isinstance(mappings, dict):
+            mappings = {}
+        # 内置 key → 写入全局 tags
+        user = db.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+        is_admin = user and user["role"] in ("admin", "developer")
+        if is_admin:
+            global_mappings = {}
+            for k in _BUILTIN_SHEET_MAPPING_KEYS:
+                if k in mappings:
+                    global_mappings[k] = mappings[k]
+            if global_mappings:
+                db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
+                           ("sheet_mappings", _json.dumps(global_mappings, ensure_ascii=False)))
+        # 全部 key → 写入用户私有 config
+        db.commit()  # 先提交 tags 变更
+        db.close()
+        _save_user_sheet_mappings(user_id, mappings)
+    else:
         db.commit()
         db.close()
     return jsonify({"success": True})
