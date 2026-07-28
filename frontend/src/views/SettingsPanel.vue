@@ -106,8 +106,8 @@
           </el-form-item>
           <el-form-item label="Sheet 映射">
             <div style="width:100%;">
-              <div v-for="(meta, key) in SHEET_MAPPING_META" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                <span style="white-space:nowrap;font-size:13px;min-width:60px;">{{ meta.label }}</span>
+              <div v-for="key in Object.keys(form.sheet_mappings)" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                <span style="white-space:nowrap;font-size:13px;min-width:70px;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}</span>
                 <el-select
                   v-model="form.sheet_mappings[key]"
                   filterable
@@ -123,6 +123,23 @@
                     :value="name"
                   />
                 </el-select>
+                <el-button v-if="key !== 'recharge'" size="small" type="danger" @click="removeMapping(key)" style="flex-shrink:0;">🗑</el-button>
+              </div>
+              <!-- 新增映射行 -->
+              <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+                <el-input v-model="newMappingKey" placeholder="新功能 key" size="small" style="width:120px;" @keyup.enter="addMapping" />
+                <el-select
+                  v-model="newMappingSheet"
+                  filterable
+                  allow-create
+                  default-first-option
+                  placeholder="选择 sheet"
+                  size="small"
+                  style="flex:1;"
+                >
+                  <el-option v-for="name in sheetOptions" :key="name" :label="name" :value="name" />
+                </el-select>
+                <el-button size="small" type="primary" @click="addMapping" :disabled="!newMappingKey.trim()">➕ 添加</el-button>
               </div>
               <span v-if="!sheetOptionsLoaded" style="font-size:11px;color:#909399;">点击「📋 读取工作表」加载可选 sheet 列表，也可直接手动输入</span>
               <span v-else style="font-size:11px;color:#059669;">已加载 {{ sheetOptions.length }} 个工作表可供选择</span>
@@ -234,7 +251,7 @@ import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import api from '@/api/client'
 
-// Sheet 映射功能注册表（新增功能只需在此加一行，UI 自动渲染）
+// Sheet 映射功能注册表 — 已知 key 的显示名（未知 key 直接显示 key 名）
 const SHEET_MAPPING_META = {
   recharge: { label: '充值表', description: '充值记录写入目标 sheet' },
 }
@@ -257,6 +274,8 @@ const editing = reactive({ statuses: -1, agents: -1, mccLevels: -1, salesPersons
 const readingSheets = ref(false)
 const sheetOptions = ref([])
 const sheetOptionsLoaded = ref(false)
+const newMappingKey = ref('')
+const newMappingSheet = ref('')
 
 // 数据管理
 const exporting = ref(false)
@@ -382,6 +401,22 @@ async function readSheets() {
   } finally {
     readingSheets.value = false
   }
+}
+
+function addMapping() {
+  const key = newMappingKey.value.trim()
+  if (!key) return
+  if (form.sheet_mappings[key] !== undefined) {
+    ElMessage.warning(`映射 key「${key}」已存在`)
+    return
+  }
+  form.sheet_mappings[key] = newMappingSheet.value || ''
+  newMappingKey.value = ''
+  newMappingSheet.value = ''
+}
+
+function removeMapping(key) {
+  delete form.sheet_mappings[key]
 }
 
 async function save() {
