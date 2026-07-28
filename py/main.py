@@ -4776,6 +4776,170 @@ def statuses_delete(sid):
     return jsonify({"success": True})
 
 
+# ========== MCC Levels 选项 API ==========
+
+@app.route("/api/mcc-levels/list", methods=["GET"])
+@jwt_required()
+def mcc_levels_list():
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    rows = db.execute(
+        "SELECT id, name FROM mcc_levels WHERE owner_id=? ORDER BY id",
+        (user_id,)
+    ).fetchall()
+    db.close()
+    return jsonify({"success": True, "mcc_levels": [dict(r) for r in rows]})
+
+
+@app.route("/api/mcc-levels/create", methods=["POST"])
+@jwt_required()
+def mcc_levels_create():
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "名称不能为空"}), 400
+    db = _yt_db()
+    existing = db.execute(
+        "SELECT id FROM mcc_levels WHERE name=? AND owner_id=?", (name, user_id)
+    ).fetchone()
+    if existing:
+        db.close()
+        return jsonify({"success": False, "error": f"等级「{name}」已存在"}), 409
+    db.execute("INSERT INTO mcc_levels(name, owner_id) VALUES(?,?)", (name, user_id))
+    db.commit()
+    new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.close()
+    return jsonify({"success": True, "id": new_id})
+
+
+@app.route("/api/mcc-levels/<int:lid>", methods=["PUT"])
+@jwt_required()
+def mcc_levels_rename(lid):
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "名称不能为空"}), 400
+    db = _yt_db()
+    row = db.execute("SELECT id FROM mcc_levels WHERE id=? AND owner_id=?", (lid, user_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "等级不存在或无权修改"}), 404
+    dup = db.execute(
+        "SELECT id FROM mcc_levels WHERE name=? AND owner_id=? AND id!=?",
+        (name, user_id, lid)
+    ).fetchone()
+    if dup:
+        db.close()
+        return jsonify({"success": False, "error": f"等级「{name}」已存在"}), 409
+    db.execute("UPDATE mcc_levels SET name=? WHERE id=?", (name, lid))
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/mcc-levels/<int:lid>", methods=["DELETE"])
+@jwt_required()
+def mcc_levels_delete(lid):
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    row = db.execute("SELECT id FROM mcc_levels WHERE id=? AND owner_id=?", (lid, user_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "等级不存在或无权操作"}), 404
+    mc = db.execute("SELECT COUNT(*) FROM mcc WHERE level_id=?", (lid,)).fetchone()[0]
+    if mc > 0:
+        db.close()
+        return jsonify({"success": False, "error": f"无法删除：被 {mc} 个 MCC 引用，请先解除关联"}), 409
+    db.execute("DELETE FROM mcc_levels WHERE id=?", (lid,))
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+
+# ========== Sales Persons 选项 API ==========
+
+@app.route("/api/sales-persons/list", methods=["GET"])
+@jwt_required()
+def sales_persons_list():
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    rows = db.execute(
+        "SELECT id, name FROM sales_persons WHERE owner_id=? ORDER BY id",
+        (user_id,)
+    ).fetchall()
+    db.close()
+    return jsonify({"success": True, "sales_persons": [dict(r) for r in rows]})
+
+
+@app.route("/api/sales-persons/create", methods=["POST"])
+@jwt_required()
+def sales_persons_create():
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "名称不能为空"}), 400
+    db = _yt_db()
+    existing = db.execute(
+        "SELECT id FROM sales_persons WHERE name=? AND owner_id=?", (name, user_id)
+    ).fetchone()
+    if existing:
+        db.close()
+        return jsonify({"success": False, "error": f"商务人员「{name}」已存在"}), 409
+    db.execute("INSERT INTO sales_persons(name, owner_id) VALUES(?,?)", (name, user_id))
+    db.commit()
+    new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.close()
+    return jsonify({"success": True, "id": new_id})
+
+
+@app.route("/api/sales-persons/<int:sid>", methods=["PUT"])
+@jwt_required()
+def sales_persons_rename(sid):
+    user_id = int(get_jwt_identity())
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "名称不能为空"}), 400
+    db = _yt_db()
+    row = db.execute("SELECT id FROM sales_persons WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "商务人员不存在或无权修改"}), 404
+    dup = db.execute(
+        "SELECT id FROM sales_persons WHERE name=? AND owner_id=? AND id!=?",
+        (name, user_id, sid)
+    ).fetchone()
+    if dup:
+        db.close()
+        return jsonify({"success": False, "error": f"商务人员「{name}」已存在"}), 409
+    db.execute("UPDATE sales_persons SET name=? WHERE id=?", (name, sid))
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/sales-persons/<int:sid>", methods=["DELETE"])
+@jwt_required()
+def sales_persons_delete(sid):
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    row = db.execute("SELECT id FROM sales_persons WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "error": "商务人员不存在或无权操作"}), 404
+    pc = db.execute("SELECT COUNT(*) FROM products WHERE sales_person_id=?", (sid,)).fetchone()[0]
+    if pc > 0:
+        db.close()
+        return jsonify({"success": False, "error": f"无法删除：被 {pc} 个产品引用，请先解除关联"}), 409
+    db.execute("DELETE FROM sales_persons WHERE id=?", (sid,))
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+
 # ---------- 账户设置 API ----------
 
 @app.route("/api/settings/account", methods=["GET"])
