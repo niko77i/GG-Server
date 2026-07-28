@@ -5193,18 +5193,15 @@ def account_settings_get():
     }
     row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
     if row:
-        try:
-            result["recharge_sheet_id"] = _json.loads(row["value"])
-        except Exception:
-            result["recharge_sheet_id"] = row["value"]
+        result["recharge_sheet_id"] = row["value"]
     sm_row = db.execute("SELECT value FROM tags WHERE key='sheet_mappings'").fetchone()
     if sm_row and sm_row["value"]:
         try:
             result["sheet_mappings"] = _json.loads(sm_row["value"])
         except Exception:
-            result["sheet_mappings"] = {"recharge": "充值表", "received_accounts": "已接账户明细"}
+            result["sheet_mappings"] = {"recharge": "充值表"}
     else:
-        result["sheet_mappings"] = {"recharge": "充值表", "received_accounts": "已接账户明细"}
+        result["sheet_mappings"] = {"recharge": "充值表"}
     db.close()
     return jsonify({"success": True, "settings": result})
 
@@ -5217,7 +5214,7 @@ def account_settings_save():
         db = database.get_db()
         if "recharge_sheet_id" in data:
             db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
-                       ("recharge_sheet_id", _json.dumps(data["recharge_sheet_id"], ensure_ascii=False)))
+                       ("recharge_sheet_id", str(data["recharge_sheet_id"])))
         if "sheet_mappings" in data:
             db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
                        ("sheet_mappings", _json.dumps(data["sheet_mappings"], ensure_ascii=False)))
