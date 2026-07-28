@@ -2466,8 +2466,8 @@ def products_create():
                     _assign_mcc_to_users(db, mcc_id, [user_id])
     else:
         runner_ids = _json.dumps([user_id]) if user_id else "[]"
-        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,customer,sales_person,sales_person_id,agency_ratio,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                   (product_name, kpi, region, mcc_id, customer, sales_person, sales_person_id, agency_ratio, user_id, runner_ids, now))
+        db.execute("INSERT INTO products(product_name,kpi,region,mcc_id,customer,sales_person_id,agency_ratio,owner_id,runner_ids,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (product_name, kpi, region, mcc_id, customer, sales_person_id, agency_ratio, user_id, runner_ids, now))
         pid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         if user_id:
             db.execute("INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)", (pid, user_id))
@@ -2489,7 +2489,7 @@ def products_update(pid):
     _product_fields = {
         "product_name": "product_name", "kpi": "kpi", "region": "region",
         "status": "status", "mcc_id": "mcc_id", "customer": "customer",
-        "sales_person": "sales_person", "sales_person_id": "sales_person_id",
+        "sales_person_id": "sales_person_id",
         "agency_ratio": "agency_ratio",
     }
     # 产品改名时同步更新所有关联表（冗余存储的 product_name 字段）
@@ -2757,7 +2757,7 @@ def products_detail(pid):
         if related_ids:
             placeholders = ",".join("?" * len(related_ids))
             related_accounts = [dict(r) for r in db.execute(
-                f"SELECT id, name, account_id, status FROM accounts WHERE id IN ({placeholders}) ORDER BY name",
+                f"SELECT a.id, a.name, a.account_id, COALESCE(st.name, '存活') AS status FROM accounts a LEFT JOIN account_statuses st ON a.status_id = st.id WHERE a.id IN ({placeholders}) ORDER BY a.name",
                 related_ids
             ).fetchall()]
         else:
@@ -3556,14 +3556,12 @@ def accounts_create():
                     status_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         db.execute(
-            "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,agent_id,status,status_id,acquired_date,death_date,created_at,updated_at,owner_id) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent_id,status_id,acquired_date,death_date,created_at,updated_at,owner_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (name, account_id,
              data.get("mcc_id") or None,
              (data.get("timezone") or "").strip(),
-             (data.get("agent") or "").strip(),     # 旧文本字段，填兼容值
              agent_id,
-             (data.get("status") or "存活").strip(),  # 旧文本字段，填兼容值
              status_id,
              (data.get("acquired_date") or datetime.date.today().isoformat()),
              (data.get("death_date") or "").strip(),
@@ -3699,10 +3697,9 @@ def accounts_batch_create():
 
         try:
             db.execute(
-                "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent,agent_id,status,status_id,acquired_date,death_date,created_at,updated_at,owner_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (name, aid, mcc_id, timezone, agent,
-                 agent_id, status, status_id,
+                "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent_id,status_id,acquired_date,death_date,created_at,updated_at,owner_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (name, aid, mcc_id, timezone, agent_id, status_id,
                  acquired_date, common["death_date"], now, now, user_id))
             db.commit()
             created.append(aid)
@@ -3885,7 +3882,7 @@ def accounts_reassign(aid):
         )
 
         # 同时更新其他可编辑字段
-        for f in ["name", "timezone", "agent", "status", "acquired_date"]:
+        for f in ["name", "timezone", "agent_id", "status_id", "acquired_date"]:
             if f in data and data[f] is not None:
                 db.execute(
                     f"UPDATE accounts SET {f} = ? WHERE id = ?",
@@ -3959,7 +3956,7 @@ def accounts_batch_update():
     value = data.get("value")
     if not ids or not field:
         return jsonify({"success": False, "error": "缺少参数"}), 400
-    allowed = ["status", "status_id", "agent", "agent_id", "mcc_id", "timezone"]
+    allowed = ["status_id", "agent_id", "mcc_id", "timezone"]
     if field not in allowed:
         return jsonify({"success": False, "error": f"不允许修改字段: {field}"}), 400
     db = _yt_db()
@@ -4128,7 +4125,11 @@ def recharge_submit():
         return jsonify({"success": False, "error": "账户ID和金额不能为空"}), 400
 
     # 校验账户状态必须为「存活」
-    ac = db.execute("SELECT status FROM accounts WHERE account_id=?", (account_id,)).fetchone()
+    ac = db.execute(
+        "SELECT COALESCE(st.name, '存活') AS status FROM accounts a "
+        "LEFT JOIN account_statuses st ON a.status_id = st.id "
+        "WHERE a.account_id=?", (account_id,)
+    ).fetchone()
     if not ac or ac["status"] != "存活":
         db.close()
         return jsonify({"success": False, "error": "仅存活状态的账户允许充值"}), 400
@@ -4136,9 +4137,9 @@ def recharge_submit():
     try:
         # 1. 先写数据库（立即完成）
         db.execute(
-            "INSERT INTO recharge_records (account_id, amount, agent, agent_id, operator, created_by, sheets_synced) "
-            "VALUES (?, ?, ?, ?, ?, ?, 0)",
-            (account_id, amount, agent, agent_id, operator, user_id)
+            "INSERT INTO recharge_records (account_id, amount, agent_id, operator, created_by, sheets_synced) "
+            "VALUES (?, ?, ?, ?, ?, 0)",
+            (account_id, amount, agent_id, operator, user_id)
         )
         db.commit()
         record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -4218,7 +4219,11 @@ def recharge_batch_submit():
                     agent_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             if not account_id or not amount:
                 continue
-            ac = db.execute("SELECT status FROM accounts WHERE account_id=?", (account_id,)).fetchone()
+            ac = db.execute(
+                "SELECT COALESCE(st.name, '存活') AS status FROM accounts a "
+                "LEFT JOIN account_statuses st ON a.status_id = st.id "
+                "WHERE a.account_id=?", (account_id,)
+            ).fetchone()
             if not ac or ac["status"] != "存活":
                 continue
             valid_rows.append({
@@ -4233,9 +4238,9 @@ def recharge_batch_submit():
         inserted_ids = []
         for r in valid_rows:
             db.execute(
-                "INSERT INTO recharge_records (account_id, amount, agent, agent_id, operator, created_by, sheets_synced) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (r["account_id"], r["amount"], r["agent"], r["agent_id"], r["operator"], user_id)
+                "INSERT INTO recharge_records (account_id, amount, agent_id, operator, created_by, sheets_synced) "
+                "VALUES (?, ?, ?, ?, ?, 0)",
+                (r["account_id"], r["amount"], r["agent_id"], r["operator"], user_id)
             )
             inserted_ids.append(db.execute("SELECT last_insert_rowid()").fetchone()[0])
         db.commit()
@@ -4314,8 +4319,8 @@ def recharge_update(rid):
             if ag_name:
                 agent = ag_name["name"]
         db.execute(
-            "UPDATE recharge_records SET amount=?, agent=?, agent_id=? WHERE id=?",
-            (amount, agent, agent_id, rid)
+            "UPDATE recharge_records SET amount=?, agent_id=? WHERE id=?",
+            (amount, agent_id, rid)
         )
         if db.total_changes == 0:
             db.close()
@@ -4617,10 +4622,9 @@ def mcc_create():
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
         db.execute(
-            "INSERT INTO mcc(name,mcc_id,level,level_id,parent_mcc_id,shared_user_ids,created_at,updated_at,owner_id) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO mcc(name,mcc_id,level_id,parent_mcc_id,shared_user_ids,created_at,updated_at,owner_id) "
+            "VALUES(?,?,?,?,?,?,?,?)",
             (name, mcc_id,
-             level,
              level_id,
              parent_mcc_id,
              json.dumps([user_id]),
@@ -4662,7 +4666,7 @@ def mcc_update(mid):
         if not parent_row:
             db.close()
             return jsonify({"success": False, "error": "上级 MCC 不存在"}), 400
-    _mcc_fields = {"name": "name", "level": "level", "level_id": "level_id", "parent_mcc_id": "parent_mcc_id"}
+    _mcc_fields = {"name": "name", "level_id": "level_id", "parent_mcc_id": "parent_mcc_id"}
     for key, col in _mcc_fields.items():
         if key in data:
             db.execute(f"UPDATE mcc SET {col}=?, updated_at=datetime('now','localtime') WHERE id=?",
@@ -4777,7 +4781,9 @@ def mcc_detail(mid):
         mcc_data["parent_mcc"] = None
     # 直属账户
     direct_accounts = [dict(r) for r in db.execute(
-        "SELECT id, name, account_id, status FROM accounts WHERE mcc_id=? ORDER BY name", (mid,)
+        "SELECT a.id, a.name, a.account_id, COALESCE(st.name, '存活') AS status "
+        "FROM accounts a LEFT JOIN account_statuses st ON a.status_id = st.id "
+        "WHERE a.mcc_id=? ORDER BY a.name", (mid,)
     ).fetchall()]
     mcc_data["direct_count"] = len(direct_accounts)
     mcc_data["direct_accounts"] = direct_accounts
@@ -4787,11 +4793,15 @@ def mcc_detail(mid):
     for c in db.execute("SELECT id, name, mcc_id FROM mcc WHERE parent_mcc_id=?", (mid,)).fetchall():
         cdict = dict(c)
         c_direct = [dict(r) for r in db.execute(
-            "SELECT id, name, account_id, status FROM accounts WHERE mcc_id=? ORDER BY name", (c["id"],)
+            "SELECT a.id, a.name, a.account_id, COALESCE(st.name, '存活') AS status "
+            "FROM accounts a LEFT JOIN account_statuses st ON a.status_id = st.id "
+            "WHERE a.mcc_id=? ORDER BY a.name", (c["id"],)
         ).fetchall()]
         for sc in db.execute("SELECT id FROM mcc WHERE parent_mcc_id=?", (c["id"],)).fetchall():
             c_direct += [dict(r) for r in db.execute(
-                "SELECT id, name, account_id, status FROM accounts WHERE mcc_id=? ORDER BY name", (sc["id"],)
+                "SELECT a.id, a.name, a.account_id, COALESCE(st.name, '存活') AS status "
+                "FROM accounts a LEFT JOIN account_statuses st ON a.status_id = st.id "
+                "WHERE a.mcc_id=? ORDER BY a.name", (sc["id"],)
             ).fetchall()]
         cdict["account_count"] = len(c_direct)
         child_mccs.append(cdict)
@@ -5628,7 +5638,9 @@ def google_sheets_retry_sync():
 
     # 取产品信息
     prod = db.execute(
-        "SELECT sales_person, agency_ratio FROM products WHERE product_name=? AND (is_archived IS NULL OR is_archived=0) LIMIT 1",
+        "SELECT COALESCE(sp.name, '') AS sales_person, agency_ratio FROM products p "
+        "LEFT JOIN sales_persons sp ON p.sales_person_id = sp.id "
+        "WHERE p.product_name=? AND (p.is_archived IS NULL OR p.is_archived=0) LIMIT 1",
         (product_name,)
     ).fetchone()
     sales_person = (prod["sales_person"] or "") if prod else ""
