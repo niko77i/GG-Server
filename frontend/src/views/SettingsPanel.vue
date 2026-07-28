@@ -63,58 +63,60 @@
           </el-col>
         </el-row>
         <template v-if="authStore.isAdmin || authStore.isDeveloper">
-          <el-divider />
-          <h4 style="margin-bottom:8px;">📊 充值表配置（仅管理员可见）</h4>
-          <el-form-item label="Google Sheets（URL 或 ID）">
-            <div style="display:flex;gap:8px;width:100%;">
-              <el-input v-model="form.recharge_sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" style="flex:1;" />
-              <el-button @click="readSheets" :loading="readingSheets">📋 读取工作表</el-button>
-            </div>
-          </el-form-item>
-          <el-form-item label="Sheet 映射">
-            <div style="width:100%;">
-              <div v-for="key in Object.keys(form.sheet_mappings)" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                <span style="white-space:nowrap;font-size:13px;min-width:70px;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}</span>
-                <el-select
-                  v-model="form.sheet_mappings[key]"
-                  filterable
-                  allow-create
-                  default-first-option
-                  placeholder="选择或输入 sheet 名"
-                  style="flex:1;"
-                >
-                  <el-option
-                    v-for="name in sheetOptions"
-                    :key="name"
-                    :label="name"
-                    :value="name"
-                  />
-                </el-select>
-                <el-button v-if="key !== 'recharge'" size="small" type="danger" @click="removeMapping(key)" style="flex-shrink:0;">🗑</el-button>
+          <el-card shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
+            <template #header>
+              <span style="font-weight:600;">📊 充值表配置</span>
+              <el-tag size="small" type="warning" style="margin-left:8px;">仅管理员</el-tag>
+            </template>
+
+            <!-- Google Sheets URL -->
+            <div style="margin-bottom:16px;">
+              <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">Google Sheets（URL 或 ID）</div>
+              <div style="display:flex;gap:8px;">
+                <el-input v-model="form.recharge_sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" style="flex:1;" />
+                <el-button @click="readSheets" :loading="readingSheets">📋 读取工作表</el-button>
               </div>
-              <!-- 新增映射行 -->
-              <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
-                <el-input v-model="newMappingKey" placeholder="新功能 key" size="small" style="width:120px;" @keyup.enter="addMapping" />
-                <el-select
-                  v-model="newMappingSheet"
-                  filterable
-                  allow-create
-                  default-first-option
-                  placeholder="选择 sheet"
-                  size="small"
-                  style="flex:1;"
-                >
-                  <el-option v-for="name in sheetOptions" :key="name" :label="name" :value="name" />
-                </el-select>
-                <el-button size="small" type="primary" @click="addMapping" :disabled="!newMappingKey.trim()">➕ 添加</el-button>
-              </div>
-              <span v-if="!sheetOptionsLoaded" style="font-size:11px;color:#909399;">点击「📋 读取工作表」加载可选 sheet 列表，也可直接手动输入</span>
-              <span v-else style="font-size:11px;color:#059669;">已加载 {{ sheetOptions.length }} 个工作表可供选择</span>
             </div>
-          </el-form-item>
+
+            <!-- Sheet 映射 -->
+            <div style="margin-bottom:16px;">
+              <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">Sheet 映射</div>
+              <div style="background:#f9fafb;border-radius:8px;padding:12px;">
+                <div v-for="key in Object.keys(form.sheet_mappings)" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                  <span style="white-space:nowrap;font-size:13px;min-width:60px;color:#374151;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}</span>
+                  <el-select
+                    v-model="form.sheet_mappings[key]"
+                    filterable allow-create default-first-option
+                    placeholder="选择或输入 sheet 名"
+                    style="flex:1;"
+                  >
+                    <el-option v-for="name in sheetOptions" :key="name" :label="name" :value="name" />
+                  </el-select>
+                  <el-button v-if="key !== 'recharge'" size="small" type="danger" @click="removeMapping(key)" style="flex-shrink:0;">🗑</el-button>
+                </div>
+                <!-- 新增映射行 -->
+                <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+                  <el-input v-model="newMappingKey" placeholder="新功能 key" size="small" style="width:120px;" @keyup.enter="addMapping" />
+                  <el-select
+                    v-model="newMappingSheet"
+                    filterable allow-create default-first-option
+                    placeholder="选择 sheet"
+                    size="small"
+                    style="flex:1;"
+                  >
+                    <el-option v-for="name in sheetOptions" :key="name" :label="name" :value="name" />
+                  </el-select>
+                  <el-button size="small" type="primary" @click="addMapping" :disabled="!newMappingKey.trim()">➕ 添加</el-button>
+                </div>
+                <span v-if="!sheetOptionsLoaded" style="font-size:11px;color:#909399;">点击「📋 读取工作表」加载可选 sheet 列表，也可直接手动输入</span>
+                <span v-else style="font-size:11px;color:#059669;">✅ 已加载 {{ sheetOptions.length }} 个工作表可供选择</span>
+              </div>
+            </div>
+
+            <el-button type="primary" @click="save" :loading="saving">💾 保存配置</el-button>
+            <span v-if="msg" style="margin-left:8px;font-size:12px;color:#059669;">{{ msg }}</span>
+          </el-card>
         </template>
-        <el-button type="primary" @click="save" :loading="saving" style="margin-top:16px;">💾 保存配置</el-button>
-        <span v-if="msg" style="margin-left:8px;font-size:11px;color:#059669;">{{ msg }}</span>
       </el-tab-pane>
 
       <!-- Tab 2: 地区时区 -->
