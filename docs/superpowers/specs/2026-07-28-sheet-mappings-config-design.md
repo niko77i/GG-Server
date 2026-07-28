@@ -78,8 +78,19 @@ if user authenticated:
 ```
 POST /api/settings/account (JWT required)
   if admin/developer:
-    → 内置 key → INSERT INTO tags (全局)
-  → 所有 key → INSERT INTO config (用户私有)
+    → _BUILTIN_SHEET_MAPPING_KEYS 中的 key → INSERT INTO tags (全局)
+  → 全部 key → INSERT INTO config.sheet_mappings_{user_id} (用户私有)
+```
+
+> **关键区分**：`_BUILTIN_SHEET_DEFAULTS` 决定哪些 key 展示在 UI 上（读取用），`_BUILTIN_SHEET_MAPPING_KEYS` 决定哪些 key 的 value 写入全局 `tags`（写入用）。`my_dashboard` 在 `_BUILTIN_SHEET_DEFAULTS` 中但**不在** `_BUILTIN_SHEET_MAPPING_KEYS` 中，因此其 value 仅存用户私有 `config`，不会泄漏到全局。
+
+```python
+_BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts"}  # 写全局的 key
+_BUILTIN_SHEET_DEFAULTS = {                                       # 展示兜底（所有 key）
+    "recharge": "充值表",
+    "received_accounts": "已接账户明细",
+    "my_dashboard": "我的看板",
+}
 ```
 
 ---
