@@ -179,25 +179,25 @@
 
       <!-- Tab 3: 数据管理 -->
       <el-tab-pane label="数据管理" name="data">
-        <el-row :gutter="20">
+        <el-row :gutter="16">
           <!-- 导出区 -->
           <el-col :span="12">
-            <el-card shadow="hover">
-              <template #header>📤 导出数据</template>
-              <p style="color:#888;margin-bottom:12px;">导出你的所有数据为 JSON 文件，可用于备份或迁移。</p>
-              <el-button type="primary" @click="exportData" :loading="exporting">
-                📥 导出我的数据
-              </el-button>
+            <el-card shadow="never">
+              <template #header>
+                <span style="font-weight:600;">📤 导出数据</span>
+              </template>
+              <p style="color:#909399;font-size:13px;margin-bottom:12px;">导出你的所有数据为 JSON 文件，可用于备份或迁移。</p>
+              <el-button type="primary" @click="exportData" :loading="exporting">📥 导出我的数据</el-button>
             </el-card>
           </el-col>
 
           <!-- 导入区 -->
           <el-col :span="12">
-            <el-card shadow="hover">
-              <template #header>📥 导入数据</template>
-              <p style="color:#888;margin-bottom:12px;">
-                上传 ImageCrawling 的 app.db 或 JSON 导出文件。
-              </p>
+            <el-card shadow="never">
+              <template #header>
+                <span style="font-weight:600;">📥 导入数据</span>
+              </template>
+              <p style="color:#909399;font-size:13px;margin-bottom:12px;">上传 ImageCrawling 的 app.db 或 JSON 导出文件。</p>
               <el-upload
                 :auto-upload="false"
                 :on-change="onFileChange"
@@ -205,25 +205,25 @@
                 accept=".db,.json"
                 drag
               >
-                <el-icon><UploadFilled /></el-icon>
-                <div>拖拽或点击上传 .db / .json 文件</div>
+                <el-icon style="font-size:24px;color:#0891b2;"><UploadFilled /></el-icon>
+                <div style="margin-top:8px;font-size:13px;color:#606266;">拖拽或点击上传 <b>.db</b> / <b>.json</b> 文件</div>
               </el-upload>
               <el-button
                 type="success"
                 @click="confirmImport"
                 :loading="importing"
                 :disabled="!importFile"
-                style="margin-top:10px;"
-              >
-                ✅ 确认导入
-              </el-button>
+                style="margin-top:12px;"
+              >✅ 确认导入</el-button>
             </el-card>
           </el-col>
         </el-row>
 
         <!-- 导入历史 -->
-        <el-card shadow="hover" style="margin-top:20px;">
-          <template #header>📋 导入历史</template>
+        <el-card shadow="never" style="margin-top:16px;">
+          <template #header>
+            <span style="font-weight:600;">📋 导入历史</span>
+          </template>
           <el-table :data="importHistory" v-if="importHistory.length" size="small">
             <el-table-column prop="file_name" label="文件名" />
             <el-table-column prop="file_type" label="类型" width="60" />
