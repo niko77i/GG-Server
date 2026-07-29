@@ -4229,7 +4229,7 @@ def accounts_sync_from_sheet():
     try:
         import google_sheets_service as gs
         service = gs.build_service(creds_path)
-        rows = gs.read_sheet_values(service, sheet_id, dashboard_name, "A:G")
+        rows = gs.read_sheet_values(service, sheet_id, dashboard_name, "A:H")
     except gs.GoogleSheetsServiceError as e:
         db.close()
         return jsonify({"success": False, "error": str(e)}), 400
@@ -4268,6 +4268,10 @@ def accounts_sync_from_sheet():
         if not account_id:
             warnings.append({"row": i, "message": "账户ID为空，跳过"})
             continue
+        # H 列="解绑" → 跳过
+        unbound = (row[7] or "").strip() if len(row) > 7 else ""
+        if unbound == "解绑":
+            continue
         sheet_accounts.append({
             "account_id": account_id,
             "operator": (row[0] or "").strip() if len(row) > 0 else "",
@@ -4286,7 +4290,7 @@ def accounts_sync_from_sheet():
             FROM accounts a
             LEFT JOIN agents ag ON a.agent_id = ag.id
             LEFT JOIN account_statuses st ON a.status_id = st.id
-            WHERE a.account_id IN ({placeholders}) AND a.owner_id = ?""",
+            WHERE a.account_id IN ({placeholders}) AND a.owner_id = ? AND a.deleted_at IS NULL""",
         sheet_ids + [user_id]
     ).fetchall()
 
@@ -4433,7 +4437,7 @@ def accounts_sync_from_sheet():
                     f"""SELECT a.account_id, COALESCE(st.name, '存活') AS status_name
                         FROM accounts a
                         LEFT JOIN account_statuses st ON a.status_id = st.id
-                        WHERE a.account_id IN ({placeholders}) AND a.owner_id = ?""",
+                        WHERE a.account_id IN ({placeholders}) AND a.owner_id = ? AND a.deleted_at IS NULL""",
                     sheet_ids + [user_id]
                 ).fetchall()
                 for r in _fresh_rows:
