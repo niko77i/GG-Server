@@ -122,6 +122,7 @@ def _ensure_columns(conn: sqlite3.Connection):
     # 选项表外键列（从 TEXT 迁移到 ID 引用）
     _add_column_if_missing(conn, "accounts", "agent_id", "agent_id INTEGER REFERENCES agents(id)")
     _add_column_if_missing(conn, "accounts", "status_id", "status_id INTEGER REFERENCES account_statuses(id)")
+    _add_column_if_missing(conn, "accounts", "deleted_at", "deleted_at TEXT DEFAULT NULL")
     _add_column_if_missing(conn, "recharge_records", "agent_id", "agent_id INTEGER REFERENCES agents(id)")
     _add_column_if_missing(conn, "mcc", "level_id", "level_id INTEGER REFERENCES mcc_levels(id)")
     _add_column_if_missing(conn, "products", "sales_person_id", "sales_person_id INTEGER REFERENCES sales_persons(id)")
