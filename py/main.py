@@ -5548,11 +5548,13 @@ def _get_sync_spreadsheet_id(db) -> str:
     """
     row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
     if row and row["value"]:
+        raw = row["value"]
+        # 兼容旧 JSON 编码数据（如 "abc123"），异常时 fallback 到原始值
         try:
-            raw = _json.loads(row["value"])
-            return _parse_sheet_id(raw)
+            raw = _json.loads(raw)
         except Exception:
-            return ""
+            pass
+        return _parse_sheet_id(raw)
     return ""
 
 
