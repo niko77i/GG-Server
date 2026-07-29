@@ -4338,6 +4338,34 @@ def accounts_sync_from_sheet():
                 errors.append({"account_id": item.get("account_id", ""), "error": str(e)})
 
         db.commit()
+
+        # 10c. 系统 → Sheet：将系统当前状态同步回「我的看板」备注列
+        if sheet_id and dashboard_name:
+            # 重新查询所有 sheet 中账户的最新状态（10b 可能已更新 status_id）
+            _sync_back_rows = []
+            if sheet_ids:
+                _fresh_rows = db.execute(
+                    f"""SELECT a.account_id, COALESCE(st.name, '存活') AS status_name
+                        FROM accounts a
+                        LEFT JOIN account_statuses st ON a.status_id = st.id
+                        WHERE a.account_id IN ({placeholders}) AND a.owner_id = ?""",
+                    sheet_ids + [user_id]
+                ).fetchall()
+                for r in _fresh_rows:
+                    _sync_back_rows.append((r["account_id"], r["status_name"] or "存活"))
+
+            if _sync_back_rows:
+                def _sync_back_to_dashboard():
+                    import google_sheets_service as gs
+                    svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                    for aid, st in _sync_back_rows:
+                        try:
+                            gs.update_cell_by_account_id(svc, sheet_id, dashboard_name, aid, st)
+                        except Exception as e:
+                            log.warning("同步备注列失败 account_id=%s: %s", aid, e)
+
+                _sync_sheets_background(_sync_back_to_dashboard,
+                                        lambda s, e: log.warning("批量同步备注列失败: %s", e) if e else None)
     finally:
         db.close()
 
