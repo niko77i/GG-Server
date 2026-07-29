@@ -76,6 +76,14 @@ export const useAccountStore = defineStore('accounts', {
     async syncFromSheet(body) {
       return accountsApi.syncFromSheet(body)
     },
+    async restoreAccount(id) {
+      await accountsApi.restore(id)
+      return this.loadAccounts()
+    },
+    async loadDeletedAccounts() {
+      const res = await accountsApi.listDeleted()
+      return res.accounts || []
+    },
 
     // ---- option actions: agents ----
     async loadAgents() {

@@ -15,6 +15,8 @@ export const accountsApi = {
   deleteHistory: (aid, hid) => api.delete(`/accounts/${aid}/mcc-history/${hid}`),
   rechargeRecords: (aid) => api.get(`/accounts/${aid}/recharge-records`),
   syncFromSheet: (body) => api.post('/accounts/sync-from-sheet', body),
+  restore: (id) => api.post(`/accounts/${id}/restore`),
+  listDeleted: () => api.get('/accounts/deleted'),
 }
 
 export const mccApi = {
