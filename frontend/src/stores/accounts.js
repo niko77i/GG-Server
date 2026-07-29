@@ -80,6 +80,9 @@ export const useAccountStore = defineStore('accounts', {
       await accountsApi.restore(id)
       return this.loadAccounts()
     },
+    async permanentDeleteAccount(id) {
+      await accountsApi.permanentDelete(id)
+    },
     async loadDeletedAccounts() {
       const res = await accountsApi.listDeleted()
       return res.accounts || []

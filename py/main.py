@@ -3380,15 +3380,26 @@ def accounts_list():
             a["agent"] = a["agent_name"]
         if a.get("status_name"):
             a["status"] = a["status_name"]
-    # 各状态的计数
+    # 各状态的计数 — 关联当前筛选条件（不含 status，因为需要展示所有状态的数量）
+    sc_where = ["a.owner_id = ?", "a.deleted_at IS NULL"]; sc_params = [user_id]
+    if search:
+        sc_where.append("(a.name LIKE ? OR a.account_id LIKE ?)")
+        sc_params += [f"%{search}%", f"%{search}%"]
+    if mcc_id:
+        sc_where.append("a.mcc_id = ?"); sc_params.append(mcc_id)
+    if agent:
+        sc_where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
+        sc_params += [f"%{agent}%", user_id]
+    if timezone:
+        sc_where.append("a.timezone = ?"); sc_params.append(timezone)
     status_counts = {}
-    for r in db.execute("""
-        SELECT COALESCE(st.name, '存活') as status, COUNT(*) as cnt
-        FROM accounts a
-        LEFT JOIN account_statuses st ON a.status_id = st.id
-        WHERE a.owner_id=?
-        GROUP BY st.name
-    """, (user_id,)).fetchall():
+    for r in db.execute(
+        "SELECT COALESCE(st.name, '存活') as status, COUNT(*) as cnt "
+        "FROM accounts a "
+        "LEFT JOIN account_statuses st ON a.status_id = st.id "
+        "WHERE " + " AND ".join(sc_where) + " GROUP BY st.name",
+        sc_params
+    ).fetchall():
         s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
     # 筛选下拉数据（缓存低频查询结果）
     uid_str = str(user_id)
@@ -4018,6 +4029,28 @@ def accounts_restore(aid):
                 gs.update_cell_by_account_id(svc, _sid, _dname, _sync_aid, "", col_index=7)
             _sync_sheets_background(_sync_unbind_clear, lambda s, e: log.warning("解绑清除失败: %s", e) if e else None)
 
+        return jsonify({"success": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/accounts/<int:aid>/permanent", methods=["DELETE"])
+@jwt_required()
+def accounts_permanent_delete(aid):
+    """物理删除已软删除的账户（不可恢复）。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    try:
+        ac = db.execute(
+            "SELECT account_id FROM accounts WHERE id=? AND owner_id=? AND deleted_at IS NOT NULL",
+            (aid, user_id)
+        ).fetchone()
+        if not ac:
+            return jsonify({"success": False, "error": "账户不存在或未被删除"}), 404
+        db.execute("DELETE FROM recharge_records WHERE account_id=?", (ac["account_id"],))
+        db.execute("DELETE FROM account_mcc_history WHERE account_id=?", (aid,))
+        db.execute("DELETE FROM accounts WHERE id=?", (aid,))
+        db.commit()
         return jsonify({"success": True})
     finally:
         db.close()

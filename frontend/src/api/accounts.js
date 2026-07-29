@@ -16,6 +16,7 @@ export const accountsApi = {
   rechargeRecords: (aid) => api.get(`/accounts/${aid}/recharge-records`),
   syncFromSheet: (body) => api.post('/accounts/sync-from-sheet', body),
   restore: (id) => api.post(`/accounts/${id}/restore`),
+  permanentDelete: (id) => api.delete(`/accounts/${id}/permanent`),
   listDeleted: () => api.get('/accounts/deleted'),
 }
 
