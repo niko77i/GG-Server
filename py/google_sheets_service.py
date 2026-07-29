@@ -370,18 +370,19 @@ def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: 
 
 
 def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
-                               account_id: str, new_status: str) -> dict:
-    """在指定 sheet 中按 account_id（B 列）定位行，更新备注列（F 列）。
+                               account_id: str, value: str, col_index: int = 5) -> dict:
+    """在指定 sheet 中按 account_id（B 列）定位行，更新指定列。
 
     我的看板列结构：
-      A=运营, B=账户ID, C=所属渠道, D=国家, E=时区, F=备注, G=是否封户
+      A=运营, B=账户ID, C=所属渠道, D=国家, E=时区, F=备注, G=是否封户, H=是否解绑
 
     Args:
         service: Google Sheets API service 对象
         spreadsheet_id: 表格 ID
         sheet_name: sheet 名称（用户私有的「我的看板」）
         account_id: 要查找的账户 ID
-        new_status: 新的状态文本，写入 F 列（备注）
+        value: 要写入的值（空字符串表示清空该单元格）
+        col_index: 目标列索引，5=F列（备注），7=H列（是否解绑）
 
     Returns:
         {"updated": 1} 或 {"not_found": True}
@@ -389,10 +390,13 @@ def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
     import logging
     log = logging.getLogger("gg-server")
 
-    # 读取全表 A-G 列
-    rows = read_sheet_values(service, spreadsheet_id, sheet_name, "A:G")
+    # 列索引 → 列字母
+    col_letter = chr(ord('A') + col_index)
 
-    # 查找匹配 account_id 的行（B 列 = 第 0 列是 A，第 1 列是 B）
+    # 读取全表 A-H 列
+    rows = read_sheet_values(service, spreadsheet_id, sheet_name, "A:H")
+
+    # 查找匹配 account_id 的行（B 列 = 索引 1）
     target_row = None
     for i, row in enumerate(rows):
         if len(row) > 1 and (row[1] or "").strip() == account_id.strip():
@@ -403,25 +407,25 @@ def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
         log.info("update_cell_by_account_id: account_id=%s 在 sheet 中未找到", account_id)
         return {"not_found": True}
 
-    # 确保行足够长到 F 列（索引 5）
-    while len(rows[target_row]) < 6:
+    # 确保行足够长
+    while len(rows[target_row]) <= col_index:
         rows[target_row].append("")
 
-    # 更新备注列（F 列 = 索引 5）
-    rows[target_row][5] = new_status
+    # 更新目标列
+    rows[target_row][col_index] = value
 
-    # 写回 F 列（备注列）
+    # 写回单个单元格
     row_num = target_row + 1  # 1-indexed
-    range_write = f"'{sheet_name}'!F{row_num}"
+    range_write = f"'{sheet_name}'!{col_letter}{row_num}"
     try:
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range=range_write,
             valueInputOption="USER_ENTERED",
-            body={"values": [[new_status]]},
+            body={"values": [[value]]},
         ).execute()
     except Exception as e:
-        raise GoogleSheetsServiceError(f"更新备注列失败: {e}") from e
+        raise GoogleSheetsServiceError(f"更新{col_letter}列失败: {e}") from e
 
-    log.info("update_cell_by_account_id: account_id=%s 备注列已更新为 '%s'", account_id, new_status)
+    log.info("update_cell_by_account_id: account_id=%s %s列已更新为 '%s'", account_id, col_letter, value)
     return {"updated": 1}
