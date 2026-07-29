@@ -3334,7 +3334,7 @@ def accounts_list():
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
-    where = ["a.owner_id = ?"]; params = [user_id]
+    where = ["a.owner_id = ?", "a.deleted_at IS NULL"]; params = [user_id]
     if search:
         where.append("(a.name LIKE ? OR a.account_id LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -3436,7 +3436,7 @@ def accounts_lookup():
         "LEFT JOIN users u ON a.owner_id = u.id "
         "LEFT JOIN agents ag ON a.agent_id = ag.id "
         "LEFT JOIN account_statuses st ON a.status_id = st.id "
-        "WHERE a.account_id = ?",
+        "WHERE a.account_id = ? AND a.deleted_at IS NULL",
         (account_id,)
     ).fetchone()
     db.close()
@@ -3596,7 +3596,7 @@ def accounts_create():
                 "LEFT JOIN users u ON a.owner_id = u.id "
                 "LEFT JOIN agents ag ON a.agent_id = ag.id "
                 "LEFT JOIN account_statuses st ON a.status_id = st.id "
-                "WHERE a.account_id = ?",
+                "WHERE a.account_id = ? AND a.deleted_at IS NULL",
                 (account_id,)
             ).fetchone()
             db.close()
@@ -3933,12 +3933,32 @@ def accounts_delete(aid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     try:
-        ac = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()
-        if ac:
-            db.execute("DELETE FROM recharge_records WHERE account_id=?", (ac["account_id"],))
-        db.execute("DELETE FROM account_mcc_history WHERE account_id=?", (aid,))
-        db.execute("DELETE FROM accounts WHERE id=? AND owner_id=?", (aid, user_id))
+        ac = db.execute(
+            "SELECT account_id FROM accounts WHERE id=? AND owner_id=? AND deleted_at IS NULL",
+            (aid, user_id)
+        ).fetchone()
+        if not ac:
+            return jsonify({"success": False, "error": "账户不存在或已删除"}), 404
+        db.execute(
+            "UPDATE accounts SET deleted_at=datetime('now','localtime'), "
+            "updated_at=datetime('now','localtime') WHERE id=?",
+            (aid,)
+        )
         db.commit()
+
+        # 后台同步 Sheet H 列"解绑"
+        sheet_id = _get_sync_spreadsheet_id(db)
+        dashboard_name = _get_my_dashboard_name(db, user_id)
+        if sheet_id and dashboard_name:
+            _sync_aid = ac["account_id"]
+            _sid = sheet_id
+            _dname = dashboard_name
+            def _sync_unbind():
+                import google_sheets_service as gs
+                svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                gs.update_cell_by_account_id(svc, _sid, _dname, _sync_aid, "解绑", col_index=7)
+            _sync_sheets_background(_sync_unbind, lambda s, e: log.warning("解绑同步失败: %s", e) if e else None)
+
         return jsonify({"success": True})
     finally:
         db.close()
@@ -3955,15 +3975,80 @@ def accounts_batch_delete():
     db = _yt_db()
     try:
         for aid in ids:
-            ac = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()
-            if ac:
-                db.execute("DELETE FROM recharge_records WHERE account_id=?", (ac["account_id"],))
-            db.execute("DELETE FROM account_mcc_history WHERE account_id=?", (aid,))
-            db.execute("DELETE FROM accounts WHERE id=? AND owner_id=?", (aid, user_id))
+            db.execute(
+                "UPDATE accounts SET deleted_at=datetime('now','localtime'), "
+                "updated_at=datetime('now','localtime') WHERE id=? AND owner_id=? AND deleted_at IS NULL",
+                (aid, user_id)
+            )
         db.commit()
         return jsonify({"success": True, "deleted": len(ids)})
     finally:
         db.close()
+
+
+@app.route("/api/accounts/<int:aid>/restore", methods=["POST"])
+@jwt_required()
+def accounts_restore(aid):
+    """恢复已删除的账户。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    try:
+        ac = db.execute(
+            "SELECT account_id FROM accounts WHERE id=? AND owner_id=? AND deleted_at IS NOT NULL",
+            (aid, user_id)
+        ).fetchone()
+        if not ac:
+            return jsonify({"success": False, "error": "账户不存在或未被删除"}), 404
+        db.execute(
+            "UPDATE accounts SET deleted_at=NULL, updated_at=datetime('now','localtime') WHERE id=?",
+            (aid,)
+        )
+        db.commit()
+
+        # 后台清空 Sheet H 列"解绑"
+        sheet_id = _get_sync_spreadsheet_id(db)
+        dashboard_name = _get_my_dashboard_name(db, user_id)
+        if sheet_id and dashboard_name:
+            _sync_aid = ac["account_id"]
+            _sid = sheet_id
+            _dname = dashboard_name
+            def _sync_unbind_clear():
+                import google_sheets_service as gs
+                svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+                gs.update_cell_by_account_id(svc, _sid, _dname, _sync_aid, "", col_index=7)
+            _sync_sheets_background(_sync_unbind_clear, lambda s, e: log.warning("解绑清除失败: %s", e) if e else None)
+
+        return jsonify({"success": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/accounts/deleted", methods=["GET"])
+@jwt_required()
+def accounts_deleted_list():
+    """返回当前用户已删除的账户列表。"""
+    user_id = int(get_jwt_identity())
+    db = _yt_db()
+    rows = db.execute(
+        """SELECT a.id, a.name, a.account_id, a.timezone, a.deleted_at,
+                  ag.name AS agent_name, st.name AS status_name
+           FROM accounts a
+           LEFT JOIN agents ag ON a.agent_id = ag.id
+           LEFT JOIN account_statuses st ON a.status_id = st.id
+           WHERE a.owner_id=? AND a.deleted_at IS NOT NULL
+           ORDER BY a.deleted_at DESC""",
+        (user_id,)
+    ).fetchall()
+    db.close()
+    accounts = []
+    for r in rows:
+        d = dict(r)
+        if d.get("agent_name"):
+            d["agent"] = d["agent_name"]
+        if d.get("status_name"):
+            d["status"] = d["status_name"]
+        accounts.append(d)
+    return jsonify({"success": True, "accounts": accounts})
 
 
 @app.route("/api/accounts/batch-update", methods=["POST"])
