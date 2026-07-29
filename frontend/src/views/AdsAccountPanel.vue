@@ -45,15 +45,39 @@
     <div style="flex:1;min-height:0;overflow-y:auto;">
       <el-table :data="store.accounts" @selection-change="val => selected = val" :row-class-name="mccRowClass">
         <el-table-column type="selection" width="45" />
-        <el-table-column prop="name" label="账号名称" min-width="100" />
-        <el-table-column prop="account_id" label="账号 ID" min-width="130" show-overflow-tooltip />
-        <el-table-column label="所属 MCC" min-width="100">
+        <el-table-column label="账号名称" min-width="120">
           <template #default="{ row }">
-            <template v-if="row.mcc_name">
-              <span style="color:#0891b2;">{{ row.mcc_name }}</span>
-              <span style="font-size:10px;color:#0891b2;"> · {{ row.mcc_code }}</span>
-            </template>
-            <span v-else style="color:#888;">未分配</span>
+            <div class="inline-edit-cell" v-if="editingNameId === row.id">
+              <el-input v-model="editNameValue" size="small" class="inline-name-input"
+                :ref="el => { if (el) nameInputRef = el }"
+                @blur="saveName(row)" @keyup.enter="saveName(row)" @keyup.escape="cancelNameEdit" />
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <span class="inline-cell-text">{{ row.name }}</span>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditName(row)">✏️</el-button>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="account_id" label="账号 ID" min-width="130" show-overflow-tooltip />
+        <el-table-column label="所属 MCC" min-width="130">
+          <template #default="{ row }">
+            <div class="inline-edit-cell" v-if="editingMccId === row.id">
+              <el-select v-model="editMccValue" size="small" class="inline-mcc-select"
+                filterable clearable placeholder="选择 MCC"
+                @change="saveMcc(row)" @blur="onMccBlur"
+                @visible-change="v => { if (!v && !mccPending) cancelMccEdit() }">
+                <el-option v-for="m in mccOptions" :key="m.id"
+                  :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
+              </el-select>
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <template v-if="row.mcc_name">
+                <span style="color:#0891b2;">{{ row.mcc_name }}</span>
+                <span style="font-size:10px;color:#0891b2;"> · {{ row.mcc_code }}</span>
+              </template>
+              <span v-else style="color:#888;">未分配</span>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditMcc(row)">✏️</el-button>
+            </div>
           </template>
         </el-table-column>
         <el-table-column prop="timezone" label="时区" min-width="60" />
@@ -104,7 +128,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
 import AccountModal from '@/components/AccountModal.vue'
 import AccountBatchImportModal from '@/components/AccountBatchImportModal.vue'
@@ -136,6 +160,13 @@ const mccOptions = ref([])
 const agentOptions = ref([])
 const timezoneOptions = ref([])
 const statusCounts = ref({})
+// 内联编辑状态
+const editingNameId = ref(null)
+const editingMccId = ref(null)
+const editNameValue = ref('')
+const editMccValue = ref(null)
+let nameInputRef = null
+let mccPending = false
 let searchTimer = null
 
 onMounted(() => {
@@ -212,6 +243,66 @@ async function batchDelete() {
   await store.batchDeleteAccounts(selected.value.map(s => s.id))
 }
 
+// ===== 名称内联编辑 =====
+function startEditName(row) {
+  editingNameId.value = row.id
+  editNameValue.value = row.name
+  nextTick(() => {
+    nameInputRef?.focus?.()
+    nameInputRef?.select?.()
+  })
+}
+function cancelNameEdit() {
+  editingNameId.value = null
+  editNameValue.value = ''
+  nameInputRef = null
+}
+async function saveName(row) {
+  const v = editNameValue.value.trim()
+  if (!v || v === row.name) { cancelNameEdit(); return }
+  try {
+    await store.updateAccount(row.id, { name: v })
+    row.name = v
+    ElMessage.success('名称已更新')
+  } catch (e) {
+    ElMessage.error('更新名称失败')
+  }
+  cancelNameEdit()
+}
+
+// ===== MCC 内联编辑 =====
+function startEditMcc(row) {
+  editingMccId.value = row.id
+  editMccValue.value = row.mcc_id ?? null
+  mccPending = false
+}
+function cancelMccEdit() {
+  editingMccId.value = null
+  editMccValue.value = null
+  mccPending = false
+}
+async function saveMcc(row) {
+  const v = editMccValue.value ?? null
+  if (v === (row.mcc_id ?? null)) { cancelMccEdit(); return }
+  mccPending = true
+  try {
+    await store.updateAccount(row.id, { mcc_id: v })
+    const m = mccOptions.value.find(x => x.id === v)
+    row.mcc_name = m ? m.name : null
+    row.mcc_code = m ? m.mcc_id : null
+    row.mcc_id = v
+    ElMessage.success('MCC 已更新')
+  } catch (e) {
+    ElMessage.error('更新 MCC 失败')
+  }
+  cancelMccEdit()
+}
+function onMccBlur() {
+  setTimeout(() => {
+    if (!mccPending && editingMccId.value !== null) cancelMccEdit()
+  }, 200)
+}
+
 async function doBatchStatus(val) {
   if (!val) return
   const st = store.options.statuses.find(s => s.id === val)
@@ -247,5 +338,24 @@ async function doBatchMcc(val) {
 /* 覆盖默认 hover 浅色，改为微暗叠加，保持 MCC 分组色可辨 */
 :deep(.el-table__body tr:hover > td) {
   background-color: rgba(0,0,0,0.10) !important;
+}
+/* 内联编辑 */
+.inline-edit-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.inline-edit-btn {
+  opacity: 0;
+  transition: opacity 0.15s;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.inline-edit-cell:hover .inline-edit-btn {
+  opacity: 1;
+}
+.inline-name-input,
+.inline-mcc-select {
+  width: 100%;
 }
 </style>

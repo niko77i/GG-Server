@@ -1,7 +1,11 @@
 <template>
   <el-dialog :model-value="visible" @update:model-value="$emit('update:visible', $event)"
-    title="🗑 已删除账户" width="700px" @open="load">
-    <el-table :data="accounts" size="small" border stripe v-if="accounts.length">
+    title="🗑 已删除账户" width="750px" @open="load">
+    <div v-if="allAccounts.length" style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+      <el-input v-model="searchText" placeholder="🔍 搜索账户ID / 名称 / 代理..." clearable style="flex:1;" />
+      <span style="color:#888;font-size:12px;white-space:nowrap;">{{ filteredAccounts.length }} / {{ allAccounts.length }} 条</span>
+    </div>
+    <el-table :data="filteredAccounts" size="small" border stripe v-if="filteredAccounts.length">
       <el-table-column prop="account_id" label="账户ID" min-width="130" show-overflow-tooltip />
       <el-table-column prop="name" label="账户名称" min-width="100">
         <template #default="{ row }">
@@ -24,7 +28,7 @@
         </template>
       </el-table-column>
     </el-table>
-    <el-empty v-else description="暂无已删除账户" :image-size="50" />
+    <el-empty v-else :description="allAccounts.length ? '无匹配结果' : '暂无已删除账户'" :image-size="50" />
 
     <template #footer>
       <el-button @click="$emit('update:visible', false)">关闭</el-button>
@@ -33,7 +37,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -41,19 +45,31 @@ const props = defineProps({ visible: Boolean })
 const emit = defineEmits(['update:visible', 'restored'])
 
 const store = useAccountStore()
-const accounts = ref([])
+const allAccounts = ref([])
+const searchText = ref('')
 const restoring = ref(null)
 const deleting = ref(null)
 
+const filteredAccounts = computed(() => {
+  const q = searchText.value.toLowerCase().trim()
+  if (!q) return allAccounts.value
+  return allAccounts.value.filter(a =>
+    (a.account_id || '').toLowerCase().includes(q) ||
+    (a.name || '').toLowerCase().includes(q) ||
+    (a.agent || '').toLowerCase().includes(q)
+  )
+})
+
 async function load() {
-  accounts.value = await store.loadDeletedAccounts()
+  allAccounts.value = await store.loadDeletedAccounts()
+  searchText.value = ''
 }
 
 async function doRestore(row) {
   restoring.value = row.id
   try {
     await store.restoreAccount(row.id)
-    accounts.value = accounts.value.filter(a => a.id !== row.id)
+    allAccounts.value = allAccounts.value.filter(a => a.id !== row.id)
     ElMessage.success('账户已恢复')
     emit('restored')
   } catch (e) {
@@ -74,7 +90,7 @@ async function doPermanentDelete(row) {
   deleting.value = row.id
   try {
     await store.permanentDeleteAccount(row.id)
-    accounts.value = accounts.value.filter(a => a.id !== row.id)
+    allAccounts.value = allAccounts.value.filter(a => a.id !== row.id)
     ElMessage.success('已永久删除')
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '删除失败')
