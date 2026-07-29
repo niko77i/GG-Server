@@ -77,18 +77,23 @@
 用户确认 → 执行同步
   - 批量创建新账户
   - 执行确认后的状态变更（不触发清账逻辑）
+  - 系统→Sheet：所有匹配账户的最新状态写回 Sheet 备注列
 ```
 
 ### 流 B：系统 → Sheet（自动触发，后台线程）
 
 ```
-accounts_update() 状态变更
+状态变更（手动修改 / 同步触发）
        │
        ├──→ 充值表：追加"清"记录（已有逻辑，不变）
        │
        └──→ 我的看板：_sync_sheets_background()
              按 account_id 定位行 → 更新备注列（F列）
              写入当前状态名称
+             
+注意：dashboard 同步独立于清账逻辑，所有状态变更都触发
+（存活↔死亡/验证/限额等）。批量变更在 db.commit() 前收集
+变更列表，commit 后使用预收集的列表避免时序问题。
 ```
 
 ---
@@ -148,7 +153,9 @@ accounts_update() 状态变更
 {
   "dry_run": false,
   "confirmed": {
-    "create": ["account_id_1", "account_id_2"],
+    "create": [
+      {"account_id": "123-456-7890", "agent": "卡尔", "timezone": "UTC+8", "operator": "张三"}
+    ],
     "update": [
       {"account_id": "xxx", "new_status": "死亡"},
       {"account_id": "yyy", "new_status": "存活"}
@@ -169,6 +176,9 @@ accounts_update() 状态变更
 }
 ```
 
+> **注意**：`confirmed.create` 传递完整对象 `{account_id, agent, timezone, operator}`，
+> 与 `dry_run` 返回的 `to_create` 条目格式一致。
+
 #### 错误处理
 
 | 场景 | HTTP | 消息 |
@@ -181,25 +191,50 @@ accounts_update() 状态变更
 
 ### 4.2 `PUT /api/accounts/<id>` — 修改
 
-在现有状态变更逻辑（清账 + 充值表同步）之后，新增 my_dashboard 后台同步：
+在状态变更检测处（与 `status_changed_date` 更新同级），新增 my_dashboard 后台同步。
+**注意**：dashboard 同步独立于清账逻辑块，所有状态变更都触发，不限于存活→非存活。
 
 ```python
-# 新增：状态变更时同步「我的看板」备注列
+# 状态变更时同步「我的看板」备注列（独立于清账逻辑）
 if new_status and old_status and new_status != old_status["status_name"]:
     dashboard_name = _get_my_dashboard_name(db, user_id)
-    sheet_id = _get_recharge_sheet_id(db)  # 复用同一个 spreadsheet
-    if sheet_id and dashboard_name:
+    sync_sheet_id = _get_sync_spreadsheet_id(db)
+    if sync_sheet_id and dashboard_name:
         def _sync_dashboard():
+            svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
             gs.update_cell_by_account_id(
-                service, sheet_id, dashboard_name,
+                svc, sync_sheet_id, dashboard_name,
                 old_status["account_id"], new_status
             )
-        _sync_sheets_background(_sync_dashboard, lambda s, e: None)
+        _sync_sheets_background(_sync_dashboard, _on_dash_fail)
 ```
 
 ### 4.3 `PUT /api/accounts/batch-update` — 修改
 
-同单账户更新，批量状态变更时每一条都触发 my_dashboard 后台同步。
+在循环内收集状态变更到 `dashboard_sync_rows` 列表（`db.commit()` 之前），
+commit 之后独立于清账块使用预收集列表进行后台同步。
+避免 commit 后查询导致 old==new 的时序问题。
+
+---
+
+## 五、Google Sheets 服务
+
+### 4.4 `POST /api/accounts/sync-from-sheet` execute — 系统→Sheet 同步
+
+execute 阶段 db.commit() 后，对 Sheet 中所有匹配账户重新查询最新状态，
+后台写入 Sheet 备注列。
+
+```python
+# 10c. 系统 → Sheet
+if sheet_id and dashboard_name:
+    _fresh_rows = db.execute(
+        "SELECT a.account_id, COALESCE(st.name, '存活') AS status_name ..."
+    ).fetchall()
+    for r in _fresh_rows:
+        _sync_back_rows.append((r["account_id"], r["status_name"]))
+    # 后台批量写 Sheet
+    _sync_sheets_background(_sync_back_to_dashboard, ...)
+```
 
 ---
 
@@ -264,9 +299,24 @@ def _get_my_dashboard_name(db, user_id) -> str:
 
 读取「我的看板」sheet 数据，跳过表头行，返回结构化列表。
 
-### `_get_spreadsheet_id(db) -> str`
+### `_get_sync_spreadsheet_id(db) -> str`
 
-从 tags/config 中获取当前有效的 spreadsheet ID。
+从 tags 表 `recharge_sheet_id` 获取 spreadsheet ID。兼容两种存储格式：
+- JSON 编码：`"abc123"` → `_json.loads` 解析后传给 `_parse_sheet_id`
+- 纯文本：`abc123` 或完整 URL → `_json.loads` 失败时 fallback 到原始值
+
+```python
+def _get_sync_spreadsheet_id(db) -> str:
+    row = db.execute("SELECT value FROM tags WHERE key='recharge_sheet_id'").fetchone()
+    if row and row["value"]:
+        raw = row["value"]
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            pass  # fallback 到原始值
+        return _parse_sheet_id(raw)
+    return ""
+```
 
 ---
 
@@ -336,6 +386,9 @@ async syncFromSheet(body) {
 | 新增时 account_id 与系统已有重复 | 自动归类到 to_update 处理 |
 | 后台写 Sheet 失败 | 静默失败，不阻塞主流程 |
 | 用户未配置 my_dashboard sheet 名 | 使用默认值"我的看板" |
+| recharge_sheet_id 非 JSON 格式 | `_get_sync_spreadsheet_id` JSON 解析失败时 fallback 到原始值 |
+| 充值 API 中 spreadsheet_id 读取 | 统一使用 `_get_sync_spreadsheet_id(db)`，不再裸调 `_json.loads` |
+| 批量状态变更 Sheet 同步 | db.commit() 前收集变更列表，避免 commit 后查询 old==new |
 
 ---
 
