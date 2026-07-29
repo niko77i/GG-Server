@@ -4055,10 +4055,7 @@ def accounts_batch_update():
         db.commit()
         # 后台同步 Google Sheets（仅写入新插入的记录）
         if field in ("status", "status_id") and value and new_clear_rows:
-            sheet_id_row = db.execute(
-                "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-            ).fetchone()
-            sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+            sheet_id = _get_sync_spreadsheet_id(db)
             recharge_sheet_name = _get_recharge_sheet_name(db)
             if sheet_id:
                 user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
@@ -4091,10 +4088,7 @@ def accounts_batch_update():
         # 新增：批量状态变更时同步「我的看板」（独立于清账逻辑）
         if field in ("status", "status_id") and value and dashboard_sync_rows:
             dashboard_name = _get_my_dashboard_name(db, user_id)
-            sheet_id_row = db.execute(
-                "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-            ).fetchone()
-            sync_sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+            sync_sheet_id = _get_sync_spreadsheet_id(db)
             if sync_sheet_id and dashboard_name:
                 _dname = dashboard_name
                 _sid = sync_sheet_id
@@ -4298,55 +4292,57 @@ def accounts_sync_from_sheet():
     updated_count = 0
     errors = []
 
-    # 10a. 创建新账户
-    for item in confirmed.get("create", []):
-        try:
-            _execute_sync_create(db, item, user_id)
-            created_count += 1
-        except Exception as e:
-            errors.append({"account_id": item.get("account_id", "unknown") if isinstance(item, dict) else str(item), "error": str(e)})
+    try:
+        # 10a. 创建新账户
+        for item in confirmed.get("create", []):
+            try:
+                _execute_sync_create(db, item, user_id)
+                created_count += 1
+            except Exception as e:
+                errors.append({"account_id": item.get("account_id", "unknown") if isinstance(item, dict) else str(item), "error": str(e)})
 
-    # 10b. 执行状态更新
-    for item in confirmed.get("update", []):
-        try:
-            account_id = item.get("account_id", "")
-            new_status = item.get("new_status", "")
-            if account_id and new_status:
-                # 查找状态 ID
-                st = db.execute(
-                    "SELECT id FROM account_statuses WHERE name=? AND owner_id=?",
-                    (new_status, user_id)
-                ).fetchone()
-                if not st:
-                    db.execute(
-                        "INSERT INTO account_statuses(name, owner_id) VALUES(?,?)",
+        # 10b. 执行状态更新
+        for item in confirmed.get("update", []):
+            try:
+                account_id = item.get("account_id", "")
+                new_status = item.get("new_status", "")
+                if account_id and new_status:
+                    # 查找状态 ID
+                    st = db.execute(
+                        "SELECT id FROM account_statuses WHERE name=? AND owner_id=?",
                         (new_status, user_id)
-                    )
-                    st_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-                else:
-                    st_id = st["id"]
+                    ).fetchone()
+                    if not st:
+                        db.execute(
+                            "INSERT INTO account_statuses(name, owner_id) VALUES(?,?)",
+                            (new_status, user_id)
+                        )
+                        st_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    else:
+                        st_id = st["id"]
 
-                # 更新账户状态（不触发清账逻辑）
-                # 同步死亡时间
-                if new_status == "死亡":
-                    db.execute(
-                        "UPDATE accounts SET status_id=?, death_date=date('now','localtime'), "
-                        "status_changed_date=datetime('now','localtime'), "
-                        "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
-                        (st_id, account_id, user_id)
-                    )
-                else:
-                    db.execute(
-                        "UPDATE accounts SET status_id=?, death_date='', status_changed_date=datetime('now','localtime'), "
-                        "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
-                        (st_id, account_id, user_id)
-                    )
-                updated_count += 1
-        except Exception as e:
-            errors.append({"account_id": item.get("account_id", ""), "error": str(e)})
+                    # 更新账户状态（不触发清账逻辑）
+                    # 同步死亡时间
+                    if new_status == "死亡":
+                        db.execute(
+                            "UPDATE accounts SET status_id=?, death_date=date('now','localtime'), "
+                            "status_changed_date=datetime('now','localtime'), "
+                            "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
+                            (st_id, account_id, user_id)
+                        )
+                    else:
+                        db.execute(
+                            "UPDATE accounts SET status_id=?, death_date='', status_changed_date=datetime('now','localtime'), "
+                            "updated_at=datetime('now','localtime') WHERE account_id=? AND owner_id=?",
+                            (st_id, account_id, user_id)
+                        )
+                    updated_count += 1
+            except Exception as e:
+                errors.append({"account_id": item.get("account_id", ""), "error": str(e)})
 
-    db.commit()
-    db.close()
+        db.commit()
+    finally:
+        db.close()
 
     return jsonify({
         "success": True,
