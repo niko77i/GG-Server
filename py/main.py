@@ -3812,10 +3812,7 @@ def accounts_update(aid):
                 clear_record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
                 # 后台同步 Sheets
-                sheet_id_row = db.execute(
-                    "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-                ).fetchone()
-                sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+                sheet_id = _get_sync_spreadsheet_id(db)
                 recharge_sheet_name = _get_recharge_sheet_name(db)
                 if sheet_id and clear_record_id:
                     _rid = clear_record_id
@@ -4488,10 +4485,7 @@ def recharge_submit():
         record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         # 2. 读配置，启动后台同步
-        sheet_id_row = db.execute(
-            "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-        ).fetchone()
-        sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+        sheet_id = _get_sync_spreadsheet_id(db)
         recharge_sheet_name = _get_recharge_sheet_name(db)
         db.close()
 
@@ -4589,10 +4583,7 @@ def recharge_batch_submit():
         db.commit()
 
         # 2. 读配置，启动后台同步
-        sheet_id_row = db.execute(
-            "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-        ).fetchone()
-        sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+        sheet_id = _get_sync_spreadsheet_id(db)
         recharge_sheet_name = _get_recharge_sheet_name(db)
         db.close()
 
@@ -4714,10 +4705,7 @@ def recharge_retry_sheets(rid):
             db.close()
             return jsonify({"success": False, "error": "记录不存在"}), 404
 
-        sheet_id_row = db.execute(
-            "SELECT value FROM tags WHERE key='recharge_sheet_id'"
-        ).fetchone()
-        sheet_id = _parse_sheet_id(_json.loads(sheet_id_row["value"]) if (sheet_id_row and sheet_id_row["value"]) else "")
+        sheet_id = _get_sync_spreadsheet_id(db)
         recharge_sheet_name = _get_recharge_sheet_name(db)
         if not sheet_id:
             db.close()
