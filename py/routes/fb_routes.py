@@ -965,7 +965,8 @@ def extract_save():
 def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, records):
     """后台线程写 Google Sheets + 失败记录到 sheets_sync_log"""
     def _do_write():
-        db = get_db()
+        import database as _db
+        db = _db.get_db()
         try:
             import google_sheets_service as gs
             gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
