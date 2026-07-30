@@ -121,25 +121,39 @@ def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
     }
 
 
-def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
-                   rows: list, product_name: str, region: str, report_date: str,
-                   sales_person: str, agency_ratio, operator_name: str) -> dict:
-    """将做表数据 upsert 到 Google Sheets。
+def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
+                   region: str, report_date: str, sales_person: str,
+                   agency_ratio, operator_name: str) -> dict:
+    """将做表数据 upsert 到 Google Sheets。按 report_date 月份自动选/建 Sheet。
 
-    info: get_spreadsheet_info 的返回值（含 sheets 列表和 rowCount）
+    Sheet 命名格式：{operator_name}{YYYY.MM}，如「卡尔2026.07」。
+    若 Sheet 不存在则自动创建，然后执行去重更新 + 追加 + 格式化。
     """
-    # 1. 从已缓存的 info 解析 sheet 名和行数（不再调 API）
-    sheet_name = "Sheet1"
-    sheet_rows = 1000
-    for s in info.get("sheets", []):
-        if str(s.get("gid", 0)) == str(sheet_gid):
-            sheet_name = s["name"]
-            sheet_rows = s.get("rowCount", 1000)
-            break
-    sheet_id_int = int(sheet_gid) if str(sheet_gid).isdigit() else 0
+    if not rows:
+        return {"updated": 0, "inserted": 0}
 
-    # 2. 读取现有数据
-    range_read = f"'{sheet_name}'!A:N"
+    # 1. 按月份生成目标 Sheet 名，获取/创建 Sheet
+    month_key = report_date[:7].replace('-', '.')          # 2026-07-30 → 2026.07
+    target_sheet = f"{operator_name}{month_key}"
+
+    info = get_spreadsheet_info(service, spreadsheet_id)
+    existing_sheets = {s.get("name", ""): s for s in info.get("sheets", [])}
+
+    if target_sheet not in existing_sheets:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": target_sheet}}}]}
+        ).execute()
+        log.info("Created new sheet: %s", target_sheet)
+        info = get_spreadsheet_info(service, spreadsheet_id)
+        existing_sheets = {s.get("name", ""): s for s in info.get("sheets", [])}
+
+    sheet_info = existing_sheets[target_sheet]
+    sheet_rows = sheet_info.get("rowCount", 1000)
+    sheet_id_int = sheet_info.get("gid", 0)
+
+    # 2. 读取目标 Sheet 现有数据（A-N 列）
+    range_read = f"'{target_sheet}'!A:N"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
         range=range_read,
@@ -154,7 +168,7 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
             last_date = (row[0] or "").strip() if len(row) > 0 else ""
             break
 
-    # 3. 构建索引
+    # 3. 构建索引：（日期, 客户ID, 广告系列）→ 行号
     existing_index = {}
     for i, row in enumerate(existing):
         d = (row[0] or "").strip() if len(row) > 0 else ""
@@ -179,7 +193,7 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
             row.get("campaign", ""), "", l_val, None, None,  # M/N 公式稍后填入
         ])
 
-    # 5. 分拣
+    # 5. 分拣：已有索引 → 更新，新数据 → 追加
     updates = []
     appends = []
     for new_row in new_rows:
@@ -199,7 +213,7 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
             row_data[12] = f"=F{row_num}*L{row_num}"
             row_data[13] = f"=F{row_num}-K{row_num}+M{row_num}"
             data.append({
-                "range": f"'{sheet_name}'!A{row_num}:N{row_num}",
+                "range": f"'{target_sheet}'!A{row_num}:N{row_num}",
                 "values": [row_data],
             })
         service.spreadsheets().values().batchUpdate(
@@ -207,7 +221,7 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
             body={"valueInputOption": "USER_ENTERED", "data": data},
         ).execute()
 
-    # 7. 追加新行（用 info 中的 rowCount，不再调 API）
+    # 7. 追加新行
     if appends:
         start = last_row + 1
         # 不同日期之间空一行
@@ -232,12 +246,12 @@ def upsert_zuobiao(service, info: dict, spreadsheet_id: str, sheet_gid: str,
             ).execute()
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"'{sheet_name}'!A{start}:N{end}",
+            range=f"'{target_sheet}'!A{start}:N{end}",
             valueInputOption="USER_ENTERED",
             body={"values": appends},
         ).execute()
 
-    # 8. 格式化 — 仅对新写入的行
+    # 8. 格式化 — 仅对新写入的行（D列文本，E列数字千分位）
     if appends:
         service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
@@ -497,8 +511,14 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
         raise ValueError("表格配置缺少 spreadsheet_id")
 
     result = _upsert_rows(
-        user_id, ss_id, rows,
-        report_date, product_name, region, report_date
+        user_id=user_id,
+        spreadsheet_id=ss_id,
+        sheet_name="",
+        rows=rows,
+        report_date=report_date,
+        product_name=product_name,
+        region=region,
+        date_str=report_date,
     )
     return result
 

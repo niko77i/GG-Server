@@ -6214,11 +6214,23 @@ def google_sheets_update_zuobiao():
                 }), 400
 
     sheets, active_config = _get_user_sheets_config(user_id)
-    if not active_config:
+    if not sheets:
         return jsonify({"success": False, "error": "请先在个人中心配置 Google 表格"}), 400
 
-    spreadsheet_id = active_config.get("spreadsheet_id", "")
-    sheet_gid = active_config.get("sheet_gid", "0")
+    # 按 report_date 月份匹配表格名称：{操作人名}{YYYY.MM}
+    user = db.execute(
+        "SELECT display_name, username FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    operator_name = (user['display_name'] or user['username']) if user else ''
+    month_key = report_date[:7].replace('-', '.')
+    expected = f"{operator_name}{month_key}"
+    matched = next((s for s in sheets if expected in (s.get('spreadsheet_name', '') or '')), None)
+    if matched:
+        spreadsheet_id = matched.get("spreadsheet_id", "")
+    elif active_config:
+        spreadsheet_id = active_config.get("spreadsheet_id", "")
+    else:
+        spreadsheet_id = sheets[0].get("spreadsheet_id", "")
     if not spreadsheet_id:
         return jsonify({"success": False, "error": "表格 ID 为空，请检查配置"}), 400
 

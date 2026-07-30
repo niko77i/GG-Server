@@ -826,3 +826,53 @@ SELECT 增加 `u.platform`，前端可按平台筛选用户。
 | 选项表权限 | 未定义 | developer/admin 可操作任意 owner 的记录 | 实际使用需要 |
 | admin 用户平台切换 | 仅 developer | admin 也可通过 `?platform=` 参数切换 | `_get_effective_platform()` 统一处理 |
 | `fb_ad_reports` 去重 | `INSERT OR REPLACE` | `INSERT ... ON CONFLICT ... DO UPDATE` | 避免 id 跳跃和 updated_at 丢失 |
+
+---
+
+## 十一、Google Sheets 自动写表（FB 平台）
+
+### 11.1 配置
+
+- FB 用户的 Sheets 配置独立存储：key = `google_sheets_fb_{user_id}`（GG 用 `google_sheets_{user_id}`）
+- 配置页：和 GG 共用 `UserProfileView.vue`，后端按平台自动选 key
+- 每个月一个表格文件，命名规则：`{用户名}{YYYY.MM}`，如 `卡尔2026.07`
+
+### 11.2 表格列布局（12 列，A-L）
+
+| 列 | 标题 | 来源 |
+|---|------|------|
+| A | 日期 | 用户选择的 report_date |
+| B | 运营 | 当前用户 display_name |
+| C | 账户名称 | 粘贴数据 account_name |
+| D | 广告账户ID | 粘贴数据 account_id（文本，加 `'` 前缀） |
+| E | 账号消耗 | 粘贴数据 cost |
+| F | 报给客户 | 空 |
+| G | 客户名称 | 产品名 product_name |
+| H | 商务 | 产品关联的 sales_person |
+| I | 投放国家 | 产品 region |
+| J | 渠道号 | 线名 line_name |
+| K | 平台实际 | 空 |
+| L | 代投比例 | 产品 agency_ratio（如 `6%`） |
+| M | 代投费 | **不写**（公式 `=F*L`，表内保留） |
+| N | 利润 | **不写**（公式 `=F-K+M`，表内保留） |
+
+### 11.3 写表流程
+
+1. 保存到数据库 → 启动后台线程写 Sheets
+2. 按 report_date 月份匹配表格名称 → 找到对应 `spreadsheet_id`
+3. 找不到 → 弹窗提示 `未找到 YYYY.MM 月份的表格，请在个人信息页添加`
+4. 写入默认 Sheet1，去重键 (日期, 账户ID) → 已有则覆盖，新则追加
+5. 新日期与上一条不同 → 自动空一行
+6. 写入结果记录到 `sheets_sync_log`（成功/失败）
+7. 前端 1.5 秒后检查结果 → ✅ 写表成功 / ❌ 写表失败: 错误信息
+8. 失败时数据管理页可手动重试（🔄 重试写表按钮）
+
+### 11.4 API 端点
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/fb/extract/save` | 保存到 DB + 触发后台写 Sheets |
+| `POST /api/fb/extract/check-duplicates` | 检查重复数据 |
+| `GET /api/fb/reports/last-sync` | 最近一次 Sheet 同步结果 |
+| `GET /api/fb/reports/sync-status` | 同步失败记录列表 |
+| `POST /api/fb/reports/retry-sync` | 手动重试失败的同步 |
