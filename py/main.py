@@ -2419,7 +2419,7 @@ def products_create():
     packages = data.get("packages") or []
 
     # --- sales_person_id 兼容处理 ---
-    sales_person_id = data.get("sales_person_id")
+    sales_person_id = data.get("sales_person_id") or None
     if sales_person_id is None and sales_person:
         existing_sp = db.execute(
             "SELECT id FROM sales_persons WHERE name=? AND owner_id=?", (sales_person, user_id)
@@ -6237,7 +6237,6 @@ def google_sheets_retry_sync():
 
     spreadsheet_id = log_row["spreadsheet_id"] or ""
     sheet_gid = log_row["sheet_gid"] or "0"
-    db.close()
 
     if not spreadsheet_id:
         return jsonify({"success": False, "error": "表格 ID 为空"}), 400
@@ -6259,8 +6258,8 @@ def google_sheets_retry_sync():
             operator_name=operator_name,
         )
 
-        # 成功 → 删除日志
-        db2 = _yt_db()
+        # 成功 → 删除日志（用独立连接，避免 db 已被关闭的问题）
+        db2 = database.get_db()
         db2.execute("DELETE FROM sheets_sync_log WHERE id=?", (log_row["id"],))
         db2.commit(); db2.close()
 
@@ -6271,7 +6270,7 @@ def google_sheets_retry_sync():
         })
     except Exception as e:
         msg = str(e)
-        db2 = _yt_db()
+        db2 = database.get_db()
         db2.execute(
             "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
             "updated_at=datetime('now','localtime') WHERE id=?",
