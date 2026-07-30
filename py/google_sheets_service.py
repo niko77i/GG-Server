@@ -450,7 +450,14 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     sheets_list = json.loads(config['value'] or '[]')
     if not isinstance(sheets_list, list) or not sheets_list:
         raise ValueError("用户未配置 Google Sheets")
-    active_sheet = sheets_list[0]
+
+    # 按 report_date 月份匹配表格名称：用户名YYYY.MM
+    user_name = (user['display_name'] or user['username']) if user else f"user{user_id}"
+    month_key = report_date[:7].replace('-', '.')
+    expected = f"{user_name}{month_key}"
+    active_sheet = next((s for s in sheets_list if expected in (s.get('spreadsheet_name','') or '')), None)
+    if not active_sheet:
+        raise ValueError(f"未找到 {month_key} 月份的表格「{expected}」，请在个人信息页添加")
 
     # 获取产品信息（商务、地区等）
     product_info = db.execute(
@@ -516,21 +523,8 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
         service = build_service(creds_path)
         info = get_spreadsheet_info(service, spreadsheet_id)
 
-        # Sheet 标签名 = 用户名YYYY.MM
-        import database as _db2
-        db3 = _db2.get_db()
-        u = db3.execute("SELECT display_name, username FROM users WHERE id=?", (user_id,)).fetchone()
-        db3.close()
-        user_name = (u['display_name'] or u['username']) if u else f"user{user_id}"
-        month_key = (date_str or report_date)[:7].replace('-', '.')
-        target_sheet = f"{user_name}{month_key}"
-
-        # 不存在则自动创建
-        existing_names = {s.get("name", "") for s in info.get("sheets", [])}
-        if target_sheet not in existing_names:
-            body = {"requests": [{"addSheet": {"properties": {"title": target_sheet}}}]}
-            service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
-            log.info(f"Auto-created sheet: {target_sheet}")
+        # 使用默认 Sheet1
+        target_sheet = info.get("sheets", [{}])[0].get("name", "Sheet1")
 
         # 读取现有数据
         range_read = f"'{target_sheet}'!A:L"
