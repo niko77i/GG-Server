@@ -96,9 +96,9 @@ async function loadOptions() {
   const [bmRes, pxBmRes, userRes, salesRes, regionsRes] = await Promise.all([
     fbApi.bmOptions(),
     fbApi.pixelBmOptions(),
-    client.get('/api/auth/names'),
-    client.get('/api/sales-persons/list'),
-    client.get('/api/regions/list'),
+    client.get('/auth/names'),
+    client.get('/sales-persons/list'),
+    client.get('/regions/list'),
   ])
   bmOptions.value = bmRes.data || []
   // fbUsers: /api/auth/names 返回 {users: [...]}
