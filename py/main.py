@@ -5797,19 +5797,23 @@ def sales_persons_delete(sid):
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
     is_dev = user and user.get("role") == "developer"
+    # 调试日志
+    import logging; log = logging.getLogger("gg-server")
+    log.info(f"[DELETE sales_persons] sid={sid}, uid={user_id}, is_dev={is_dev}, user_role={user.get('role') if user else 'None'}")
     if is_dev:
         row = db.execute("SELECT id FROM sales_persons WHERE id=?", (sid,)).fetchone()
     else:
         row = db.execute("SELECT id FROM sales_persons WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    log.info(f"[DELETE sales_persons] row_found={row is not None}")
     if not row:
         db.close()
         return jsonify({"success": False, "error": "商务人员不存在或无权操作"}), 404
-    # 检查 GG 产品和 FB 产品的引用
+    # 检查 GG 产品和 FB 产品的引用（排除已归档/软删除的产品）
     gg_products = db.execute(
-        "SELECT product_name FROM products WHERE sales_person_id=?", (sid,)
+        "SELECT product_name FROM products WHERE sales_person_id=? AND is_archived=0", (sid,)
     ).fetchall()
     fb_products = db.execute(
-        "SELECT product_name FROM fb_products WHERE sales_person_id=?", (sid,)
+        "SELECT product_name FROM fb_products WHERE sales_person_id=? AND is_archived=0", (sid,)
     ).fetchall()
     all_products = [p["product_name"] for p in gg_products] + [p["product_name"] for p in fb_products]
     if all_products:
