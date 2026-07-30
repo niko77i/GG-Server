@@ -502,13 +502,22 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
 
 def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
                  rows: list, report_date: str, product_name: str,
-                 region: str, today: str = "") -> dict:
-    """FB 做表数据写入 Google Sheets（12列 A-L，M-N 留公式）。新的一天自动空一行。"""
+                 region: str, date_str: str = "") -> dict:
+    """FB 做表数据写入 Google Sheets（12列 A-L）。按 report_date 月份自动选/建 Sheet。"""
     if not rows:
         return {"updated": 0}
 
     import logging
     log = logging.getLogger(__name__)
+
+    # 根据 report_date 生成 sheet 名：用户名YYYY.MM
+    import database as _db
+    db2 = _db.get_db()
+    user = db2.execute("SELECT display_name, username FROM users WHERE id=?", (user_id,)).fetchone()
+    db2.close()
+    user_name = (user['display_name'] or user['username']) if user else f"user{user_id}"
+    month_key = (date_str or report_date)[:7].replace('-', '.')  # 2026-07-30 → 2026.07
+    target_sheet = f"{user_name}{month_key}"
 
     try:
         import os
@@ -520,14 +529,27 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
         service = build_service(creds_path)
         info = get_spreadsheet_info(service, spreadsheet_id)
 
-        target_sheet = info.get("sheets", [{}])[0].get("name", "Sheet1")
+        # 检查 sheet 是否存在，没有则创建
+        existing_sheets = {s.get("name", ""): s for s in info.get("sheets", [])}
+        if target_sheet not in existing_sheets:
+            # 创建新 sheet（复制第一个 sheet 的格式或空表）
+            body = {"requests": [{"addSheet": {"properties": {"title": target_sheet}}}]}
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=body
+            ).execute()
+            log.info(f"Created new sheet: {target_sheet}")
+            # 刷新 info
+            info = get_spreadsheet_info(service, spreadsheet_id)
 
-        # 读取现有数据
+        # 读取目标 sheet 现有数据
         range_read = f"'{target_sheet}'!A:L"
-        result = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, range=range_read
-        ).execute()
-        existing = result.get("values", [])
+        try:
+            result = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id, range=range_read
+            ).execute()
+            existing = result.get("values", [])
+        except Exception:
+            existing = []
 
         # 找最后一行 + 最后日期
         last_row = 0
@@ -540,7 +562,7 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
                 break
 
         # 新日期 → 空一行
-        if today and last_date and last_date != today:
+        if date_str and last_date and last_date != date_str:
             last_row += 1
 
         # 去重索引：按 (A=日期, D=账户ID)
@@ -554,9 +576,9 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
         updates = []
         for r in rows:
             row_data = [str(v) if not isinstance(v, (int, float)) else v for v in r]
-            date_str = str(r[0]) if isinstance(r, list) else today
+            d = str(r[0]) if isinstance(r, list) else date_str
             acct_id = str(r[3]).lstrip("'") if isinstance(r, list) else ""
-            key = (date_str, acct_id)
+            key = (d, acct_id)
 
             if key in existing_map:
                 row_idx = existing_map[key]
@@ -573,8 +595,8 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
                 spreadsheetId=spreadsheet_id, body=body
             ).execute()
 
-        log.info(f"FB sheets written: {len(updates)} rows to {spreadsheet_id}")
-        return {"updated": len(updates)}
+        log.info(f"FB sheets written: {len(updates)} rows to {spreadsheet_id}/{target_sheet}")
+        return {"updated": len(updates), "sheet": target_sheet}
     except Exception as e:
         log.error(f"FB sheets write failed: {e}")
         raise
