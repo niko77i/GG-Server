@@ -384,9 +384,11 @@ def _ensure_schema(conn: sqlite3.Connection):
         -- 地区与时区管理
         CREATE TABLE IF NOT EXISTS regions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
             timezone TEXT NOT NULL DEFAULT '',
-            created_at TEXT DEFAULT (datetime('now','localtime'))
+            platform TEXT DEFAULT 'gg',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(name, platform)
         );
 
         -- 用户表
@@ -1061,14 +1063,30 @@ def _cleanup_old_option_columns(conn: sqlite3.Connection):
 
 
 def _copy_gg_options_to_fb(conn: sqlite3.Connection):
-    """一次性迁移：将 GG 平台的选项数据复制一份到 FB 平台。"""
+    """一次性迁移：将 GG 平台的选项数据复制一份到 FB 平台，并更新 UNIQUE 约束。"""
     migrated = conn.execute(
         "SELECT value FROM config WHERE key='migrated_copy_options_to_fb'"
     ).fetchone()
     if migrated:
         return
 
-    # 地区
+    # 先修复 regions 的 UNIQUE 约束：从 UNIQUE(name) 改为 UNIQUE(name, platform)
+    # 重建 regions 表（保留数据）
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS regions_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            timezone TEXT DEFAULT '',
+            platform TEXT DEFAULT 'gg',
+            UNIQUE(name, platform)
+        );
+        INSERT OR IGNORE INTO regions_new(id, name, timezone, platform)
+            SELECT id, name, timezone, platform FROM regions;
+        DROP TABLE regions;
+        ALTER TABLE regions_new RENAME TO regions;
+    """)
+
+    # 复制 GG → FB
     gg_regions = conn.execute(
         "SELECT name, timezone FROM regions WHERE platform='gg'"
     ).fetchall()
@@ -1076,17 +1094,19 @@ def _copy_gg_options_to_fb(conn: sqlite3.Connection):
         conn.execute(
             "INSERT OR IGNORE INTO regions(name, timezone, platform) VALUES(?,?,'fb')",
             (r["name"], r["timezone"]))
+
     # 商务
     gg_sales = conn.execute(
-        "SELECT name FROM sales_persons WHERE platform='gg'"
+        "SELECT DISTINCT name FROM sales_persons WHERE platform='gg'"
     ).fetchall()
     for s in gg_sales:
         conn.execute(
             "INSERT OR IGNORE INTO sales_persons(name, owner_id, platform) VALUES(?,1,'fb')",
             (s["name"],))
+
     # 状态
     gg_statuses = conn.execute(
-        "SELECT name FROM account_statuses WHERE platform='gg'"
+        "SELECT DISTINCT name FROM account_statuses WHERE platform='gg'"
     ).fetchall()
     for s in gg_statuses:
         conn.execute(
