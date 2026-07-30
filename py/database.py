@@ -1073,16 +1073,16 @@ def _copy_gg_options_to_fb(conn: sqlite3.Connection):
     conn.execute("PRAGMA foreign_keys=OFF")
 
     # 重建三张选项表：UNIQUE 加入 platform（保留数据 + id）
-    rebuilds = [
-        ("regions", "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, timezone TEXT DEFAULT '', platform TEXT DEFAULT 'gg', created_at TEXT DEFAULT (datetime('now','localtime')), UNIQUE(name, platform)",
-         "id, name, timezone, platform, created_at"),
+    for tbl, cols_def, cols_sel in [
+        ("regions", "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, timezone TEXT DEFAULT '', platform TEXT DEFAULT 'gg', UNIQUE(name, platform)",
+         "id, name, timezone, platform"),
         ("sales_persons", "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, owner_id INTEGER REFERENCES users(id), platform TEXT DEFAULT 'gg', created_at TEXT DEFAULT (datetime('now','localtime')), UNIQUE(name, platform)",
          "id, name, owner_id, platform, created_at"),
         ("account_statuses", "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, owner_id INTEGER REFERENCES users(id), platform TEXT DEFAULT 'gg', created_at TEXT DEFAULT (datetime('now','localtime')), UNIQUE(name, platform)",
          "id, name, owner_id, platform, created_at"),
-    ]
-    for tbl, cols_def, cols_sel in rebuilds:
-        conn.execute(f"CREATE TABLE IF NOT EXISTS {tbl}_new ({cols_def})")
+    ]:
+        conn.execute(f"DROP TABLE IF EXISTS {tbl}_new")
+        conn.execute(f"CREATE TABLE {tbl}_new ({cols_def})")
         conn.execute(f"INSERT OR IGNORE INTO {tbl}_new({cols_sel}) SELECT {cols_sel} FROM {tbl}")
         conn.execute(f"DROP TABLE {tbl}")
         conn.execute(f"ALTER TABLE {tbl}_new RENAME TO {tbl}")
