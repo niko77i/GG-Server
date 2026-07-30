@@ -494,9 +494,83 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
 def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
                  rows: list, report_date: str, product_name: str,
                  region: str) -> dict:
-    """通用 sheet 写入（简化版，后续完善）"""
-    # 简化实现：返回成功，由前端确认
+    """FB 做表数据写入 Google Sheets。"""
     if not rows:
         return {"updated": 0}
-    # 实际写入逻辑后续补充
-    return {"updated": len(rows)}
+
+    import logging
+    log = logging.getLogger(__name__)
+
+    try:
+        service = _build_sheets_service()
+        # 获取 spreadsheet 信息
+        info = get_spreadsheet_info(service, spreadsheet_id)
+
+        # 找第一个 sheet
+        gid = 0
+        target_sheet = "Sheet1"
+        for s in info.get("sheets", []):
+            target_sheet = s["name"]
+            gid = s.get("gid", 0)
+            break
+
+        sheet_rows = 1000
+        for s in info.get("sheets", []):
+            if str(s.get("gid", 0)) == str(gid):
+                sheet_rows = s.get("rowCount", 1000)
+
+        # 读取现有数据
+        range_read = f"'{target_sheet}'!A:L"
+        result = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=range_read
+        ).execute()
+        existing = result.get("values", [])
+
+        # 找最后一行
+        last_row = 0
+        for i in range(len(existing) - 1, -1, -1):
+            row = existing[i]
+            if any(cell for cell in row if cell):
+                last_row = i + 1
+                break
+
+        # 去重：按 (日期=col0, 账户ID=col5) 找已存在的行
+        existing_map = {}
+        for i, row in enumerate(existing):
+            if len(row) > 5 and row[0] and row[5]:
+                key = (row[0].strip(), row[5].strip())
+                existing_map[key] = i
+
+        # 构建 upsert 数据
+        updates = []
+        for r in rows:
+            row_data = [str(v) if not isinstance(v, (int, float)) else v for v in r]
+            date_str = str(r[0] if isinstance(r, list) else report_date)
+            account_id = str(r[5] if isinstance(r, list) else r[5])
+            key = (date_str, account_id)
+
+            if key in existing_map:
+                # 覆盖已有行
+                row_idx = existing_map[key]
+                range_write = f"'{target_sheet}'!A{row_idx + 1}:L{row_idx + 1}"
+            else:
+                # 追加
+                last_row += 1
+                range_write = f"'{target_sheet}'!A{last_row}:L{last_row}"
+
+            updates.append({
+                "range": range_write,
+                "values": [row_data]
+            })
+
+        if updates:
+            body = {"valueInputOption": "USER_ENTERED", "data": updates}
+            service.spreadsheets().values().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=body
+            ).execute()
+
+        log.info(f"FB sheets written: {len(updates)} rows to {spreadsheet_id}")
+        return {"updated": len(updates)}
+    except Exception as e:
+        log.error(f"FB sheets write failed: {e}")
+        raise

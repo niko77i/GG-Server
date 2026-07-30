@@ -233,7 +233,6 @@ async function doSave() {
     })
     ElMessage.success(`已保存 ${parsedData.value.length} 条` + (dupCount.value ? `（覆盖 ${dupCount.value} 条）` : ''))
     saveDialogVisible.value = false
-    parsedData.value = []; pasteText.value = ''
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败') }
   finally { saving.value = false }
 }

@@ -1,48 +1,83 @@
 <template>
   <div class="fb-panel">
+    <!-- 页面头部 -->
     <div class="panel-header">
-      <h2>🏢 账户BM管理</h2>
-      <el-button type="primary" @click="openCreate">➕ 新增BM</el-button>
+      <h2>账户BM管理</h2>
+      <el-button type="primary" @click="openCreate">新增BM</el-button>
     </div>
 
-    <div class="filter-bar">
-      <el-select v-model="filterStatus" placeholder="全部状态" clearable style="width:140px" @change="loadData">
-        <el-option label="正常" value="normal" />
-        <el-option label="已封禁" value="banned" />
-      </el-select>
-      <el-button @click="loadData">🔄 刷新</el-button>
+    <!-- 统计卡片行 -->
+    <el-row :gutter="16" class="stats-row">
+      <el-col :span="6">
+        <div class="stat-card">
+          <div class="stat-value">{{ items.length }}</div>
+          <div class="stat-label">总 BM</div>
+        </div>
+      </el-col>
+      <el-col :span="6">
+        <div class="stat-card stat-card--success">
+          <div class="stat-value">{{ items.filter(function(i) { return i.status === 'normal' }).length }}</div>
+          <div class="stat-label">正常</div>
+        </div>
+      </el-col>
+      <el-col :span="6">
+        <div class="stat-card stat-card--danger">
+          <div class="stat-value">{{ items.filter(function(i) { return i.status === 'banned' }).length }}</div>
+          <div class="stat-label">已封禁</div>
+        </div>
+      </el-col>
+      <el-col :span="6">
+        <div class="stat-card">
+          <div class="stat-value">{{ items.reduce(function(s, i) { return s + (i.account_count || 0) }, 0) }}</div>
+          <div class="stat-label">关联账户总数</div>
+        </div>
+      </el-col>
+    </el-row>
+
+    <!-- 筛选栏卡片 -->
+    <div class="filter-card">
+      <div class="filter-bar">
+        <el-select v-model="filterStatus" placeholder="全部状态" clearable style="width:140px" @change="loadData">
+          <el-option label="正常" value="normal" />
+          <el-option label="已封禁" value="banned" />
+        </el-select>
+        <el-button @click="loadData">刷新</el-button>
+      </div>
     </div>
 
-    <el-table :data="items" stripe border v-loading="loading" style="width:100%">
-      <el-table-column prop="name" label="BM名称" min-width="150" />
-      <el-table-column prop="bm_id" label="BMID" width="150" />
-      <el-table-column prop="note" label="备注" min-width="120" />
-      <el-table-column prop="status" label="状态" width="80">
-        <template #default="{ row }">
-          <el-tag :type="row.status === 'banned' ? 'danger' : 'success'" size="small">
-            {{ row.status === 'banned' ? '已封禁' : '正常' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="account_count" label="关联账户数" width="100" />
-      <el-table-column label="操作" width="220" fixed="right">
-        <template #default="{ row }">
-          <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
-          <el-button v-if="row.status !== 'banned'" size="small" type="warning" link @click="openBan(row)">封禁</el-button>
-          <el-popconfirm title="确定删除？" @confirm="handleDelete(row.id)">
-            <template #reference>
-              <el-button size="small" type="danger" link>删除</el-button>
-            </template>
-          </el-popconfirm>
-        </template>
-      </el-table-column>
-    </el-table>
+    <!-- 表格卡片 -->
+    <el-card class="table-card" shadow="never">
+      <el-table :data="items" stripe border v-loading="loading" style="width:100%">
+        <el-table-column prop="name" label="BM名称" min-width="150" />
+        <el-table-column prop="bm_id" label="BMID" width="150" />
+        <el-table-column prop="note" label="备注" min-width="120" />
+        <el-table-column prop="status" label="状态" width="80">
+          <template #default="{ row }">
+            <el-tag :type="row.status === 'banned' ? 'danger' : 'success'" size="small">
+              {{ row.status === 'banned' ? '已封禁' : '正常' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="account_count" label="关联账户数" width="100" />
+        <el-table-column label="操作" width="220" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
+            <el-button v-if="row.status !== 'banned'" size="small" type="warning" link @click="openBan(row)">封禁</el-button>
+            <el-popconfirm title="确定删除？" @confirm="handleDelete(row.id)">
+              <template #reference>
+                <el-button size="small" type="danger" link>删除</el-button>
+              </template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
 
-    <el-pagination
-      v-if="total > size"
-      v-model:current-page="page" :page-size="size" :total="total"
-      layout="prev, pager, next" @current-change="loadData" style="margin-top:16px;justify-content:flex-end"
-    />
+      <el-pagination
+        v-if="total > size"
+        v-model:current-page="page" :page-size="size" :total="total"
+        layout="prev, pager, next" @current-change="loadData" style="margin-top:16px;justify-content:flex-end"
+      />
+    </el-card>
 
     <!-- BM弹窗 -->
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑BM' : '新增BM'" width="480px">
@@ -65,6 +100,11 @@
 
     <!-- 封禁迁移弹窗 -->
     <el-dialog v-model="banDialogVisible" title="封禁BM" width="500px">
+      <el-alert type="warning" show-icon :closable="false" style="margin-bottom:16px">
+        <template #title>
+          封禁后该 BM 下的所有广告账户将被迁移至目标 BM，此操作不可逆，请谨慎操作。
+        </template>
+      </el-alert>
       <p>确定封禁 BM「{{ banTarget?.name }}」？(关联 {{ banTarget?.account_count }} 个账户)</p>
       <el-form label-width="80px" style="margin-top:16px">
         <el-form-item label="迁移到BM">
@@ -171,8 +211,97 @@ onMounted(loadData)
 </script>
 
 <style scoped>
-.fb-panel { padding: 20px; }
-.panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.panel-header h2 { margin: 0; font-size: 18px; }
-.filter-bar { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; }
+/* ========== 页面容器 ========== */
+.fb-panel {
+  background: #f5f6f8;
+  padding: 24px;
+  min-height: 100vh;
+}
+
+/* ========== 页面头部 ========== */
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.panel-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+
+/* ========== 统计卡片 ========== */
+.stats-row {
+  margin-bottom: 16px;
+}
+
+.stat-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px 16px;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  cursor: default;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: #303133;
+  line-height: 1.3;
+}
+.stat-label {
+  font-size: 13px;
+  color: #909399;
+  margin-top: 4px;
+}
+
+/* 统计卡片颜色变体 */
+.stat-card--success .stat-value {
+  color: #67c23a;
+}
+.stat-card--danger .stat-value {
+  color: #f56c6c;
+}
+
+/* ========== 筛选栏卡片 ========== */
+.filter-card {
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.filter-bar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+/* ========== 表格卡片 ========== */
+.table-card {
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  border: none;
+}
+.table-card :deep(.el-card__body) {
+  padding: 16px;
+}
+
+/* 表格表头样式 */
+:deep(.el-table th.el-table__cell) {
+  background-color: #f5f7fa;
+  color: #303133;
+  font-weight: 600;
+}
+:deep(.el-table) {
+  border-radius: 8px;
+  overflow: hidden;
+}
 </style>

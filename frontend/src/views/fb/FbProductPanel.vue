@@ -1,8 +1,41 @@
 <template>
-  <div style="display:flex;flex-direction:column;height:100%;">
-    <!-- 工具栏 -->
-    <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
-      <el-button type="primary" @click="openCreate">➕ 新增产品</el-button>
+  <div class="page-wrapper">
+    <!-- 页面头部 -->
+    <div class="page-header">
+      <h1 class="page-title">产品管理</h1>
+      <el-button type="primary" @click="openCreate">新增产品</el-button>
+    </div>
+
+    <!-- 统计卡片行 -->
+    <el-row :gutter="16" class="stats-row">
+      <el-col :xs="12" :sm="6">
+        <div class="stat-card">
+          <div class="stat-number" style="color: #3b82f6">{{ total }}</div>
+          <div class="stat-label">总产品</div>
+        </div>
+      </el-col>
+      <el-col :xs="12" :sm="6">
+        <div class="stat-card">
+          <div class="stat-number" style="color: #059669">{{ items.filter(function(i){return i.status!=='paused'}).length }}</div>
+          <div class="stat-label">正常</div>
+        </div>
+      </el-col>
+      <el-col :xs="12" :sm="6">
+        <div class="stat-card">
+          <div class="stat-number" style="color: #dc2626">{{ items.filter(function(i){return i.status==='paused'}).length }}</div>
+          <div class="stat-label">已暂停</div>
+        </div>
+      </el-col>
+      <el-col :xs="12" :sm="6">
+        <div class="stat-card">
+          <div class="stat-number" style="color: #7c3aed">{{ runnerFilter === 'mine' ? total : items.filter(function(i){return i.runners && i.runners.some(function(r){return r.id === auth.user.id})}).length }}</div>
+          <div class="stat-label">我在跑的</div>
+        </div>
+      </el-col>
+    </el-row>
+
+    <!-- 筛选栏卡片 -->
+    <div class="filter-card">
       <el-radio-group v-model="runnerFilter" @change="loadData" size="small">
         <el-radio-button value="mine">我在跑的</el-radio-button>
         <el-radio-button value="all">全部产品</el-radio-button>
@@ -15,68 +48,96 @@
         <el-radio-button value="">正常</el-radio-button>
         <el-radio-button value="paused">已暂停</el-radio-button>
       </el-radio-group>
-      <span style="font-size:13px;color:#6b7280">共 {{ total }} 个</span>
+      <span class="total-badge">共 {{ total }} 个</span>
     </div>
 
     <!-- 产品列表 -->
-    <div style="flex:1;min-height:0;overflow-y:auto;">
-      <el-card v-for="item in items" :key="item.id" style="margin-bottom:12px" :body-style="{ padding:'12px 16px' }"
-        :class="{ 'is-paused': item.status === 'paused' }">
-        <!-- 头部 — 点击展开 -->
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;cursor:pointer" @click="toggleExpand(item.id)">
-          <div style="flex:1">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-              <span :style="{ width:'8px',height:'8px',borderRadius:'50%',background: item.status==='paused' ? '#dc2626' : '#059669' }"></span>
-              <strong>{{ item.product_name }}</strong>
-              <el-tag v-if="item.sales_person_name" size="small" type="success">💼 {{ item.sales_person_name }}</el-tag>
-              <el-tag v-if="item.kpi" size="small" type="warning">{{ item.kpi }}</el-tag>
-              <el-tag v-if="item.region" size="small" type="primary">{{ item.region }}</el-tag>
-              <el-tag v-if="item.agency_ratio" size="small">📊 {{ item.agency_ratio }}%</el-tag>
+    <div class="product-list">
+      <el-card
+        v-for="item in items"
+        :key="item.id"
+        class="product-card"
+        :class="{ 'is-paused': item.status === 'paused' }"
+        :body-style="{ padding: 0 }"
+      >
+        <!-- 暂停状态左边框 -->
+        <div v-if="item.status === 'paused'" class="paused-indicator"></div>
+
+        <!-- 卡片内部 -->
+        <div class="product-card-inner">
+          <!-- 头部 -- 点击展开 -->
+          <div class="product-card-header" @click="toggleExpand(item.id)">
+            <div class="product-card-info">
+              <div class="product-card-tags">
+                <span class="status-dot" :class="item.status === 'paused' ? 'dot-paused' : 'dot-active'"></span>
+                <strong class="product-name">{{ item.product_name }}</strong>
+                <el-tag v-if="item.sales_person_name" size="small" class="tag-sales">{{ item.sales_person_name }}</el-tag>
+                <el-tag v-if="item.kpi" size="small" class="tag-kpi">{{ item.kpi }}</el-tag>
+                <el-tag v-if="item.region" size="small" class="tag-region">{{ item.region }}</el-tag>
+                <el-tag v-if="item.agency_ratio" size="small" class="tag-ratio">{{ item.agency_ratio }}%</el-tag>
+              </div>
+              <div v-if="item.bms && item.bms.length" class="product-card-bms">
+                <el-tag v-for="b in item.bms" :key="b.id" size="small" type="info">{{ b.name }}</el-tag>
+              </div>
+              <div v-if="item.runners && item.runners.length" class="product-card-runners">
+                在跑: {{ item.runners.map(function(r){return r.display_name||r.username}).join('、') }}
+              </div>
+              <div class="product-card-lines">
+                线名: {{ (item.lines||[]).map(function(l){return l.line_name}).join(', ') || '无' }}
+                <span class="expand-hint">展开</span>
+              </div>
             </div>
-            <div v-if="item.bms?.length" style="margin-bottom:2px">
-              <el-tag v-for="b in item.bms" :key="b.id" size="small" type="info" style="margin-right:4px">🏢 {{ b.name }}</el-tag>
-            </div>
-            <div v-if="item.runners?.length" style="font-size:12px;color:#9ca3af">
-              在跑: {{ item.runners.map(r=>r.display_name||r.username).join('、') }}
-            </div>
-            <div style="font-size:12px;color:#9ca3af;margin-top:2px">
-              线名: {{ (item.lines||[]).map(l=>l.line_name).join(', ') || '无' }} | 🔽 展开
+            <div class="product-card-actions" @click.stop>
+              <el-button size="small" @click="openEdit(item)">编辑</el-button>
+              <el-button size="small" @click="togglePause(item)" :type="item.status==='paused'?'success':'warning'">
+                {{ item.status==='paused'?'恢复':'暂停' }}
+              </el-button>
+              <el-popconfirm title="确定删除？" @confirm="handleDelete(item.id)">
+                <template #reference><el-button size="small" type="danger">删除</el-button></template>
+              </el-popconfirm>
             </div>
           </div>
-          <div style="display:flex;gap:4px;flex-shrink:0" @click.stop>
-            <el-button size="small" @click="openEdit(item)">编辑</el-button>
-            <el-button size="small" @click="togglePause(item)" :type="item.status==='paused'?'success':'warning'">
-              {{ item.status==='paused'?'恢复':'暂停' }}
-            </el-button>
-            <el-popconfirm title="确定删除？" @confirm="handleDelete(item.id)">
-              <template #reference><el-button size="small" type="danger">删除</el-button></template>
-            </el-popconfirm>
+
+          <!-- 展开区 -- 线名列表 -->
+          <div v-if="expanded[item.id]" class="product-card-expand" @click.stop>
+            <el-table
+              v-if="(item.lines||[]).length"
+              :data="item.lines"
+              border
+              size="small"
+              class="lines-table"
+              :header-cell-style="{ background:'#f8f9fa', color:'#374151', fontWeight:600 }"
+            >
+              <el-table-column prop="line_name" label="线名" min-width="140">
+                <template #default="{ row: ln }">
+                  <span class="copy-link" @click="copy(ln.line_name)" :title="'点击复制: '+ln.line_name">{{ ln.line_name }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="link" label="链接" min-width="200">
+                <template #default="{ row: ln }">
+                  <span v-if="ln.link" class="copy-link" @click="copy(ln.link)" :title="'点击复制: '+ln.link">{{ ln.link }}</span>
+                  <span v-else class="no-data">-</span>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div v-else class="no-lines">无线名</div>
           </div>
-        </div>
-        <!-- 展开区 — 线名列表 + 复制 -->
-        <div v-if="expanded[item.id]" style="margin-top:12px;padding-top:12px;border-top:1px solid #f3f4f6" @click.stop>
-          <el-table v-if="(item.lines||[]).length" :data="item.lines" border size="small">
-            <el-table-column prop="line_name" label="线名" min-width="140">
-              <template #default="{ row: ln }">
-                <span style="cursor:pointer;color:#0891b2" @click="copy(ln.line_name)" :title="'点击复制: '+ln.line_name">{{ ln.line_name }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="link" label="链接" min-width="200">
-              <template #default="{ row: ln }">
-                <span v-if="ln.link" style="cursor:pointer;color:#0891b2;font-size:12px" @click="copy(ln.link)" :title="'点击复制: '+ln.link">{{ ln.link }}</span>
-                <span v-else style="color:#9ca3af;font-size:12px">-</span>
-              </template>
-            </el-table-column>
-          </el-table>
-          <div v-else style="color:#9ca3af;font-size:13px">无线名</div>
         </div>
       </el-card>
 
       <el-empty v-if="!items.length" description="暂无产品" />
 
-      <div v-if="total>size" style="display:flex;justify-content:center;gap:8px;margin-top:12px">
-        <el-pagination v-model:current-page="page" :page-size="size" :total="total" background
-          layout="prev,pager,next" size="small" :pager-count="7" @current-change="loadData" />
+      <div v-if="total>size" class="pagination-row">
+        <el-pagination
+          v-model:current-page="page"
+          :page-size="size"
+          :total="total"
+          background
+          layout="prev,pager,next"
+          size="small"
+          :pager-count="7"
+          @current-change="loadData"
+        />
         <el-select v-model="size" @change="page=1;loadData()" size="small" style="width:90px">
           <el-option v-for="s in [5,10,20,50]" :key="s" :label="s+'条/页'" :value="s" />
         </el-select>
@@ -84,7 +145,7 @@
     </div>
 
     <!-- 产品弹窗 -->
-    <el-dialog v-model="dialogVisible" :title="editingId?'编辑产品':'新增产品'" width="680px" top="3vh">
+    <el-dialog v-model="dialogVisible" :title="editingId?'编辑产品':'新增产品'" width="720px" top="3vh" class="product-dialog">
       <el-form :model="form" label-width="80px">
         <el-row :gutter="16">
           <el-col :span="12"><el-form-item label="产品名" required><el-input v-model="form.product_name" /></el-form-item></el-col>
@@ -130,8 +191,14 @@
         </el-form-item>
 
         <el-divider content-position="left">线名管理</el-divider>
-        <el-button size="small" type="success" @click="addLineRow" style="margin-bottom:8px">➕ 添加线名</el-button>
-        <el-table :data="formLines" border size="small">
+        <el-button size="small" type="success" @click="addLineRow" class="add-line-btn">添加线名</el-button>
+        <el-table
+          :data="formLines"
+          border
+          size="small"
+          class="dialog-lines-table"
+          :header-cell-style="{ background:'#f8f9fa', color:'#374151', fontWeight:600 }"
+        >
           <el-table-column label="线名" min-width="120">
             <template #default="{row,$index}"><el-input v-model="formLines[$index].line_name" size="small" /></template>
           </el-table-column>
@@ -147,7 +214,7 @@
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="70">
+          <el-table-column label="操作" width="70" align="center">
             <template #default="{ $index }"><el-button size="small" type="danger" @click="formLines.splice($index,1)">删除</el-button></template>
           </el-table-column>
         </el-table>
@@ -254,5 +321,296 @@ onMounted(() => { loadOptions(); loadData() })
 </script>
 
 <style scoped>
-.is-paused { opacity: 0.6; }
+/* ========== 页面容器 ========== */
+.page-wrapper {
+  background: #f5f6f8;
+  padding: 24px;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ========== 页面头部 ========== */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #1f2937;
+  letter-spacing: -0.2px;
+}
+
+/* ========== 统计卡片行 ========== */
+.stats-row {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+.stat-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  text-align: center;
+  cursor: default;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
+  border-color: #e5e7eb;
+}
+
+.stat-number {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.stat-label {
+  font-size: 13px;
+  color: #6b7280;
+  margin-top: 6px;
+  font-weight: 500;
+}
+
+/* ========== 筛选栏卡片 ========== */
+.filter-card {
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid #e5e7eb;
+}
+
+.total-badge {
+  font-size: 13px;
+  color: #6b7280;
+  font-weight: 500;
+  white-space: nowrap;
+  padding: 4px 10px;
+  background: #fff;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+}
+
+/* ========== 产品列表 ========== */
+.product-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.product-card {
+  margin-bottom: 12px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.product-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  border-color: #d1d5db;
+}
+
+.product-card.is-paused {
+  opacity: 0.7;
+}
+
+.product-card.is-paused:hover {
+  opacity: 0.85;
+}
+
+.paused-indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: #dc2626;
+  border-radius: 12px 0 0 12px;
+  z-index: 1;
+}
+
+.product-card-inner {
+  padding: 16px;
+}
+
+.product-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  cursor: pointer;
+  gap: 16px;
+}
+
+.product-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.product-card-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.dot-active {
+  background: #059669;
+}
+
+.dot-paused {
+  background: #dc2626;
+}
+
+.product-name {
+  font-size: 15px;
+  color: #1f2937;
+}
+
+.tag-sales {
+  background: #ecfdf5 !important;
+  color: #059669 !important;
+  border-color: #a7f3d0 !important;
+}
+
+.tag-kpi {
+  background: #fffbeb !important;
+  color: #d97706 !important;
+  border-color: #fde68a !important;
+}
+
+.tag-region {
+  background: #eff6ff !important;
+  color: #2563eb !important;
+  border-color: #bfdbfe !important;
+}
+
+.tag-ratio {
+  background: #f5f3ff !important;
+  color: #7c3aed !important;
+  border-color: #ddd6fe !important;
+}
+
+.product-card-bms {
+  margin-bottom: 4px;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.product-card-runners {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 2px;
+}
+
+.product-card-lines {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.expand-hint {
+  display: inline-block;
+  margin-left: 8px;
+  color: #0891b2;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.product-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* ========== 展开区 ========== */
+.product-card-expand {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #f3f4f6;
+}
+
+.lines-table {
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.lines-table :deep(.el-table__row:hover) {
+  background: #f0f9ff;
+}
+
+.copy-link {
+  cursor: pointer;
+  color: #0891b2;
+  font-size: 13px;
+  transition: color 0.15s;
+}
+
+.copy-link:hover {
+  color: #06b6d4;
+  text-decoration: underline;
+}
+
+.no-data {
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.no-lines {
+  color: #9ca3af;
+  font-size: 13px;
+  padding: 8px 0;
+  text-align: center;
+}
+
+/* ========== 分页 ========== */
+.pagination-row {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-bottom: 4px;
+}
+
+/* ========== 弹窗 ========== */
+.add-line-btn {
+  margin-bottom: 10px;
+}
+
+.dialog-lines-table {
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.dialog-lines-table :deep(.el-table__row:hover) {
+  background: #f0f9ff;
+}
+
+.dialog-lines-table :deep(.el-input__inner) {
+  border-radius: 4px;
+}
 </style>
