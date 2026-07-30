@@ -6326,9 +6326,8 @@ def google_sheets_update_zuobiao():
             ])
         return result
 
-    _op_name = [""]  # mutable for closure capture
+    _op_name = [operator_name]  # mutable for closure capture（已从用户表获取）
     _spreadsheet_id = spreadsheet_id
-    _sheet_gid = sheet_gid
     _product_name = product_name
     _region = region
     _report_date = report_date
@@ -6338,15 +6337,11 @@ def google_sheets_update_zuobiao():
     _user_id = user_id
 
     def _do_sync():
-        from google_sheets_service import (
-            build_service, get_spreadsheet_info, upsert_zuobiao,
-        )
+        from google_sheets_service import build_service, upsert_zuobiao
         service = build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        info = get_spreadsheet_info(service, _spreadsheet_id)
-        _op_name[0] = info.get("operator", "")
         upsert_zuobiao(
-            service=service, info=info,
-            spreadsheet_id=_spreadsheet_id, sheet_gid=_sheet_gid,
+            service=service,
+            spreadsheet_id=_spreadsheet_id,
             rows=_rows, product_name=_product_name,
             region=_region, report_date=_report_date,
             sales_person=_sales_person, agency_ratio=_agency_ratio,
@@ -6365,8 +6360,8 @@ def google_sheets_update_zuobiao():
             _db.execute(
                 """INSERT OR REPLACE INTO sheets_sync_log
                    (user_id, product_name, spreadsheet_id, sheet_gid, status, error_msg, rows_json, retry_count, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
-                (_user_id, _product_name, _spreadsheet_id, _sheet_gid, status, err_msg,
+                   VALUES (?, ?, ?, '', ?, ?, ?, ?, datetime('now','localtime'))""",
+                (_user_id, _product_name, _spreadsheet_id, status, err_msg,
                  json.dumps(formatted, ensure_ascii=False),
                  1 if status == "retry_failed" else 0)
             )
@@ -6462,22 +6457,22 @@ def google_sheets_retry_sync():
     agency_ratio = prod["agency_ratio"] if prod else None
 
     spreadsheet_id = log_row["spreadsheet_id"] or ""
-    sheet_gid = log_row["sheet_gid"] or "0"
 
     if not spreadsheet_id:
         return jsonify({"success": False, "error": "表格 ID 为空"}), 400
 
+    # 从用户表获取 operator_name
+    user = db.execute(
+        "SELECT display_name, username FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    operator_name = (user['display_name'] or user['username']) if user else ''
+
     try:
-        from google_sheets_service import (
-            build_service, get_spreadsheet_info, upsert_zuobiao,
-            GoogleSheetsServiceError,
-        )
+        from google_sheets_service import build_service, upsert_zuobiao, GoogleSheetsServiceError
         service = build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        info = get_spreadsheet_info(service, spreadsheet_id)
-        operator_name = info.get("operator", "")
         result = upsert_zuobiao(
-            service=service, info=info,
-            spreadsheet_id=spreadsheet_id, sheet_gid=sheet_gid,
+            service=service,
+            spreadsheet_id=spreadsheet_id,
             rows=rows, product_name=product_name,
             region=region, report_date=report_date,
             sales_person=sales_person, agency_ratio=agency_ratio,

@@ -124,36 +124,31 @@ def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
 def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
                    region: str, report_date: str, sales_person: str,
                    agency_ratio, operator_name: str) -> dict:
-    """将做表数据 upsert 到 Google Sheets。按 report_date 月份自动选/建 Sheet。
+    """将做表数据 upsert 到 Google Sheets。
 
-    Sheet 命名格式：{operator_name}{YYYY.MM}，如「卡尔2026.07」。
-    若 Sheet 不存在则自动创建，然后执行去重更新 + 追加 + 格式化。
+    月份匹配已在上层完成（按 spreadsheat_name 选文件），此函数固定写第一个 Sheet。
     """
     if not rows:
         return {"updated": 0, "inserted": 0}
 
-    # 1. 按月份生成目标 Sheet 名，获取/创建 Sheet
-    month_key = report_date[:7].replace('-', '.')          # 2026-07-30 → 2026.07
-    target_sheet = f"{operator_name}{month_key}"
-
+    # 1. 取表格的第一个 Sheet（默认写表位置）
     info = get_spreadsheet_info(service, spreadsheet_id)
-    existing_sheets = {s.get("name", ""): s for s in info.get("sheets", [])}
-
-    if target_sheet not in existing_sheets:
+    sheets = info.get("sheets", [])
+    if not sheets:
+        # 极端情况：表格一个 Sheet 都没有，创建默认 Sheet1
         service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
-            body={"requests": [{"addSheet": {"properties": {"title": target_sheet}}}]}
+            body={"requests": [{"addSheet": {"properties": {"title": "Sheet1"}}}]}
         ).execute()
-        log.info("Created new sheet: %s", target_sheet)
         info = get_spreadsheet_info(service, spreadsheet_id)
-        existing_sheets = {s.get("name", ""): s for s in info.get("sheets", [])}
-
-    sheet_info = existing_sheets[target_sheet]
-    sheet_rows = sheet_info.get("rowCount", 1000)
-    sheet_id_int = sheet_info.get("gid", 0)
+        sheets = info.get("sheets", [])
+    first_sheet = sheets[0]
+    sheet_name = first_sheet.get("name", "Sheet1")
+    sheet_rows = first_sheet.get("rowCount", 1000)
+    sheet_id_int = first_sheet.get("gid", 0)
 
     # 2. 读取目标 Sheet 现有数据（A-N 列）
-    range_read = f"'{target_sheet}'!A:N"
+    range_read = f"'{sheet_name}'!A:N"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
         range=range_read,
@@ -213,7 +208,7 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
             row_data[12] = f"=F{row_num}*L{row_num}"
             row_data[13] = f"=F{row_num}-K{row_num}+M{row_num}"
             data.append({
-                "range": f"'{target_sheet}'!A{row_num}:N{row_num}",
+                "range": f"'{sheet_name}'!A{row_num}:N{row_num}",
                 "values": [row_data],
             })
         service.spreadsheets().values().batchUpdate(
@@ -246,7 +241,7 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
             ).execute()
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"'{target_sheet}'!A{start}:N{end}",
+            range=f"'{sheet_name}'!A{start}:N{end}",
             valueInputOption="USER_ENTERED",
             body={"values": appends},
         ).execute()
@@ -511,14 +506,8 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
         raise ValueError("表格配置缺少 spreadsheet_id")
 
     result = _upsert_rows(
-        user_id=user_id,
-        spreadsheet_id=ss_id,
-        sheet_name="",
-        rows=rows,
-        report_date=report_date,
-        product_name=product_name,
-        region=region,
-        date_str=report_date,
+        user_id, ss_id, rows,
+        report_date, product_name, region, report_date
     )
     return result
 
@@ -576,6 +565,19 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
             if len(row) > 3 and row[0] and row[3]:
                 key = (row[0].strip(), row[3].strip())
                 existing_map[key] = i
+
+        # 获取 sheet 最大行数，不够则扩容
+        max_rows = info.get("sheets", [{}])[0].get("rowCount", 1000)
+        needed = last_row + len(rows) + 1
+        if needed > max_rows:
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": [{"appendDimension": {
+                    "sheetId": info.get("sheets", [{}])[0].get("gid", 0),
+                    "dimension": "ROWS",
+                    "length": needed - max_rows + 100
+                }}]}
+            ).execute()
 
         # 构建写入数据
         updates = []
