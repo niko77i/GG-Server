@@ -118,6 +118,11 @@ const routes = [
     component: () => import('../views/fb/FbDataManage.vue'),
     meta: { platform: 'fb', title: 'FB数据管理' }
   },
+  {
+    path: '/fb/settings',
+    component: () => import('../views/fb/FbSettingsPanel.vue'),
+    meta: { platform: 'fb', admin: true, title: 'FB设置' }
+  },
 ]
 
 const router = createRouter({

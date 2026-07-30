@@ -31,7 +31,7 @@
           <el-col :span="12"><el-form-item label="KPI"><el-input v-model="form.kpi" /></el-form-item></el-col>
         </el-row>
         <el-row :gutter="16">
-          <el-col :span="12"><el-form-item label="地区"><el-input v-model="form.region" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="地区"><el-select v-model="form.region" clearable filterable style="width:100%"><el-option v-for="r in regionOptions" :key="r.name" :label="r.name" :value="r.name" /></el-select></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="商务"><el-select v-model="form.sales_person_id" clearable style="width:100%"><el-option v-for="s in salesOptions" :key="s.id" :label="s.name" :value="s.id" /></el-select></el-form-item></el-col>
         </el-row>
         <el-row :gutter="16">
@@ -73,7 +73,7 @@ import client from '../../api/client'
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
 const search = ref(''); const filterStatus = ref('')
 const dialogVisible = ref(false); const editingId = ref(null); const saving = ref(false)
-const bmOptions = ref([]); const fbUsers = ref([]); const salesOptions = ref([])
+const bmOptions = ref([]); const fbUsers = ref([]); const salesOptions = ref([]); const regionOptions = ref([])
 const form = reactive({ product_name:'', kpi:'', region:'', status:'active', sales_person_id:null, agency_ratio:0, bm_ids:[], runner_ids:[] })
 const formLines = ref([])
 const pixelBmGroups = ref([])
@@ -93,15 +93,20 @@ async function loadData() {
   } finally { loading.value = false }
 }
 async function loadOptions() {
-  const [bmRes, pxBmRes, userRes, salesRes] = await Promise.all([
+  const [bmRes, pxBmRes, userRes, salesRes, regionsRes] = await Promise.all([
     fbApi.bmOptions(),
     fbApi.pixelBmOptions(),
     client.get('/api/auth/names'),
     client.get('/api/sales-persons/list'),
+    client.get('/api/regions/list'),
   ])
   bmOptions.value = bmRes.data || []
-  fbUsers.value = (userRes.users || userRes.data || []).filter(u => u.platform !== 'gg' || !u.platform)
-  salesOptions.value = (salesRes.data?.items || salesRes.data || [])
+  // fbUsers: /api/auth/names 返回 {users: [...]}
+  fbUsers.value = (userRes.users || []).filter(u => u.platform === 'fb' || !u.platform)
+  // salesOptions: /api/sales-persons/list 返回 {sales_persons: [...]}
+  salesOptions.value = salesRes.sales_persons || []
+  // regionOptions: /api/regions/list 返回 {regions: [...]}
+  regionOptions.value = (regionsRes.regions || []).map(r => typeof r === 'string' ? { name: r } : r)
   // 加载像素BM分组
   for (const pb of (pxBmRes.data || [])) {
     const pxRes = await fbApi.listPixels(pb.id)

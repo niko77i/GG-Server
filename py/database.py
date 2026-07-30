@@ -1250,7 +1250,8 @@ def _migrate_videos_composite_pk(conn: sqlite3.Connection):
         PRIMARY KEY (id, owner_id)
     )""")
 
-    # 2. 复制数据（owner_id 为空的设默认值 1）
+    # 2. 复制数据（临时关闭 FK，因为旧数据可能存在无效 owner_id）
+    conn.execute("PRAGMA foreign_keys=OFF")
     conn.execute("""
         INSERT INTO videos_new (id, owner_id, url, title, region, frame_type,
             effectiveness, product_name, review_status, is_public, imported_at, channel_name)
@@ -1264,6 +1265,7 @@ def _migrate_videos_composite_pk(conn: sqlite3.Connection):
     # 3. 替换表
     conn.execute("DROP TABLE videos")
     conn.execute("ALTER TABLE videos_new RENAME TO videos")
+    conn.execute("PRAGMA foreign_keys=ON")
 
     # 4. 回填 product_assets.video_owner_id
     conn.execute("""
