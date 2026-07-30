@@ -502,7 +502,9 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
     log = logging.getLogger(__name__)
 
     try:
-        service = _build_sheets_service()
+        import os
+        creds_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'google_sheets_credentials.json')
+        service = build_service(creds_path)
         # 获取 spreadsheet 信息
         info = get_spreadsheet_info(service, spreadsheet_id)
 

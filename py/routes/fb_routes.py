@@ -966,23 +966,27 @@ def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, rec
     """后台线程写 Google Sheets + 失败记录到 sheets_sync_log"""
     def _do_write():
         import database as _db
+        import traceback
+        import json
         db = _db.get_db()
         try:
             import google_sheets_service as gs
-            gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
+            result = gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
+            print(f"[FB-Sheets] 写入成功: {result}")
         except Exception as e:
-            # 记录失败日志供手动重试
+            err_msg = str(e)[:500]
+            traceback.print_exc()
             try:
-                import json
                 db.execute(
                     "INSERT INTO sheets_sync_log (user_id, product_name, report_date, row_data, error_msg) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (user_id, product_name, report_date,
                      json.dumps(records, ensure_ascii=False)[:10000],
-                     str(e)[:500]))
+                     err_msg))
                 db.commit()
-            except Exception:
-                pass
+                print(f"[FB-Sheets] 写入失败已记录: {err_msg}")
+            except Exception as ex2:
+                print(f"[FB-Sheets] 日志写入也失败: {ex2}")
         finally:
             try:
                 db.close()
