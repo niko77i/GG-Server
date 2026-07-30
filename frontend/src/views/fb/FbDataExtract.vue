@@ -59,7 +59,7 @@
       </el-card>
 
       <!-- 2. 做表数据（按账户ID累加） -->
-      <el-card v-if="selectedProductId" style="margin-top:16px">
+      <el-card style="margin-top:16px">
         <template #header>
           📑 做表数据 <el-tag size="small">{{ zbData.length }} 条</el-tag>
           <span style="margin-left:8px;font-size:13px;color:#6b7280">（按账户ID + 广告系列合并，费用累加）</span>
