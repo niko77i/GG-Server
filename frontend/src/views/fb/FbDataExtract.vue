@@ -43,7 +43,8 @@ import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
 
 const products = ref([]); const selectedProductId = ref(null); const selectedLineId = ref(null)
-const reportDate = ref(new Date().toISOString().slice(0,10)); const sortedMode = ref(false)
+const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1)
+const reportDate = ref(yesterday.toISOString().slice(0,10)); const sortedMode = ref(false)
 const pasteText = ref(''); const parsedData = ref([]); const warnings = ref([])
 const parsing = ref(false); const saving = ref(false)
 
