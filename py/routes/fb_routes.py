@@ -1009,6 +1009,12 @@ def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, rec
             import google_sheets_service as gs
             result = gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
             print(f"[FB-Sheets] 写入成功: {result}")
+            # 记录成功
+            db.execute(
+                "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, rows_json) "
+                "VALUES (?,?,?,'','synced',?)",
+                (user_id, product_name, '', json.dumps(records, ensure_ascii=False)[:10000]))
+            db.commit()
         except Exception as e:
             err_msg = str(e)[:500]
             traceback.print_exc()
@@ -1062,6 +1068,24 @@ def fb_check_duplicates():
                 "incoming": rec
             })
     return ok({'duplicates': duplicates})
+
+
+@fb_bp.route('/api/fb/reports/last-sync', methods=['GET'])
+@jwt_required()
+@fb_required
+def fb_last_sync():
+    """获取最近一次 Sheet 同步结果。"""
+    db = get_db()
+    uid = get_uid()
+    row = db.execute(
+        "SELECT * FROM sheets_sync_log WHERE user_id=? ORDER BY created_at DESC LIMIT 1",
+        (uid,)
+    ).fetchone()
+    if not row:
+        return ok({'status': 'none'})
+    result = dict(row)
+    result['rows_json'] = (result.get('rows_json') or '')[:200]  # 截断
+    return ok(result)
 
 
 @fb_bp.route('/api/fb/reports/sync-status', methods=['GET'])

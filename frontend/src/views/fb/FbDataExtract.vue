@@ -233,6 +233,14 @@ async function doSave() {
     })
     ElMessage.success(`已保存 ${parsedData.value.length} 条` + (dupCount.value ? `（覆盖 ${dupCount.value} 条）` : '') + `，后台写表中...`)
     saveDialogVisible.value = false
+    // 3秒后检查写表结果
+    setTimeout(async () => {
+      try {
+        const r = await fbApi.lastSyncStatus()
+        if (r.status === 'synced') ElMessage.success('✅ 写表成功')
+        else if (r.status === 'failed') ElMessage.error(`❌ 写表失败: ${r.error_msg || ''}`)
+      } catch(e) {}
+    }, 3000)
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败') }
   finally { saving.value = false }
 }
