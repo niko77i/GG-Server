@@ -515,6 +515,148 @@ def _ensure_schema(conn: sqlite3.Connection):
         )
     """)
 
+    # ==================== FB 平台表 ====================
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS fb_bms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            bm_id TEXT NOT NULL UNIQUE,
+            note TEXT DEFAULT '',
+            status TEXT DEFAULT 'normal',
+            owner_id INTEGER REFERENCES users(id),
+            deleted_at TEXT DEFAULT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_bms_owner ON fb_bms(owner_id);
+        CREATE INDEX IF NOT EXISTS idx_fb_bms_status ON fb_bms(status);
+        CREATE INDEX IF NOT EXISTS idx_fb_bms_list ON fb_bms(owner_id, status, deleted_at);
+
+        CREATE TABLE IF NOT EXISTS fb_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            account_id TEXT NOT NULL UNIQUE,
+            timezone TEXT DEFAULT '',
+            status_id INTEGER REFERENCES account_statuses(id),
+            acquired_date TEXT DEFAULT (date('now','localtime')),
+            status_changed_date TEXT DEFAULT '',
+            owner_id INTEGER REFERENCES users(id),
+            deleted_at TEXT DEFAULT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_accounts_owner ON fb_accounts(owner_id);
+        CREATE INDEX IF NOT EXISTS idx_fb_accounts_list ON fb_accounts(owner_id, status_id, deleted_at);
+
+        CREATE TABLE IF NOT EXISTS fb_account_bm (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES fb_accounts(id) ON DELETE CASCADE,
+            bm_id INTEGER NOT NULL REFERENCES fb_bms(id) ON DELETE CASCADE,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(account_id, bm_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_account_bm_bm ON fb_account_bm(bm_id);
+
+        CREATE TABLE IF NOT EXISTS fb_account_bm_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES fb_accounts(id),
+            old_bm_id INTEGER REFERENCES fb_bms(id),
+            new_bm_id INTEGER REFERENCES fb_bms(id),
+            changed_by INTEGER REFERENCES users(id),
+            change_type TEXT NOT NULL DEFAULT 'manual',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS fb_products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            kpi TEXT DEFAULT '',
+            region TEXT DEFAULT '',
+            status TEXT DEFAULT 'active',
+            sales_person_id INTEGER REFERENCES sales_persons(id),
+            agency_ratio REAL DEFAULT 0,
+            owner_id INTEGER REFERENCES users(id),
+            is_archived INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_products_owner ON fb_products(owner_id);
+
+        CREATE TABLE IF NOT EXISTS fb_product_runners (
+            product_id INTEGER NOT NULL REFERENCES fb_products(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            PRIMARY KEY (product_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_product_runners_user ON fb_product_runners(user_id);
+
+        CREATE TABLE IF NOT EXISTS fb_product_bms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL REFERENCES fb_products(id) ON DELETE CASCADE,
+            bm_id INTEGER NOT NULL REFERENCES fb_bms(id) ON DELETE CASCADE,
+            UNIQUE(product_id, bm_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_product_bms_bm ON fb_product_bms(bm_id);
+
+        CREATE TABLE IF NOT EXISTS fb_pixel_bms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            bm_id TEXT NOT NULL UNIQUE,
+            note TEXT DEFAULT '',
+            status TEXT DEFAULT 'normal',
+            owner_id INTEGER REFERENCES users(id),
+            deleted_at TEXT DEFAULT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_pixel_bms_owner ON fb_pixel_bms(owner_id);
+        CREATE INDEX IF NOT EXISTS idx_fb_pixel_bms_list ON fb_pixel_bms(owner_id, status, deleted_at);
+
+        CREATE TABLE IF NOT EXISTS fb_pixels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pixel_bm_id INTEGER NOT NULL REFERENCES fb_pixel_bms(id) ON DELETE CASCADE,
+            pixel_name TEXT NOT NULL,
+            pixel_id TEXT NOT NULL UNIQUE,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_pixels_bm ON fb_pixels(pixel_bm_id);
+
+        CREATE TABLE IF NOT EXISTS fb_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL REFERENCES fb_products(id) ON DELETE CASCADE,
+            line_name TEXT NOT NULL,
+            link TEXT DEFAULT '',
+            pixel_id INTEGER REFERENCES fb_pixels(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(product_id, line_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fb_lines_product ON fb_lines(product_id);
+        CREATE INDEX IF NOT EXISTS idx_fb_lines_pixel ON fb_lines(pixel_id);
+
+        CREATE TABLE IF NOT EXISTS fb_ad_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            product_name TEXT NOT NULL,
+            line_name TEXT DEFAULT '',
+            report_date TEXT NOT NULL,
+            account_name TEXT DEFAULT '',
+            account_id TEXT DEFAULT '',
+            cost REAL DEFAULT 0,
+            impressions INTEGER DEFAULT 0,
+            clicks INTEGER DEFAULT 0,
+            registrations INTEGER DEFAULT 0,
+            purchases INTEGER DEFAULT 0,
+            cost_per_purchase REAL DEFAULT 0,
+            updated_at TEXT DEFAULT NULL,
+            saved_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fb_ad_reports_upsert
+            ON fb_ad_reports(user_id, product_name, line_name, account_id, report_date);
+        CREATE INDEX IF NOT EXISTS idx_fb_ad_reports_user_date
+            ON fb_ad_reports(user_id, report_date);
+        CREATE INDEX IF NOT EXISTS idx_fb_ad_reports_product_date
+            ON fb_ad_reports(product_name, report_date);
+    """)
+
     # 列迁移已移至 _ensure_columns()（每次连接都执行）
 
     # 初始化默认标签
