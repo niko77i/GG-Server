@@ -60,4 +60,5 @@ export const fbApi = {
   batchDeleteReports(ids) { return client.post('/fb/reports/batch-delete', { ids }) },
   reportStats(params = {}) { return client.get('/fb/reports/stats', { params }) },
   exportReports(params = {}) { return client.get('/fb/reports/export', { params }) },
+  retrySheetsSync() { return client.post('/fb/reports/retry-sync') },
 }

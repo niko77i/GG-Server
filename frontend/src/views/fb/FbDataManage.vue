@@ -15,6 +15,7 @@
       <el-checkbox v-model="showDetailCols" style="margin-left:8px">显示详情列</el-checkbox>
       <el-button type="primary" @click="loadStats" style="margin-left:auto">📈 查看统计</el-button>
       <el-button type="success" @click="handleExport">📥 导出CSV</el-button>
+      <el-button type="warning" @click="retrySheets">🔄 重试写表</el-button>
     </div>
 
     <el-table :data="items" stripe border v-loading="loading" @selection-change="onSelect">
@@ -147,6 +148,13 @@ async function handleDelete(id) { await fbApi.deleteReport(id); ElMessage.succes
 async function handleBatchDelete() {
   await fbApi.batchDeleteReports(selectedIds.value)
   ElMessage.success(`已删除${selectedIds.value.length}条`); selectedIds.value = []; loadData()
+}
+
+async function retrySheets() {
+  try {
+    const res = await fbApi.retrySheetsSync()
+    ElMessage.success(`重试完成：${res.retried || 0} 条已同步`)
+  } catch(e) { ElMessage.error(e.response?.data?.error || '重试失败') }
 }
 
 async function handleExport() {
