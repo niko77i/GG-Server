@@ -5,13 +5,20 @@ export const useAuthStore = defineStore('auth', {
   state: () => ({
     user: null,
     token: localStorage.getItem('token') || '',
-    isLoggedIn: !!localStorage.getItem('token')
+    isLoggedIn: !!localStorage.getItem('token'),
+    currentPlatform: 'gg'  // developer 可切换，普通用户登录后根据 user.platform 设置
   }),
   getters: {
     isAdmin: (state) => ['developer', 'admin'].includes(state.user?.role),
     isDeveloper: (state) => state.user?.role === 'developer',
     isViewer: (state) => state.user?.role === 'viewer',
     canAccessProducts: (state) => ['developer', 'admin', 'viewer'].includes(state.user?.role),
+    isFbUser: (state) => state.currentPlatform === 'fb',
+    isGgUser: (state) => state.currentPlatform === 'gg',
+    effectivePlatform: (state) => {
+      if (state.user?.role === 'developer') return state.currentPlatform
+      return state.user?.platform || 'gg'
+    },
     roleLabel: (state) => {
       const labels = { developer: '开发者', admin: '管理员', viewer: '观察者', user: '用户', hidden: '已禁用' }
       return labels[state.user?.role] || state.user?.role || ''
@@ -23,6 +30,12 @@ export const useAuthStore = defineStore('auth', {
       this.token = res.access_token
       this.user = res.user
       this.isLoggedIn = true
+      // 设置当前平台
+      if (this.isDeveloper) {
+        this.currentPlatform = 'gg' // developer 默认进 GG
+      } else {
+        this.currentPlatform = res.user?.platform || 'gg'
+      }
       localStorage.setItem('token', res.access_token)
       localStorage.setItem('user', JSON.stringify(res.user))
       return res
@@ -42,10 +55,16 @@ export const useAuthStore = defineStore('auth', {
         return null
       }
     },
+    setPlatform(platform) {
+      if (this.isDeveloper) {
+        this.currentPlatform = platform
+      }
+    },
     logout() {
       this.user = null
       this.token = ''
       this.isLoggedIn = false
+      this.currentPlatform = 'gg'
       localStorage.removeItem('token')
       localStorage.removeItem('user')
     },

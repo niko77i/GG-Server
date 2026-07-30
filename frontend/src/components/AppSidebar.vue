@@ -1,12 +1,17 @@
 <template>
   <div class="sidebar-wrap">
     <nav class="icon-rail">
-      <div class="rail-brand" @click="selectTab('/accounts')" title="首页">
+      <div class="rail-brand" @click="selectTab(auth.effectivePlatform === 'fb' ? '/fb/products' : '/accounts')" title="首页">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
           <rect x="2" y="2" width="20" height="20" rx="4" stroke="#0891b2" stroke-width="1.5"/>
           <circle cx="12" cy="10" r="3" stroke="#0891b2" stroke-width="1.5"/>
           <path d="M7 18c0-2.8 2.2-5 5-5s5 2.2 5 5" stroke="#0891b2" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
+      </div>
+      <!-- Developer 平台切换 -->
+      <div v-if="auth.isDeveloper" class="platform-switch">
+        <button class="plat-btn" :class="{ active: auth.currentPlatform === 'gg' }" @click="switchPlatform('gg')">GG</button>
+        <button class="plat-btn" :class="{ active: auth.currentPlatform === 'fb' }" @click="switchPlatform('fb')">FB</button>
       </div>
       <div class="rail-icons">
         <button v-for="item in visibleNavItems" :key="item.key" class="rail-btn" :class="{ active: activeSection === item.key }" :title="item.label" @click="selectTab(item.key)">
@@ -51,23 +56,53 @@ function handleLogout() {
   auth.logout()
   router.push('/login')
 }
+
+function switchPlatform(platform) {
+  auth.setPlatform(platform)
+  // 跳转到该平台的默认页面
+  if (platform === 'fb') {
+    router.push('/fb/products')
+    activeSection.value = 'fb-accounts'
+  } else {
+    router.push('/accounts/products')
+    activeSection.value = 'accounts'
+  }
+}
+
 const detailOpen = ref(true); const activeSection = ref('accounts')
-const navItems = [
+const ggNavItems = [
   { key: 'accounts', icon: '🏢', label: '账户管理', admin: true, sections: [{ title: '账户', items: [{ icon:'📦',label:'产品管理',path:'/accounts/products'},{ icon:'👤',label:'广告账户',path:'/accounts/ads'},{ icon:'🏢',label:'MCC管理',path:'/accounts/mcc'}]},{ title:'系统', items:[{ icon:'⚙',label:'设置',path:'/accounts/settings'}]}]},
   { key: 'youtube', icon: '📺', label: '视频管理', sections: [{ title: '视频', items: [{ icon:'▶',label:'视频展示',path:'/youtube/view'},{ icon:'📝',label:'文案展示',path:'/youtube/copywriting'},{ icon:'➕',label:'导入视频或文案',path:'/youtube/import'},{ icon:'🏷',label:'标签配置',path:'/youtube/config'}]}]},
   { key: 'media', icon: '🎬', label: '媒体工具', sections: [{ title: '媒体', items: [{ icon:'🖼',label:'爬取&视频',path:'/media'}]}]},
   { key: 'toolkit', icon: '🧰', label: '工具集', sections: [{ title: '工具', items: [{ icon:'📊',label:'做表数据',path:'/toolkit/zuobiao'},{ icon:'🎵',label:'音频替换',path:'/toolkit/audio'},{ icon:'🌐',label:'翻译工具',path:'/toolkit/translate'}]}]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
   { key: 'data-manage', icon: '📋', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'数据管理',path:'/data-manage'}]}]},
-  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'⚙️',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
 ]
-  const visibleNavItems = computed(() => navItems.filter(n => {
-    // accounts 对 admin 和 viewer 都可见
-    if (n.key === 'accounts') return auth.canAccessProducts
-    if (n.admin) return auth.isAdmin
-    return true
-  }))
-const currentNav = computed(() => navItems.find(n => n.key === activeSection.value))
+
+const fbNavItems = [
+  { key: 'fb-accounts', icon: '🏢', label: '账户管理', sections: [
+    { title: '账户', items: [
+      { icon:'📦',label:'产品管理',path:'/fb/products'},
+      { icon:'👤',label:'广告账户',path:'/fb/accounts'},
+      { icon:'🏢',label:'账户BM管理',path:'/fb/bms'},
+      { icon:'🔷',label:'像素BM管理',path:'/fb/pixel-bms'},
+    ]}
+  ]},
+  { key: 'fb-extract', icon: '📋', label: '数据提取', sections: [{ title: '提取', items: [{ icon:'📥',label:'FB数据提取',path:'/fb/extract'}]}]},
+  { key: 'fb-data', icon: '📊', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'FB数据管理',path:'/fb/data-manage'}]}]},
+  { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
+]
+
+const currentNavItems = computed(() => auth.effectivePlatform === 'fb' ? fbNavItems : ggNavItems)
+
+const visibleNavItems = computed(() => currentNavItems.value.filter(n => {
+  if (n.key === 'accounts' || n.key === 'fb-accounts') return auth.canAccessProducts
+  if (n.admin) return auth.isAdmin
+  return true
+}))
+const currentNav = computed(() => currentNavItems.value.find(n => n.key === activeSection.value))
 const detailTitle = computed(() => activeSection.value === 'settings' ? '设置' : (currentNav.value?.label || ''))
 const detailSections = computed(() => {
   if (activeSection.value === 'settings') return [{ title: '系统', items: [{ icon:'⚙',label:'账户设置',path:'/accounts/settings'}] }]
@@ -92,12 +127,18 @@ function isActive(p) { return route.path === p || route.path.startsWith(p + '/')
 function selectTab(key) {
   if (key === 'settings') { activeSection.value = 'settings'; detailOpen.value = true; router.push('/accounts/settings'); return }
   activeSection.value = key; detailOpen.value = true
-  const nav = navItems.find(n => n.key === key)
+  const nav = currentNavItems.value.find(n => n.key === key)
   if (nav) { const f = nav.sections[0]?.items[0]; if (f) router.push(f.path) }
 }
 function navigate(path) { router.push(path) }
 watch(() => route.path, (p) => {
-  for (const item of navItems) { if (p.startsWith('/' + item.key) || (item.key === 'accounts' && p.startsWith('/accounts'))) { activeSection.value = item.key; return } }
+  const items = currentNavItems.value
+  for (const item of items) {
+    const prefix = item.key.startsWith('fb-') ? '/fb' : '/' + item.key
+    if (p.startsWith(prefix) || (item.key === 'accounts' && p.startsWith('/accounts'))) {
+      activeSection.value = item.key; return
+    }
+  }
   if (p.startsWith('/accounts/settings')) activeSection.value = 'settings'
 }, { immediate: true })
 </script>
@@ -114,6 +155,10 @@ watch(() => route.path, (p) => {
 .rail-btn.active::before { content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:20px;background:#0891b2;border-radius:0 3px 3px 0; }
 .rail-emoji { font-size:18px;line-height:1; }
 .rail-spacer { flex:1; }
+.platform-switch { display:flex;flex-direction:column;gap:2px;margin:4px 0; }
+.plat-btn { width:40px;height:24px;border:1px solid #e5e7eb;background:transparent;border-radius:6px;cursor:pointer;font-size:10px;font-weight:600;color:#9ca3af;transition:all .15s;padding:0; }
+.plat-btn:hover { border-color:#0891b2;color:#0891b2; }
+.plat-btn.active { background:#0891b2;color:#fff;border-color:#0891b2; }
 .detail-panel { width:200px;background:#fff;border-right:1px solid #e5e7eb;display:flex;flex-direction:column;overflow:hidden;transition:width .2s ease; }
 .detail-panel.collapsed { width:0;border-right:none; }
 .detail-header { display:flex;align-items:center;justify-content:space-between;padding:16px 16px 12px;border-bottom:1px solid #f3f4f6; }
