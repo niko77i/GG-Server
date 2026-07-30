@@ -140,7 +140,7 @@
           </el-table-column>
           <el-table-column label="像素" width="200">
             <template #default="{row,$index}">
-              <el-select v-model="formLines[$index].pixel_id" size="small" clearable style="width:100%">
+              <el-select v-model="formLines[$index].pixel_id" size="small" clearable filterable style="width:100%">
                 <el-option-group v-for="pbm in pixelBmGroups" :key="pbm.id" :label="pbm.name+'('+pbm.bm_id+')'">
                   <el-option v-for="px in pbm.pixels" :key="px.id" :label="px.pixel_name+'('+px.pixel_id+')'" :value="px.id" />
                 </el-option-group>
