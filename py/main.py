@@ -5856,6 +5856,9 @@ def sales_persons_delete(sid):
 # ---------- 账户设置 API ----------
 
 # 内置 sheet 映射 key（全局共享，admin 可修改）
+# 记录重试失败事件，供 sync-status 一次性通知前端弹窗
+_retry_failed_events = {}  # {(user_id, product_name): timestamp}
+
 _BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts"}
 _BUILTIN_SHEET_DEFAULTS = {
     "recharge": "充值表",

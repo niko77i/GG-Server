@@ -1,7 +1,8 @@
 # GG-Server Facebook 平台支持设计文档
 
 > 日期：2026-07-30
-> 状态：已实现 + 审查修复完成（2026-07-30）
+> 状态：已实现 + 审查修复完成（2026-07-31）
+> 最后更新：2026-07-31 — Sheets 自动写表 + UI 对齐 GG
 
 ## 一、需求概述
 
@@ -826,6 +827,12 @@ SELECT 增加 `u.platform`，前端可按平台筛选用户。
 | 选项表权限 | 未定义 | developer/admin 可操作任意 owner 的记录 | 实际使用需要 |
 | admin 用户平台切换 | 仅 developer | admin 也可通过 `?platform=` 参数切换 | `_get_effective_platform()` 统一处理 |
 | `fb_ad_reports` 去重 | `INSERT OR REPLACE` | `INSERT ... ON CONFLICT ... DO UPDATE` | 避免 id 跳跃和 updated_at 丢失 |
+| Google Sheets | 未设计 | 12 列布局 (A-L)，按月匹配表格，后台异步写入，失败记录+重试 | 和 GG 一样支持自动写表 |
+| Sheet 命名 | 未设计 | 表格文件名 `用户名YYYY.MM`，如 `卡尔2026.07` | 每月一个独立表格文件 |
+| 数据提取下拉框 | 所有产品 | 仅当前用户的在跑产品 | runner_products 端点去掉了 admin 绕行 |
+| 日期默认值 | 未设计 | 默认前一天 | 方便日常使用 |
+| 保存后数据 | 未设计 | 不清空解析数据，可重复修改保存 | 用户反馈 |
+| 写表结果通知 | 未设计 | 保存 1.5s 后自动检查弹窗 ✅/❌ | 异步写表需要反馈 |
 
 ---
 
