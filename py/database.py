@@ -41,9 +41,7 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
-    # 列级迁移每次连接都执行（_add_column_if_missing 是幂等的，只 PRAGMA table_info）
-    _ensure_columns(conn)
-
+    # 先建表，再迁移列（确保 _ensure_columns 运行时所有表已存在）
     if not _schema_verified or _schema_verified_path != db_path:
         with _schema_lock:
             if not _schema_verified or _schema_verified_path != db_path:
@@ -51,6 +49,9 @@ def get_db() -> sqlite3.Connection:
                 _migrate_if_needed(conn)
                 _schema_verified = True
                 _schema_verified_path = db_path
+
+    # 列级迁移每次连接都执行（_add_column_if_missing 是幂等的）
+    _ensure_columns(conn)
     return conn
 
 
@@ -70,19 +71,32 @@ def db_conn():
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, col_name: str, col_def: str):
-    """仅在列不存在时添加。避免重复 PRAGMA table_info 样板代码。"""
+    """仅在列不存在时添加。如果表不存在则跳过。"""
+    if not _table_exists(conn, table):
+        return
     cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if col_name not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    """检查表是否存在（用于迁移时的安全判断）。"""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
+    ).fetchone()
+    return row is not None
+
+
 def _ensure_columns(conn: sqlite3.Connection):
     """每次数据库连接都执行的列级迁移（幂等，仅 PRAGMA + 条件 ALTER TABLE）。"""
     # 产品表迁移：补 mcc_id 和兼容 is_paused→status
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
-    if "mcc_id" not in cols:
-        conn.execute("ALTER TABLE products ADD COLUMN mcc_id INTEGER REFERENCES mcc(id)")
+    if _table_exists(conn, "products"):
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+        if "mcc_id" not in cols:
+            conn.execute("ALTER TABLE products ADD COLUMN mcc_id INTEGER REFERENCES mcc(id)")
     for t in ["products", "packages"]:
+        if not _table_exists(conn, t):
+            continue
         tcols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})").fetchall()]
         if "is_paused" in tcols and "status" not in tcols:
             conn.execute(f"ALTER TABLE {t} RENAME COLUMN is_paused TO status")
@@ -105,8 +119,10 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "recharge_records", "sheets_synced", "sheets_synced INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "recharge_records", "sheets_error", "sheets_error TEXT DEFAULT ''")
     # 高频查询字段索引（_add_column_if_missing 之后创建，确保列已存在）
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
+    if _table_exists(conn, "accounts"):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
+    if _table_exists(conn, "products"):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
     _add_column_if_missing(conn, "products", "customer", "customer TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "deleted_at", "deleted_at TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "agency_ratio", "agency_ratio REAL DEFAULT NULL")
@@ -119,6 +135,7 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "users", "custom_name", "custom_name TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "users", "platform", "platform TEXT DEFAULT 'gg'")
     # 选项表外键列（从 TEXT 迁移到 ID 引用）
     _add_column_if_missing(conn, "accounts", "agent_id", "agent_id INTEGER REFERENCES agents(id)")
     _add_column_if_missing(conn, "accounts", "status_id", "status_id INTEGER REFERENCES account_statuses(id)")
@@ -376,7 +393,8 @@ def _ensure_schema(conn: sqlite3.Connection):
             last_login TEXT,
             created_by INTEGER REFERENCES users(id),
             config TEXT DEFAULT '{}',
-            custom_name TEXT DEFAULT ''
+            custom_name TEXT DEFAULT '',
+            platform TEXT DEFAULT 'gg'
         );
 
         -- 爬取缓存表
@@ -549,31 +567,34 @@ def _ensure_schema(conn: sqlite3.Connection):
         "SELECT value FROM config WHERE key='migrated_product_runners_v2'"
     ).fetchone()
     if not pr_migrated_v2:
-        rows = conn.execute(
-            "SELECT id, runner_ids FROM products WHERE runner_ids IS NOT NULL AND runner_ids != '' AND runner_ids != '[]'"
-        ).fetchall()
-        valid_uids = set(r[0] for r in conn.execute("SELECT id FROM users").fetchall())
-        for r in rows:
-            try:
-                runner_ids = json.loads(r["runner_ids"] or "[]")
-            except Exception:
-                runner_ids = []
-            valid_rids = [uid for uid in runner_ids if uid in valid_uids]
-            current = set(row[0] for row in conn.execute(
-                "SELECT user_id FROM product_runners WHERE product_id=?", (r["id"],)
-            ).fetchall())
-            if set(valid_rids) != current:
-                conn.execute("DELETE FROM product_runners WHERE product_id=?", (r["id"],))
-                for uid in valid_rids:
-                    try:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)",
-                            (r["id"], uid)
-                        )
-                    except Exception:
-                        pass
-        conn.execute(
-            "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_product_runners_v2','1')"
+        # 检查 runner_ids 列是否已存在（_ensure_columns 之后才添加）
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+        if "runner_ids" in cols:
+            rows = conn.execute(
+                "SELECT id, runner_ids FROM products WHERE runner_ids IS NOT NULL AND runner_ids != '' AND runner_ids != '[]'"
+            ).fetchall()
+            valid_uids = set(r[0] for r in conn.execute("SELECT id FROM users").fetchall())
+            for r in rows:
+                try:
+                    runner_ids = json.loads(r["runner_ids"] or "[]")
+                except Exception:
+                    runner_ids = []
+                valid_rids = [uid for uid in runner_ids if uid in valid_uids]
+                current = set(row[0] for row in conn.execute(
+                    "SELECT user_id FROM product_runners WHERE product_id=?", (r["id"],)
+                ).fetchall())
+                if set(valid_rids) != current:
+                    conn.execute("DELETE FROM product_runners WHERE product_id=?", (r["id"],))
+                    for uid in valid_rids:
+                        try:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO product_runners(product_id, user_id) VALUES(?,?)",
+                                (r["id"], uid)
+                            )
+                        except Exception:
+                            pass
+            conn.execute(
+                "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_product_runners_v2','1')"
         )
 
     # 初始化地区时区（从 tags 同步已有地区，预设常见时区）
@@ -601,6 +622,14 @@ def _migrate_mcc_share_runners(conn: sqlite3.Connection):
         "SELECT value FROM config WHERE key='migrated_mcc_share_runners'"
     ).fetchone()
     if migrated:
+        return
+
+    # 检查 runner_ids 和 mcc_id 列是否存在
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+    if "runner_ids" not in cols or "mcc_id" not in cols:
+        conn.execute(
+            "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_mcc_share_runners','1')"
+        )
         return
 
     products = conn.execute(
