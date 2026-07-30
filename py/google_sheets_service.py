@@ -440,26 +440,19 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     """
     import json
 
-    # 获取用户 Google Sheets 配置（和 GG 使用相同 key）
+    # 获取用户 Google Sheets 配置（和 GG 共用配置页，优先取含 "FB" 的表）
     config = db.execute(
         "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
     ).fetchone()
-    active = db.execute(
-        "SELECT value FROM config WHERE key=?", (f"google_sheets_active_{user_id}",)
-    ).fetchone()
-    sheets_list = json.loads(config['value'] or '[]') if config else []
-    active_id = active['value'].strip() if active else ""
-    # 找激活的表格
-    active_sheet = None
-    if active_id:
-        for s in sheets_list:
-            if s.get("id") == active_id:
-                active_sheet = s
-                break
-    if not active_sheet and sheets_list:
-        active_sheet = sheets_list[0]
-    if not active_sheet:
+    if not config:
         raise ValueError("用户未配置 Google Sheets")
+    sheets_list = json.loads(config['value'] or '[]')
+    if not isinstance(sheets_list, list) or not sheets_list:
+        raise ValueError("用户未配置 Google Sheets")
+    # 优先找名称含 "FB" 的，否则用第一个
+    active_sheet = next((s for s in sheets_list if 'FB' in (s.get('name', '') or '').upper()), None)
+    if not active_sheet:
+        active_sheet = sheets_list[0]
     spreadsheet_id = active_sheet.get("spreadsheet_id", "")
     if not spreadsheet_id:
         raise ValueError("用户未配置 Google Sheets")
