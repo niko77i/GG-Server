@@ -509,7 +509,11 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
 
     try:
         import os
-        creds_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'google_sheets_credentials.json')
+        creds_path = os.environ.get(
+            "GOOGLE_SHEETS_CREDENTIALS_PATH",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                         "config", "fit-boulevard-503111-u4-812bc02c2000.json")
+        )
         service = build_service(creds_path)
         # 获取 spreadsheet 信息
         info = get_spreadsheet_info(service, spreadsheet_id)
