@@ -471,22 +471,30 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     region = product_info['region'] or ''
     channel = line_name
 
-    # 构建行数据
+    # 获取运营名称
+    operator = db.execute("SELECT display_name, username FROM users WHERE id=?", (user_id,)).fetchone()
+    operator_name = (operator['display_name'] or operator['username']) if operator else ''
+
+    # 构建行数据（14列）
+    from datetime import date
+    today = date.today().isoformat()
     rows = []
     for rec in records:
         rows.append([
-            product_name,                                    # 客户名称
+            today,                                            # 日期
+            operator_name,                                    # 运营
+            rec.get('account_name', ''),                     # 账户名称
+            f"'{rec.get('account_id', '')}",                 # 广告账户ID（文本）
+            float(rec.get('cost', 0)),                       # 账号消耗
+            '',                                               # 报给客户（空）
+            product_name,                                     # 客户名称
             sales_person,                                     # 商务
             region,                                           # 投放国家
             channel,                                          # 渠道号
-            rec.get('account_name', ''),                     # 账户名称
-            str(rec.get('account_id', '')),                  # 广告账户ID（文本）
-            float(rec.get('cost', 0)),                       # 账号消耗
-            int(rec.get('impressions', 0)),                  # 展示次数
-            int(rec.get('clicks', 0)),                       # 点击
-            int(rec.get('registrations', 0)),                # 完成注册
-            int(rec.get('purchases', 0)),                    # 购物次数
-            float(rec.get('cost_per_purchase', 0)),          # 单词购物费用
+            '',                                               # 平台实际
+            f"{product_info['agency_ratio'] or 0}%",         # 代投比例
+            '',                                               # 代投费（公式）
+            '',                                               # 利润（公式）
         ])
 
     # 调用通用 upsert 逻辑
@@ -531,8 +539,8 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
             if str(s.get("gid", 0)) == str(gid):
                 sheet_rows = s.get("rowCount", 1000)
 
-        # 读取现有数据
-        range_read = f"'{target_sheet}'!A:L"
+        # 读取现有数据（14列 A:N）
+        range_read = f"'{target_sheet}'!A:N"
         result = service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id, range=range_read
         ).execute()
@@ -564,11 +572,11 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
             if key in existing_map:
                 # 覆盖已有行
                 row_idx = existing_map[key]
-                range_write = f"'{target_sheet}'!A{row_idx + 1}:L{row_idx + 1}"
+                range_write = f"'{target_sheet}'!A{row_idx + 1}:N{row_idx + 1}"
             else:
                 # 追加
                 last_row += 1
-                range_write = f"'{target_sheet}'!A{last_row}:L{last_row}"
+                range_write = f"'{target_sheet}'!A{last_row}:N{last_row}"
 
             updates.append({
                 "range": range_write,
