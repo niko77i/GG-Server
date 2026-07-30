@@ -2398,7 +2398,11 @@ def products_list():
             # 兼容旧数据 INTEGER 0（is_paused 迁移后）和新数据 TEXT ''
             where.append("(p.status IS NULL OR p.status = '' OR p.status = '0' OR p.status = 0)")
     where.append("(p.is_archived IS NULL OR p.is_archived = 0)")
-    sql = "SELECT p.*, m.name AS mcc_name, m.mcc_id AS mcc_code FROM products p LEFT JOIN mcc m ON p.mcc_id=m.id"
+    sql = ("SELECT p.*, m.name AS mcc_name, m.mcc_id AS mcc_code, "
+           "COALESCE(sp.name, '') AS sales_person "
+           "FROM products p "
+           "LEFT JOIN mcc m ON p.mcc_id=m.id "
+           "LEFT JOIN sales_persons sp ON p.sales_person_id=sp.id")
     if where: sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY p.created_at DESC LIMIT ? OFFSET ?"
     rows = db.execute(sql, params + [size, (page - 1) * size]).fetchall()
