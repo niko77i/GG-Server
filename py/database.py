@@ -1101,6 +1101,19 @@ def _migrate_if_needed(conn: sqlite3.Connection):
             print(f"[Migrate] videos composite PK migration failed: {e}")
             conn.rollback()
 
+    # 4.1 重建 product_assets / video_consumption 的 FK 引用（DROP+RENAME 后 FK 内部 ID 失效）
+    conn.execute("INSERT OR IGNORE INTO config(key,value) VALUES('migrated_fk_rebuild_after_composite_pk','0')")
+    conn.commit()
+    fk_claim = conn.execute("SELECT value FROM config WHERE key='migrated_fk_rebuild_after_composite_pk'").fetchone()
+    if fk_claim and fk_claim["value"] == "0":
+        try:
+            _rebuild_dependent_fks(conn)
+            conn.execute("UPDATE config SET value='1' WHERE key='migrated_fk_rebuild_after_composite_pk'")
+            conn.commit()
+        except Exception as e:
+            print(f"[Migrate] FK rebuild failed: {e}")
+            conn.rollback()
+
     _migrate_options_tables(conn)
     _cleanup_old_option_columns(conn)
 
@@ -1289,6 +1302,54 @@ def _migrate_videos_composite_pk(conn: sqlite3.Connection):
             SELECT owner_id FROM videos WHERE videos.id = video_consumption.video_id LIMIT 1
         )
     """)
+
+
+def _rebuild_dependent_fks(conn: sqlite3.Connection):
+    """重建 product_assets 和 video_consumption 表，修复因 videos 复合主键迁移
+    (DROP + RENAME) 导致的 FK 内部引用 ID 失效。"""
+    # --- product_assets ---
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("DROP TABLE IF EXISTS product_assets_new")
+    conn.execute("""CREATE TABLE product_assets_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER NOT NULL REFERENCES products(id),
+        video_id TEXT NOT NULL,
+        video_owner_id INTEGER NOT NULL DEFAULT 1,
+        added_by INTEGER REFERENCES users(id),
+        added_at TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(product_id, video_id),
+        FOREIGN KEY (video_id, video_owner_id) REFERENCES videos(id, owner_id)
+    )""")
+    conn.execute("""
+        INSERT INTO product_assets_new (id, product_id, video_id, video_owner_id, added_by, added_at)
+        SELECT id, product_id, video_id, video_owner_id, added_by, added_at FROM product_assets
+    """)
+    conn.execute("DROP TABLE product_assets")
+    conn.execute("ALTER TABLE product_assets_new RENAME TO product_assets")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_product_assets_product ON product_assets(product_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_product_assets_video ON product_assets(video_id)")
+
+    # --- video_consumption ---
+    conn.execute("DROP TABLE IF EXISTS video_consumption_new")
+    conn.execute("""CREATE TABLE video_consumption_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id TEXT NOT NULL,
+        video_owner_id INTEGER NOT NULL DEFAULT 1,
+        user_id INTEGER,
+        product_id INTEGER REFERENCES products(id),
+        amount REAL NOT NULL,
+        consume_date TEXT DEFAULT '',
+        created_at TEXT,
+        FOREIGN KEY (video_id, video_owner_id) REFERENCES videos(id, owner_id)
+    )""")
+    conn.execute("""
+        INSERT INTO video_consumption_new (id, video_id, video_owner_id, user_id, product_id, amount, consume_date, created_at)
+        SELECT id, video_id, video_owner_id, user_id, product_id, amount, consume_date, created_at FROM video_consumption
+    """)
+    conn.execute("DROP TABLE video_consumption")
+    conn.execute("ALTER TABLE video_consumption_new RENAME TO video_consumption")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_vc_video ON video_consumption(video_id, video_owner_id)")
+    conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _migrate_font_recent(conn: sqlite3.Connection, root: str):

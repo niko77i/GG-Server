@@ -35,7 +35,7 @@ import data_service
 import datetime
 import requests
 from functools import wraps
-from routes.decorators import reject_viewer as _reject_viewer
+from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 # google_ads_service 按需加载，不打包进 EXE
 
@@ -135,6 +135,53 @@ def _refresh_jwt(response):
 def _attach_db():
     """每个请求附加一个共享的数据库连接（通过 flask.g）。"""
     g.db = database.get_db()
+
+
+# GG 平台专用路由前缀（FB 用户不可访问，developer 放行）
+_GG_ONLY_PREFIXES = (
+    '/api/ad-reports',   # GG 做表数据
+    '/api/accounts',     # GG 账户（/api/fb/accounts 由 fb_routes 处理，优先级更高）
+    '/api/mcc',          # GG MCC
+    '/api/products',     # GG 产品
+    '/api/scrape',       # GG 爬取
+    '/api/video',        # GG 视频
+    '/api/youtube',      # GG YouTube
+)
+
+
+@app.before_request
+def _guard_gg_platform():
+    """GG 专用路由的平台守卫：FB 用户不可访问，developer 放行。"""
+    # 仅处理 API 请求
+    if not request.path.startswith('/api/'):
+        return None
+    # OPTIONS 预检请求直接放行（CORS）
+    if request.method == 'OPTIONS':
+        return None
+    # 跳过 FB 专用路由（由 fb_routes 的 @fb_required 守卫）
+    if request.path.startswith('/api/fb/'):
+        return None
+    # 跳过认证与共享路由
+    if request.path.startswith(('/api/auth/', '/api/admin/', '/api/regions',
+                                 '/api/statuses', '/api/sales-persons', '/api/agents',
+                                 '/api/mcc-levels', '/api/sheets', '/api/delist',
+                                 '/api/toolkit', '/api/media', '/api/config',
+                                 '/api/import', '/api/export', '/api/copywritings',
+                                 '/api/packages', '/api/recharge')):
+        return None
+    # 对 GG 专用路由做平台检查（仅检查已登录用户，未登录由 @jwt_required 处理）
+    if request.path.startswith(_GG_ONLY_PREFIXES):
+        try:
+            from flask_jwt_extended import get_jwt_identity
+            uid = get_jwt_identity()
+            if uid is None:
+                return None  # 未登录，交给路由自身的 @jwt_required 处理
+        except Exception:
+            return None  # 无 JWT，交给路由处理
+        err_resp = _require_platform('gg')
+        if err_resp:
+            return err_resp
+    return None
 
 
 @app.after_request
@@ -1865,8 +1912,10 @@ def youtube_delete():
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
     is_admin = user and user["role"] in ("developer", "admin")
-    # 清理关联数据：成效素材关联 + 消耗记录（匹配 owner_id）
+    # 清理关联数据：成效素材关联 + 消耗记录
+    # 注：复合主键迁移后 FK 内部引用失效，临时关闭 FK 检查
     placeholders = ",".join(["?"] * len(ids))
+    db.execute("PRAGMA foreign_keys=OFF")
     if is_admin:
         db.execute(f"DELETE FROM product_assets WHERE video_id IN ({placeholders})", ids)
         db.execute(f"DELETE FROM video_consumption WHERE video_id IN ({placeholders})", ids)
@@ -1874,6 +1923,7 @@ def youtube_delete():
         for vid in ids:
             db.execute("DELETE FROM product_assets WHERE video_id=? AND video_owner_id=?", (vid, user_id))
             db.execute("DELETE FROM video_consumption WHERE video_id=? AND video_owner_id=?", (vid, user_id))
+    db.execute("PRAGMA foreign_keys=ON")
     deleted = 0
     for vid in ids:
         if is_admin:

@@ -93,25 +93,20 @@ async function loadData() {
   } finally { loading.value = false }
 }
 async function loadOptions() {
-  const [bmRes, pxBmRes, userRes, salesRes, regionsRes] = await Promise.all([
-    fbApi.bmOptions(),
-    fbApi.pixelBmOptions(),
-    client.get('/auth/names'),
-    client.get('/sales-persons/list'),
-    client.get('/regions/list'),
-  ])
-  bmOptions.value = bmRes.data || []
-  // fbUsers: /api/auth/names 返回 {users: [...]}
-  fbUsers.value = (userRes.users || []).filter(u => u.platform === 'fb' || !u.platform)
-  // salesOptions: /api/sales-persons/list 返回 {sales_persons: [...]}
-  salesOptions.value = salesRes.sales_persons || []
-  // regionOptions: /api/regions/list 返回 {regions: [...]}
-  regionOptions.value = (regionsRes.regions || []).map(r => typeof r === 'string' ? { name: r } : r)
-  // 加载像素BM分组
-  for (const pb of (pxBmRes.data || [])) {
-    const pxRes = await fbApi.listPixels(pb.id)
-    pixelBmGroups.value.push({ id: pb.id, name: pb.name, bm_id: pb.bm_id, pixels: pxRes.data || [] })
-  }
+  // 每个请求独立加载，避免一个失败全部挂掉
+  try { const r = await fbApi.bmOptions(); bmOptions.value = r.data || [] } catch(e) { console.warn('loadOptions bm', e) }
+  try { const r = await fbApi.pixelBmOptions()
+    pixelBmGroups.value = []
+    for (const pb of (r.data || [])) {
+      try {
+        const pxRes = await fbApi.listPixels(pb.id)
+        pixelBmGroups.value.push({ id: pb.id, name: pb.name, bm_id: pb.bm_id, pixels: pxRes.data || [] })
+      } catch(e) { console.warn('loadOptions pixels', e) }
+    }
+  } catch(e) { console.warn('loadOptions pixelBm', e) }
+  try { const r = await fbApi.listFbUsers(); fbUsers.value = r.data || [] } catch(e) { console.warn('loadOptions users', e) }
+  try { const r = await client.get('/sales-persons/list'); salesOptions.value = r.sales_persons || [] } catch(e) { console.warn('loadOptions sales', e) }
+  try { const r = await client.get('/regions/list'); regionOptions.value = (r.regions || []).map(r => typeof r === 'string' ? { name: r } : r) } catch(e) { console.warn('loadOptions regions', e) }
 }
 
 function openCreate() {

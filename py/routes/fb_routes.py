@@ -125,56 +125,59 @@ def ban_and_migrate(bid):
     if bm['status'] == 'banned':
         return err('该BM已被封禁'), 400
 
-    # 查找或创建目标 BM
-    target = db.execute("SELECT id FROM fb_bms WHERE bm_id=?", (target_bm_id_str,)).fetchone()
-    if target:
-        target_bid = target['id']
-        if target_bid == bid:
-            return err('不能迁移到自身'), 400
-    else:
-        if not target_bm_name:
-            return err('新建BM需要提供名称'), 400
-        if not target_bm_id_str.isdigit():
-            return err('BMID必须是纯数字'), 400
-        db.execute(
-            "INSERT INTO fb_bms (name, bm_id, owner_id) VALUES (?, ?, ?)",
-            (target_bm_name, target_bm_id_str, uid))
+    try:
+        # 查找或创建目标 BM
+        target = db.execute("SELECT id FROM fb_bms WHERE bm_id=?", (target_bm_id_str,)).fetchone()
+        if target:
+            target_bid = target['id']
+            if target_bid == bid:
+                return err('不能迁移到自身'), 400
+        else:
+            if not target_bm_name:
+                return err('新建BM需要提供名称'), 400
+            if not target_bm_id_str.isdigit():
+                return err('BMID必须是纯数字'), 400
+            db.execute(
+                "INSERT INTO fb_bms (name, bm_id, owner_id) VALUES (?, ?, ?)",
+                (target_bm_name, target_bm_id_str, uid))
+            target_bid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 迁移账户关联
+        accounts = db.execute(
+            "SELECT account_id FROM fb_account_bm WHERE bm_id=?", (bid,)
+        ).fetchall()
+        for acc in accounts:
+            db.execute(
+                "INSERT OR IGNORE INTO fb_account_bm (account_id, bm_id) VALUES (?, ?)",
+                (acc['account_id'], target_bid))
+            db.execute("DELETE FROM fb_account_bm WHERE account_id=? AND bm_id=?", (acc['account_id'], bid))
+            db.execute(
+                "INSERT INTO fb_account_bm_history (account_id, old_bm_id, new_bm_id, changed_by, change_type) "
+                "VALUES (?, ?, ?, ?, 'banned_migration')",
+                (acc['account_id'], bid, target_bid, uid))
+
+        # 标记封禁
+        db.execute("UPDATE fb_bms SET status='banned', updated_at=datetime('now','localtime') WHERE id=?", (bid,))
+
+        # 检查产品-BM关联（返回警告）
+        product_links = db.execute(
+            "SELECT p.id, p.product_name FROM fb_products p "
+            "JOIN fb_product_bms pb ON pb.product_id = p.id "
+            "WHERE pb.bm_id = ?", (bid,)
+        ).fetchall()
+        warnings = []
+        if product_links:
+            warnings = [f"产品「{p['product_name']}」仍关联此BM，请手动更新产品的在跑BM" for p in product_links]
+
         db.commit()
-        target_bid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-    # 迁移账户关联
-    accounts = db.execute(
-        "SELECT account_id FROM fb_account_bm WHERE bm_id=?", (bid,)
-    ).fetchall()
-    for acc in accounts:
-        db.execute(
-            "INSERT OR IGNORE INTO fb_account_bm (account_id, bm_id) VALUES (?, ?)",
-            (acc['account_id'], target_bid))
-        db.execute("DELETE FROM fb_account_bm WHERE account_id=? AND bm_id=?", (acc['account_id'], bid))
-        db.execute(
-            "INSERT INTO fb_account_bm_history (account_id, old_bm_id, new_bm_id, changed_by, change_type) "
-            "VALUES (?, ?, ?, ?, 'banned_migration')",
-            (acc['account_id'], bid, target_bid, uid))
-
-    # 标记封禁
-    db.execute("UPDATE fb_bms SET status='banned', updated_at=datetime('now','localtime') WHERE id=?", (bid,))
-
-    # 检查产品-BM关联（返回警告）
-    product_links = db.execute(
-        "SELECT p.id, p.product_name FROM fb_products p "
-        "JOIN fb_product_bms pb ON pb.product_id = p.id "
-        "WHERE pb.bm_id = ?", (bid,)
-    ).fetchall()
-    warnings = []
-    if product_links:
-        warnings = [f"产品「{p['product_name']}」仍关联此BM，请手动更新产品的在跑BM" for p in product_links]
-
-    db.commit()
-    return ok({
-        'migrated_accounts': len(accounts),
-        'target_bm_id': target_bid,
-        'warnings': warnings
-    })
+        return ok({
+            'migrated_accounts': len(accounts),
+            'target_bm_id': target_bid,
+            'warnings': warnings
+        })
+    except Exception as e:
+        db.rollback()
+        return err(f'封禁迁移失败: {str(e)}'), 500
 
 
 # ==================== 账户管理 ====================
@@ -309,8 +312,39 @@ def delete_account(aid):
 @jwt_required()
 @fb_required
 def list_deleted_accounts():
-    # 复用 list，加参数
-    return list_accounts()
+    """返回已删除账户列表"""
+    db = get_db()
+    page = request.args.get('page', 1, type=int)
+    size = request.args.get('size', 50, type=int)
+    offset = (page - 1) * size
+    uid = get_uid()
+
+    where = ["a.deleted_at IS NOT NULL"]
+    params = []
+    role = _get_role(db, uid)
+    if role not in ('developer', 'admin'):
+        where.append("a.owner_id = ?")
+        params.append(uid)
+
+    where_clause = " AND ".join(where)
+    total = db.execute(f"SELECT COUNT(*) FROM fb_accounts a WHERE {where_clause}", params).fetchone()[0]
+    rows = db.execute(
+        f"SELECT a.* FROM fb_accounts a WHERE {where_clause} ORDER BY a.deleted_at DESC LIMIT ? OFFSET ?",
+        params + [size, offset]
+    ).fetchall()
+
+    result_items = []
+    for r in rows:
+        item = dict(r)
+        bms = db.execute(
+            "SELECT b.name, b.id, b.bm_id FROM fb_bms b "
+            "JOIN fb_account_bm ab ON ab.bm_id = b.id "
+            "WHERE ab.account_id = ?", (r['id'],)
+        ).fetchall()
+        item['bms'] = [dict(b) for b in bms]
+        result_items.append(item)
+
+    return ok({'items': result_items, 'total': total, 'page': page, 'size': size})
 
 
 @fb_bp.route('/api/fb/accounts/<int:aid>/restore', methods=['POST'])
@@ -496,6 +530,7 @@ def update_product(pid):
     agency_ratio = data.get('agency_ratio', 0)
     bm_ids = data.get('bm_ids', None)
     runner_ids = data.get('runner_ids', None)
+    lines = data.get('lines', None)
 
     if product_name:
         db.execute(
@@ -512,6 +547,13 @@ def update_product(pid):
         db.execute("DELETE FROM fb_product_runners WHERE product_id=?", (pid,))
         for ruid in runner_ids:
             db.execute("INSERT OR IGNORE INTO fb_product_runners (product_id, user_id) VALUES (?, ?)", (pid, ruid))
+
+    if lines is not None:
+        db.execute("DELETE FROM fb_lines WHERE product_id=?", (pid,))
+        for line in lines:
+            db.execute(
+                "INSERT INTO fb_lines (product_id, line_name, link, pixel_id) VALUES (?, ?, ?, ?)",
+                (pid, line.get('line_name', ''), line.get('link', ''), line.get('pixel_id', None)))
 
     db.commit()
     return ok()
@@ -687,7 +729,7 @@ def delete_pixel_bm(bid):
 def pixel_bm_options():
     db = get_db()
     rows = db.execute(
-        "SELECT id, name, bm_id FROM fb_pixel_bms WHERE deleted_at IS NULL ORDER BY name"
+        "SELECT id, name, bm_id FROM fb_pixel_bms WHERE status='normal' AND deleted_at IS NULL ORDER BY name"
     ).fetchall()
     return ok([dict(r) for r in rows])
 
@@ -824,18 +866,23 @@ def _parse_fb_extract(text: str, sorted_mode: bool) -> dict:
         }
 
         if sorted_mode:
-            # 按顺序映射：展示次数、点击、完成注册、购物、单词购物费用
-            if len(clean_numbers) >= 5:
+            # 按顺序映射：展示次数、点击、完成注册、购物
+            # cost_per_purchase 取 dollar_amounts 中非最大的值（如果有多个$）
+            if len(clean_numbers) >= 4:
                 record['impressions'] = clean_numbers[0]
                 record['clicks'] = clean_numbers[1]
                 record['registrations'] = clean_numbers[2]
                 record['purchases'] = clean_numbers[3]
-                record['cost_per_purchase'] = clean_numbers[4] if len(clean_numbers) >= 5 else 0
             else:
                 record['impressions'] = clean_numbers[0] if len(clean_numbers) > 0 else 0
                 record['clicks'] = clean_numbers[1] if len(clean_numbers) > 1 else 0
                 record['registrations'] = 0
                 record['purchases'] = 0
+            # cost_per_purchase: 如果 $ 金额有多个，取非 max 的值（次大值）
+            if len(dollar_amounts) >= 2:
+                sorted_amounts = sorted(dollar_amounts, reverse=True)
+                record['cost_per_purchase'] = sorted_amounts[1]
+            else:
                 record['cost_per_purchase'] = 0
 
         results.append(record)
@@ -878,10 +925,16 @@ def extract_save():
     try:
         for rec in records:
             db.execute(
-                "INSERT OR REPLACE INTO fb_ad_reports "
+                "INSERT INTO fb_ad_reports "
                 "(user_id, product_name, line_name, report_date, account_name, account_id, "
                 "cost, impressions, clicks, registrations, purchases, cost_per_purchase) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, product_name, line_name, account_id, report_date) DO UPDATE SET "
+                "account_name=excluded.account_name, cost=excluded.cost, "
+                "impressions=excluded.impressions, clicks=excluded.clicks, "
+                "registrations=excluded.registrations, purchases=excluded.purchases, "
+                "cost_per_purchase=excluded.cost_per_purchase, "
+                "saved_at=datetime('now','localtime')",
                 (uid, product_name, line_name, report_date,
                  rec.get('account_name', ''), rec.get('account_id', ''),
                  rec.get('cost', 0), rec.get('impressions', 0), rec.get('clicks', 0),
@@ -889,7 +942,8 @@ def extract_save():
         db.commit()
         return ok({'saved': len(records)})
     except Exception as e:
-        return err(str(e))
+        db.rollback()
+        return err(f'保存数据失败: {str(e)}'), 500
 
 
 # ==================== 数据管理 ====================
@@ -1026,9 +1080,29 @@ def export_reports():
     db = get_db()
     uid = get_uid()
     product_name = request.args.get('product_name', '')
+    line_name = request.args.get('line_name', '')
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+
+    where = ["user_id = ?"]
+    params = [uid]
+    if product_name:
+        where.append("product_name = ?")
+        params.append(product_name)
+    if line_name:
+        where.append("line_name = ?")
+        params.append(line_name)
+    if date_from:
+        where.append("report_date >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("report_date <= ?")
+        params.append(date_to)
+
+    where_clause = " AND ".join(where)
     rows = db.execute(
-        "SELECT * FROM fb_ad_reports WHERE user_id=? AND product_name=? ORDER BY report_date DESC",
-        (uid, product_name)
+        f"SELECT * FROM fb_ad_reports WHERE {where_clause} ORDER BY report_date DESC",
+        params
     ).fetchall()
 
     output = io.StringIO()
@@ -1046,6 +1120,22 @@ def export_reports():
         mimetype='text/csv',
         headers={'Content-Disposition': 'attachment;filename=fb_reports.csv'}
     )
+
+
+# ==================== 用户查询（FB 平台） ====================
+
+@fb_bp.route('/api/fb/users', methods=['GET'])
+@jwt_required()
+@fb_required
+def list_fb_users():
+    """返回 FB 平台用户列表（供"在跑人员"选择器使用）"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, username, display_name, platform FROM users "
+        "WHERE (platform = 'fb' OR role = 'developer') AND role != 'hidden' "
+        "ORDER BY display_name, username"
+    ).fetchall()
+    return ok([dict(r) for r in rows])
 
 
 # ==================== 工具函数 ====================

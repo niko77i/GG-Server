@@ -189,7 +189,7 @@ def users_names():
     else:
         dev_filter = " AND u.role != 'developer'"
     rows = db.execute(f"""
-        SELECT DISTINCT u.id, u.username, u.display_name
+        SELECT DISTINCT u.id, u.username, u.display_name, u.platform
         FROM users u
         JOIN products p ON (
             p.owner_id = u.id

@@ -60,6 +60,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
+import client from '../../api/client'
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
 const search = ref(''); const filterBm = ref(''); const selectedIds = ref([])
@@ -82,8 +83,8 @@ async function loadData() {
   } finally { loading.value = false }
 }
 async function loadOptions() {
-  const [bmRes] = await Promise.all([fbApi.bmOptions()])
-  bmOptions.value = bmRes.data || []
+  try { const r = await fbApi.bmOptions(); bmOptions.value = r.data || [] } catch(e) { console.warn('loadOptions bm', e) }
+  try { const r = await client.get('/statuses/list'); statusOptions.value = r.statuses || r.data || [] } catch(e) { console.warn('loadOptions statuses', e) }
 }
 
 function openCreate() {

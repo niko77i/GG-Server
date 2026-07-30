@@ -70,14 +70,9 @@ const salesPersons = ref([]); const newSalesName = ref('')
 const statuses = ref([]); const newStatusName = ref('')
 
 async function loadData() {
-  const [spRes, stRes, regRes] = await Promise.all([
-    client.get('/sales-persons/list'),
-    client.get('/statuses/list'),
-    client.get('/regions/list'),
-  ])
-  salesPersons.value = spRes.sales_persons || []
-  statuses.value = stRes.statuses || stRes.data || []
-  regionOptions.value = (regRes.regions || []).map(r => typeof r === 'string' ? { name: r, timezone: '' } : r)
+  try { const r = await client.get('/sales-persons/list'); salesPersons.value = r.sales_persons || [] } catch(e) { console.warn(e) }
+  try { const r = await client.get('/statuses/list'); statuses.value = r.statuses || r.data || [] } catch(e) { console.warn(e) }
+  try { const r = await client.get('/regions/list'); regionOptions.value = (r.regions || []).map(r => typeof r === 'string' ? { name: r, timezone: '' } : r) } catch(e) { console.warn(e) }
 }
 
 // 地区

@@ -49,6 +49,9 @@ export const fbApi = {
   parseExtract(data) { return client.post('/api/fb/extract/parse', data) },
   saveExtract(data) { return client.post('/api/fb/extract/save', data) },
 
+  // 用户查询
+  listFbUsers() { return client.get('/api/fb/users') },
+
   // 数据管理
   listReports(params = {}) { return client.get('/api/fb/reports/list', { params }) },
   updateReport(id, data) { return client.put(`/api/fb/reports/${id}`, data) },
