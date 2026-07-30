@@ -1,7 +1,7 @@
 # GG-Server Facebook 平台支持设计文档
 
 > 日期：2026-07-30
-> 状态：设计完成，待确认
+> 状态：已实现 + 审查修复完成（2026-07-30）
 
 ## 一、需求概述
 
@@ -590,15 +590,20 @@ if (to.meta.platform && to.meta.platform !== auth.currentPlatform) {
 
 | 文件 | 改动 |
 |------|------|
-| `py/database.py` | 新增 FB 建表语句 |
-| `py/main.py` | 注册 fb_routes Blueprint |
-| `py/auth.py` | `/api/auth/me` 返回 platform 字段 |
+| `py/database.py` | 新增 FB 建表语句 + 选项表 platform 列 + `_copy_gg_options_to_fb` 迁移 |
+| `py/main.py` | 注册 fb_routes Blueprint + GG 平台守卫 + 选项表 CRUD 加 platform 隔离 + developer/admin 权限豁免 + export 支持筛选 |
+| `py/auth.py` | `/api/auth/me` 返回 platform 字段；create_user/list_users/update_user 支持 platform |
+| `py/routes/auth_routes.py` | `/api/auth/names` 加 platform 字段 |
 | `py/routes/helpers.py` | 新增 `require_platform()` 权限检查 |
+| `py/routes/decorators.py` | 新增 `fb_required` / `gg_required` 装饰器 + `require_platform()` |
 | `frontend/src/router/index.js` | 新增 FB 路由 + platform 守卫 |
-| `frontend/src/components/AppSidebar.vue` | platform 菜单切换 |
+| `frontend/src/components/AppSidebar.vue` | platform 菜单切换 + 子路径精确匹配修复 |
 | `frontend/src/stores/auth.js` | 新增 platform getter + currentPlatform 状态 |
-| `frontend/src/views/LoginView.vue` | 开发者登录后进入平台（无需改，后端返 platform） |
+| `frontend/src/views/LoginView.vue` | 开发者登录后进入平台（后端返 platform） |
 | `frontend/src/views/UserManageView.vue` | 创建用户时选 GG/FB 平台 |
+| `frontend/src/views/SettingsPanel.vue` | GG 设置页（通过 platform 参数隔离） |
+| `frontend/src/api/accounts.js` | 选项表 API 模块 |
+| `frontend/src/stores/accounts.js` | 选项表状态管理 |
 
 ### 不变文件
 
@@ -717,3 +722,107 @@ CREATE INDEX IF NOT EXISTS idx_fb_pixel_bms_list ON fb_pixel_bms(owner_id, statu
 | 开发者默认平台 | 登录后默认进入 GG，切换平台状态记录在 Pinia（不持久化） |
 | 开发者平台切换 | 切换时取消进行中的 API 请求（AbortController） |
 | fb_lines/fb_pixels | 无软删除（子级数据，硬删除即可） |
+
+---
+
+## 十、实现后审查与修复记录
+
+> 2026-07-30 代码审查 + 全部修复
+
+### 10.1 后端修复
+
+#### 事务保护
+
+| 端点 | 问题 | 修复 |
+|------|------|------|
+| `POST /api/fb/bms/:bid/ban-and-migrate` | 中途 `db.commit()` 导致事务分裂，新建目标 BM 已提交但迁移失败时数据不一致 | 移除中间 commit，统一 try/except + rollback |
+| `POST /api/fb/extract/save` | 无事务保护，`INSERT OR REPLACE` 导致 id 跳跃 + `updated_at` 丢失 | 改为 `INSERT ... ON CONFLICT ... DO UPDATE` upsert，加 rollback |
+
+#### 功能缺陷修复
+
+| 端点 | 问题 | 修复 |
+|------|------|------|
+| `GET /api/fb/accounts/deleted` | 直接复用 `list_accounts()`，deleted 参数默认为 `'0'`，永远返回未删除账户 | 重写为独立查询，`WHERE deleted_at IS NOT NULL` |
+| `PUT /api/fb/products/:pid` | 不处理 `lines` 字段，前端传了但后端丢弃 | 新增 lines 删除+重建逻辑（与 bm_ids/runner_ids 一致） |
+| `GET /api/fb/reports/export` | 不支持日期/线名筛选 | 增加 `line_name`、`date_from`、`date_to` 查询参数 |
+| `GET /api/fb/pixel-bms/options` | 不过滤 banned 状态，与 bm_options 不一致 | 加 `AND status='normal'` |
+
+#### 数据解析修复
+
+| 问题 | 修复 |
+|------|------|
+| `cost_per_purchase` 被 `int()` 强制转整数（精度丢失） | 排序模式下从 `dollar_amounts` 中取次大值（FB 数据中"单词购物费用"为 `$` 格式） |
+| `clean_numbers` 用 `int()` 解析，但非排序模式不需要 | 排序模式才映射 clean_numbers，且只取前 4 个（展示/点击/注册/购物） |
+
+#### 平台隔离
+
+| 改动 | 说明 |
+|------|------|
+| GG 路由平台守卫 | `main.py` 新增 `_guard_gg_platform` before_request 钩子，FB 用户访问 GG 专用路由（`/api/ad-reports`、`/api/accounts`、`/api/mcc`、`/api/products`、`/api/scrape`、`/api/video`、`/api/youtube`）返回 403 |
+| 未登录请求放行 | 守卫检测到无 JWT 时跳过，交给路由自身 `@jwt_required()` 处理（避免触发前端 401 拦截器 → 跳登录的死循环） |
+| 选项表 platform 隔离 | `sales_persons`、`account_statuses`、`regions` 加 `platform` 列；迁移脚本 `_copy_gg_options_to_fb` 自动复制 GG 数据到 FB |
+| 选项表删除/重命名权限 | 8 个端点（agents/statuses/mcc_levels/sales_persons 的 DELETE + PUT）的 `owner_id` 检查改为 developer/admin 豁免 |
+
+#### 新增端点
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/fb/users` | 返回 FB 平台用户（developer 也包含），供"在跑人员"选择器使用 |
+| `POST /api/fb/extract/check-duplicates` | 保存前检查重复数据 |
+
+#### `/api/auth/names` 增加 platform 字段
+
+SELECT 增加 `u.platform`，前端可按平台筛选用户。
+
+---
+
+### 10.2 前端修复
+
+#### FbAccountPanel
+
+- 补充 `statusOptions` 加载（从 `/api/statuses/list`），之前下拉框为空
+
+#### FbProductPanel
+
+- "在跑人员"改用 `fbApi.listFbUsers()`（新 `/api/fb/users` 端点），不再从 `/api/auth/names` 过滤
+
+#### FbDataManage（完整重写）
+
+- **新增编辑弹窗**：支持编辑单条记录全部字段
+- **新增导出按钮**：fetch + Authorization header 下载 CSV
+- **筛选选项修复**：产品/线名下接框从 `runnerProducts` API 加载（原来只取首页前 50 条且永不更新）
+- **动态列开关**：复选框手动切换详情列（展示/点击/注册/购物/单词购物费用）
+- **cost_per_purchase 列**：新增展示
+
+#### AppSidebar
+
+- `watch(route.path)` 改用子路径精确匹配，修复 FB 菜单永远只激活第一个的问题（原逻辑所有 FB 项的 prefix 都是 `/fb`）
+
+#### fb.js API 模块
+
+- 新增 `listFbUsers()`、`checkDuplicates()`
+- API 路径去 `/api` 前缀（`client.js` 的 `baseURL: '/api'` 已自动拼接）
+
+---
+
+### 10.3 数据库迁移
+
+#### `_copy_gg_options_to_fb` 迁移函数
+
+- 将 GG 平台的 `regions`、`sales_persons`、`account_statuses` 复制一份到 FB（`platform='fb'`）
+- `regions` 表 UNIQUE 约束从 `UNIQUE(name)` 改为 `UNIQUE(name, platform)`
+- `PRAGMA foreign_keys=OFF` 在函数最开头设置（`executescript()` 会隐式 commit，必须提前），finally 块恢复 ON
+- 迁移 gate：`config` 表 `migrated_copy_options_to_fb` 键
+
+---
+
+### 10.4 当前实现与设计的差异
+
+| 项目 | 设计文档 | 实际实现 | 原因 |
+|------|---------|---------|------|
+| FB 路由前缀 | `/api/fb/*` | `/api/fb/*`（后端）；前端 API 路径无 `/api` 前缀 | axios baseURL 已设 `/api` |
+| 像素BM options | 无 status 过滤 | 过滤 `status='normal'` | 与 BM options 一致 |
+| FB 设置页 | 在 FbSettingsPanel | 复用 GG `/api/sales-persons` 等端点（通过 platform 参数隔离） | 选项表共享，platform 列区分 |
+| 选项表权限 | 未定义 | developer/admin 可操作任意 owner 的记录 | 实际使用需要 |
+| admin 用户平台切换 | 仅 developer | admin 也可通过 `?platform=` 参数切换 | `_get_effective_platform()` 统一处理 |
+| `fb_ad_reports` 去重 | `INSERT OR REPLACE` | `INSERT ... ON CONFLICT ... DO UPDATE` | 避免 id 跳跃和 updated_at 丢失 |

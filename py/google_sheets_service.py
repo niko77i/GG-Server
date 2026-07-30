@@ -475,40 +475,38 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     operator = db.execute("SELECT display_name, username FROM users WHERE id=?", (user_id,)).fetchone()
     operator_name = (operator['display_name'] or operator['username']) if operator else ''
 
-    # 构建行数据（14列）
+    # 构建行数据（只写 12 列 A-L，M-N 是公式不覆盖）
     from datetime import date
     today = date.today().isoformat()
     rows = []
     for rec in records:
         rows.append([
-            today,                                            # 日期
-            operator_name,                                    # 运营
-            rec.get('account_name', ''),                     # 账户名称
-            f"'{rec.get('account_id', '')}",                 # 广告账户ID（文本）
-            float(rec.get('cost', 0)),                       # 账号消耗
-            '',                                               # 报给客户（空）
-            product_name,                                     # 客户名称
-            sales_person,                                     # 商务
-            region,                                           # 投放国家
-            channel,                                          # 渠道号
-            '',                                               # 平台实际
-            f"{product_info['agency_ratio'] or 0}%",         # 代投比例
-            '',                                               # 代投费（公式）
-            '',                                               # 利润（公式）
+            today,                                            # A: 日期
+            operator_name,                                    # B: 运营
+            rec.get('account_name', ''),                     # C: 账户名称
+            f"'{rec.get('account_id', '')}",                 # D: 广告账户ID（文本）
+            float(rec.get('cost', 0)),                       # E: 账号消耗
+            '',                                               # F: 报给客户
+            product_name,                                     # G: 客户名称
+            sales_person,                                     # H: 商务
+            region,                                           # I: 投放国家
+            channel,                                          # J: 渠道号
+            '',                                               # K: 平台实际
+            f"{product_info['agency_ratio'] or 0}%",         # L: 代投比例
         ])
 
-    # 调用通用 upsert 逻辑
+    # 调用通用 upsert 逻辑（只写 A-L，M-N 不动）
     result = _upsert_rows(
         user_id, spreadsheet_id, "FB做表数据", rows,
-        report_date, product_name, region
+        report_date, product_name, region, today
     )
     return result
 
 
 def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
                  rows: list, report_date: str, product_name: str,
-                 region: str) -> dict:
-    """FB 做表数据写入 Google Sheets。"""
+                 region: str, today: str = "") -> dict:
+    """FB 做表数据写入 Google Sheets（12列 A-L，M-N 留公式）。新的一天自动空一行。"""
     if not rows:
         return {"updated": 0}
 
@@ -523,65 +521,54 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
                          "config", "fit-boulevard-503111-u4-812bc02c2000.json")
         )
         service = build_service(creds_path)
-        # 获取 spreadsheet 信息
         info = get_spreadsheet_info(service, spreadsheet_id)
 
-        # 找第一个 sheet
-        gid = 0
-        target_sheet = "Sheet1"
-        for s in info.get("sheets", []):
-            target_sheet = s["name"]
-            gid = s.get("gid", 0)
-            break
+        target_sheet = info.get("sheets", [{}])[0].get("name", "Sheet1")
 
-        sheet_rows = 1000
-        for s in info.get("sheets", []):
-            if str(s.get("gid", 0)) == str(gid):
-                sheet_rows = s.get("rowCount", 1000)
-
-        # 读取现有数据（14列 A:N）
-        range_read = f"'{target_sheet}'!A:N"
+        # 读取现有数据
+        range_read = f"'{target_sheet}'!A:L"
         result = service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id, range=range_read
         ).execute()
         existing = result.get("values", [])
 
-        # 找最后一行
+        # 找最后一行 + 最后日期
         last_row = 0
+        last_date = ""
         for i in range(len(existing) - 1, -1, -1):
             row = existing[i]
             if any(cell for cell in row if cell):
                 last_row = i + 1
+                last_date = (row[0] or "").strip() if len(row) > 0 else ""
                 break
 
-        # 去重：按 (日期=col0, 账户ID=col5) 找已存在的行
+        # 新日期 → 空一行
+        if today and last_date and last_date != today:
+            last_row += 1
+
+        # 去重索引：按 (A=日期, D=账户ID)
         existing_map = {}
         for i, row in enumerate(existing):
-            if len(row) > 5 and row[0] and row[5]:
-                key = (row[0].strip(), row[5].strip())
+            if len(row) > 3 and row[0] and row[3]:
+                key = (row[0].strip(), row[3].strip())
                 existing_map[key] = i
 
-        # 构建 upsert 数据
+        # 构建写入数据
         updates = []
         for r in rows:
             row_data = [str(v) if not isinstance(v, (int, float)) else v for v in r]
-            date_str = str(r[0] if isinstance(r, list) else report_date)
-            account_id = str(r[5] if isinstance(r, list) else r[5])
-            key = (date_str, account_id)
+            date_str = str(r[0]) if isinstance(r, list) else today
+            acct_id = str(r[3]).lstrip("'") if isinstance(r, list) else ""
+            key = (date_str, acct_id)
 
             if key in existing_map:
-                # 覆盖已有行
                 row_idx = existing_map[key]
-                range_write = f"'{target_sheet}'!A{row_idx + 1}:N{row_idx + 1}"
+                range_write = f"'{target_sheet}'!A{row_idx + 1}:L{row_idx + 1}"
             else:
-                # 追加
                 last_row += 1
-                range_write = f"'{target_sheet}'!A{last_row}:N{last_row}"
+                range_write = f"'{target_sheet}'!A{last_row}:L{last_row}"
 
-            updates.append({
-                "range": range_write,
-                "values": [row_data]
-            })
+            updates.append({"range": range_write, "values": [row_data]})
 
         if updates:
             body = {"valueInputOption": "USER_ENTERED", "data": updates}
