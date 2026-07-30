@@ -1063,62 +1063,51 @@ def _cleanup_old_option_columns(conn: sqlite3.Connection):
 
 
 def _copy_gg_options_to_fb(conn: sqlite3.Connection):
-    """一次性迁移：将 GG 平台的选项数据复制一份到 FB 平台，并更新 UNIQUE 约束。"""
+    """一次性迁移：将 GG 平台的选项数据复制一份到 FB 平台。"""
     migrated = conn.execute(
         "SELECT value FROM config WHERE key='migrated_copy_options_to_fb'"
     ).fetchone()
     if migrated:
         return
 
-    # 先修复 regions 的 UNIQUE 约束：从 UNIQUE(name) 改为 UNIQUE(name, platform)
-    # 重建 regions 表（保留数据）
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS regions_new (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            timezone TEXT DEFAULT '',
-            platform TEXT DEFAULT 'gg',
-            UNIQUE(name, platform)
-        );
-        INSERT OR IGNORE INTO regions_new(id, name, timezone, platform)
-            SELECT id, name, timezone, platform FROM regions;
-        DROP TABLE regions;
-        ALTER TABLE regions_new RENAME TO regions;
-    """)
+    conn.execute("PRAGMA foreign_keys=OFF")
 
-    # 复制 GG → FB
-    gg_regions = conn.execute(
-        "SELECT name, timezone FROM regions WHERE platform='gg'"
-    ).fetchall()
-    for r in gg_regions:
+    # 重建三张选项表：UNIQUE 加入 platform（保留数据 + id）
+    rebuilds = [
+        ("regions", "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, timezone TEXT DEFAULT '', platform TEXT DEFAULT 'gg', created_at TEXT DEFAULT (datetime('now','localtime')), UNIQUE(name, platform)",
+         "id, name, timezone, platform, created_at"),
+        ("sales_persons", "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, owner_id INTEGER REFERENCES users(id), platform TEXT DEFAULT 'gg', created_at TEXT DEFAULT (datetime('now','localtime')), UNIQUE(name, platform)",
+         "id, name, owner_id, platform, created_at"),
+        ("account_statuses", "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, owner_id INTEGER REFERENCES users(id), platform TEXT DEFAULT 'gg', created_at TEXT DEFAULT (datetime('now','localtime')), UNIQUE(name, platform)",
+         "id, name, owner_id, platform, created_at"),
+    ]
+    for tbl, cols_def, cols_sel in rebuilds:
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {tbl}_new ({cols_def})")
+        conn.execute(f"INSERT OR IGNORE INTO {tbl}_new({cols_sel}) SELECT {cols_sel} FROM {tbl}")
+        conn.execute(f"DROP TABLE {tbl}")
+        conn.execute(f"ALTER TABLE {tbl}_new RENAME TO {tbl}")
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+
+    # 复制地区
+    for r in conn.execute("SELECT name, timezone FROM regions WHERE platform='gg'").fetchall():
         conn.execute(
             "INSERT OR IGNORE INTO regions(name, timezone, platform) VALUES(?,?,'fb')",
             (r["name"], r["timezone"]))
 
-    # 商务（临时关闭外键，绕过 UNIQUE(name, owner_id) + FK 冲突）
-    conn.execute("PRAGMA foreign_keys=OFF")
-    gg_sales = conn.execute(
-        "SELECT DISTINCT name FROM sales_persons WHERE platform='gg'"
-    ).fetchall()
-    for s in gg_sales:
+    # 复制商务
+    for s in conn.execute("SELECT DISTINCT name FROM sales_persons WHERE platform='gg'").fetchall():
         conn.execute(
-            "INSERT OR IGNORE INTO sales_persons(name, owner_id, platform) VALUES(?,-1,'fb')",
+            "INSERT OR IGNORE INTO sales_persons(name, owner_id, platform) VALUES(?,1,'fb')",
             (s["name"],))
-    conn.execute(
-        "UPDATE sales_persons SET owner_id=1 WHERE owner_id=-1 AND platform='fb'")
 
-    # 状态（同理）
-    gg_statuses = conn.execute(
-        "SELECT DISTINCT name FROM account_statuses WHERE platform='gg'"
-    ).fetchall()
-    for s in gg_statuses:
+    # 复制状态
+    for s in conn.execute("SELECT DISTINCT name FROM account_statuses WHERE platform='gg'").fetchall():
         conn.execute(
-            "INSERT OR IGNORE INTO account_statuses(name, owner_id, platform) VALUES(?,-1,'fb')",
+            "INSERT OR IGNORE INTO account_statuses(name, owner_id, platform) VALUES(?,1,'fb')",
             (s["name"],))
-    conn.execute(
-        "UPDATE account_statuses SET owner_id=1 WHERE owner_id=-1 AND platform='fb'")
+
     conn.execute("PRAGMA foreign_keys=ON")
-
     conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_copy_options_to_fb','1')")
     conn.commit()
 
