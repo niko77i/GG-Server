@@ -441,7 +441,7 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     import json
 
     # 获取用户 Google Sheets 配置（按平台自动选 key）
-    user = db.execute("SELECT platform, role FROM users WHERE id=?", (user_id,)).fetchone()
+    user = db.execute("SELECT display_name, username, platform, role FROM users WHERE id=?", (user_id,)).fetchone()
     platform = (user['platform'] or 'gg') if user else 'gg'
     key = f"google_sheets_fb_{user_id}" if platform == 'fb' else f"google_sheets_{user_id}"
     config = db.execute(
@@ -481,11 +481,8 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     region = product_info['region'] or ''
     channel = line_name
 
-    # 获取运营名称
-    operator = db.execute("SELECT display_name, username FROM users WHERE id=?", (user_id,)).fetchone()
-    operator_name = (operator['display_name'] or operator['username']) if operator else ''
-
     # 构建行数据（12 列 A-L，M-N 是公式不覆盖）
+    operator_name = (user['display_name'] or user['username']) if user else ''
     rows = []
     for rec in records:
         rows.append([
