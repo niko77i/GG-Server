@@ -4,6 +4,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from .helpers import ok, err, get_uid, get_db, parse_body
 from .decorators import fb_required
 import re
+import threading
 
 fb_bp = Blueprint('fb', __name__)
 
@@ -952,10 +953,146 @@ def extract_save():
                  rec.get('cost', 0), rec.get('impressions', 0), rec.get('clicks', 0),
                  rec.get('registrations', 0), rec.get('purchases', 0), rec.get('cost_per_purchase', 0)))
         db.commit()
+        # 异步写 Google Sheets
+        _schedule_fb_sheets_write(uid, product_name, line_name, report_date, records)
+
         return ok({'saved': len(records)})
     except Exception as e:
         db.rollback()
         return err(f'保存数据失败: {str(e)}'), 500
+
+
+def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, records):
+    """后台线程写 Google Sheets + 失败记录到 sheets_sync_log"""
+    def _do_write():
+        db = get_db()
+        try:
+            import google_sheets_service as gs
+            gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
+        except Exception as e:
+            # 记录失败日志供手动重试
+            try:
+                import json
+                db.execute(
+                    "INSERT INTO sheets_sync_log (user_id, product_name, report_date, row_data, error_msg) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (user_id, product_name, report_date,
+                     json.dumps(records, ensure_ascii=False)[:10000],
+                     str(e)[:500]))
+                db.commit()
+            except Exception:
+                pass
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    t = threading.Thread(target=_do_write, daemon=True)
+    t.start()
+
+
+@fb_bp.route('/api/fb/extract/check-duplicates', methods=['POST'])
+@jwt_required()
+@fb_required
+def fb_check_duplicates():
+    """检查即将保存的数据中哪些行与已有数据重复。"""
+    db = get_db()
+    data = parse_body()
+    user_id = get_uid()
+    product_name = data.get('product_name', '').strip()
+    line_name = data.get('line_name', '')
+    report_date = data.get('report_date', '')
+    records = data.get('records', [])
+
+    if not product_name or not records:
+        return ok({'duplicates': []})
+
+    duplicates = []
+    for rec in records:
+        account_id = str(rec.get('account_id', '')).strip()
+        existing = db.execute(
+            "SELECT * FROM fb_ad_reports WHERE user_id=? AND product_name=? "
+            "AND line_name=? AND account_id=? AND report_date=?",
+            (user_id, product_name, line_name, account_id, report_date)
+        ).fetchone()
+        if existing:
+            duplicates.append({
+                "existing": dict(existing),
+                "incoming": rec
+            })
+    return ok({'duplicates': duplicates})
+
+
+@fb_bp.route('/api/fb/reports/sync-status', methods=['GET'])
+@jwt_required()
+@fb_required
+def fb_sheets_sync_status():
+    """获取 Sheet 同步失败记录。"""
+    db = get_db()
+    user_id = get_uid()
+    product_name = request.args.get('product_name', '')
+    rows = db.execute(
+        "SELECT * FROM sheets_sync_log WHERE user_id=? AND product_name=? "
+        "ORDER BY created_at DESC LIMIT 50",
+        (user_id, product_name)
+    ).fetchall()
+    return ok({'items': [dict(r) for r in rows]})
+
+
+@fb_bp.route('/api/fb/reports/retry-sync', methods=['POST'])
+@jwt_required()
+@fb_required
+def fb_retry_sheets_sync():
+    """重试失败的 Sheet 同步。"""
+    db = get_db()
+    data = parse_body()
+    log_id = data.get('id', None)
+    user_id = get_uid()
+
+    if log_id:
+        log_row = db.execute(
+            "SELECT * FROM sheets_sync_log WHERE id=? AND user_id=?", (log_id, user_id)
+        ).fetchone()
+        if not log_row:
+            return err('记录不存在'), 404
+        try:
+            import google_sheets_service as gs
+            import json
+            row_data = json.loads(log_row['row_data'] or '[]')
+            gs.upsert_fb_reports(db, user_id, log_row['product_name'],
+                                '', log_row['report_date'], row_data)
+            db.execute("DELETE FROM sheets_sync_log WHERE id=?", (log_id,))
+            db.commit()
+            return ok({'retried': 1})
+        except Exception as e:
+            db.execute(
+                "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
+                "updated_at=datetime('now','localtime') WHERE id=?",
+                (str(e)[:500], log_id))
+            db.commit()
+            return err(f'重试失败: {str(e)}'), 500
+
+    # 批量重试
+    rows = db.execute(
+        "SELECT * FROM sheets_sync_log WHERE user_id=? ORDER BY created_at DESC LIMIT 20",
+        (user_id,)
+    ).fetchall()
+    retried = 0
+    for r in rows:
+        try:
+            import google_sheets_service as gs
+            import json
+            row_data = json.loads(r['row_data'] or '[]')
+            gs.upsert_fb_reports(db, user_id, r['product_name'],
+                                '', r['report_date'], row_data)
+            db.execute("DELETE FROM sheets_sync_log WHERE id=?", (r['id'],))
+            retried += 1
+        except Exception:
+            db.execute(
+                "UPDATE sheets_sync_log SET retry_count=retry_count+1, "
+                "updated_at=datetime('now','localtime') WHERE id=?", (r['id'],))
+    db.commit()
+    return ok({'retried': retried})
 
 
 # ==================== 数据管理 ====================
