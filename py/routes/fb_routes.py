@@ -1135,7 +1135,7 @@ def list_fb_users():
         "WHERE (platform = 'fb' OR role = 'developer') AND role != 'hidden' "
         "ORDER BY display_name, username"
     ).fetchall()
-    return ok([dict(r) for r in rows])
+    return ok({"users": [dict(r) for r in rows]})
 
 
 # ==================== 工具函数 ====================
