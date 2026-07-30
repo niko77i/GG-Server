@@ -45,3 +45,41 @@ def reject_viewer():
     if user and user.get("role") == "viewer":
         return err("权限不足：只读用户无法执行此操作", 403)
     return None
+
+
+def require_platform(platform):
+    """检查当前用户是否属于指定平台。developer 直接放行。返回错误响应或 None。"""
+    try:
+        uid = int(get_jwt_identity())
+    except Exception:
+        return err("未认证", 401)
+    user = auth.get_user_by_id(uid)
+    if not user:
+        return err("用户不存在", 401)
+    if user.get("role") == "developer":
+        return None
+    if user.get("platform") != platform:
+        return err(f"仅限 {platform.upper()} 平台用户访问", 403)
+    return None
+
+
+def fb_required(fn):
+    """要求 FB 平台用户（或 developer）。"""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        err_resp = require_platform('fb')
+        if err_resp:
+            return err_resp
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def gg_required(fn):
+    """要求 GG 平台用户（或 developer）。"""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        err_resp = require_platform('gg')
+        if err_resp:
+            return err_resp
+        return fn(*args, **kwargs)
+    return wrapper

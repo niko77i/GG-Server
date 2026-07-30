@@ -265,6 +265,10 @@ jwt = JWTManager(app)
 register_jwt_callbacks(jwt)
 app.register_blueprint(auth_bp, url_prefix="/api/auth")
 
+# FB 平台路由
+from routes.fb_routes import fb_bp
+app.register_blueprint(fb_bp)
+
 try:
     auth.init_developer(APP_CONFIG)
 except Exception as e:
