@@ -394,13 +394,18 @@ def list_products():
     size = request.args.get('size', 50, type=int)
     search = request.args.get('search', '')
     status = request.args.get('status', '')
+    region = request.args.get('region', '')
+    runner = request.args.get('runner', '', type=str)
     uid = get_uid()
     offset = (page - 1) * size
 
     where = ["p.is_archived = 0"]
     params = []
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin'):
+    if runner and runner.isdigit():
+        where.append("p.id IN (SELECT product_id FROM fb_product_runners WHERE user_id=?)")
+        params.append(int(runner))
+    elif role not in ('developer', 'admin'):
         where.append("p.id IN (SELECT product_id FROM fb_product_runners WHERE user_id=?)")
         params.append(uid)
     if search:
@@ -409,6 +414,9 @@ def list_products():
     if status:
         where.append("p.status = ?")
         params.append(status)
+    if region:
+        where.append("p.region = ?")
+        params.append(region)
 
     where_clause = " AND ".join(where)
     total = db.execute(f"SELECT COUNT(*) FROM fb_products p WHERE {where_clause}", params).fetchone()[0]
@@ -420,6 +428,10 @@ def list_products():
     items = []
     for r in rows:
         item = dict(r)
+        # 商务名
+        if r['sales_person_id']:
+            sp = db.execute("SELECT name FROM sales_persons WHERE id=?", (r['sales_person_id'],)).fetchone()
+            item['sales_person_name'] = sp['name'] if sp else ''
         # 获取在跑BM
         bms = db.execute(
             "SELECT b.id, b.name, b.bm_id FROM fb_bms b "

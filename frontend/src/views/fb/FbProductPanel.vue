@@ -1,56 +1,69 @@
 <template>
-  <div class="fb-panel">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-      <h2 style="margin:0;font-size:18px">📦 FB产品管理</h2>
+  <div style="display:flex;flex-direction:column;height:100%;">
+    <!-- 工具栏 -->
+    <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
       <el-button type="primary" @click="openCreate">➕ 新增产品</el-button>
-    </div>
-
-    <!-- 筛选 -->
-    <div style="display:flex;gap:12px;margin-bottom:16px;align-items:center;flex-wrap:wrap">
-      <el-input v-model="search" placeholder="搜索产品名" clearable style="width:200px" @input="onSearch" />
-      <el-select v-model="filterStatus" placeholder="全部状态" clearable style="width:120px" @change="loadData">
-        <el-option label="正常" value="active" /><el-option label="暂停" value="paused" />
+      <el-radio-group v-model="runnerFilter" @change="loadData" size="small">
+        <el-radio-button value="mine">我在跑的</el-radio-button>
+        <el-radio-button value="all">全部产品</el-radio-button>
+      </el-radio-group>
+      <el-select v-model="filterRegion" placeholder="全部地区" clearable size="small" style="width:120px" @change="loadData">
+        <el-option v-for="r in regionOptions" :key="r.name" :label="r.name" :value="r.name" />
       </el-select>
-      <span style="font-size:13px;color:#6b7280">共 {{ total }} 个产品</span>
+      <el-input v-model="search" placeholder="搜索产品或KPI..." @input="onSearch" clearable size="small" style="flex:1;min-width:160px" />
+      <el-radio-group v-model="filterStatus" size="small" @change="loadData">
+        <el-radio-button value="">正常</el-radio-button>
+        <el-radio-button value="paused">已暂停</el-radio-button>
+      </el-radio-group>
+      <span style="font-size:13px;color:#6b7280">共 {{ total }} 个</span>
     </div>
 
-    <!-- 产品卡片 -->
-    <el-row :gutter="16" v-loading="loading">
-      <el-col v-for="item in items" :key="item.id" :span="8" style="margin-bottom:16px">
-        <el-card shadow="hover" :body-style="{ padding: '16px' }">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start">
-            <div style="flex:1;cursor:pointer" @click="openEdit(item)">
-              <div style="font-size:15px;font-weight:600;color:#111827;margin-bottom:4px">
-                {{ item.product_name }}
-                <el-tag :type="item.status==='paused'?'warning':'success'" size="small" style="margin-left:4px">
-                  {{ item.status==='paused'?'暂停':'正常' }}
-                </el-tag>
-              </div>
-              <div style="font-size:12px;color:#6b7280">
-                KPI: {{ item.kpi || '-' }} | 地区: {{ item.region || '-' }}
-              </div>
-              <div v-if="item.bms?.length" style="margin-top:4px">
-                <el-tag v-for="b in item.bms" :key="b.id" size="small" type="info" style="margin-right:4px;margin-bottom:2px">
-                  {{ b.name }}
-                </el-tag>
-              </div>
-              <div style="font-size:12px;color:#9ca3af;margin-top:4px">
-                线名: {{ (item.lines||[]).map(l=>l.line_name).join(', ') || '无' }}
-              </div>
+    <!-- 产品列表 -->
+    <div style="flex:1;min-height:0;overflow-y:auto;">
+      <el-card v-for="item in items" :key="item.id" style="margin-bottom:12px" :body-style="{ padding:'12px 16px' }"
+        :class="{ 'is-paused': item.status === 'paused' }">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div style="flex:1;cursor:pointer" @click="openDetail(item)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <span :style="{ width:'8px',height:'8px',borderRadius:'50%',background: item.status==='paused' ? '#dc2626' : '#059669' }"></span>
+              <strong>{{ item.product_name }}</strong>
+              <el-tag v-if="item.sales_person_name" size="small" type="success">💼 {{ item.sales_person_name }}</el-tag>
+              <el-tag v-if="item.kpi" size="small" type="warning">{{ item.kpi }}</el-tag>
+              <el-tag v-if="item.region" size="small" type="primary">{{ item.region }}</el-tag>
+              <el-tag v-if="item.agency_ratio" size="small">📊 {{ item.agency_ratio }}%</el-tag>
+            </div>
+            <div v-if="item.bms?.length" style="margin-bottom:2px">
+              <el-tag v-for="b in item.bms" :key="b.id" size="small" type="info" style="margin-right:4px">🏢 {{ b.name }}</el-tag>
+            </div>
+            <div v-if="item.runners?.length" style="font-size:12px;color:#9ca3af">
+              在跑: {{ item.runners.map(r=>r.display_name||r.username).join('、') }}
+            </div>
+            <div style="font-size:12px;color:#9ca3af;margin-top:2px">
+              线名: {{ (item.lines||[]).map(l=>l.line_name).join(', ') || '无' }}
             </div>
           </div>
-          <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:4px">
+          <div style="display:flex;gap:4px;flex-shrink:0">
             <el-button size="small" @click="openEdit(item)">编辑</el-button>
+            <el-button size="small" @click="togglePause(item)" :type="item.status==='paused'?'success':'warning'">
+              {{ item.status==='paused'?'恢复':'暂停' }}
+            </el-button>
             <el-popconfirm title="确定删除？" @confirm="handleDelete(item.id)">
               <template #reference><el-button size="small" type="danger">删除</el-button></template>
             </el-popconfirm>
           </div>
-        </el-card>
-      </el-col>
-    </el-row>
+        </div>
+      </el-card>
 
-    <el-pagination v-if="total>size" v-model:current-page="page" :page-size="size" :total="total"
-      layout="prev,pager,next" @current-change="loadData" style="justify-content:flex-end" />
+      <el-empty v-if="!items.length" description="暂无产品" />
+
+      <div v-if="total>size" style="display:flex;justify-content:center;gap:8px;margin-top:12px">
+        <el-pagination v-model:current-page="page" :page-size="size" :total="total" background
+          layout="prev,pager,next" size="small" :pager-count="7" @current-change="loadData" />
+        <el-select v-model="size" @change="page=1;loadData()" size="small" style="width:90px">
+          <el-option v-for="s in [5,10,20,50]" :key="s" :label="s+'条/页'" :value="s" />
+        </el-select>
+      </div>
+    </div>
 
     <!-- 产品弹窗 -->
     <el-dialog v-model="dialogVisible" :title="editingId?'编辑产品':'新增产品'" width="680px" top="3vh">
@@ -77,9 +90,7 @@
         </el-row>
         <el-row :gutter="16">
           <el-col :span="12">
-            <el-form-item label="代投比例">
-              <el-input-number v-model="form.agency_ratio" :min="0" :max="100" style="width:100%" />
-            </el-form-item>
+            <el-form-item label="代投比例"><el-input-number v-model="form.agency_ratio" :min="0" :max="100" style="width:100%" /></el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="状态">
@@ -119,7 +130,7 @@
             </template>
           </el-table-column>
           <el-table-column label="操作" width="70">
-            <template #default="{row,$index}"><el-button size="small" type="danger" @click="formLines.splice($index,1)">删除</el-button></template>
+            <template #default="{ $index }"><el-button size="small" type="danger" @click="formLines.splice($index,1)">删除</el-button></template>
           </el-table-column>
         </el-table>
       </el-form>
@@ -140,8 +151,9 @@ import client from '../../api/client'
 
 const auth = useAuthStore()
 const items = ref([]); const loading = ref(false)
-const page = ref(1); const size = ref(12); const total = ref(0)
-const search = ref(''); const filterStatus = ref('')
+const page = ref(1); const size = ref(5); const total = ref(0)
+const search = ref(''); const filterStatus = ref(''); const filterRegion = ref('')
+const runnerFilter = ref('mine')
 const dialogVisible = ref(false); const editingId = ref(null); const saving = ref(false)
 const bmOptions = ref([]); const fbUsers = ref([]); const salesOptions = ref([]); const regionOptions = ref([])
 const form = reactive({ product_name:'', kpi:'', region:'', status:'active', sales_person_id:null, agency_ratio:0, bm_ids:[], runner_ids:[] })
@@ -158,8 +170,10 @@ async function loadData() {
     const p = { page: page.value, size: size.value }
     if (search.value) p.search = search.value
     if (filterStatus.value) p.status = filterStatus.value
+    if (filterRegion.value) p.region = filterRegion.value
+    if (runnerFilter.value === 'mine') p.runner = auth.user?.id
     const res = await fbApi.listProducts(p)
-    items.value = res.items; total.value = res.total
+    items.value = res.items || []; total.value = res.total || 0
   } finally { loading.value = false }
 }
 
@@ -172,10 +186,7 @@ async function loadOptions() {
     const pxBmRes = await fbApi.pixelBmOptions()
     pixelBmGroups.value = []
     for (const pb of (pxBmRes.data || [])) {
-      try {
-        const pxRes = await fbApi.listPixels(pb.id)
-        pixelBmGroups.value.push({ id: pb.id, name: pb.name, bm_id: pb.bm_id, pixels: pxRes.data || [] })
-      } catch(e) {}
+      try { const pxRes = await fbApi.listPixels(pb.id); pixelBmGroups.value.push({ id: pb.id, name: pb.name, bm_id: pb.bm_id, pixels: pxRes.data || [] }) } catch(e) {}
     }
   } catch(e) {}
 }
@@ -189,46 +200,38 @@ function openCreate() {
 
 function openEdit(row) {
   editingId.value = row.id
-  Object.assign(form, {
-    product_name: row.product_name, kpi: row.kpi, region: row.region,
-    status: row.status || 'active', sales_person_id: row.sales_person_id,
-    agency_ratio: row.agency_ratio,
-    bm_ids: (row.bms||[]).map(b=>b.id),
-    runner_ids: (row.runners||[]).map(r=>r.id)
-  })
+  Object.assign(form, { product_name: row.product_name, kpi: row.kpi, region: row.region, status: row.status || 'active', sales_person_id: row.sales_person_id, agency_ratio: row.agency_ratio, bm_ids: (row.bms||[]).map(b=>b.id), runner_ids: (row.runners||[]).map(r=>r.id) })
   formLines.value = (row.lines||[]).map(l=>({ line_name:l.line_name, link:l.link, pixel_id:l.pixel_id }))
   dialogVisible.value = true
 }
 
+function openDetail(row) { openEdit(row) }
+
 async function handleSave() {
   if (!form.product_name) return ElMessage.warning('请输入产品名')
-  // 创建时自动把当前用户加入在跑人员
-  if (!editingId.value && auth.user && !form.runner_ids.includes(auth.user.id)) {
-    form.runner_ids.push(auth.user.id)
-  }
+  if (!editingId.value && auth.user && !form.runner_ids.includes(auth.user.id)) form.runner_ids.push(auth.user.id)
   saving.value = true
   try {
     const data = { ...form, lines: formLines.value }
-    if (editingId.value) {
-      await fbApi.updateProduct(editingId.value, data)
-    } else {
-      await fbApi.createProduct(data)
-    }
+    editingId.value ? await fbApi.updateProduct(editingId.value, data) : await fbApi.createProduct(data)
     ElMessage.success(editingId.value?'已更新':'已创建')
     dialogVisible.value = false; loadData()
   } catch(e) { ElMessage.error(e.response?.data?.error||'保存失败') }
   finally { saving.value = false }
 }
 
-async function handleDelete(id) {
-  await fbApi.deleteProduct(id)
-  ElMessage.success('已删除')
+async function togglePause(item) {
+  const newStatus = item.status === 'paused' ? 'active' : 'paused'
+  await fbApi.updateProduct(item.id, { status: newStatus })
+  ElMessage.success(newStatus === 'paused' ? '已暂停' : '已恢复')
   loadData()
 }
+
+function handleDelete(id) { fbApi.deleteProduct(id).then(() => { ElMessage.success('已删除'); loadData() }) }
 
 onMounted(() => { loadOptions(); loadData() })
 </script>
 
 <style scoped>
-.fb-panel { padding: 20px; }
+.is-paused { opacity: 0.6; }
 </style>
