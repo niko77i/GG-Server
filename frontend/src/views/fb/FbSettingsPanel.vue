@@ -89,7 +89,16 @@ async function createSalesPerson() {
   await client.post('/sales-persons/create', { name: newSalesName.value.trim() })
   ElMessage.success('已添加'); newSalesName.value = ''; loadData()
 }
-async function deleteSalesPerson(id) { await client.delete(`/sales-persons/${id}`); ElMessage.success('已删除'); loadData() }
+async function deleteSalesPerson(id) {
+  try {
+    await client.delete(`/sales-persons/${id}`)
+    ElMessage.success('已删除'); loadData()
+  } catch(e) {
+    const msg = e.response?.data?.error || '删除失败'
+    const products = e.response?.data?.products
+    ElMessage.error(products ? `${msg}：${products.join('、')}` : msg)
+  }
+}
 
 // 状态
 async function createStatus() {

@@ -5804,10 +5804,21 @@ def sales_persons_delete(sid):
     if not row:
         db.close()
         return jsonify({"success": False, "error": "商务人员不存在或无权操作"}), 404
-    pc = db.execute("SELECT COUNT(*) FROM products WHERE sales_person_id=?", (sid,)).fetchone()[0]
-    if pc > 0:
+    # 检查 GG 产品和 FB 产品的引用
+    gg_products = db.execute(
+        "SELECT product_name FROM products WHERE sales_person_id=?", (sid,)
+    ).fetchall()
+    fb_products = db.execute(
+        "SELECT product_name FROM fb_products WHERE sales_person_id=?", (sid,)
+    ).fetchall()
+    all_products = [p["product_name"] for p in gg_products] + [p["product_name"] for p in fb_products]
+    if all_products:
         db.close()
-        return jsonify({"success": False, "error": f"无法删除：被 {pc} 个产品引用，请先解除关联"}), 409
+        return jsonify({
+            "success": False,
+            "error": f"无法删除：被 {len(all_products)} 个产品引用",
+            "products": all_products
+        }), 409
     db.execute("DELETE FROM sales_persons WHERE id=?", (sid,))
     db.commit()
     db.close()
