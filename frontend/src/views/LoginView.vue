@@ -82,8 +82,12 @@ async function handleLogin() {
   try {
     await auth.login(form.username, form.password)
     ElMessage.success('登录成功')
-    const redirect = route.query.redirect || '/accounts'
-    router.push(redirect)
+    const redirect = route.query.redirect
+    if (redirect) {
+      router.push(redirect)
+    } else {
+      router.push(auth.effectivePlatform === 'fb' ? '/fb/products' : '/accounts/products')
+    }
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '登录失败，请检查用户名和密码')
   } finally {

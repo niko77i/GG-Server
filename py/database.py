@@ -104,6 +104,7 @@ def _ensure_columns(conn: sqlite3.Connection):
 
     # 增量迁移（使用公共函数缩减排板代码）
     _add_column_if_missing(conn, "videos", "review_status", "review_status TEXT DEFAULT '能过审'")
+    _add_column_if_missing(conn, "videos", "channel_name", "channel_name TEXT DEFAULT ''")
     _add_column_if_missing(conn, "accounts", "death_date", "death_date TEXT DEFAULT ''")
     _add_column_if_missing(conn, "accounts", "status_changed_date", "status_changed_date TEXT DEFAULT ''")
     _add_column_if_missing(conn, "videos", "owner_id", "owner_id INTEGER REFERENCES users(id)")
@@ -1231,7 +1232,8 @@ def _migrate_videos_composite_pk(conn: sqlite3.Connection):
     if len(pks) > 1:
         return  # 已是复合主键
 
-    # 1. 创建新表
+    # 1. 清理上次失败的残留，创建新表
+    conn.execute("DROP TABLE IF EXISTS videos_new")
     conn.execute("""CREATE TABLE videos_new (
         id TEXT NOT NULL,
         owner_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
@@ -1244,16 +1246,18 @@ def _migrate_videos_composite_pk(conn: sqlite3.Connection):
         review_status TEXT DEFAULT '能过审',
         is_public INTEGER DEFAULT 0,
         imported_at TEXT,
+        channel_name TEXT DEFAULT '',
         PRIMARY KEY (id, owner_id)
     )""")
 
     # 2. 复制数据（owner_id 为空的设默认值 1）
     conn.execute("""
         INSERT INTO videos_new (id, owner_id, url, title, region, frame_type,
-            effectiveness, product_name, review_status, is_public, imported_at)
+            effectiveness, product_name, review_status, is_public, imported_at, channel_name)
         SELECT id, COALESCE(owner_id, 1), url, title, region, frame_type,
             COALESCE(effectiveness, ''), COALESCE(product_name, ''),
-            COALESCE(review_status, '能过审'), COALESCE(is_public, 0), imported_at
+            COALESCE(review_status, '能过审'), COALESCE(is_public, 0), imported_at,
+            COALESCE(channel_name, '')
         FROM videos
     """)
 

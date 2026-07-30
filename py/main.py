@@ -1602,8 +1602,9 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
     duplicates = [{"id": vid, "title": existing_titles.get(vid, vid)} for vid in parsed if vid in existing_ids]
     new_vids = [vid for vid in parsed if vid not in existing_ids]
 
-    # 3. 并行 oEmbed 获取标题（只有新视频需要）
+    # 3. 并行 oEmbed 获取标题+频道（只有新视频需要）
     titles = {}
+    channels = {}
     if new_vids:
         def _fetch_title(vid):
             try:
@@ -1612,16 +1613,18 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
                     timeout=8
                 )
                 if r.status_code == 200:
-                    return vid, r.json().get("title", vid)
+                    data = r.json()
+                    return vid, data.get("title", vid), data.get("author_name", "")
             except Exception:
                 pass
-            return vid, vid
+            return vid, vid, ""
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(_fetch_title, vid): vid for vid in new_vids}
             for future in as_completed(futures):
-                vid, title = future.result()
+                vid, title, channel = future.result()
                 titles[vid] = title
+                channels[vid] = channel
 
     # 4. 批量 INSERT 新视频（复合主键确保同用户不重复，不同用户各自独立）
     ts = imported_at if imported_at else _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1632,13 +1635,14 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
             results.append((vid, existing_titles.get(vid, vid), False))
         else:
             title = titles.get(vid, vid)
+            channel = channels.get(vid, "")
             db.execute(
                 "INSERT OR IGNORE INTO videos(id,url,title,region,frame_type,effectiveness,"
-                "product_name,review_status,imported_at,owner_id,is_public) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "product_name,review_status,imported_at,owner_id,is_public,channel_name) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (vid, f"https://www.youtube.com/watch?v={vid}", title, region,
                  frame_type, effectiveness, product_name, review_status,
-                 ts, user_id, is_public)
+                 ts, user_id, is_public, channel)
             )
             imported += 1
             results.append((vid, title, True))
@@ -1685,8 +1689,7 @@ def youtube_list():
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
     uploader_id = request.args.get("uploader_id", "").strip()
-
-
+    channel_name = request.args.get("channel_name", "").strip()
     db = _yt_db()
     where = []; params = []
 
@@ -1710,6 +1713,8 @@ def youtube_list():
             pass
     if uploader_id:
         where.append("v.owner_id = ?"); params.append(int(uploader_id))
+    if channel_name:
+        where.append("v.channel_name LIKE ?"); params.append(f"%{channel_name}%")
 
     query = "SELECT v.*, u.display_name AS owner_display_name, u.username AS owner_username, COALESCE(vc.total_consumption, 0) AS total_consumption FROM videos v LEFT JOIN users u ON v.owner_id = u.id LEFT JOIN (SELECT video_id, video_owner_id, SUM(amount) AS total_consumption FROM video_consumption GROUP BY video_id, video_owner_id) vc ON v.id = vc.video_id AND v.owner_id = vc.video_owner_id"
     if where: query += " WHERE " + " AND ".join(where)
@@ -1718,11 +1723,14 @@ def youtube_list():
     rows = db.execute(query, params).fetchall()
     videos = [dict(r) for r in rows]
 
-    counts = {"region": {}, "frame_type": {}, "effectiveness": {}, "product_name": {}, "review_status": {}, "uploader": {}}
+    counts = {"region": {}, "frame_type": {}, "effectiveness": {}, "product_name": {}, "review_status": {}, "uploader": {}, "channel_name": {}}
     for v in videos:
         for field in ["region", "frame_type", "effectiveness", "product_name", "review_status"]:
             val = v.get(field, "") or ""
             if val: counts[field][val] = counts[field].get(val, 0) + 1
+        # channel_name 计数
+        cn = v.get("channel_name", "") or ""
+        if cn: counts["channel_name"][cn] = counts["channel_name"].get(cn, 0) + 1
         # uploader 计数：用 owner_id 作为 key，存 display_name 和 count
         oid = v.get("owner_id")
         if oid:
@@ -1768,6 +1776,52 @@ def youtube_dates():
     dates = {r["date"]: r["cnt"] for r in rows}
     db.close()
     return jsonify({"success": True, "dates": dates})
+
+
+@app.route("/api/youtube/backfill-channels", methods=["POST"])
+@jwt_required()
+def youtube_backfill_channels():
+    """对 channel_name 为空的视频，调用 oEmbed 接口补全频道名。"""
+    import requests as _requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    db = _yt_db()
+    rows = db.execute("SELECT id FROM videos WHERE channel_name = '' OR channel_name IS NULL").fetchall()
+    if not rows:
+        db.close()
+        return jsonify({"success": True, "filled": 0, "message": "没有需要补全的视频"})
+
+    vids = [r["id"] for r in rows]
+    filled = 0
+
+    def _fetch_channel(vid):
+        try:
+            r = _requests.get(
+                f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json",
+                timeout=8
+            )
+            if r.status_code == 200:
+                return vid, r.json().get("author_name", "")
+        except Exception:
+            pass
+        return vid, ""
+
+    # 分批处理，每批 50 个
+    batch_size = 50
+    for i in range(0, len(vids), batch_size):
+        batch = vids[i:i + batch_size]
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(_fetch_channel, vid): vid for vid in batch}
+            for future in as_completed(futures):
+                vid, channel = future.result()
+                if channel:
+                    db.execute("UPDATE videos SET channel_name=? WHERE id=?", (channel, vid))
+                    filled += 1
+
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "filled": filled, "total": len(vids),
+                    "message": f"已补全 {filled}/{len(vids)} 个视频的频道名"})
 
 
 def _can_modify(db, user_id, table, item_id):

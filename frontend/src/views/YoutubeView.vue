@@ -40,6 +40,9 @@
             <el-option label="全部" value="全部" />
             <el-option v-for="s in store.tags.review_statuses" :key="s" :label="s + ' (' + (store.counts.review_status?.[s] || 0) + ')'" :value="s" />
           </el-select>
+          <el-select v-model="store.filters.channel_name" @change="loadVideos" placeholder="全部频道" clearable size="small" style="flex:1;min-width:130px;" filterable>
+            <el-option v-for="(cnt, name) in store.counts.channel_name" :key="name" :label="name + ' (' + cnt + ')'" :value="name" />
+          </el-select>
           <el-date-picker v-model="dateRange" type="daterange" range-separator="~" start-placeholder="开始" end-placeholder="结束"
             size="small" value-format="YYYY-MM-DD" popper-class="yt-date-picker" :cell-class-name="dateCellClass" @change="onDateChange" style="width:210px;flex-shrink:0;" />
         </div>
@@ -96,6 +99,7 @@
                     <el-tag size="small" v-if="row.product_name" type="info">{{ row.product_name }}</el-tag>
                     <el-tag size="small" v-if="row.review_status" :type="row.review_status === '不能过审' ? 'danger' : 'success'">{{ row.review_status }}</el-tag>
                     <el-tag size="small" type="warning" v-if="row.owner_display_name" effect="plain">{{ row.owner_display_name }}</el-tag>
+                    <el-tag size="small" type="info" v-if="row.channel_name" effect="plain">📺 {{ row.channel_name }}</el-tag>
                     <el-tag v-if="row.total_consumption > 0" size="small" type="danger" effect="dark" style="cursor:pointer;" @click.stop="openConsumption(row)">💰 {{ fmtAmount(row.total_consumption) }}</el-tag>
                     <el-tooltip v-if="productAssetMap[row.id] && productAssetMap[row.id].length" placement="top">
                       <template #content>

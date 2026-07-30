@@ -14,7 +14,12 @@ const routes = [
   },
   {
     path: '/',
-    redirect: '/youtube'
+    redirect: () => {
+      const token = localStorage.getItem('token')
+      if (!token) return '/login'
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      return user.platform === 'fb' ? '/fb/products' : '/accounts/products'
+    }
   },
   {
     path: '/accounts',
@@ -130,20 +135,23 @@ router.beforeEach((to, from, next) => {
     next('/login?redirect=' + encodeURIComponent(to.fullPath))
     return
   }
-  // 平台守卫：GG 路由拒绝 FB 用户，FB 路由拒绝 GG 用户（developer 除外）
+  // 根据用户平台获取首页
+  const userPlatform = auth.user?.platform || 'gg'
+  const platformHome = userPlatform === 'fb' ? '/fb/products' : '/accounts/products'
+
+  // 平台守卫
   if (to.meta.platform && !auth.isDeveloper) {
-    const userPlatform = auth.user?.platform || 'gg'
     if (to.meta.platform !== userPlatform) {
-      next('/')
+      next(platformHome)
       return
     }
   }
   if (to.meta.admin && !auth.isAdmin) {
-    next('/')
+    next(platformHome)
     return
   }
   if (to.meta.developer && !auth.isDeveloper) {
-    next('/')
+    next(platformHome)
     return
   }
   // viewer 只能访问 /accounts/products，不能访问其他账户子页面
