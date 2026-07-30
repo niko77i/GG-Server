@@ -22,8 +22,9 @@
     <div style="flex:1;min-height:0;overflow-y:auto;">
       <el-card v-for="item in items" :key="item.id" style="margin-bottom:12px" :body-style="{ padding:'12px 16px' }"
         :class="{ 'is-paused': item.status === 'paused' }">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <div style="flex:1;cursor:pointer" @click="openDetail(item)">
+        <!-- 头部 — 点击展开 -->
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;cursor:pointer" @click="toggleExpand(item.id)">
+          <div style="flex:1">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
               <span :style="{ width:'8px',height:'8px',borderRadius:'50%',background: item.status==='paused' ? '#dc2626' : '#059669' }"></span>
               <strong>{{ item.product_name }}</strong>
@@ -39,10 +40,10 @@
               在跑: {{ item.runners.map(r=>r.display_name||r.username).join('、') }}
             </div>
             <div style="font-size:12px;color:#9ca3af;margin-top:2px">
-              线名: {{ (item.lines||[]).map(l=>l.line_name).join(', ') || '无' }}
+              线名: {{ (item.lines||[]).map(l=>l.line_name).join(', ') || '无' }} | 🔽 展开
             </div>
           </div>
-          <div style="display:flex;gap:4px;flex-shrink:0">
+          <div style="display:flex;gap:4px;flex-shrink:0" @click.stop>
             <el-button size="small" @click="openEdit(item)">编辑</el-button>
             <el-button size="small" @click="togglePause(item)" :type="item.status==='paused'?'success':'warning'">
               {{ item.status==='paused'?'恢复':'暂停' }}
@@ -51,6 +52,22 @@
               <template #reference><el-button size="small" type="danger">删除</el-button></template>
             </el-popconfirm>
           </div>
+        </div>
+        <!-- 展开区 — 线名列表 + 复制 -->
+        <div v-if="expanded[item.id]" style="margin-top:12px;padding-top:12px;border-top:1px solid #f3f4f6" @click.stop>
+          <el-table v-if="(item.lines||[]).length" :data="item.lines" border size="small">
+            <el-table-column prop="line_name" label="线名" min-width="140" />
+            <el-table-column prop="link" label="链接" min-width="200">
+              <template #default="{ row: ln }"><span style="font-size:12px;color:#6b7280">{{ ln.link || '-' }}</span></template>
+            </el-table-column>
+            <el-table-column label="复制" width="160">
+              <template #default="{ row: ln }">
+                <el-button size="small" @click="copy(ln.line_name)">📋 线名</el-button>
+                <el-button size="small" v-if="ln.link" @click="copy(ln.link)" style="margin-left:4px">🔗 链接</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div v-else style="color:#9ca3af;font-size:13px">无线名</div>
         </div>
       </el-card>
 
@@ -147,6 +164,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useAuthStore } from '../../stores/auth'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
+import { copyToClipboard } from '../../utils/clipboard'
 import client from '../../api/client'
 
 const auth = useAuthStore()
@@ -159,6 +177,10 @@ const bmOptions = ref([]); const fbUsers = ref([]); const salesOptions = ref([])
 const form = reactive({ product_name:'', kpi:'', region:'', status:'active', sales_person_id:null, agency_ratio:0, bm_ids:[], runner_ids:[] })
 const formLines = ref([])
 const pixelBmGroups = ref([])
+const expanded = ref({})
+
+function toggleExpand(id) { expanded.value[id] = !expanded.value[id] }
+async function copy(val) { await copyToClipboard(val); ElMessage.success('已复制 ✓') }
 
 let searchTimer = null
 function onSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(loadData, 300) }
@@ -204,8 +226,6 @@ function openEdit(row) {
   formLines.value = (row.lines||[]).map(l=>({ line_name:l.line_name, link:l.link, pixel_id:l.pixel_id }))
   dialogVisible.value = true
 }
-
-function openDetail(row) { openEdit(row) }
 
 async function handleSave() {
   if (!form.product_name) return ElMessage.warning('请输入产品名')
