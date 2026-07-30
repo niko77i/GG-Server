@@ -56,14 +56,15 @@
         <!-- 展开区 — 线名列表 + 复制 -->
         <div v-if="expanded[item.id]" style="margin-top:12px;padding-top:12px;border-top:1px solid #f3f4f6" @click.stop>
           <el-table v-if="(item.lines||[]).length" :data="item.lines" border size="small">
-            <el-table-column prop="line_name" label="线名" min-width="140" />
-            <el-table-column prop="link" label="链接" min-width="200">
-              <template #default="{ row: ln }"><span style="font-size:12px;color:#6b7280">{{ ln.link || '-' }}</span></template>
-            </el-table-column>
-            <el-table-column label="复制" width="160">
+            <el-table-column prop="line_name" label="线名" min-width="140">
               <template #default="{ row: ln }">
-                <el-button size="small" @click="copy(ln.line_name)">📋 线名</el-button>
-                <el-button size="small" v-if="ln.link" @click="copy(ln.link)" style="margin-left:4px">🔗 链接</el-button>
+                <span style="cursor:pointer;color:#0891b2" @click="copy(ln.line_name)" :title="'点击复制: '+ln.line_name">{{ ln.line_name }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="link" label="链接" min-width="200">
+              <template #default="{ row: ln }">
+                <span v-if="ln.link" style="cursor:pointer;color:#0891b2;font-size:12px" @click="copy(ln.link)" :title="'点击复制: '+ln.link">{{ ln.link }}</span>
+                <span v-else style="color:#9ca3af;font-size:12px">-</span>
               </template>
             </el-table-column>
           </el-table>
