@@ -107,7 +107,7 @@ async function loadData() {
     const params = { page: page.value, size: size.value }
     if (filterStatus.value) params.status = filterStatus.value
     const res = await fbApi.listBms(params)
-    items.value = res.data.items; total.value = res.data.total
+    items.value = res.items; total.value = res.total
   } catch (e) { ElMessage.error('加载失败') }
   finally { loading.value = false }
 }

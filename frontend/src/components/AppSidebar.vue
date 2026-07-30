@@ -87,11 +87,13 @@ const fbNavItems = [
       { icon:'👤',label:'广告账户',path:'/fb/accounts'},
       { icon:'🏢',label:'账户BM管理',path:'/fb/bms'},
       { icon:'🔷',label:'像素BM管理',path:'/fb/pixel-bms'},
+    ]},
+    { title: '系统', items: [
+      { icon:'⚙',label:'FB设置',path:'/fb/settings',admin:true},
     ]}
   ]},
   { key: 'fb-extract', icon: '📋', label: '数据提取', sections: [{ title: '提取', items: [{ icon:'📥',label:'FB数据提取',path:'/fb/extract'}]}]},
   { key: 'fb-data', icon: '📊', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'FB数据管理',path:'/fb/data-manage'}]}]},
-  { key: 'fb-settings', icon: '⚙', label: '设置', admin: true, sections: [{ title: '系统', items: [{ icon:'⚙',label:'FB设置',path:'/fb/settings'}]}]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
 ]
@@ -105,9 +107,10 @@ const visibleNavItems = computed(() => currentNavItems.value.filter(n => {
 }))
 const currentNav = computed(() => currentNavItems.value.find(n => n.key === activeSection.value))
 const detailTitle = computed(() => activeSection.value === 'settings' ? '设置' : (currentNav.value?.label || ''))
+const settingsPath = computed(() => auth.effectivePlatform === 'fb' ? '/fb/settings' : '/accounts/settings')
 const detailSections = computed(() => {
-  if (activeSection.value === 'settings') return [{ title: '系统', items: [{ icon:'⚙',label:'账户设置',path:'/accounts/settings'}] }]
-  const sections = currentNav.value?.sections || []
+  if (activeSection.value === 'settings') return [{ title: '系统', items: [{ icon:'⚙',label:'设置',path:settingsPath.value}] }]
+  let sections = currentNav.value?.sections || []
   // viewer 只能看到产品管理的侧边栏入口
   if (auth.isViewer && activeSection.value === 'accounts') {
     return sections.map(sec => ({
@@ -117,16 +120,23 @@ const detailSections = computed(() => {
   }
   // 非 developer 看不到 developer 专属菜单项
   if (!auth.isDeveloper) {
-    return sections.map(sec => ({
+    sections = sections.map(sec => ({
       ...sec,
       items: sec.items.filter(item => !item.developer)
+    })).filter(sec => sec.items.length > 0)
+  }
+  // 非 admin 看不到 admin 专属菜单项
+  if (!auth.isAdmin) {
+    sections = sections.map(sec => ({
+      ...sec,
+      items: sec.items.filter(item => !item.admin)
     })).filter(sec => sec.items.length > 0)
   }
   return sections
 })
 function isActive(p) { return route.path === p || route.path.startsWith(p + '/') }
 function selectTab(key) {
-  if (key === 'settings') { activeSection.value = 'settings'; detailOpen.value = true; router.push('/accounts/settings'); return }
+  if (key === 'settings') { activeSection.value = 'settings'; detailOpen.value = true; router.push(settingsPath.value); return }
   activeSection.value = key; detailOpen.value = true
   const nav = currentNavItems.value.find(n => n.key === key)
   if (nav) { const f = nav.sections[0]?.items[0]; if (f) router.push(f.path) }
@@ -141,7 +151,7 @@ watch(() => route.path, (p) => {
       activeSection.value = item.key; return
     }
   }
-  if (p.startsWith('/accounts/settings')) activeSection.value = 'settings'
+  if (p.startsWith('/accounts/settings') || p.startsWith('/fb/settings')) activeSection.value = 'settings'
 }, { immediate: true })
 </script>
 

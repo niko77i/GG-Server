@@ -159,7 +159,7 @@ async function loadData() {
     if (search.value) p.search = search.value
     if (filterStatus.value) p.status = filterStatus.value
     const res = await fbApi.listProducts(p)
-    items.value = res.data.items; total.value = res.data.total
+    items.value = res.items; total.value = res.total
   } finally { loading.value = false }
 }
 

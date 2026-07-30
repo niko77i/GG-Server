@@ -113,7 +113,7 @@ async function loadData() {
     if (filterLine.value) p.line_name = filterLine.value
     if (dateRange.value) { p.date_from = dateRange.value[0]; p.date_to = dateRange.value[1] }
     const res = await fbApi.listReports(p)
-    items.value = res.data.items; total.value = res.data.total
+    items.value = res.items; total.value = res.total
     // 自动检测是否有详情数据
     if (items.value.some(r => r.impressions > 0 || r.clicks > 0)) showDetailCols.value = true
   } finally { loading.value = false }

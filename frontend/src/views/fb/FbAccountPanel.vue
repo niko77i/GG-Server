@@ -79,7 +79,7 @@ async function loadData() {
     if (search.value) p.search = search.value
     if (filterBm.value) p.bm_id = filterBm.value
     const res = await fbApi.listAccounts(p)
-    items.value = res.data.items; total.value = res.data.total
+    items.value = res.items; total.value = res.total
   } finally { loading.value = false }
 }
 async function loadOptions() {

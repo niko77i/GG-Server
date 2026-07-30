@@ -93,7 +93,7 @@ async function loadData() {
   loading.value = true
   try {
     const res = await fbApi.listPixelBms({ page: page.value, size: size.value })
-    items.value = res.data.items; total.value = res.data.total
+    items.value = res.items; total.value = res.total
   } finally { loading.value = false }
 }
 

@@ -5,11 +5,15 @@ import database
 import auth
 
 
-def ok(data: dict = None) -> tuple:
-    """成功响应 (200)。"""
+def ok(data=None) -> tuple:
+    """成功响应 (200)。data 为 dict 时平铺到响应中，为 list 时包装为 {"data": [...]}。"""
     resp = {"success": True}
-    if data:
+    if isinstance(data, list):
+        resp["data"] = data
+    elif isinstance(data, dict):
         resp.update(data)
+    elif data is not None:
+        resp["data"] = data
     return jsonify(resp)
 
 
