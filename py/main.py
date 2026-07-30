@@ -7110,18 +7110,9 @@ def translate_text():
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required(optional=True)
 def users_names():
-    """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。
-    非 developer 用户看不到 developer 角色用户。"""
-    current_user_id = get_jwt_identity()
+    """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。"""
     db = database.get_db()
-    dev_filter = ""
-    if current_user_id:
-        cur_user = db.execute("SELECT role FROM users WHERE id=?", (int(current_user_id),)).fetchone()
-        if not cur_user or cur_user["role"] != "developer":
-            dev_filter = " AND u.role != 'developer'"
-    else:
-        dev_filter = " AND u.role != 'developer'"
-    rows = db.execute(f"""
+    rows = db.execute("""
         SELECT DISTINCT u.id, u.username, u.display_name
         FROM users u
         JOIN products p ON (
@@ -7131,7 +7122,7 @@ def users_names():
             OR p.runner_ids LIKE '%, ' || u.id || ',%'
             OR p.runner_ids LIKE '%, ' || u.id || ']'
         )
-        WHERE u.role != 'hidden'{dev_filter}
+        WHERE u.role != 'hidden'
         ORDER BY u.id
     """).fetchall()
     db.close()

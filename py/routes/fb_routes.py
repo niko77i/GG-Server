@@ -953,16 +953,10 @@ def extract_save():
                  rec.get('cost', 0), rec.get('impressions', 0), rec.get('clicks', 0),
                  rec.get('registrations', 0), rec.get('purchases', 0), rec.get('cost_per_purchase', 0)))
         db.commit()
-        # 检查 Sheet 是否存在（同步检查，提前告知用户）
-        sheet_warning = _check_fb_sheet_exists(uid, report_date)
-
         # 异步写 Google Sheets
         _schedule_fb_sheets_write(uid, product_name, line_name, report_date, records)
 
-        resp = {'saved': len(records)}
-        if sheet_warning:
-            resp['warning'] = sheet_warning
-        return ok(resp)
+        return ok({'saved': len(records)})
     except Exception as e:
         db.rollback()
         return err(f'保存数据失败: {str(e)}'), 500
