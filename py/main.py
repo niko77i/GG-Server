@@ -6037,6 +6037,13 @@ def config_ai_save():
 
 # ---------- Google Sheets 用户配置 ----------
 
+def _sheet_config_key(user_id: int) -> str:
+    """根据用户平台返回 Sheets 配置 key：GG→google_sheets_{id}，FB→google_sheets_fb_{id}。"""
+    user = auth.get_user_by_id(user_id)
+    platform = (user.get('platform') or 'gg') if user else 'gg'
+    return f"google_sheets_fb_{user_id}" if platform == 'fb' else f"google_sheets_{user_id}"
+
+
 def _get_user_sheets_config(user_id: int):
     """读取用户的 Google Sheets 配置，返回 (sheets_list, active_config_or_None)。
 
@@ -6046,11 +6053,12 @@ def _get_user_sheets_config(user_id: int):
     注意：使用独立的 DB 连接（而非 _yt_db 共享连接），避免干扰调用方的连接生命周期。
     """
     db = database.get_db()
+    key = _sheet_config_key(user_id)
     row = db.execute(
-        "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
+        "SELECT value FROM config WHERE key=?", (key,)
     ).fetchone()
     active_row = db.execute(
-        "SELECT value FROM config WHERE key=?", (f"google_sheets_active_{user_id}",)
+        "SELECT value FROM config WHERE key=?", (f"{key}_active",)
     ).fetchone()
     db.close()
 
@@ -6129,13 +6137,14 @@ def config_google_sheets_save():
         active_id = cleaned[0]["id"]
 
     db = _yt_db()
+    key = _sheet_config_key(user_id)
     db.execute(
         "INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
-        (f"google_sheets_{user_id}", json.dumps(cleaned, ensure_ascii=False)),
+        (key, json.dumps(cleaned, ensure_ascii=False)),
     )
     db.execute(
         "INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
-        (f"google_sheets_active_{user_id}", active_id),
+        (f"{key}_active", active_id),
     )
     db.commit()
     db.close()

@@ -440,19 +440,19 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     """
     import json
 
-    # 获取用户 Google Sheets 配置（和 GG 共用配置页，优先取含 "FB" 的表）
+    # 获取用户 Google Sheets 配置（按平台自动选 key）
+    user = db.execute("SELECT platform, role FROM users WHERE id=?", (user_id,)).fetchone()
+    platform = (user['platform'] or 'gg') if user else 'gg'
+    key = f"google_sheets_fb_{user_id}" if platform == 'fb' else f"google_sheets_{user_id}"
     config = db.execute(
-        "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
+        "SELECT value FROM config WHERE key=?", (key,)
     ).fetchone()
     if not config:
         raise ValueError("用户未配置 Google Sheets")
     sheets_list = json.loads(config['value'] or '[]')
     if not isinstance(sheets_list, list) or not sheets_list:
         raise ValueError("用户未配置 Google Sheets")
-    # 优先找名称含 "FB" 的，否则用第一个
-    active_sheet = next((s for s in sheets_list if 'FB' in (s.get('name', '') or '').upper()), None)
-    if not active_sheet:
-        active_sheet = sheets_list[0]
+    active_sheet = sheets_list[0]
     spreadsheet_id = active_sheet.get("spreadsheet_id", "")
     if not spreadsheet_id:
         raise ValueError("用户未配置 Google Sheets")
