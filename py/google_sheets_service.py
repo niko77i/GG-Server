@@ -545,14 +545,14 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
         except Exception:
             existing = []
 
-        # 找最后一行 + 最后日期
+        # 找最后一行（只看 A 列日期）
         last_row = 0
         last_date = ""
         for i in range(len(existing) - 1, -1, -1):
             row = existing[i]
-            if any(cell for cell in row if cell):
+            if len(row) > 0 and row[0]:
                 last_row = i + 1
-                last_date = (row[0] or "").strip() if len(row) > 0 else ""
+                last_date = row[0].strip()
                 break
 
         # 新日期 → 空一行
