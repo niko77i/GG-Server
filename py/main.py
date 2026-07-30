@@ -2600,18 +2600,32 @@ def products_update(pid):
         "sales_person_id": "sales_person_id",
         "agency_ratio": "agency_ratio",
     }
+    # 查询当前产品，用于对比变更和校验 FK
+    current = db.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+    if not current:
+        db.close()
+        return jsonify({"success": False, "error": "产品不存在"}), 404
+
     # 产品改名时同步更新所有关联表（冗余存储的 product_name 字段）
     if "product_name" in data:
-        old = db.execute("SELECT product_name FROM products WHERE id=?", (pid,)).fetchone()
-        if old and data["product_name"] != old["product_name"]:
+        old_name = current["product_name"]
+        if data["product_name"] != old_name:
             new_name = data["product_name"]
-            old_name = old["product_name"]
             db.execute("UPDATE videos SET product_name=? WHERE product_name=?", (new_name, old_name))
             db.execute("UPDATE ad_reports SET product_name=? WHERE product_name=?", (new_name, old_name))
             db.execute("UPDATE sheets_sync_log SET product_name=? WHERE product_name=?", (new_name, old_name))
     for key, col in _product_fields.items():
         if key in data:
-            db.execute(f"UPDATE products SET {col}=? WHERE id=?", (data[key], pid))
+            new_val = data[key]
+            old_val = current[col]
+            # 值未变化则跳过，避免 SQLite 外键约束对未变值也做校验
+            if new_val == old_val:
+                continue
+            # FK 字段为 None/0/'' 时用 NULL
+            if col in ("mcc_id", "sales_person_id") and (new_val is None or new_val == 0 or new_val == ""):
+                db.execute(f"UPDATE products SET {col}=NULL WHERE id=?", (pid,))
+            else:
+                db.execute(f"UPDATE products SET {col}=? WHERE id=?", (new_val, pid))
     db.commit(); db.close()
     return jsonify({"success": True})
 
