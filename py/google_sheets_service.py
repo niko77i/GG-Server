@@ -454,8 +454,8 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
         raise ValueError("用户未配置 Google Sheets")
 
     # 根据 report_date 月份找匹配的表格名
-    user_name = operator_name or f"user{user_id}"
-    month_key = report_date[:7].replace('-', '.')  # 2026-07-30 → 2026.07
+    user_name = (user['display_name'] or user['username']) if user else f"user{user_id}"
+    month_key = report_date[:7].replace('-', '.')
     expected_name = f"{user_name}{month_key}"
 
     active_sheet = None
