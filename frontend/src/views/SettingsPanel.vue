@@ -413,10 +413,12 @@ async function handleDelete(type, item) {
     await store[actions[type]](item.id)
     ElMessage.success('已删除')
   } catch (e) {
+    const msg = e.response?.data?.error || '无法删除'
+    const products = e.response?.data?.products
     if (e.response?.status === 409) {
-      ElMessage.warning(e.response?.data?.error || '无法删除')
+      ElMessage.warning(products ? `${msg}：${products.join('、')}` : msg)
     } else {
-      ElMessage.error(e.response?.data?.error || '删除失败')
+      ElMessage.error(msg)
     }
   }
 }
