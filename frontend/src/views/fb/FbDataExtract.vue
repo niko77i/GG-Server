@@ -240,7 +240,7 @@ async function doSave() {
         if (r.status === 'synced') ElMessage.success('✅ 写表成功')
         else if (r.status === 'failed') ElMessage.error(`❌ 写表失败: ${r.error_msg || ''}`)
       } catch(e) {}
-    }, 3000)
+    }, 1500)
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败') }
   finally { saving.value = false }
 }
