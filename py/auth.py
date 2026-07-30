@@ -125,8 +125,8 @@ def update_user_role(user_id: int, new_role: str) -> bool:
         conn.close()
 
 
-def update_user(uid: int, username: str = None, display_name: str = None) -> dict | None:
-    """编辑用户信息（用户名、显示名）。返回更新后的用户 dict，失败返回 None。"""
+def update_user(uid: int, username: str = None, display_name: str = None, platform: str = None) -> dict | None:
+    """编辑用户信息（用户名、显示名、平台）。返回更新后的用户 dict，失败返回 None。"""
     conn = database.get_db()
     try:
         existing = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
@@ -147,6 +147,9 @@ def update_user(uid: int, username: str = None, display_name: str = None) -> dic
 
         if display_name is not None:
             conn.execute("UPDATE users SET display_name = ? WHERE id = ?", (display_name.strip(), uid))
+
+        if platform is not None:
+            conn.execute("UPDATE users SET platform = ? WHERE id = ?", (platform, uid))
 
         conn.commit()
         return get_user_by_id(uid)

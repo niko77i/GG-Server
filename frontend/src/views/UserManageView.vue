@@ -27,6 +27,13 @@
           <el-tag :type="roleType(row.role)" size="small">{{ roleLabel(row.role) }}</el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="平台" width="70">
+        <template #default="{ row }">
+          <el-tag :type="row.platform === 'fb' ? 'primary' : 'success'" size="small">
+            {{ row.platform === 'fb' ? 'FB' : 'GG' }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="160" />
       <el-table-column prop="last_login" label="最后登录" width="160" />
       <el-table-column label="操作" width="360" fixed="right">
@@ -81,6 +88,12 @@
             <el-option label="管理员" value="admin" />
           </el-select>
         </el-form-item>
+        <el-form-item label="平台">
+          <el-select v-model="createForm.platform" style="width:100%">
+            <el-option label="GG (Google Ads)" value="gg" />
+            <el-option label="FB (Facebook)" value="fb" />
+          </el-select>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showCreateDialog = false">取消</el-button>
@@ -99,6 +112,12 @@
         </el-form-item>
         <el-form-item label="Telegram">
           <el-input v-model="editForm.telegram_username" placeholder="用户名（不带 @）" />
+        </el-form-item>
+        <el-form-item v-if="authStore.isDeveloper" label="平台">
+          <el-select v-model="editForm.platform" style="width:100%">
+            <el-option label="GG (Google Ads)" value="gg" />
+            <el-option label="FB (Facebook)" value="fb" />
+          </el-select>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -243,7 +262,8 @@ const createForm = ref({
   username: "",
   password: "",
   display_name: "",
-  role: "user"
+  role: "user",
+  platform: "gg"
 })
 
 async function handleCreate() {
@@ -260,7 +280,7 @@ async function handleCreate() {
     await adminApi.createUser(createForm.value)
     ElMessage.success("用户创建成功")
     showCreateDialog.value = false
-    createForm.value = { username: "", password: "", display_name: "", role: "user" }
+    createForm.value = { username: "", password: "", display_name: "", role: "user", platform: "gg" }
     fetchUsers()
   } catch (e) {
     ElMessage.error(e.response?.data?.error || "创建失败")
@@ -273,11 +293,11 @@ async function handleCreate() {
 const editDialogVisible = ref(false)
 const editing = ref(false)
 const editTargetId = ref(null)
-const editForm = ref({ username: "", display_name: "", telegram_username: "" })
+const editForm = ref({ username: "", display_name: "", telegram_username: "", platform: "gg" })
 
 function showEditDialog(row) {
   editTargetId.value = row.id
-  editForm.value = { username: row.username, display_name: row.display_name || "", telegram_username: row.telegram_username || "" }
+  editForm.value = { username: row.username, display_name: row.display_name || "", telegram_username: row.telegram_username || "", platform: row.platform || "gg" }
   editDialogVisible.value = true
 }
 
@@ -288,7 +308,9 @@ async function handleEdit() {
   }
   editing.value = true
   try {
-    await adminApi.updateUser(editTargetId.value, { username: editForm.value.username, display_name: editForm.value.display_name })
+    const updateData = { username: editForm.value.username, display_name: editForm.value.display_name }
+    if (authStore.isDeveloper && editForm.value.platform !== undefined) updateData.platform = editForm.value.platform
+    await adminApi.updateUser(editTargetId.value, updateData)
     await adminApi.updateUserTelegram(editTargetId.value, editForm.value.telegram_username)
     ElMessage.success("用户信息已更新")
     editDialogVisible.value = false
