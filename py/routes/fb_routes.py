@@ -969,23 +969,18 @@ def extract_save():
 
 
 def _check_fb_sheet_exists(user_id, report_date):
-    """同步检查对应月份的 Sheet 是否存在。返回警告文本或 None。"""
+    """同步检查对应月份的表格是否已配置。返回警告文本或 None。"""
     try:
         import database as _db
         import json
-        import os
         db2 = _db.get_db()
         key = _get_sheet_config_key(db2, user_id)
         config = db2.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
         if not config:
             db2.close()
-            return "未配置 Google Sheets"
+            return "未配置 Google Sheets，请先去个人信息页添加"
         sheets = json.loads(config['value'] or '[]')
         if not sheets:
-            db2.close()
-            return "未配置 Google Sheets"
-        ss_id = sheets[0].get('spreadsheet_id', '')
-        if not ss_id:
             db2.close()
             return "未配置 Google Sheets"
 
@@ -993,22 +988,14 @@ def _check_fb_sheet_exists(user_id, report_date):
         db2.close()
         user_name = (user['display_name'] or user['username']) if user else f"user{user_id}"
         month_key = report_date[:7].replace('-', '.')
-        target_sheet = f"{user_name}{month_key}"
+        expected_name = f"{user_name}{month_key}"
 
-        import google_sheets_service as gs
-        creds_path = os.environ.get(
-            "GOOGLE_SHEETS_CREDENTIALS_PATH",
-            os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                         "config", "fit-boulevard-503111-u4-812bc02c2000.json")
-        )
-        service = gs.build_service(creds_path)
-        info = gs.get_spreadsheet_info(service, ss_id)
-        existing = {s.get("name", "") for s in info.get("sheets", [])}
-        if target_sheet not in existing:
-            return f"Sheet「{target_sheet}」不存在，请先在表格中创建 {month_key} 月份的表"
+        found = next((s for s in sheets if expected_name in (s.get('spreadsheet_name', '') or s.get('name', ''))), None)
+        if not found:
+            return f"未找到 {month_key} 月份的表格「{expected_name}」，请先在个人信息页添加"
         return None
     except Exception as e:
-        return f"Sheet检查失败: {str(e)[:100]}"
+        return f"配置检查失败: {str(e)[:100]}"
 
 
 def _get_sheet_config_key(db, user_id):

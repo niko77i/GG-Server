@@ -452,10 +452,20 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     sheets_list = json.loads(config['value'] or '[]')
     if not isinstance(sheets_list, list) or not sheets_list:
         raise ValueError("用户未配置 Google Sheets")
-    active_sheet = sheets_list[0]
-    spreadsheet_id = active_sheet.get("spreadsheet_id", "")
-    if not spreadsheet_id:
-        raise ValueError("用户未配置 Google Sheets")
+
+    # 根据 report_date 月份找匹配的表格名
+    user_name = operator_name or f"user{user_id}"
+    month_key = report_date[:7].replace('-', '.')  # 2026-07-30 → 2026.07
+    expected_name = f"{user_name}{month_key}"
+
+    active_sheet = None
+    for s in sheets_list:
+        name = s.get('spreadsheet_name', '') or s.get('name', '')
+        if expected_name in name or name == expected_name:
+            active_sheet = s
+            break
+    if not active_sheet:
+        raise ValueError(f"未找到 {month_key} 月份的表格「{expected_name}」，请先在个人信息页添加")
 
     # 获取产品信息（商务、地区等）
     product_info = db.execute(
@@ -510,14 +520,8 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
     import logging
     log = logging.getLogger(__name__)
 
-    # 根据 report_date 生成 sheet 名：用户名YYYY.MM
-    import database as _db
-    db2 = _db.get_db()
-    user = db2.execute("SELECT display_name, username FROM users WHERE id=?", (user_id,)).fetchone()
-    db2.close()
-    user_name = (user['display_name'] or user['username']) if user else f"user{user_id}"
-    month_key = (date_str or report_date)[:7].replace('-', '.')  # 2026-07-30 → 2026.07
-    target_sheet = f"{user_name}{month_key}"
+    # 使用表格文件里的第一个 Sheet（表格文件本身按月份命名，内部 Sheet 默认即可）
+    target_sheet = info.get("sheets", [{}])[0].get("name", "Sheet1")
 
     try:
         import os
@@ -529,12 +533,7 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
         service = build_service(creds_path)
         info = get_spreadsheet_info(service, spreadsheet_id)
 
-        # 检查 sheet 是否存在
-        existing_sheets = {s.get("name", ""): s for s in info.get("sheets", [])}
-        if target_sheet not in existing_sheets:
-            raise ValueError(f"Sheet「{target_sheet}」不存在，请先在表格中创建对应月份的表")
-
-        # 读取目标 sheet 现有数据
+        # 读取现有数据
         range_read = f"'{target_sheet}'!A:L"
         try:
             result = service.spreadsheets().values().get(
