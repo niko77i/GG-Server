@@ -162,10 +162,10 @@ async function handleParse() {
   parsing.value = true
   try {
     const res = await fbApi.parseExtract({ text: pasteText.value, sorted: sortedMode.value })
-    parsedData.value = res.data.data || []
-    warnings.value = res.data.warnings || []
+    parsedData.value = res.data || []
+    warnings.value = res.warnings || []
     const count = parsedData.value.length
-    const gs = res.data.group_size
+    const gs = res.group_size
     ElMessage.success(`解析完成：${count} 条数据（每组 ${gs} 行）`)
     if (warnings.value.length) ElMessage.warning(`${warnings.value.join('、')} 的$符号超过2个`)
   } catch (e) {
