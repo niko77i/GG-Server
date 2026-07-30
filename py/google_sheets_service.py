@@ -500,15 +500,19 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
             f"{product_info['agency_ratio'] or 0}%",         # L: 代投比例
         ])
 
+    ss_id = active_sheet.get("spreadsheet_id", "")
+    if not ss_id:
+        raise ValueError("表格配置缺少 spreadsheet_id")
+
     result = _upsert_rows(
-        user_id, spreadsheet_id, "FB做表数据", rows,
+        user_id, ss_id, rows,
         report_date, product_name, region, report_date
     )
     return result
 
 
-def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
-                 rows: list, report_date: str, product_name: str,
+def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
+                 report_date: str, product_name: str,
                  region: str, date_str: str = "") -> dict:
     """FB 做表数据写入 Google Sheets（12列 A-L）。按 report_date 月份自动选/建 Sheet。"""
     if not rows:
