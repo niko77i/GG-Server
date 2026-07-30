@@ -521,9 +521,6 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
     import logging
     log = logging.getLogger(__name__)
 
-    # 使用表格文件里的第一个 Sheet（表格文件本身按月份命名，内部 Sheet 默认即可）
-    target_sheet = info.get("sheets", [{}])[0].get("name", "Sheet1")
-
     try:
         import os
         creds_path = os.environ.get(
@@ -533,6 +530,9 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
         )
         service = build_service(creds_path)
         info = get_spreadsheet_info(service, spreadsheet_id)
+
+        # 使用第一个 Sheet
+        target_sheet = info.get("sheets", [{}])[0].get("name", "Sheet1")
 
         # 读取现有数据
         range_read = f"'{target_sheet}'!A:L"
