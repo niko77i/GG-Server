@@ -1095,7 +1095,8 @@ def _copy_gg_options_to_fb(conn: sqlite3.Connection):
             "INSERT OR IGNORE INTO regions(name, timezone, platform) VALUES(?,?,'fb')",
             (r["name"], r["timezone"]))
 
-    # 商务（绕过 UNIQUE(name, owner_id)：先插临时 owner_id=-1，再更新）
+    # 商务（临时关闭外键，绕过 UNIQUE(name, owner_id) + FK 冲突）
+    conn.execute("PRAGMA foreign_keys=OFF")
     gg_sales = conn.execute(
         "SELECT DISTINCT name FROM sales_persons WHERE platform='gg'"
     ).fetchall()
@@ -1116,6 +1117,7 @@ def _copy_gg_options_to_fb(conn: sqlite3.Connection):
             (s["name"],))
     conn.execute(
         "UPDATE account_statuses SET owner_id=1 WHERE owner_id=-1 AND platform='fb'")
+    conn.execute("PRAGMA foreign_keys=ON")
 
     conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_copy_options_to_fb','1')")
     conn.commit()

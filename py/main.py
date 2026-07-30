@@ -5459,8 +5459,13 @@ def agents_rename(aid):
     if not name:
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
-    # 检查是否存在
-    row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
+    # 检查是否存在（developer 可操作任意）
+    user = auth.get_user_by_id(user_id)
+    is_dev = user and user.get("role") == "developer"
+    if is_dev:
+        row = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
+    else:
+        row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "代理不存在或无权修改"}), 404
@@ -5486,7 +5491,12 @@ def agents_delete(aid):
     """删除代理 — 账户引用阻止删除，充值记录自动清空关联。"""
     user_id = int(get_jwt_identity())
     db = _yt_db()
-    row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
+    user = auth.get_user_by_id(user_id)
+    is_dev = user and user.get("role") == "developer"
+    if is_dev:
+        row = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
+    else:
+        row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "代理不存在或无权操作"}), 404
@@ -5566,7 +5576,12 @@ def statuses_rename(sid):
     if not name:
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
-    row = db.execute("SELECT id FROM account_statuses WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    user = auth.get_user_by_id(user_id)
+    is_dev = user and user.get("role") == "developer"
+    if is_dev:
+        row = db.execute("SELECT id FROM account_statuses WHERE id=?", (sid,)).fetchone()
+    else:
+        row = db.execute("SELECT id FROM account_statuses WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "状态不存在或无权修改"}), 404
@@ -5589,7 +5604,12 @@ def statuses_rename(sid):
 def statuses_delete(sid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
-    row = db.execute("SELECT id FROM account_statuses WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    user = auth.get_user_by_id(user_id)
+    is_dev = user and user.get("role") == "developer"
+    if is_dev:
+        row = db.execute("SELECT id FROM account_statuses WHERE id=?", (sid,)).fetchone()
+    else:
+        row = db.execute("SELECT id FROM account_statuses WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "状态不存在或无权操作"}), 404
@@ -5650,7 +5670,12 @@ def mcc_levels_rename(lid):
     if not name:
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
-    row = db.execute("SELECT id FROM mcc_levels WHERE id=? AND owner_id=?", (lid, user_id)).fetchone()
+    user = auth.get_user_by_id(user_id)
+    is_dev = user and user.get("role") == "developer"
+    if is_dev:
+        row = db.execute("SELECT id FROM mcc_levels WHERE id=?", (lid,)).fetchone()
+    else:
+        row = db.execute("SELECT id FROM mcc_levels WHERE id=? AND owner_id=?", (lid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "等级不存在或无权修改"}), 404
@@ -5672,7 +5697,12 @@ def mcc_levels_rename(lid):
 def mcc_levels_delete(lid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
-    row = db.execute("SELECT id FROM mcc_levels WHERE id=? AND owner_id=?", (lid, user_id)).fetchone()
+    user = auth.get_user_by_id(user_id)
+    is_dev = user and user.get("role") == "developer"
+    if is_dev:
+        row = db.execute("SELECT id FROM mcc_levels WHERE id=?", (lid,)).fetchone()
+    else:
+        row = db.execute("SELECT id FROM mcc_levels WHERE id=? AND owner_id=?", (lid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "等级不存在或无权操作"}), 404
@@ -5735,13 +5765,21 @@ def sales_persons_rename(sid):
     if not name:
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
-    row = db.execute("SELECT id FROM sales_persons WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    user = auth.get_user_by_id(user_id)
+    is_dev = user and user.get("role") == "developer"
+    if is_dev:
+        row = db.execute("SELECT id FROM sales_persons WHERE id=?", (sid,)).fetchone()
+    else:
+        row = db.execute("SELECT id FROM sales_persons WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "商务人员不存在或无权修改"}), 404
     dup = db.execute(
         "SELECT id FROM sales_persons WHERE name=? AND owner_id=? AND id!=?",
         (name, user_id, sid)
+    ).fetchone() if not is_dev else db.execute(
+        "SELECT id FROM sales_persons WHERE name=? AND id!=?",
+        (name, sid)
     ).fetchone()
     if dup:
         db.close()
@@ -5757,7 +5795,12 @@ def sales_persons_rename(sid):
 def sales_persons_delete(sid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
-    row = db.execute("SELECT id FROM sales_persons WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
+    user = auth.get_user_by_id(user_id)
+    is_dev = user and user.get("role") == "developer"
+    if is_dev:
+        row = db.execute("SELECT id FROM sales_persons WHERE id=?", (sid,)).fetchone()
+    else:
+        row = db.execute("SELECT id FROM sales_persons WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "商务人员不存在或无权操作"}), 404
