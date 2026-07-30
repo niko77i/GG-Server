@@ -978,11 +978,11 @@ def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, rec
             traceback.print_exc()
             try:
                 db.execute(
-                    "INSERT INTO sheets_sync_log (user_id, product_name, report_date, row_data, error_msg) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (user_id, product_name, report_date,
-                     json.dumps(records, ensure_ascii=False)[:10000],
-                     err_msg))
+                    "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, error_msg, rows_json) "
+                    "VALUES (?, ?, ?, '', 'failed', ?, ?)",
+                    (user_id, product_name, '',
+                     err_msg,
+                     json.dumps(records, ensure_ascii=False)[:10000]))
                 db.commit()
                 print(f"[FB-Sheets] 写入失败已记录: {err_msg}")
             except Exception as ex2:

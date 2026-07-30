@@ -440,12 +440,27 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     """
     import json
 
-    # 获取用户 Google Sheets 配置
+    # 获取用户 Google Sheets 配置（和 GG 使用相同 key）
     config = db.execute(
-        "SELECT value FROM config WHERE key=?", (f"gs_config_{user_id}",)
+        "SELECT value FROM config WHERE key=?", (f"google_sheets_{user_id}",)
     ).fetchone()
-    sheets_config = json.loads(config['value'] or '{}') if config else {}
-    spreadsheet_id = sheets_config.get('spreadsheet_id', '')
+    active = db.execute(
+        "SELECT value FROM config WHERE key=?", (f"google_sheets_active_{user_id}",)
+    ).fetchone()
+    sheets_list = json.loads(config['value'] or '[]') if config else []
+    active_id = active['value'].strip() if active else ""
+    # 找激活的表格
+    active_sheet = None
+    if active_id:
+        for s in sheets_list:
+            if s.get("id") == active_id:
+                active_sheet = s
+                break
+    if not active_sheet and sheets_list:
+        active_sheet = sheets_list[0]
+    if not active_sheet:
+        raise ValueError("用户未配置 Google Sheets")
+    spreadsheet_id = active_sheet.get("spreadsheet_id", "")
     if not spreadsheet_id:
         raise ValueError("用户未配置 Google Sheets")
 
