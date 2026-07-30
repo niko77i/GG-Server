@@ -1095,23 +1095,27 @@ def _copy_gg_options_to_fb(conn: sqlite3.Connection):
             "INSERT OR IGNORE INTO regions(name, timezone, platform) VALUES(?,?,'fb')",
             (r["name"], r["timezone"]))
 
-    # 商务
+    # 商务（绕过 UNIQUE(name, owner_id)：先插临时 owner_id=-1，再更新）
     gg_sales = conn.execute(
         "SELECT DISTINCT name FROM sales_persons WHERE platform='gg'"
     ).fetchall()
     for s in gg_sales:
         conn.execute(
-            "INSERT OR IGNORE INTO sales_persons(name, owner_id, platform) VALUES(?,1,'fb')",
+            "INSERT OR IGNORE INTO sales_persons(name, owner_id, platform) VALUES(?,-1,'fb')",
             (s["name"],))
+    conn.execute(
+        "UPDATE sales_persons SET owner_id=1 WHERE owner_id=-1 AND platform='fb'")
 
-    # 状态
+    # 状态（同理）
     gg_statuses = conn.execute(
         "SELECT DISTINCT name FROM account_statuses WHERE platform='gg'"
     ).fetchall()
     for s in gg_statuses:
         conn.execute(
-            "INSERT OR IGNORE INTO account_statuses(name, owner_id, platform) VALUES(?,1,'fb')",
+            "INSERT OR IGNORE INTO account_statuses(name, owner_id, platform) VALUES(?,-1,'fb')",
             (s["name"],))
+    conn.execute(
+        "UPDATE account_statuses SET owner_id=1 WHERE owner_id=-1 AND platform='fb'")
 
     conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_copy_options_to_fb','1')")
     conn.commit()

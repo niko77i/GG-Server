@@ -5508,8 +5508,6 @@ def agents_delete(aid):
 
 # ========== Account Statuses 选项 API ==========
 
-@app.route("/api/statuses/list", methods=["GET"])
-@jwt_required()
 def _get_effective_platform():
     """获取当前用户的有效平台。FB 用户返回 'fb'，GG 用户返回 'gg'，developer 按请求参数或默认 'gg'。"""
     uid = int(get_jwt_identity())
@@ -5519,6 +5517,8 @@ def _get_effective_platform():
     return (user or {}).get("platform", "gg")
 
 
+@app.route("/api/statuses/list", methods=["GET"])
+@jwt_required()
 def statuses_list():
     db = _yt_db()
     platform = _get_effective_platform()
