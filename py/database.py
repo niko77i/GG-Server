@@ -1025,7 +1025,13 @@ def _migrate_options_tables(conn: sqlite3.Connection):
 
 
 def _cleanup_old_option_columns(conn: sqlite3.Connection):
-    """在所有代码切换到外键列之后，删除旧 TEXT 列和 tags 中的旧配置。"""
+    """在所有代码切换到外键列之后，删除旧 TEXT 列和 tags 中的旧配置（仅执行一次）。"""
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_cleanup_old_option_columns'"
+    ).fetchone()
+    if migrated:
+        return
+
     conn.execute("PRAGMA foreign_keys=OFF")
 
     for table, col in [
@@ -1044,6 +1050,9 @@ def _cleanup_old_option_columns(conn: sqlite3.Connection):
     for key in ["account_agents", "account_statuses", "mcc_levels", "sales_persons"]:
         conn.execute("DELETE FROM tags WHERE key=?", (key,))
 
+    conn.execute(
+        "INSERT OR REPLACE INTO config(key,value) VALUES('migrated_cleanup_old_option_columns','1')"
+    )
     conn.commit()
 
 
