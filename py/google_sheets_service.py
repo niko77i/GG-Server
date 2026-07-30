@@ -200,6 +200,28 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
 
     log.info("Google Sheets: 更新 %d 行，新增 %d 行", len(updates), len(appends))
 
+    # 5.5 确保行数足够 — 在所有写入操作之前，统一检查最大行号并扩展
+    max_row_needed = 0
+    for row_idx, _ in updates:
+        max_row_needed = max(max_row_needed, row_idx + 1)
+    if appends:
+        _append_start = last_row + 1
+        if last_date and last_date != (report_date or "").strip():
+            _append_start += 1
+        max_row_needed = max(max_row_needed, _append_start + len(appends) - 1)
+    if max_row_needed > sheet_rows:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{
+                "appendDimension": {
+                    "sheetId": sheet_id_int,
+                    "dimension": "ROWS",
+                    "length": max_row_needed - sheet_rows + 10
+                }
+            }]}
+        ).execute()
+        log.info("Google Sheets: 扩展行数 %d → %d", sheet_rows, max_row_needed + 10)
+
     # 6. 批量更新 — 一次 API 调用
     if updates:
         data = []
@@ -228,17 +250,6 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
             row_num = start + i
             row_data[12] = f"=F{row_num}*L{row_num}"
             row_data[13] = f"=F{row_num}-K{row_num}+M{row_num}"
-        if end > sheet_rows:
-            service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body={"requests": [{
-                    "appendDimension": {
-                        "sheetId": sheet_id_int,
-                        "dimension": "ROWS",
-                        "length": end - sheet_rows
-                    }
-                }]}
-            ).execute()
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range=f"'{sheet_name}'!A{start}:N{end}",

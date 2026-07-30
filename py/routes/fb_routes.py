@@ -461,21 +461,15 @@ def list_products():
 @jwt_required()
 @fb_required
 def runner_products():
-    """获取当前用户的在跑产品（下拉框用），返回产品名+线名列表"""
+    """获取当前用户的在跑产品（下拉框用），只返回当前用户是在跑人员的产品。"""
     db = get_db()
     uid = get_uid()
-    role = _get_role(db, uid)
-    if role in ('developer', 'admin'):
-        products = db.execute(
-            "SELECT id, product_name FROM fb_products WHERE is_archived=0 ORDER BY product_name"
-        ).fetchall()
-    else:
-        products = db.execute(
-            "SELECT p.id, p.product_name FROM fb_products p "
-            "JOIN fb_product_runners pr ON pr.product_id = p.id "
-            "WHERE pr.user_id=? AND p.is_archived=0 ORDER BY p.product_name",
-            (uid,)
-        ).fetchall()
+    products = db.execute(
+        "SELECT p.id, p.product_name FROM fb_products p "
+        "JOIN fb_product_runners pr ON pr.product_id = p.id "
+        "WHERE pr.user_id=? AND p.is_archived=0 ORDER BY p.product_name",
+        (uid,)
+    ).fetchall()
     result = []
     for p in products:
         item = dict(p)
