@@ -5511,13 +5511,11 @@ def agents_delete(aid):
 @app.route("/api/statuses/list", methods=["GET"])
 @jwt_required()
 def statuses_list():
-    user_id = int(get_jwt_identity())
     db = _yt_db()
     rows = db.execute(
-        "SELECT id, name FROM account_statuses WHERE owner_id=? "
+        "SELECT id, name FROM account_statuses "
         "ORDER BY CASE name WHEN '存活' THEN 1 WHEN '死亡' THEN 2 "
-        "WHEN '验证' THEN 3 WHEN '限额' THEN 4 ELSE 5 END, id",
-        (user_id,)
+        "WHEN '验证' THEN 3 WHEN '限额' THEN 4 ELSE 5 END, id"
     ).fetchall()
     db.close()
     return jsonify({"success": True, "statuses": [dict(r) for r in rows]})
@@ -5679,11 +5677,9 @@ def mcc_levels_delete(lid):
 @app.route("/api/sales-persons/list", methods=["GET"])
 @jwt_required()
 def sales_persons_list():
-    user_id = int(get_jwt_identity())
     db = _yt_db()
     rows = db.execute(
-        "SELECT id, name FROM sales_persons WHERE owner_id=? ORDER BY id",
-        (user_id,)
+        "SELECT id, name FROM sales_persons ORDER BY id"
     ).fetchall()
     db.close()
     return jsonify({"success": True, "sales_persons": [dict(r) for r in rows]})
