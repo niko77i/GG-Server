@@ -489,9 +489,7 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
             float(rec.get('cost_per_purchase', 0)),          # 单词购物费用
         ])
 
-    # 调用 GG 的写入逻辑（复用凭据和服务）
-    from . import google_sheets_service as gs_module
-    # 使用通用 upsert
+    # 调用通用 upsert 逻辑
     result = _upsert_rows(
         user_id, spreadsheet_id, "FB做表数据", rows,
         report_date, product_name, region
