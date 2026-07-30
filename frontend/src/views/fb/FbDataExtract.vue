@@ -25,7 +25,7 @@
       <el-input v-model="pasteText" type="textarea" :rows="6" placeholder="在此粘贴 FB 数据透视表内容..." style="margin-bottom:12px" />
       <div style="display:flex;gap:8px">
         <el-button type="primary" :loading="parsing" @click="handleParse">🔍 解析数据</el-button>
-        <el-button type="success" :disabled="!parsedData.length" :loading="saving" @click="handleSave">💾 保存到数据管理</el-button>
+        <el-button type="success" :disabled="!parsedData.length || !selectedProductId" :loading="saving" @click="openSaveDialog">💾 保存到数据管理</el-button>
       </div>
     </el-card>
 
@@ -77,6 +77,30 @@
       </el-card>
 
     </template>
+
+    <!-- 保存弹窗 -->
+    <el-dialog v-model="saveDialogVisible" title="💾 保存数据" width="90%" top="3vh">
+      <div style="margin-bottom:12px;font-size:13px;color:#555">
+        产品：<b>{{ selectedProduct?.product_name }}</b> | 线名：<b>{{ selectedLineName }}</b> | 日期：<b>{{ reportDate }}</b>
+      </div>
+      <el-table :data="parsedData" stripe border size="small" max-height="400">
+        <el-table-column prop="account_name" label="账户名称" min-width="140" />
+        <el-table-column prop="account_id" label="账户ID" width="160" />
+        <el-table-column prop="cost" label="消耗" width="100"><template #default="{row}">${{ row.cost?.toFixed(2) }}</template></el-table-column>
+        <template v-if="sortedMode">
+          <el-table-column prop="impressions" label="展示" width="80" />
+          <el-table-column prop="clicks" label="点击" width="80" />
+          <el-table-column prop="registrations" label="注册" width="80" />
+          <el-table-column prop="purchases" label="购物" width="80" />
+          <el-table-column prop="cost_per_purchase" label="单词购物费用" width="120" />
+        </template>
+      </el-table>
+      <el-alert v-if="dupCount > 0" :title="`发现 ${dupCount} 条重复数据，点击保存将覆盖（UPSERT）`" type="warning" show-icon style="margin-top:12px" />
+      <template #footer>
+        <el-button @click="saveDialogVisible=false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="doSave">💾 确认保存 ({{ parsedData.length }} 条)</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -174,20 +198,41 @@ async function handleParse() {
   } finally { parsing.value = false }
 }
 
-async function handleSave() {
+const saveDialogVisible = ref(false); const dupCount = ref(0)
+const selectedProduct = computed(() => products.value.find(p => p.id === selectedProductId.value))
+const selectedLineName = computed(() => selectedLines.value.find(l => l.id === selectedLineId.value)?.line_name || '')
+
+async function openSaveDialog() {
   if (!selectedProductId.value) return ElMessage.warning('请选择产品')
   if (!reportDate.value) return ElMessage.warning('请选择日期')
-  const prod = products.value.find(p => p.id === selectedProductId.value)
-  const lineName = selectedLines.value.find(l => l.id === selectedLineId.value)?.line_name || ''
+  const prod = selectedProduct.value
+  const ln = selectedLineName.value
+  // 检查重复
+  try {
+    const res = await fbApi.checkDuplicates({
+      product_name: prod.product_name,
+      line_name: ln,
+      report_date: reportDate.value,
+      records: parsedData.value
+    })
+    dupCount.value = (res.duplicates || []).length
+  } catch(e) { dupCount.value = 0 }
+  saveDialogVisible.value = true
+}
+
+async function doSave() {
+  const prod = selectedProduct.value
+  const ln = selectedLineName.value
   saving.value = true
   try {
     await fbApi.saveExtract({
       product_name: prod.product_name,
-      line_name: lineName,
+      line_name: ln,
       report_date: reportDate.value,
       records: parsedData.value
     })
-    ElMessage.success(`已保存 ${parsedData.value.length} 条数据`)
+    ElMessage.success(`已保存 ${parsedData.value.length} 条` + (dupCount.value ? `（覆盖 ${dupCount.value} 条）` : ''))
+    saveDialogVisible.value = false
     parsedData.value = []; pasteText.value = ''
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败') }
   finally { saving.value = false }

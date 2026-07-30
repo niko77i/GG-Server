@@ -47,6 +47,7 @@ export const fbApi = {
 
   // 数据提取
   parseExtract(data) { return client.post('/fb/extract/parse', data) },
+  checkDuplicates(data) { return client.post('/fb/extract/check-duplicates', data) },
   saveExtract(data) { return client.post('/fb/extract/save', data) },
 
   // 用户查询
