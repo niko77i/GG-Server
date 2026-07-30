@@ -1,39 +1,82 @@
 <template>
   <div class="fb-panel">
     <div class="panel-header"><h2>📥 FB数据提取</h2></div>
+
+    <!-- 输入区 -->
     <el-card>
       <el-form label-width="80px" inline>
-        <el-form-item label="产品"><el-select v-model="selectedProductId" placeholder="选择产品" style="width:200px" @change="onProductChange">
-          <el-option v-for="p in products" :key="p.id" :label="p.product_name" :value="p.id" /></el-select></el-form-item>
-        <el-form-item v-if="selectedLines.length>1" label="线名"><el-select v-model="selectedLineId" placeholder="选择线名" style="width:160px"><el-option v-for="l in selectedLines" :key="l.id" :label="l.line_name" :value="l.id" /></el-select></el-form-item>
-        <el-form-item label="日期"><el-date-picker v-model="reportDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" /></el-form-item>
-        <el-form-item><el-checkbox v-model="sortedMode">是否排序（提取全列）</el-checkbox></el-form-item>
+        <el-form-item label="产品">
+          <el-select v-model="selectedProductId" placeholder="选择产品" style="width:200px" @change="onProductChange">
+            <el-option v-for="p in products" :key="p.id" :label="p.product_name" :value="p.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="selectedLines.length > 1" label="线名">
+          <el-select v-model="selectedLineId" placeholder="选择线名" style="width:160px">
+            <el-option v-for="l in selectedLines" :key="l.id" :label="l.line_name" :value="l.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="日期">
+          <el-date-picker v-model="reportDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" />
+        </el-form-item>
+        <el-form-item>
+          <el-checkbox v-model="sortedMode">是否排序（提取全列）</el-checkbox>
+        </el-form-item>
       </el-form>
-      <el-input v-model="pasteText" type="textarea" :rows="8" placeholder="在此粘贴 FB 数据透视表内容..." style="margin-bottom:12px" />
+      <el-input v-model="pasteText" type="textarea" :rows="6" placeholder="在此粘贴 FB 数据透视表内容..." style="margin-bottom:12px" />
       <div style="display:flex;gap:8px">
         <el-button type="primary" :loading="parsing" @click="handleParse">🔍 解析数据</el-button>
         <el-button type="success" :disabled="!parsedData.length" :loading="saving" @click="handleSave">💾 保存到数据管理</el-button>
       </div>
     </el-card>
 
-    <!-- 解析预览 -->
-    <el-card v-if="parsedData.length" style="margin-top:16px">
-      <template #header>📋 解析预览 ({{ parsedData.length }} 条)
-        <span v-if="warnings.length" style="color:#e6a23c;margin-left:12px">⚠ 警告: {{ warnings.join(', ') }} 的$符号超过2个</span>
-      </template>
-      <el-table :data="parsedData" stripe border size="small" max-height="400">
-        <el-table-column prop="account_name" label="账户名称" min-width="140" />
-        <el-table-column prop="account_id" label="账户ID" width="160" />
-        <el-table-column prop="cost" label="消耗" width="100"><template #default="{row}">${{ row.cost?.toFixed(2) }}</template></el-table-column>
-        <template v-if="sortedMode">
-          <el-table-column prop="impressions" label="展示" width="90" />
-          <el-table-column prop="clicks" label="点击" width="80" />
-          <el-table-column prop="registrations" label="注册" width="80" />
-          <el-table-column prop="purchases" label="购物" width="80" />
-          <el-table-column prop="cost_per_purchase" label="单词购物费用" width="120" />
+    <!-- 解析结果区域 -->
+    <template v-if="parsedData.length">
+      <!-- 1. 原始数据 -->
+      <el-card style="margin-top:16px">
+        <template #header>
+          📋 原始清洗数据 <el-tag size="small">{{ parsedData.length }} 条</el-tag>
+          <span v-if="warnings.length" style="color:#e6a23c;margin-left:12px;font-size:13px">⚠ {{ warnings.join(', ') }} 的$符号超过2个</span>
+          <el-button link size="small" style="float:right" @click="copyTable('rawData')">📋 一键复制</el-button>
         </template>
-      </el-table>
-    </el-card>
+        <el-table :data="parsedData" stripe border size="small" max-height="350" ref="rawData">
+          <el-table-column prop="account_name" label="账户名称" min-width="150" />
+          <el-table-column prop="account_id" label="广告账户ID" width="170" />
+          <el-table-column prop="cost" label="账号消耗" width="110">
+            <template #default="{ row }">{{ row.cost?.toFixed(2) }}</template>
+          </el-table-column>
+          <template v-if="sortedMode">
+            <el-table-column prop="impressions" label="展示次数" width="100">
+              <template #default="{ row }">{{ row.impressions?.toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column prop="clicks" label="点击" width="80" />
+            <el-table-column prop="registrations" label="完成注册" width="100" />
+            <el-table-column prop="purchases" label="购物次数" width="100" />
+            <el-table-column prop="cost_per_purchase" label="单词购物费用" width="130">
+              <template #default="{ row }">{{ row.cost_per_purchase?.toFixed(2) }}</template>
+            </el-table-column>
+          </template>
+        </el-table>
+      </el-card>
+
+      <!-- 2. 做表数据（按账户ID累加） -->
+      <el-card v-if="selectedProductId" style="margin-top:16px">
+        <template #header>
+          📑 做表数据 <el-tag size="small">{{ zbData.length }} 条</el-tag>
+          <span style="margin-left:8px;font-size:13px;color:#6b7280">（按账户ID + 广告系列合并，费用累加）</span>
+          <el-button link size="small" style="float:right" @click="copyTable('zbData')">📋 一键复制</el-button>
+        </template>
+        <el-table :data="zbData" stripe border size="small" max-height="350" ref="zbData">
+          <el-table-column prop="account_name" label="账户名称" min-width="150" />
+          <el-table-column prop="account_id" label="广告账户ID" width="170" />
+          <el-table-column prop="cost" label="费用" width="110">
+            <template #default="{ row }">{{ row.cost?.toFixed(2) }}</template>
+          </el-table-column>
+          <el-table-column width="20" /><el-table-column width="20" /><el-table-column width="20" /><el-table-column width="20" />
+          <el-table-column prop="campaign" label="线名" min-width="120" />
+        </el-table>
+      </el-card>
+
+    </template>
   </div>
 </template>
 
@@ -41,10 +84,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
+import { copyToClipboard } from '../../utils/clipboard'
 
 const products = ref([]); const selectedProductId = ref(null); const selectedLineId = ref(null)
 const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1)
-const reportDate = ref(yesterday.toISOString().slice(0,10)); const sortedMode = ref(false)
+const reportDate = ref(yesterday.toISOString().slice(0, 10)); const sortedMode = ref(false)
 const pasteText = ref(''); const parsedData = ref([]); const warnings = ref([])
 const parsing = ref(false); const saving = ref(false)
 
@@ -52,11 +96,61 @@ const selectedLines = computed(() => {
   const p = products.value.find(p => p.id === selectedProductId.value)
   return p?.lines || []
 })
+// 做表数据：按账户ID累加
+const zbData = computed(() => {
+  const lineName = selectedLines.value.find(l => l.id === selectedLineId.value)?.line_name || ''
+  const map = {}
+  for (const r of parsedData.value) {
+    const key = r.account_id
+    if (!map[key]) {
+      map[key] = {
+        account_name: r.account_name,
+        account_id: r.account_id,
+        cost: 0,
+        campaign: lineName
+      }
+    }
+    map[key].cost += r.cost || 0
+  }
+  return Object.values(map).sort((a, b) => b.cost - a.cost)
+})
+
+function copyTable(type) {
+  const data = type === 'zbData' ? zbData.value : parsedData.value
+  if (!data.length) return
+  const headers = type === 'zbData'
+    ? ['账户名称', '广告账户ID', '费用', '', '', '', '', '线名']
+    : sortedMode.value
+      ? ['账户名称', '广告账户ID', '账号消耗', '展示次数', '点击', '完成注册', '购物次数', '单词购物费用']
+      : ['账户名称', '广告账户ID', '账号消耗']
+  const lines = [headers.join('\t')]
+  for (const r of data) {
+    if (type === 'zbData') {
+      lines.push([r.account_name, r.account_id, r.cost?.toFixed(2), '', '', '', '', r.campaign].join('\t'))
+    } else {
+      lines.push(sortedMode.value
+        ? [r.account_name, r.account_id, r.cost?.toFixed(2), r.impressions, r.clicks, r.registrations, r.purchases, r.cost_per_purchase].join('\t')
+        : [r.account_name, r.account_id, r.cost?.toFixed(2)].join('\t'))
+    }
+  }
+  copyToClipboard(lines.join('\n')).then(() => ElMessage.success('已复制 ✓'))
+}
 
 async function loadProducts() {
-  const res = await fbApi.runnerProducts()
-  products.value = res.data || []
+  try {
+    const res = await fbApi.runnerProducts()
+    products.value = (res.data || []).map(p => ({ ...p, sales_person_name: '' }))
+    // 加载产品详情获取商务名
+    for (const p of products.value) {
+      try {
+        const detail = await fbApi.productDetail(p.id)
+        const sp = detail.data?.sales_person
+        p.sales_person_name = sp?.name || ''
+      } catch (e) { /* ignore */ }
+    }
+  } catch (e) { /* ignore */ }
 }
+
 function onProductChange() {
   selectedLineId.value = null
   const p = products.value.find(p => p.id === selectedProductId.value)
@@ -70,10 +164,14 @@ async function handleParse() {
     const res = await fbApi.parseExtract({ text: pasteText.value, sorted: sortedMode.value })
     parsedData.value = res.data.data || []
     warnings.value = res.data.warnings || []
-    if (warnings.value.length) ElMessage.warning(`${warnings.value.length} 个账户的$符号超过2个`)
-    ElMessage.success(`解析完成，${parsedData.value.length} 条数据（每组${res.data.group_size}行）`)
-  } catch(e) { ElMessage.error(e.response?.data?.error||'解析失败') }
-  finally { parsing.value = false }
+    const count = parsedData.value.length
+    const gs = res.data.group_size
+    ElMessage.success(`解析完成：${count} 条数据（每组 ${gs} 行）`)
+    if (warnings.value.length) ElMessage.warning(`${warnings.value.join('、')} 的$符号超过2个`)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '解析失败')
+    parsedData.value = []
+  } finally { parsing.value = false }
 }
 
 async function handleSave() {
@@ -91,10 +189,15 @@ async function handleSave() {
     })
     ElMessage.success(`已保存 ${parsedData.value.length} 条数据`)
     parsedData.value = []; pasteText.value = ''
-  } catch(e) { ElMessage.error(e.response?.data?.error||'保存失败') }
+  } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败') }
   finally { saving.value = false }
 }
 
 onMounted(loadProducts)
 </script>
-<style scoped>.fb-panel{padding:20px}.panel-header h2{margin:0 0 16px;font-size:18px}</style>
+
+<style scoped>
+.fb-panel { padding: 20px; }
+.panel-header { margin-bottom: 16px; }
+.panel-header h2 { margin: 0; font-size: 18px; }
+</style>
