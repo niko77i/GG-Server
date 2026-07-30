@@ -1060,9 +1060,49 @@ def _cleanup_old_option_columns(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _copy_gg_options_to_fb(conn: sqlite3.Connection):
+    """一次性迁移：将 GG 平台的选项数据复制一份到 FB 平台。"""
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_copy_options_to_fb'"
+    ).fetchone()
+    if migrated:
+        return
+
+    # 地区
+    gg_regions = conn.execute(
+        "SELECT name, timezone FROM regions WHERE platform='gg'"
+    ).fetchall()
+    for r in gg_regions:
+        conn.execute(
+            "INSERT OR IGNORE INTO regions(name, timezone, platform) VALUES(?,?,'fb')",
+            (r["name"], r["timezone"]))
+    # 商务
+    gg_sales = conn.execute(
+        "SELECT name FROM sales_persons WHERE platform='gg'"
+    ).fetchall()
+    for s in gg_sales:
+        conn.execute(
+            "INSERT OR IGNORE INTO sales_persons(name, owner_id, platform) VALUES(?,1,'fb')",
+            (s["name"],))
+    # 状态
+    gg_statuses = conn.execute(
+        "SELECT name FROM account_statuses WHERE platform='gg'"
+    ).fetchall()
+    for s in gg_statuses:
+        conn.execute(
+            "INSERT OR IGNORE INTO account_statuses(name, owner_id, platform) VALUES(?,1,'fb')",
+            (s["name"],))
+
+    conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_copy_options_to_fb','1')")
+    conn.commit()
+
+
 def _migrate_if_needed(conn: sqlite3.Connection):
     """首次启动时从旧格式导入数据。"""
     root = os.path.dirname(os.path.dirname(_db_path()))
+
+    # 复制 GG 选项到 FB
+    _copy_gg_options_to_fb(conn)
 
     # 1. 迁移 video_set/*.json → video_history
     migrated = conn.execute(
