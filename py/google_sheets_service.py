@@ -475,13 +475,11 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     operator = db.execute("SELECT display_name, username FROM users WHERE id=?", (user_id,)).fetchone()
     operator_name = (operator['display_name'] or operator['username']) if operator else ''
 
-    # 构建行数据（只写 12 列 A-L，M-N 是公式不覆盖）
-    from datetime import date
-    today = date.today().isoformat()
+    # 构建行数据（12 列 A-L，M-N 是公式不覆盖）
     rows = []
     for rec in records:
         rows.append([
-            today,                                            # A: 日期
+            report_date,                                      # A: 日期（用户选择的日期）
             operator_name,                                    # B: 运营
             rec.get('account_name', ''),                     # C: 账户名称
             f"'{rec.get('account_id', '')}",                 # D: 广告账户ID（文本）
@@ -495,10 +493,9 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
             f"{product_info['agency_ratio'] or 0}%",         # L: 代投比例
         ])
 
-    # 调用通用 upsert 逻辑（只写 A-L，M-N 不动）
     result = _upsert_rows(
         user_id, spreadsheet_id, "FB做表数据", rows,
-        report_date, product_name, region, today
+        report_date, product_name, region, report_date
     )
     return result
 
