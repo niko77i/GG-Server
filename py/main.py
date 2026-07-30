@@ -5461,7 +5461,7 @@ def agents_rename(aid):
     db = _yt_db()
     # 检查是否存在（developer 可操作任意）
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") == "developer"
+    is_dev = user and user.get("role") in ("developer", "admin")
     if is_dev:
         row = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
     else:
@@ -5492,7 +5492,7 @@ def agents_delete(aid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") == "developer"
+    is_dev = user and user.get("role") in ("developer", "admin")
     if is_dev:
         row = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
     else:
@@ -5522,7 +5522,7 @@ def _get_effective_platform():
     """获取当前用户的有效平台。FB 用户返回 'fb'，GG 用户返回 'gg'，developer 按请求参数或默认 'gg'。"""
     uid = int(get_jwt_identity())
     user = auth.get_user_by_id(uid)
-    if user and user.get("role") == "developer":
+    if user and user.get("role") in ("developer", "admin"):
         return request.args.get("platform", "gg")
     return (user or {}).get("platform", "gg")
 
@@ -5577,7 +5577,7 @@ def statuses_rename(sid):
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") == "developer"
+    is_dev = user and user.get("role") in ("developer", "admin")
     if is_dev:
         row = db.execute("SELECT id FROM account_statuses WHERE id=?", (sid,)).fetchone()
     else:
@@ -5605,7 +5605,7 @@ def statuses_delete(sid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") == "developer"
+    is_dev = user and user.get("role") in ("developer", "admin")
     if is_dev:
         row = db.execute("SELECT id FROM account_statuses WHERE id=?", (sid,)).fetchone()
     else:
@@ -5613,10 +5613,14 @@ def statuses_delete(sid):
     if not row:
         db.close()
         return jsonify({"success": False, "error": "状态不存在或无权操作"}), 404
-    ac = db.execute("SELECT COUNT(*) FROM accounts WHERE status_id=?", (sid,)).fetchone()[0]
-    if ac > 0:
+    ac = db.execute("SELECT COUNT(*) FROM accounts WHERE status_id=? AND deleted_at IS NULL", (sid,)).fetchone()[0]
+    fac = db.execute("SELECT COUNT(*) FROM fb_accounts WHERE status_id=? AND deleted_at IS NULL", (sid,)).fetchone()[0]
+    if ac > 0 or fac > 0:
         db.close()
-        return jsonify({"success": False, "error": f"无法删除：被 {ac} 个账户引用，请先解除关联"}), 409
+        return jsonify({"success": False, "error": f"无法删除：被 {ac + fac} 个账户引用，请先解除关联"}), 409
+    # 解除已删除账户的引用
+    db.execute("UPDATE accounts SET status_id=NULL WHERE status_id=?", (sid,))
+    db.execute("UPDATE fb_accounts SET status_id=NULL WHERE status_id=?", (sid,))
     db.execute("DELETE FROM account_statuses WHERE id=?", (sid,))
     db.commit()
     _app_cache.delete(f"accounts:statuses:{user_id}")
@@ -5671,7 +5675,7 @@ def mcc_levels_rename(lid):
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") == "developer"
+    is_dev = user and user.get("role") in ("developer", "admin")
     if is_dev:
         row = db.execute("SELECT id FROM mcc_levels WHERE id=?", (lid,)).fetchone()
     else:
@@ -5698,7 +5702,7 @@ def mcc_levels_delete(lid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") == "developer"
+    is_dev = user and user.get("role") in ("developer", "admin")
     if is_dev:
         row = db.execute("SELECT id FROM mcc_levels WHERE id=?", (lid,)).fetchone()
     else:
@@ -5766,7 +5770,7 @@ def sales_persons_rename(sid):
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") == "developer"
+    is_dev = user and user.get("role") in ("developer", "admin")
     if is_dev:
         row = db.execute("SELECT id FROM sales_persons WHERE id=?", (sid,)).fetchone()
     else:
@@ -5796,15 +5800,11 @@ def sales_persons_delete(sid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") == "developer"
-    # 调试日志
-    import logging; log = logging.getLogger("gg-server")
-    log.info(f"[DELETE sales_persons] sid={sid}, uid={user_id}, is_dev={is_dev}, user_role={user.get('role') if user else 'None'}")
+    is_dev = user and user.get("role") in ("developer", "admin")
     if is_dev:
         row = db.execute("SELECT id FROM sales_persons WHERE id=?", (sid,)).fetchone()
     else:
         row = db.execute("SELECT id FROM sales_persons WHERE id=? AND owner_id=?", (sid, user_id)).fetchone()
-    log.info(f"[DELETE sales_persons] row_found={row is not None}")
     if not row:
         db.close()
         return jsonify({"success": False, "error": "商务人员不存在或无权操作"}), 404
@@ -5820,9 +5820,12 @@ def sales_persons_delete(sid):
         db.close()
         return jsonify({
             "success": False,
-            "error": f"无法删除：被 {len(all_products)} 个产品引用",
+            "error": f"无法删除：被 {len(all_products)} 个在跑产品引用",
             "products": all_products
         }), 409
+    # 先解除已归档产品的引用，再删除
+    db.execute("UPDATE products SET sales_person_id=NULL WHERE sales_person_id=?", (sid,))
+    db.execute("UPDATE fb_products SET sales_person_id=NULL WHERE sales_person_id=?", (sid,))
     db.execute("DELETE FROM sales_persons WHERE id=?", (sid,))
     db.commit()
     db.close()
