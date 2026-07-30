@@ -225,13 +225,14 @@ async function doSave() {
   const ln = selectedLineName.value
   saving.value = true
   try {
-    await fbApi.saveExtract({
+    const res = await fbApi.saveExtract({
       product_name: prod.product_name,
       line_name: ln,
       report_date: reportDate.value,
       records: parsedData.value
     })
     ElMessage.success(`已保存 ${parsedData.value.length} 条` + (dupCount.value ? `（覆盖 ${dupCount.value} 条）` : ''))
+    if (res.warning) ElMessage.warning(res.warning)
     saveDialogVisible.value = false
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败') }
   finally { saving.value = false }

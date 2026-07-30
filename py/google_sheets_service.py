@@ -529,17 +529,10 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, sheet_name: str,
         service = build_service(creds_path)
         info = get_spreadsheet_info(service, spreadsheet_id)
 
-        # 检查 sheet 是否存在，没有则创建
+        # 检查 sheet 是否存在
         existing_sheets = {s.get("name", ""): s for s in info.get("sheets", [])}
         if target_sheet not in existing_sheets:
-            # 创建新 sheet（复制第一个 sheet 的格式或空表）
-            body = {"requests": [{"addSheet": {"properties": {"title": target_sheet}}}]}
-            service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id, body=body
-            ).execute()
-            log.info(f"Created new sheet: {target_sheet}")
-            # 刷新 info
-            info = get_spreadsheet_info(service, spreadsheet_id)
+            raise ValueError(f"Sheet「{target_sheet}」不存在，请先在表格中创建对应月份的表")
 
         # 读取目标 sheet 现有数据
         range_read = f"'{target_sheet}'!A:L"

@@ -953,13 +953,68 @@ def extract_save():
                  rec.get('cost', 0), rec.get('impressions', 0), rec.get('clicks', 0),
                  rec.get('registrations', 0), rec.get('purchases', 0), rec.get('cost_per_purchase', 0)))
         db.commit()
+        # 检查 Sheet 是否存在（同步检查，提前告知用户）
+        sheet_warning = _check_fb_sheet_exists(uid, report_date)
+
         # 异步写 Google Sheets
         _schedule_fb_sheets_write(uid, product_name, line_name, report_date, records)
 
-        return ok({'saved': len(records)})
+        resp = {'saved': len(records)}
+        if sheet_warning:
+            resp['warning'] = sheet_warning
+        return ok(resp)
     except Exception as e:
         db.rollback()
         return err(f'保存数据失败: {str(e)}'), 500
+
+
+def _check_fb_sheet_exists(user_id, report_date):
+    """同步检查对应月份的 Sheet 是否存在。返回警告文本或 None。"""
+    try:
+        import database as _db
+        import json
+        import os
+        db2 = _db.get_db()
+        key = _get_sheet_config_key(db2, user_id)
+        config = db2.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
+        if not config:
+            db2.close()
+            return "未配置 Google Sheets"
+        sheets = json.loads(config['value'] or '[]')
+        if not sheets:
+            db2.close()
+            return "未配置 Google Sheets"
+        ss_id = sheets[0].get('spreadsheet_id', '')
+        if not ss_id:
+            db2.close()
+            return "未配置 Google Sheets"
+
+        user = db2.execute("SELECT display_name, username FROM users WHERE id=?", (user_id,)).fetchone()
+        db2.close()
+        user_name = (user['display_name'] or user['username']) if user else f"user{user_id}"
+        month_key = report_date[:7].replace('-', '.')
+        target_sheet = f"{user_name}{month_key}"
+
+        import google_sheets_service as gs
+        creds_path = os.environ.get(
+            "GOOGLE_SHEETS_CREDENTIALS_PATH",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                         "config", "fit-boulevard-503111-u4-812bc02c2000.json")
+        )
+        service = gs.build_service(creds_path)
+        info = gs.get_spreadsheet_info(service, ss_id)
+        existing = {s.get("name", "") for s in info.get("sheets", [])}
+        if target_sheet not in existing:
+            return f"Sheet「{target_sheet}」不存在，请先在表格中创建 {month_key} 月份的表"
+        return None
+    except Exception as e:
+        return f"Sheet检查失败: {str(e)[:100]}"
+
+
+def _get_sheet_config_key(db, user_id):
+    user = db.execute("SELECT platform FROM users WHERE id=?", (user_id,)).fetchone()
+    platform = (user['platform'] or 'gg') if user else 'gg'
+    return f"google_sheets_fb_{user_id}" if platform == 'fb' else f"google_sheets_{user_id}"
 
 
 def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, records):
