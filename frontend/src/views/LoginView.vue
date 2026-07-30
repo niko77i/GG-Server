@@ -8,6 +8,7 @@
         :rules="rules"
         label-width="0"
         size="large"
+        @submit.prevent
         @keyup.enter="handleLogin"
       >
         <el-form-item prop="username">

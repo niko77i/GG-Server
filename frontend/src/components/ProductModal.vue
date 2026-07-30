@@ -63,6 +63,7 @@ async function loadRegions() {
 
 function init() {
   loadRegions()
+  accountStore.loadSalesPersons()
   if (!accountStore._settingsLoaded) accountStore.loadSettings()
   if (props.editId) {
     const p = store.products.find(p => p.id === props.editId)
