@@ -13,7 +13,8 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 def create_user(username: str, password: str, role: str = "user",
-                display_name: str = "", created_by: int = None) -> dict:
+                display_name: str = "", created_by: int = None,
+                platform: str = "gg") -> dict:
     conn = database.get_db()
     try:
         cur = conn.execute(
@@ -24,8 +25,8 @@ def create_user(username: str, password: str, role: str = "user",
 
         hashed = hash_password(password)
         cur = conn.execute(
-            "INSERT INTO users (username, password, role, display_name, created_by) VALUES (?, ?, ?, ?, ?)",
-            (username, hashed, role, display_name, created_by)
+            "INSERT INTO users (username, password, role, display_name, created_by, platform) VALUES (?, ?, ?, ?, ?, ?)",
+            (username, hashed, role, display_name, created_by, platform)
         )
         conn.commit()
         return get_user_by_id(cur.lastrowid)
@@ -37,7 +38,7 @@ def get_user_by_id(user_id: int) -> dict | None:
     conn = database.get_db()
     try:
         cur = conn.execute(
-            "SELECT id, username, role, display_name, created_at, last_login, created_by, config, email, telegram_username FROM users WHERE id = ?",
+            "SELECT id, username, role, display_name, created_at, last_login, created_by, config, email, telegram_username, platform FROM users WHERE id = ?",
             (user_id,)
         )
         row = cur.fetchone()
@@ -56,8 +57,10 @@ def get_user_by_username(username: str) -> dict | None:
         conn.close()
 
 
-def list_users(search: str = "", page: int = 1, page_size: int = 20, current_user_id: int = None) -> dict:
-    """列出用户。非 developer 用户看不到 developer 角色的用户。"""
+def list_users(search: str = "", page: int = 1, page_size: int = 20, current_user_id: int = None, platform: str = None) -> dict:
+    """列出用户。非 developer 用户看不到 developer 角色的用户。
+    platform: 可选筛选 ('gg' | 'fb')，None 表示不过滤。
+    """
     conn = database.get_db()
     try:
         # 判断当前用户是否是 developer
@@ -67,25 +70,41 @@ def list_users(search: str = "", page: int = 1, page_size: int = 20, current_use
             is_dev = cur_user and cur_user["role"] == "developer"
 
         # 非 developer 用户看不到 developer 角色
-        dev_filter = "" if is_dev else " AND role != 'developer'"
+        filters = [""] if is_dev else ["role != 'developer'"]
+        params = []
+
+        if platform:
+            filters.append("platform = ?")
+            params.append(platform)
+
+        base_where = " AND ".join(f for f in filters if f)
+        where_clause = f" WHERE {base_where}" if base_where else ""
+
+        SELECT_COLS = "id, username, role, display_name, created_at, last_login, created_by, telegram_username, platform"
 
         if search:
             like = f"%{search}%"
+            search_filter = f"({' OR '.join([base_where, '(username LIKE ? OR display_name LIKE ?)'] if base_where else ['username LIKE ? OR display_name LIKE ?'])})"
+            # simplify: add AND search to where
+            search_clause = " AND (username LIKE ? OR display_name LIKE ?)"
             total = conn.execute(
-                f"SELECT COUNT(*) as total FROM users WHERE (username LIKE ? OR display_name LIKE ?){dev_filter}",
-                (like, like)
+                f"SELECT COUNT(*) as total FROM users{where_clause}{search_clause}",
+                params + [like, like]
             ).fetchone()["total"]
             offset = (page - 1) * page_size
             rows = conn.execute(
-                f"SELECT id, username, role, display_name, created_at, last_login, created_by, telegram_username FROM users WHERE (username LIKE ? OR display_name LIKE ?){dev_filter} ORDER BY id DESC LIMIT ? OFFSET ?",
-                (like, like, page_size, offset)
+                f"SELECT {SELECT_COLS} FROM users{where_clause}{search_clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+                params + [like, like, page_size, offset]
             ).fetchall()
         else:
-            total = conn.execute(f"SELECT COUNT(*) as total FROM users WHERE 1=1{dev_filter}").fetchone()["total"]
+            total = conn.execute(
+                f"SELECT COUNT(*) as total FROM users{where_clause}",
+                params
+            ).fetchone()["total"]
             offset = (page - 1) * page_size
             rows = conn.execute(
-                f"SELECT id, username, role, display_name, created_at, last_login, created_by, telegram_username FROM users WHERE 1=1{dev_filter} ORDER BY id DESC LIMIT ? OFFSET ?",
-                (page_size, offset)
+                f"SELECT {SELECT_COLS} FROM users{where_clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset]
             ).fetchall()
         return {"users": [dict(r) for r in rows], "total": total}
     finally:
@@ -188,7 +207,7 @@ def login_user(username: str, password: str) -> dict | None:
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
-        "user": {"id": user["id"], "username": user["username"], "role": user["role"], "display_name": user.get("display_name", "")}
+        "user": {"id": user["id"], "username": user["username"], "role": user["role"], "display_name": user.get("display_name", ""), "platform": user.get("platform", "gg")}
     }
 
 

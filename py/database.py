@@ -41,17 +41,18 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
-    # 先建表，再迁移列（确保 _ensure_columns 运行时所有表已存在）
+    # 先建表，再补列，最后数据迁移（顺序依赖）
     if not _schema_verified or _schema_verified_path != db_path:
         with _schema_lock:
             if not _schema_verified or _schema_verified_path != db_path:
                 _ensure_schema(conn)
-                _migrate_if_needed(conn)
                 _schema_verified = True
                 _schema_verified_path = db_path
 
-    # 列级迁移每次连接都执行（_add_column_if_missing 是幂等的）
+    # 列级迁移每次连接都执行（_add_column_if_missing 在表存在时幂等）
     _ensure_columns(conn)
+    # 数据迁移（首次连接时执行，依赖 _ensure_columns 补全的列）
+    _migrate_if_needed(conn)
     return conn
 
 
@@ -142,6 +143,7 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "accounts", "deleted_at", "deleted_at TEXT DEFAULT NULL")
     _add_column_if_missing(conn, "recharge_records", "agent_id", "agent_id INTEGER REFERENCES agents(id)")
     _add_column_if_missing(conn, "mcc", "level_id", "level_id INTEGER REFERENCES mcc_levels(id)")
+    _add_column_if_missing(conn, "products", "sales_person", "sales_person TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "sales_person_id", "sales_person_id INTEGER REFERENCES sales_persons(id)")
 
 
