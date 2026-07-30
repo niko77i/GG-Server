@@ -146,6 +146,10 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "mcc", "level_id", "level_id INTEGER REFERENCES mcc_levels(id)")
     _add_column_if_missing(conn, "products", "sales_person", "sales_person TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "sales_person_id", "sales_person_id INTEGER REFERENCES sales_persons(id)")
+    # 选项表加 platform 字段（GG/FB 隔离）
+    _add_column_if_missing(conn, "sales_persons", "platform", "platform TEXT DEFAULT 'gg'")
+    _add_column_if_missing(conn, "account_statuses", "platform", "platform TEXT DEFAULT 'gg'")
+    _add_column_if_missing(conn, "regions", "platform", "platform TEXT DEFAULT 'gg'")
 
 
 def _ensure_schema(conn: sqlite3.Connection):
@@ -1585,10 +1589,13 @@ def _init_regions(conn: sqlite3.Connection):
         existing.add(name)
 
 
-def regions_list() -> list[dict]:
-    """返回所有地区及其时区。"""
+def regions_list(platform: str = None) -> list[dict]:
+    """返回所有地区及其时区。platform 可选过滤。"""
     db = get_db()
-    rows = db.execute("SELECT * FROM regions ORDER BY name").fetchall()
+    if platform:
+        rows = db.execute("SELECT * FROM regions WHERE platform=? ORDER BY name", (platform,)).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM regions ORDER BY name").fetchall()
     db.close()
     return [dict(r) for r in rows]
 
@@ -1601,12 +1608,14 @@ def regions_update(region_id: int, timezone: str):
     db.close()
 
 
-def regions_create(name: str, timezone: str = "") -> int:
+def regions_create(name: str, timezone: str = "", platform: str = "gg") -> int:
     """新增地区，返回 id。"""
     db = get_db()
-    db.execute("INSERT INTO regions(name, timezone) VALUES(?,?)", (name, timezone))
+    db.execute(
+        "INSERT INTO regions(name, timezone, platform) VALUES(?,?,?)",
+        (name, timezone, platform))
     db.commit()
-    row = db.execute("SELECT id FROM regions WHERE name=?", (name,)).fetchone()
+    row = db.execute("SELECT id FROM regions WHERE name=? AND platform=?", (name, platform)).fetchone()
     db.close()
     return row["id"] if row else 0
 

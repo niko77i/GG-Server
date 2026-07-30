@@ -5510,12 +5510,23 @@ def agents_delete(aid):
 
 @app.route("/api/statuses/list", methods=["GET"])
 @jwt_required()
+def _get_effective_platform():
+    """获取当前用户的有效平台。FB 用户返回 'fb'，GG 用户返回 'gg'，developer 按请求参数或默认 'gg'。"""
+    uid = int(get_jwt_identity())
+    user = auth.get_user_by_id(uid)
+    if user and user.get("role") == "developer":
+        return request.args.get("platform", "gg")
+    return (user or {}).get("platform", "gg")
+
+
 def statuses_list():
     db = _yt_db()
+    platform = _get_effective_platform()
     rows = db.execute(
-        "SELECT id, name FROM account_statuses "
+        "SELECT id, name FROM account_statuses WHERE platform=? "
         "ORDER BY CASE name WHEN '存活' THEN 1 WHEN '死亡' THEN 2 "
-        "WHEN '验证' THEN 3 WHEN '限额' THEN 4 ELSE 5 END, id"
+        "WHEN '验证' THEN 3 WHEN '限额' THEN 4 ELSE 5 END, id",
+        (platform,)
     ).fetchall()
     db.close()
     return jsonify({"success": True, "statuses": [dict(r) for r in rows]})
@@ -5525,18 +5536,21 @@ def statuses_list():
 @jwt_required()
 def statuses_create():
     user_id = int(get_jwt_identity())
+    platform = _get_effective_platform()
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
     existing = db.execute(
-        "SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (name, user_id)
+        "SELECT id FROM account_statuses WHERE name=? AND platform=?", (name, platform)
     ).fetchone()
     if existing:
         db.close()
         return jsonify({"success": False, "error": f"状态「{name}」已存在"}), 409
-    db.execute("INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (name, user_id))
+    db.execute(
+        "INSERT INTO account_statuses(name, owner_id, platform) VALUES(?,?,?)",
+        (name, user_id, platform))
     db.commit()
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
@@ -5678,8 +5692,10 @@ def mcc_levels_delete(lid):
 @jwt_required()
 def sales_persons_list():
     db = _yt_db()
+    platform = _get_effective_platform()
     rows = db.execute(
-        "SELECT id, name FROM sales_persons ORDER BY id"
+        "SELECT id, name FROM sales_persons WHERE platform=? ORDER BY id",
+        (platform,)
     ).fetchall()
     db.close()
     return jsonify({"success": True, "sales_persons": [dict(r) for r in rows]})
@@ -5689,18 +5705,21 @@ def sales_persons_list():
 @jwt_required()
 def sales_persons_create():
     user_id = int(get_jwt_identity())
+    platform = _get_effective_platform()
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
     existing = db.execute(
-        "SELECT id FROM sales_persons WHERE name=? AND owner_id=?", (name, user_id)
+        "SELECT id FROM sales_persons WHERE name=? AND platform=?", (name, platform)
     ).fetchone()
     if existing:
         db.close()
         return jsonify({"success": False, "error": f"商务人员「{name}」已存在"}), 409
-    db.execute("INSERT INTO sales_persons(name, owner_id) VALUES(?,?)", (name, user_id))
+    db.execute(
+        "INSERT INTO sales_persons(name, owner_id, platform) VALUES(?,?,?)",
+        (name, user_id, platform))
     db.commit()
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
@@ -9463,8 +9482,9 @@ def ad_reports_analyze():
 @app.route("/api/regions/list", methods=["GET"])
 @jwt_required()
 def regions_list_api():
-    """获取所有地区+时区。"""
-    result = database.regions_list()
+    """获取所有地区+时区（按平台过滤）。"""
+    platform = _get_effective_platform()
+    result = database.regions_list(platform)
     return jsonify({"success": True, "regions": result})
 
 
@@ -9482,12 +9502,13 @@ def regions_update_api(region_id):
 @jwt_required()
 def regions_create_api():
     """新增地区。"""
+    platform = _get_effective_platform()
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     timezone = (data.get("timezone") or "").strip()
     if not name:
         return jsonify({"success": False, "error": "地区名不能为空"}), 400
-    rid = database.regions_create(name, timezone)
+    rid = database.regions_create(name, timezone, platform)
     return jsonify({"success": True, "id": rid})
 
 

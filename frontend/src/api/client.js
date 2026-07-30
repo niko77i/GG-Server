@@ -7,6 +7,16 @@ api.interceptors.request.use(config => {
   if (token) {
     config.headers.Authorization = 'Bearer ' + token
   }
+  // developer 跨平台时传递 platform 参数
+  try {
+    const user = JSON.parse(localStorage.getItem('user') || '{}')
+    if (user.role === 'developer') {
+      const path = window.location.hash.replace('#', '')
+      const platform = path.startsWith('/fb') ? 'fb' : 'gg'
+      if (!config.params) config.params = {}
+      if (!config.params.platform) config.params.platform = platform
+    }
+  } catch(e) {}
   return config
 })
 

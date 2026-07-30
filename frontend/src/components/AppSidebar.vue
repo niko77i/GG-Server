@@ -135,8 +135,9 @@ function navigate(path) { router.push(path) }
 watch(() => route.path, (p) => {
   const items = currentNavItems.value
   for (const item of items) {
-    const prefix = item.key.startsWith('fb-') ? '/fb' : '/' + item.key
-    if (p.startsWith(prefix) || (item.key === 'accounts' && p.startsWith('/accounts'))) {
+    // 优先用子项的具体路径匹配（解决 FB 菜单全部 /fb 前缀冲突）
+    const subPaths = item.sections?.flatMap(s => s.items.map(i => i.path)) || []
+    if (subPaths.some(sp => p === sp || p.startsWith(sp + '/'))) {
       activeSection.value = item.key; return
     }
   }
