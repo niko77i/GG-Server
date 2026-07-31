@@ -85,8 +85,8 @@ const fbNavItems = [
     { title: '账户', items: [
       { icon:'📦',label:'产品管理',path:'/fb/products'},
       { icon:'👤',label:'广告账户',path:'/fb/accounts'},
-      { icon:'🏢',label:'账户BM管理',path:'/fb/bms'},
-      { icon:'🔷',label:'像素BM管理',path:'/fb/pixel-bms'},
+      { icon:'🏢',label:'BM管理',path:'/fb/bms'},
+      { icon:'📊',label:'像素管理',path:'/fb/pixels'},
     ]},
     { title: '系统', items: [
       { icon:'⚙',label:'FB设置',path:'/fb/settings',admin:true},

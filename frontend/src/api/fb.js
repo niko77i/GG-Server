@@ -9,6 +9,7 @@ export const fbApi = {
   deleteBm(id) { return client.delete(`/fb/bms/${id}`) },
   bmOptions() { return client.get('/fb/bms/options') },
   banAndMigrate(id, data) { return client.post(`/fb/bms/${id}/ban-and-migrate`, data) },
+  listUnifiedBms(params = {}) { return client.get('/fb/bms/unified', { params }) },
 
   // 账户管理
   listAccounts(params = {}) { return client.get('/fb/accounts/list', { params }) },
@@ -25,6 +26,7 @@ export const fbApi = {
   createProduct(data) { return client.post('/fb/products/create', data) },
   updateProduct(id, data) { return client.put(`/fb/products/${id}`, data) },
   deleteProduct(id) { return client.delete(`/fb/products/${id}`) },
+  restoreProduct(id) { return client.post(`/fb/products/${id}/restore`) },
   productDetail(id) { return client.get(`/fb/products/${id}/detail`) },
 
   // 线名管理
@@ -41,6 +43,7 @@ export const fbApi = {
 
   // 像素管理
   listPixels(bmId) { return client.get(`/fb/pixel-bms/${bmId}/pixels`) },
+  listAllPixels(params = {}) { return client.get('/fb/pixels/list', { params }) },
   createPixel(bmId, data) { return client.post(`/fb/pixel-bms/${bmId}/pixels`, data) },
   updatePixel(id, data) { return client.put(`/fb/pixels/${id}`, data) },
   deletePixel(id) { return client.delete(`/fb/pixels/${id}`) },

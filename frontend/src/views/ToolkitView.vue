@@ -365,6 +365,12 @@ async function checkZbSyncStatus() {
   zbSyncChecking.value = true
   try {
     const res = await googleSheetsApi.syncStatus(zbSelectedProduct.value)
+    if (res.retry_failed) {
+      // 重试也失败了 → 一次性弹窗
+      ElMessage.error('重试失败，请联系管理')
+      zbSyncStatus.value = null
+      return
+    }
     zbSyncStatus.value = res.log
     if (res.log && res.log.status === 'failed') {
       // 显示 30s 重试中状态
@@ -512,6 +518,12 @@ function startZbSyncPolling() {
     attempts++
     try {
       const res = await googleSheetsApi.syncStatus(zbSelectedProduct.value)
+      // 重试失败 → 弹窗
+      if (res.retry_failed) {
+        ElMessage.error('重试失败，请联系管理')
+        zbSyncStatus.value = null
+        return
+      }
       const log = res.log
       if (!log) {
         // 同步成功（无失败记录）

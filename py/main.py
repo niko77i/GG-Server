@@ -6358,6 +6358,13 @@ def google_sheets_update_zuobiao():
                 "DELETE FROM sheets_sync_log WHERE user_id=? AND product_name=?",
                 (_user_id, _product_name)
             )
+        elif status == "retry_failed":
+            # 重试也失败 → 删日志 + 记事件给前端弹窗
+            _db.execute(
+                "DELETE FROM sheets_sync_log WHERE user_id=? AND product_name=?",
+                (_user_id, _product_name)
+            )
+            _retry_failed_events[(_user_id, _product_name)] = __import__("time").time()
         else:
             formatted = _fmt_rows(_op_name[0])
             _db.execute(
@@ -6402,6 +6409,11 @@ def google_sheets_sync_status():
             try: d["rows"] = json.loads(d["rows_json"])
             except: d["rows"] = []
         return jsonify({"success": True, "log": d})
+    # 无日志时，检查是否有重试失败事件（一次性通知前端弹窗）
+    event_key = (user_id, product_name)
+    ts = _retry_failed_events.pop(event_key, None)
+    if ts:
+        return jsonify({"success": True, "log": None, "retry_failed": True})
     return jsonify({"success": True, "log": None})
 
 

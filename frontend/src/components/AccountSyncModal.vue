@@ -29,7 +29,7 @@
       <!-- 状态变更 -->
       <div v-if="diff.to_update?.length" style="margin-bottom:16px;">
         <h4>⚠️ 状态变更确认（{{ diff.to_update.length }} 条）</h4>
-        <el-table :data="diff.to_update" size="small" border stripe
+        <el-table ref="updateTableRef" :data="diff.to_update" size="small" border stripe
           @selection-change="val => selectedUpdates = val">
           <el-table-column type="selection" width="45" />
           <el-table-column prop="account_id" label="账户ID" min-width="130" />
@@ -64,7 +64,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
@@ -79,6 +79,7 @@ const error = ref('')
 const diff = ref(null)
 const summary = ref(null)
 const selectedUpdates = ref([])
+const updateTableRef = ref(null)
 
 const canSync = computed(() => {
   if (!diff.value) return false
@@ -103,8 +104,12 @@ async function startSync() {
     if (res.success) {
       diff.value = res.diff
       summary.value = res.summary
-      // 默认全选状态变更项
-      selectedUpdates.value = [...(res.diff?.to_update || [])]
+      // 默认全选状态变更项 — 用 toggleRowSelection 确保 UI 复选框和数据一致
+      await nextTick()
+      const toUpdate = res.diff?.to_update || []
+      if (updateTableRef.value && toUpdate.length) {
+        toUpdate.forEach(row => updateTableRef.value.toggleRowSelection(row, true))
+      }
     } else {
       error.value = res.error || '读取失败'
     }

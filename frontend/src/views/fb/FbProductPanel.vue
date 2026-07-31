@@ -7,7 +7,7 @@
     </div>
 
     <!-- 统计卡片行 -->
-    <el-row :gutter="16" class="stats-row">
+    <el-row v-if="!filterArchived" :gutter="16" class="stats-row">
       <el-col :xs="12" :sm="6">
         <div class="stat-card">
           <div class="stat-number" style="color: #3b82f6">{{ total }}</div>
@@ -36,7 +36,7 @@
 
     <!-- 筛选栏卡片 -->
     <div class="filter-card">
-      <el-radio-group v-model="runnerFilter" @change="loadData" size="small">
+      <el-radio-group v-if="!filterArchived" v-model="runnerFilter" @change="loadData" size="small">
         <el-radio-button value="mine">我在跑的</el-radio-button>
         <el-radio-button value="all">全部产品</el-radio-button>
       </el-radio-group>
@@ -48,6 +48,10 @@
         <el-radio-button value="">正常</el-radio-button>
         <el-radio-button value="paused">已暂停</el-radio-button>
       </el-radio-group>
+      <el-radio-group v-model="filterArchived" size="small" @change="loadData">
+        <el-radio-button value="">在用</el-radio-button>
+        <el-radio-button value="1">已归档</el-radio-button>
+      </el-radio-group>
       <span class="total-badge">共 {{ total }} 个</span>
     </div>
 
@@ -57,11 +61,12 @@
         v-for="item in items"
         :key="item.id"
         class="product-card"
-        :class="{ 'is-paused': item.status === 'paused' }"
+        :class="{ 'is-paused': item.status === 'paused', 'is-archived': filterArchived==='1' }"
         :body-style="{ padding: 0 }"
       >
-        <!-- 暂停状态左边框 -->
-        <div v-if="item.status === 'paused'" class="paused-indicator"></div>
+        <!-- 状态左边框 -->
+        <div v-if="filterArchived==='1'" class="archived-indicator"></div>
+        <div v-else-if="item.status === 'paused'" class="paused-indicator"></div>
 
         <!-- 卡片内部 -->
         <div class="product-card-inner">
@@ -69,7 +74,7 @@
           <div class="product-card-header" @click="toggleExpand(item.id)">
             <div class="product-card-info">
               <div class="product-card-tags">
-                <span class="status-dot" :class="item.status === 'paused' ? 'dot-paused' : 'dot-active'"></span>
+                <span class="status-dot" :class="filterArchived==='1' ? 'dot-archived' : (item.status === 'paused' ? 'dot-paused' : 'dot-active')"></span>
                 <strong class="product-name">{{ item.product_name }}</strong>
                 <el-tag v-if="item.sales_person_name" size="small" class="tag-sales">{{ item.sales_person_name }}</el-tag>
                 <el-tag v-if="item.kpi" size="small" class="tag-kpi">{{ item.kpi }}</el-tag>
@@ -88,13 +93,20 @@
               </div>
             </div>
             <div class="product-card-actions" @click.stop>
-              <el-button size="small" @click="openEdit(item)">编辑</el-button>
-              <el-button size="small" @click="togglePause(item)" :type="item.status==='paused'?'success':'warning'">
-                {{ item.status==='paused'?'恢复':'暂停' }}
-              </el-button>
-              <el-popconfirm title="确定删除？" @confirm="handleDelete(item.id)">
-                <template #reference><el-button size="small" type="danger">删除</el-button></template>
-              </el-popconfirm>
+              <template v-if="filterArchived==='1'">
+                <el-popconfirm title="确定恢复？" @confirm="handleRestore(item.id)">
+                  <template #reference><el-button size="small" type="success">恢复</el-button></template>
+                </el-popconfirm>
+              </template>
+              <template v-else>
+                <el-button size="small" @click="openEdit(item)">编辑</el-button>
+                <el-button size="small" @click="togglePause(item)" :type="item.status==='paused'?'success':'warning'">
+                  {{ item.status==='paused'?'恢复':'暂停' }}
+                </el-button>
+                <el-popconfirm title="确定删除？" @confirm="handleDelete(item.id)">
+                  <template #reference><el-button size="small" type="danger">删除</el-button></template>
+                </el-popconfirm>
+              </template>
             </div>
           </div>
 
@@ -154,14 +166,14 @@
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="地区">
-              <el-select v-model="form.region" clearable filterable style="width:100%">
-                <el-option v-for="r in regionOptions" :key="r.name" :label="r.name" :value="r.name" />
+              <el-select v-model="form.region" clearable filterable allow-create style="width:100%">
+                <el-option v-for="r in regionOptions" :key="typeof r === 'string' ? r : r.name" :label="typeof r === 'string' ? r : r.name" :value="typeof r === 'string' ? r : r.name" />
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="商务">
-              <el-select v-model="form.sales_person_id" clearable filterable style="width:100%">
+              <el-select v-model="form.sales_person_id" clearable filterable allow-create style="width:100%">
                 <el-option v-for="s in salesOptions" :key="s.id" :label="s.name" :value="s.id" />
               </el-select>
             </el-form-item>
@@ -207,8 +219,8 @@
           </el-table-column>
           <el-table-column label="像素" width="200">
             <template #default="{row,$index}">
-              <el-select v-model="formLines[$index].pixel_id" size="small" clearable filterable style="width:100%">
-                <el-option-group v-for="pbm in pixelBmGroups" :key="pbm.id" :label="pbm.name+'('+pbm.bm_id+')'">
+              <el-select v-model="formLines[$index].pixel_id" size="small" clearable filterable :filter-method="onPixelFilter" style="width:100%">
+                <el-option-group v-for="pbm in filteredPixelBmGroups" :key="pbm.id" :label="pbm.name+'('+pbm.bm_id+')'">
                   <el-option v-for="px in pbm.pixels" :key="px.id" :label="px.pixel_name+'('+px.pixel_id+')'" :value="px.id" />
                 </el-option-group>
               </el-select>
@@ -228,7 +240,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useAuthStore } from '../../stores/auth'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
@@ -239,12 +251,28 @@ const auth = useAuthStore()
 const items = ref([]); const loading = ref(false)
 const page = ref(1); const size = ref(5); const total = ref(0)
 const search = ref(''); const filterStatus = ref(''); const filterRegion = ref('')
+const filterArchived = ref('')
 const runnerFilter = ref('mine')
 const dialogVisible = ref(false); const editingId = ref(null); const saving = ref(false)
 const bmOptions = ref([]); const fbUsers = ref([]); const salesOptions = ref([]); const regionOptions = ref([])
 const form = reactive({ product_name:'', kpi:'', region:'', status:'active', sales_person_id:null, agency_ratio:0, bm_ids:[], runner_ids:[] })
 const formLines = ref([])
 const pixelBmGroups = ref([])
+const pixelFilterQuery = ref('')
+const filteredPixelBmGroups = computed(() => {
+  if (!pixelFilterQuery.value) return pixelBmGroups.value
+  const q = pixelFilterQuery.value.toLowerCase()
+  return pixelBmGroups.value
+    .map(pbm => ({
+      ...pbm,
+      pixels: (pbm.pixels || []).filter(px =>
+        (px.pixel_name || '').toLowerCase().includes(q) ||
+        (px.pixel_id || '').toLowerCase().includes(q)
+      )
+    }))
+    .filter(pbm => pbm.pixels.length > 0)
+})
+function onPixelFilter(query) { pixelFilterQuery.value = query }
 const expanded = ref({})
 
 function toggleExpand(id) { expanded.value[id] = !expanded.value[id] }
@@ -262,6 +290,7 @@ async function loadData() {
     if (filterStatus.value) p.status = filterStatus.value
     if (filterRegion.value) p.region = filterRegion.value
     if (runnerFilter.value === 'mine') p.runner = auth.user?.id
+    if (filterArchived.value) p.archived = filterArchived.value
     const res = await fbApi.listProducts(p)
     items.value = res.items || []; total.value = res.total || 0
   } finally { loading.value = false }
@@ -285,6 +314,7 @@ function openCreate() {
   editingId.value = null
   Object.assign(form, { product_name:'', kpi:'', region:'', status:'active', sales_person_id:null, agency_ratio:0, bm_ids:[], runner_ids:[] })
   formLines.value = []
+  pixelFilterQuery.value = ''
   dialogVisible.value = true
 }
 
@@ -292,6 +322,7 @@ function openEdit(row) {
   editingId.value = row.id
   Object.assign(form, { product_name: row.product_name, kpi: row.kpi, region: row.region, status: row.status || 'active', sales_person_id: row.sales_person_id, agency_ratio: row.agency_ratio, bm_ids: (row.bms||[]).map(b=>b.id), runner_ids: (row.runners||[]).map(r=>r.id) })
   formLines.value = (row.lines||[]).map(l=>({ line_name:l.line_name, link:l.link, pixel_id:l.pixel_id }))
+  pixelFilterQuery.value = ''
   dialogVisible.value = true
 }
 
@@ -300,6 +331,17 @@ async function handleSave() {
   if (!editingId.value && auth.user && !form.runner_ids.includes(auth.user.id)) form.runner_ids.push(auth.user.id)
   saving.value = true
   try {
+    // 地区：如果是手动输入的新地区，自动创建
+    if (form.region && !regionOptions.value.some(r => (typeof r === 'string' ? r : r.name) === form.region)) {
+      await client.post('/regions/create', { name: form.region, timezone: '' })
+      try { const r = await client.get('/regions/list'); regionOptions.value = (r.regions || []).map(r => typeof r === 'string' ? { name: r } : r) } catch(e) {}
+    }
+    // 商务：如果是手动输入的新商务（值为字符串表示新名字），先创建再获取 ID
+    if (typeof form.sales_person_id === 'string' && form.sales_person_id) {
+      const res = await client.post('/sales-persons/create', { name: form.sales_person_id })
+      form.sales_person_id = res.id
+      try { const r = await client.get('/sales-persons/list'); salesOptions.value = r.sales_persons || [] } catch(e) {}
+    }
     const data = { ...form, lines: formLines.value }
     editingId.value ? await fbApi.updateProduct(editingId.value, data) : await fbApi.createProduct(data)
     ElMessage.success(editingId.value?'已更新':'已创建')
@@ -316,6 +358,7 @@ async function togglePause(item) {
 }
 
 function handleDelete(id) { fbApi.deleteProduct(id).then(() => { ElMessage.success('已删除'); loadData() }) }
+function handleRestore(id) { fbApi.restoreProduct(id).then(() => { ElMessage.success('已恢复'); loadData() }) }
 
 onMounted(() => { loadOptions(); loadData() })
 </script>
@@ -434,6 +477,14 @@ onMounted(() => { loadOptions(); loadData() })
   opacity: 0.85;
 }
 
+.product-card.is-archived {
+  opacity: 0.65;
+}
+
+.product-card.is-archived:hover {
+  opacity: 0.8;
+}
+
 .paused-indicator {
   position: absolute;
   left: 0;
@@ -441,6 +492,17 @@ onMounted(() => { loadOptions(); loadData() })
   bottom: 0;
   width: 4px;
   background: #dc2626;
+  border-radius: 12px 0 0 12px;
+  z-index: 1;
+}
+
+.archived-indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: #9ca3af;
   border-radius: 12px 0 0 12px;
   z-index: 1;
 }
@@ -484,6 +546,10 @@ onMounted(() => { loadOptions(); loadData() })
 
 .dot-paused {
   background: #dc2626;
+}
+
+.dot-archived {
+  background: #9ca3af;
 }
 
 .product-name {

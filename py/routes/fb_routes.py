@@ -45,6 +45,67 @@ def list_bms():
     return ok({'items': [dict(r) for r in rows], 'total': total, 'page': page, 'size': size})
 
 
+@fb_bp.route('/api/fb/bms/unified', methods=['GET'])
+@jwt_required()
+@fb_required
+def list_bms_unified():
+    db = get_db()
+    page = request.args.get('page', 1, type=int)
+    size = request.args.get('size', 50, type=int)
+    search = request.args.get('search', '')
+    status = request.args.get('status', '')
+    bm_type = request.args.get('bm_type', '')
+    offset = (page - 1) * size
+    uid = get_uid()
+    role = _get_role(db, uid)
+
+    base_where = ["deleted_at IS NULL"]
+    base_params = []
+    if role not in ('developer', 'admin'):
+        base_where.append("owner_id = ?")
+        base_params.append(uid)
+    if search:
+        base_where.append("(name LIKE ? OR bm_id LIKE ?)")
+        base_params.extend([f"%{search}%", f"%{search}%"])
+    if status:
+        base_where.append("status = ?")
+        base_params.append(status)
+    base_where_clause = " AND ".join(base_where)
+
+    # UNION 两个表，加 bm_type 标记
+    union_sql = f"""
+        SELECT id, name, bm_id, note, status, owner_id, created_at, updated_at,
+               'account' as bm_type,
+               (SELECT COUNT(*) FROM fb_account_bm WHERE bm_id=b.id) as account_count,
+               0 as pixel_count
+        FROM fb_bms b WHERE {base_where_clause}
+        UNION ALL
+        SELECT id, name, bm_id, note, status, owner_id, created_at, updated_at,
+               'pixel' as bm_type,
+               0 as account_count,
+               (SELECT COUNT(*) FROM fb_pixels WHERE pixel_bm_id=pb.id) as pixel_count
+        FROM fb_pixel_bms pb WHERE {base_where_clause}
+    """
+
+    # 加总类型过滤
+    wrapped_params = base_params * 2  # 两个表的参数一样
+    if bm_type:
+        union_sql = f"""
+            SELECT * FROM ({union_sql}) WHERE bm_type = ?
+        """
+        wrapped_params.append(bm_type)
+
+    # 总数和分页
+    count_sql = f"SELECT COUNT(*) FROM ({union_sql})"
+    total = db.execute(count_sql, wrapped_params).fetchone()[0]
+    rows = db.execute(
+        f"SELECT * FROM ({union_sql}) ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        wrapped_params + [size, offset]
+    ).fetchall()
+
+    return ok({'items': [dict(r) for r in rows], 'total': total, 'page': page, 'size': size})
+
+
 @fb_bp.route('/api/fb/bms/create', methods=['POST'])
 @jwt_required()
 @fb_required
@@ -397,10 +458,11 @@ def list_products():
     status = request.args.get('status', '')
     region = request.args.get('region', '')
     runner = request.args.get('runner', '', type=str)
+    archived = request.args.get('archived', '0')
     uid = get_uid()
     offset = (page - 1) * size
 
-    where = ["p.is_archived = 0"]
+    where = ["p.is_archived = 1" if archived == '1' else "p.is_archived = 0"]
     params = []
     role = _get_role(db, uid)
     if runner and runner.isdigit():
@@ -572,6 +634,16 @@ def update_product(pid):
 def delete_product(pid):
     db = get_db()
     db.execute("UPDATE fb_products SET is_archived=1, updated_at=datetime('now','localtime') WHERE id=?", (pid,))
+    db.commit()
+    return ok()
+
+
+@fb_bp.route('/api/fb/products/<int:pid>/restore', methods=['POST'])
+@jwt_required()
+@fb_required
+def restore_product(pid):
+    db = get_db()
+    db.execute("UPDATE fb_products SET is_archived=0, updated_at=datetime('now','localtime') WHERE id=?", (pid,))
     db.commit()
     return ok()
 
@@ -799,6 +871,36 @@ def delete_pixel(pxid):
     db.execute("DELETE FROM fb_pixels WHERE id=?", (pxid,))
     db.commit()
     return ok()
+
+
+@fb_bp.route('/api/fb/pixels/list', methods=['GET'])
+@jwt_required()
+@fb_required
+def list_all_pixels():
+    db = get_db()
+    page = request.args.get('page', 1, type=int)
+    size = request.args.get('size', 50, type=int)
+    search = request.args.get('search', '')
+    offset = (page - 1) * size
+
+    where = []
+    params = []
+    if search:
+        where.append("(p.pixel_name LIKE ? OR p.pixel_id LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%"])
+    where_clause = " AND ".join(where) if where else "1=1"
+
+    total = db.execute(
+        f"SELECT COUNT(*) FROM fb_pixels p WHERE {where_clause}", params
+    ).fetchone()[0]
+    rows = db.execute(
+        f"SELECT p.*, pb.name as bm_name, pb.bm_id as bm_bm_id "
+        f"FROM fb_pixels p LEFT JOIN fb_pixel_bms pb ON pb.id = p.pixel_bm_id "
+        f"WHERE {where_clause} ORDER BY p.created_at DESC LIMIT ? OFFSET ?",
+        params + [size, offset]
+    ).fetchall()
+
+    return ok({'items': [dict(r) for r in rows], 'total': total, 'page': page, 'size': size})
 
 
 # ==================== 数据提取 ====================
