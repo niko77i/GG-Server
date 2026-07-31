@@ -3,7 +3,8 @@
     title="💰 批量充值" width="600px" @open="init">
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
       <span style="white-space:nowrap;">统一金额:</span>
-      <el-input v-model="unifiedAmount" placeholder="输入金额" style="width:150px;" size="small" />
+      <el-input v-model="unifiedAmount" placeholder="输入金额（纯数字）" style="width:150px;" size="small"
+        @input="unifiedAmount = unifiedAmount.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1')" />
       <el-button size="small" @click="applyUnified" :disabled="!unifiedAmount">📝 应用</el-button>
     </div>
     <el-table :data="rows" size="small" border stripe max-height="400">
@@ -11,7 +12,8 @@
       <el-table-column prop="agent" label="代理" width="100" />
       <el-table-column label="金额" min-width="150">
         <template #default="{ row, $index }">
-          <el-input v-model="row.amount" placeholder="输入金额" size="small" />
+          <el-input v-model="row.amount" placeholder="输入金额（纯数字）" size="small"
+          @input="row.amount = row.amount.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1')" />
         </template>
       </el-table-column>
     </el-table>
@@ -66,6 +68,14 @@ async function submit() {
   if (!records.length) {
     ElMessage.warning('请至少填写一个金额')
     return
+  }
+  // 校验每个金额是否为合法正数
+  for (const r of records) {
+    const amt = parseFloat(r.amount)
+    if (isNaN(amt) || amt <= 0) {
+      ElMessage.warning(`账户 ${r.account_id} 的金额「${r.amount}」无效，请输入大于 0 的数字`)
+      return
+    }
   }
   saving.value = true
   try {

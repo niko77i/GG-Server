@@ -16,7 +16,8 @@
         <el-input :model-value="operator" disabled />
       </el-form-item>
       <el-form-item label="金额" required>
-        <el-input v-model="form.amount" placeholder="输入充值金额" />
+        <el-input v-model="form.amount" placeholder="输入充值金额（纯数字）"
+          @input="form.amount = form.amount.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1')" />
       </el-form-item>
     </el-form>
     <template #footer>
@@ -66,6 +67,11 @@ function onAccountChange(accountId) {
 async function submit() {
   if (!form.account_id || !form.amount) {
     ElMessage.warning('账户ID和金额不能为空')
+    return
+  }
+  const amt = parseFloat(form.amount)
+  if (isNaN(amt) || amt <= 0) {
+    ElMessage.warning('金额必须为大于 0 的数字')
     return
   }
   saving.value = true
