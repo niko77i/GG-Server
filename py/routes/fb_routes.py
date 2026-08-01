@@ -980,6 +980,14 @@ def _parse_fb_extract(text: str, sorted_mode: bool) -> dict:
 
         if len(dollar_amounts) == 0:
             continue
+
+        # 去重：相同 $ 金额视为重复数据，只保留一个
+        dollar_amounts = list(set(dollar_amounts))
+
+        # 跳过回流数据：消耗全为 $0.00 的行
+        if all(a == 0 for a in dollar_amounts):
+            continue
+
         if len(dollar_amounts) > 2:
             warnings.append(account_name)
 

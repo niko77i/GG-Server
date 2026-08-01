@@ -1,9 +1,13 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.1  
-> **日期**: 2026-07-31  
+> **文档版本**: v1.4  
+> **日期**: 2026-07-31（v1.4 更新于 2026-08-01）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
-> **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层
+> **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
+> **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.4 变更**: 清账逻辑兜底——改为直接查未清充值记录，不依赖 status_changed_date  
+> **v1.3 变更**: FB 数据提取增加回流数据过滤 + $ 金额去重（行数与正常数据一致，仅消耗全为 $0.00）  
+> **v1.2 变更**: 确定项目名 LM-Server、包名更新为 com.lmserver  
 > **v1.1 变更**: 修正路由计数(226→236)、修正响应格式(items vs data)、修正DDL JSON默认值、新增密码迁移策略、新增前端兼容性矩阵、补充 helpers.py 迁移方案
 ---
 
@@ -141,12 +145,12 @@
 ### 3.1 Maven/Gradle 项目结构
 
 ```
-gg-server/
-├── pom.xml (Maven) 或 build.gradle (Gradle)
+lm-server/
+├── pom.xml (Maven)
 ├── src/
 │   ├── main/
-│   │   ├── java/com/ggserver/
-│   │   │   ├── GgServerApplication.java          # 启动类
+│   │   ├── java/com/lmserver/
+│   │   │   ├── LmServerApplication.java          # 启动类
 │   │   │   │
 │   │   │   ├── config/                            # 配置类
 │   │   │   │   ├── SecurityConfig.java            # Spring Security
@@ -301,14 +305,14 @@ gg-server/
 ### 3.2 包命名规范
 
 ```
-基础包: com.ggserver
-Controller: com.ggserver.controller.{模块}
-Service:    com.ggserver.service.{模块}
-Repository: com.ggserver.repository
-Entity:     com.ggserver.entity
-DTO:        com.ggserver.dto.{request|response}
-Config:     com.ggserver.config
-Security:   com.ggserver.security
+基础包: com.lmserver
+Controller: com.lmserver.controller.{模块}
+Service:    com.lmserver.service.{模块}
+Repository: com.lmserver.repository
+Entity:     com.lmserver.entity
+DTO:        com.lmserver.dto.{request|response}
+Config:     com.lmserver.config
+Security:   com.lmserver.security
 ```
 
 ---
@@ -1951,7 +1955,7 @@ public class GoogleSheetsService {
             List<List<Object>> existing = existingData.getValues();
             if (existing == null) existing = new ArrayList<>();
 
-            // 3. 找最后一行
+            // 3. 找最后一行（只看 A 列日期，不看其他列）
             int lastRow = 0;
             String lastDate = "";
             for (int i = existing.size() - 1; i >= 0; i--) {
@@ -2119,6 +2123,11 @@ public class FbExtractService {
 
         // ... 动态分组、提取每组 account_name/account_id/cost 等（与 Python 一致）
 
+        // === 每组提取后的过滤逻辑（2026-08-01 新增） ===
+        // 1. 去重：收集到的 $ 金额用 distinct 去重，相同值视为重复数据只保留一个
+        // 2. 回流过滤：去重后若所有 $ 金额均为 0，跳过该行（回流数据：有账号名+ID但无实际消耗）
+        // 3. 警告：去重后才判断 len > 2，避免重复 $ 金额导致误报警告
+
         List<FbReportRow> data = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
         // ... 构建 data 和 warnings
@@ -2226,7 +2235,48 @@ public class FbExtractService {
 | **FbService** | FB 全平台业务（BM/账户/产品/Pixel） | JPA + @Transactional |
 | **OptionService** | 选项表 CRUD | JPA |
 
-### 8.4 定时任务
+### 8.4 账户状态变更清账（v1.4 加固）
+
+**需求**: GG 账户从"存活"变更为非存活状态（如"死亡"）时，自动在 `recharge_records` 表中插入一条 `amount='清'` 的清算记录，并同步到 Google Sheets 充值表。
+
+**现存问题**: 原逻辑依赖 `status_changed_date` 字段判断是否有"存活期间"的充值 → 该字段在账户创建时未设置，且可能因各种路径（Sheet 同步、直接改库等）不准确，导致清账被跳过。
+
+**兜底方案**: 改为**直接查数据状态**，不依赖任何外部字段：
+
+```sql
+SELECT COUNT(*) FROM recharge_records r1
+WHERE r1.account_id = ? AND r1.amount != '清'
+AND NOT EXISTS (
+    SELECT 1 FROM recharge_records r2
+    WHERE r2.account_id = r1.account_id
+      AND r2.amount = '清'
+      AND r2.created_at > r1.created_at
+)
+```
+
+逻辑：
+1. 找到该账户下所有非"清"的充值记录
+2. 检查每条充值之后是否存在"清"记录（`amount='清' AND created_at > 充值时间`）
+3. 如果有未清的充值 → `need_clear = true` → 插入清账记录
+4. **防重复**: `NOT EXISTS` 子查询天然阻止——已有"清"记录的充值不会被重复计算
+
+**涉及位置**（Python → Java 迁移对照）:
+
+| Python | Java | 说明 |
+|--------|------|------|
+| `accounts_update()` (单账户更新) | `AccountController.update()` → `AccountService` | 相同兜底 SQL |
+| `accounts_batch_update()` (批量更新) | `AccountController.batchUpdate()` → `AccountService` | 相同兜底 SQL |
+
+**与旧逻辑对比**:
+
+| | 旧逻辑 | 新逻辑 |
+|---|---|---|
+| 判断依据 | `status_changed_date` | 充值表实际数据 |
+| 依赖字段 | 必须正确维护 | 无外部依赖 |
+| 重复清账 | 依赖时间比较 | NOT EXISTS 子查询天然防重复 |
+| Sheet 同步路径 | 明确跳过 | 同样跳过（该路径不改状态） |
+
+### 8.5 定时任务
 
 ```java
 @Component
@@ -2252,7 +2302,7 @@ public class ScheduledTasks {
 }
 ```
 
-### 8.5 异步配置
+### 8.6 异步配置
 
 ```java
 @Configuration
@@ -2582,7 +2632,7 @@ server:
 
 spring:
   application:
-    name: gg-server
+    name: lm-server
 
   # 数据库
   datasource:
@@ -2672,7 +2722,7 @@ scheduler:
 # 日志
 logging:
   level:
-    com.ggserver: INFO
+    com.lmserver: INFO
     org.springframework.security: WARN
   file:
     path: ./logs
@@ -2721,7 +2771,7 @@ cd frontend && npm run dev
 mvn clean package -DskipTests
 
 # 运行
-java -jar target/gg-server-1.0.0.jar \
+java -jar target/lm-server-0.1.0-SNAPSHOT.jar \
   --server.port=5001 \
   --spring.datasource.url=jdbc:mysql://localhost:3306/ggserver \
   --spring.datasource.username=gguser \

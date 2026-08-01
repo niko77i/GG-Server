@@ -3919,17 +3919,20 @@ def accounts_update(aid):
                 (aid,)
             )
 
-        # 状态清账：存活切到非存活时，检查上次变存活后有无充值
+        # 状态清账：存活切到非存活时，检查有无未清的充值记录
         recharge_note = None
         if new_status and new_status != "存活" and old_status and old_status["status_name"] == "存活":
-            since = old_status["status_changed_date"] or ""
-            need_clear = not since  # 第一次不用查，直接填清
-            if not need_clear:
-                need_clear = db.execute(
-                    "SELECT COUNT(*) FROM recharge_records "
-                    "WHERE account_id=? AND amount!='清' AND created_at > ?",
-                    (old_status["account_id"], since)
-                ).fetchone()[0] > 0
+            # 兜底策略：直接查是否存在未清充值（有金额记录但之后无"清"记录），
+            # 不依赖 status_changed_date，避免创建时未设置该字段导致的漏清
+            need_clear = db.execute(
+                "SELECT COUNT(*) FROM recharge_records r1 "
+                "WHERE r1.account_id=? AND r1.amount!='清' "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM recharge_records r2 "
+                "  WHERE r2.account_id=r1.account_id AND r2.amount='清' AND r2.created_at > r1.created_at"
+                ")",
+                (old_status["account_id"],)
+            ).fetchone()[0] > 0
             if need_clear:
                 user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                 operator_name = (user["display_name"] or "") if user else ""
@@ -4270,16 +4273,19 @@ def accounts_batch_update():
                     db.execute("UPDATE accounts SET death_date=date('now','localtime') WHERE id=?", (aid,))
                 elif old["status_name"] == "死亡":
                     db.execute("UPDATE accounts SET death_date='' WHERE id=?", (aid,))
-                # 清账逻辑：存活切非存活，检查上次变存活后有无充值
+                # 清账逻辑：存活切非存活，检查有无未清的充值记录
                 if status_value_effective != "存活" and old["status_name"] == "存活" and old["status_name"] != status_value_effective:
-                    since = old["status_changed_date"] or ""
-                    need_clear = not since  # 第一次直接填
-                    if not need_clear:
-                        need_clear = db.execute(
-                            "SELECT COUNT(*) FROM recharge_records "
-                            "WHERE account_id=? AND amount!='清' AND created_at > ?",
-                            (old["account_id"], since)
-                        ).fetchone()[0] > 0
+                    # 兜底策略：直接查是否存在未清充值（有金额记录但之后无"清"记录），
+                    # 不依赖 status_changed_date，避免创建时未设置该字段导致的漏清
+                    need_clear = db.execute(
+                        "SELECT COUNT(*) FROM recharge_records r1 "
+                        "WHERE r1.account_id=? AND r1.amount!='清' "
+                        "AND NOT EXISTS ("
+                        "  SELECT 1 FROM recharge_records r2 "
+                        "  WHERE r2.account_id=r1.account_id AND r2.amount='清' AND r2.created_at > r1.created_at"
+                        ")",
+                        (old["account_id"],)
+                    ).fetchone()[0] > 0
                     if need_clear:
                         user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                         op = (user["display_name"] or "") if user else ""
@@ -7202,7 +7208,8 @@ def admin_list_users():
     search = request.args.get("search", "")
     page = int(request.args.get("page", 1))
     page_size = int(request.args.get("page_size", 20))
-    result = auth.list_users(search, page, page_size, current_user_id=user_id)
+    platform = request.args.get("platform") or None  # 'gg' | 'fb' | None（全部）
+    result = auth.list_users(search, page, page_size, current_user_id=user_id, platform=platform)
     return jsonify(success=True, **result)
 
 
@@ -9645,6 +9652,7 @@ if __name__ == "__main__":
     print("在浏览器中打开上方地址即可使用。")
     # 自动打开浏览器
     # webbrowser.open(f"http://127.0.0.1:{port}")  # 调试时关闭自动打开
-    app.run(host=host, port=port, debug=False, threaded=True)
+    from waitress import serve
+    serve(app, host=host, port=port, threads=40)
 
 
