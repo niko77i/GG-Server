@@ -85,7 +85,8 @@ const canSync = computed(() => {
   if (!diff.value) return false
   const hasCreates = (diff.value.to_create?.length || 0) > 0
   const hasUpdates = (diff.value.to_update?.length || 0) > 0
-  if (hasUpdates && selectedUpdates.value.length === 0) return false
+  // 没有新账户、且状态变更未勾选任何项时，才禁用
+  if (!hasCreates && hasUpdates && selectedUpdates.value.length === 0) return false
   return hasCreates || hasUpdates
 })
 
@@ -105,10 +106,15 @@ async function startSync() {
       diff.value = res.diff
       summary.value = res.summary
       // 默认全选状态变更项 — 用 toggleRowSelection 确保 UI 复选框和数据一致
-      await nextTick()
       const toUpdate = res.diff?.to_update || []
-      if (updateTableRef.value && toUpdate.length) {
-        toUpdate.forEach(row => updateTableRef.value.toggleRowSelection(row, true))
+      if (toUpdate.length) {
+        await nextTick()
+        // el-table 渲染需要额外时间，加 setTimeout 确保 toggleRowSelection 生效
+        setTimeout(() => {
+          if (updateTableRef.value) {
+            toUpdate.forEach(row => updateTableRef.value.toggleRowSelection(row, true))
+          }
+        }, 100)
       }
     } else {
       error.value = res.error || '读取失败'
