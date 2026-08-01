@@ -922,6 +922,23 @@ def _parse_fb_extract(text: str, sorted_mode: bool) -> dict:
     if end_idx is None:
         end_idx = len(lines)
 
+    # 解析尾部校验数据（"总成效"之后的内容）
+    tail_lines = lines[end_idx:]
+    declared_rows = 0
+    declared_spend = 0.0
+
+    for i, line in enumerate(tail_lines):
+        # 匹配 "已显示8/8行" 格式，提取 "/" 后面的总行数
+        m = re.search(r'已显示\d+/(\d+)行', line)
+        if m:
+            declared_rows = int(m.group(1))
+        # 收集 $ 金额，检查该行或下一行是否有"总花费"
+        if line.startswith('$'):
+            amt = float(line.replace('$', '').replace(',', ''))
+            nearby = line + ' ' + ' '.join(tail_lines[i+1:i+3])
+            if '总花费' in nearby:
+                declared_spend = max(declared_spend, amt)
+
     data_lines = lines[start_idx:end_idx]
 
     # 动态分组：文本行 + 下一行纯数字长串(≥10位) → 新组开始
@@ -996,7 +1013,20 @@ def _parse_fb_extract(text: str, sorted_mode: bool) -> dict:
 
         results.append(record)
 
-    return {'data': results, 'warnings': warnings, 'group_size': len(groups[0]) if groups else 0}
+    extracted_rows = len(results)
+    extracted_spend = round(sum(r['cost'] for r in results), 2)
+    validation = {
+        'declared_rows': declared_rows,
+        'extracted_rows': extracted_rows,
+        'declared_spend': round(declared_spend, 2),
+        'extracted_spend': extracted_spend
+    }
+    return {
+        'data': results,
+        'warnings': warnings,
+        'group_size': len(groups[0]) if groups else 0,
+        'validation': validation
+    }
 
 
 @fb_bp.route('/api/fb/extract/parse', methods=['POST'])

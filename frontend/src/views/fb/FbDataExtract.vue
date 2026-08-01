@@ -188,9 +188,22 @@ async function handleParse() {
     const res = await fbApi.parseExtract({ text: pasteText.value, sorted: sortedMode.value })
     parsedData.value = res.data || []
     warnings.value = res.warnings || []
+    const validation = res.validation
     const count = parsedData.value.length
     const gs = res.group_size
     ElMessage.success(`解析完成：${count} 条数据（每组 ${gs} 行）`)
+
+    // 尾部校验
+    if (validation) {
+      const vt = validation
+      if (vt.declared_rows > 0 && vt.extracted_rows < vt.declared_rows) {
+        ElMessage.warning({ message: `⚠ 复制的数据小于总行数（已提取 ${vt.extracted_rows} 行，共 ${vt.declared_rows} 行），请检查`, duration: 4000 })
+      }
+      if (vt.declared_spend > 0 && Math.abs(vt.extracted_spend - vt.declared_spend) > 0.01) {
+        ElMessage.warning({ message: `⚠ 总消耗不一致（汇总 $${vt.extracted_spend.toFixed(2)}，报告 $${vt.declared_spend.toFixed(2)}），请刷新广告报告后重新复制数据`, duration: 4000 })
+      }
+    }
+
     if (warnings.value.length) ElMessage.warning(`${warnings.value.join('、')} 的$符号超过2个`)
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '解析失败')
