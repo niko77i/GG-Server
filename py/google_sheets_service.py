@@ -158,7 +158,7 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
     last_date = ""
     for i in range(len(existing) - 1, -1, -1):
         row = existing[i]
-        if any(row[j] for j in range(min(10, len(row))) if row[j]):
+        if len(row) > 0 and row[0]:
             last_row = i + 1
             last_date = (row[0] or "").strip() if len(row) > 0 else ""
             break
@@ -518,14 +518,14 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
 
     result = _upsert_rows(
         user_id, ss_id, rows,
-        report_date, product_name, region, report_date
+        report_date, product_name, region, report_date, line_name
     )
     return result
 
 
 def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
                  report_date: str, product_name: str,
-                 region: str, date_str: str = "") -> dict:
+                 region: str, date_str: str = "", line_name: str = "") -> dict:
     """FB 做表数据写入 Google Sheets（12列 A-L）。按 report_date 月份自动选/建 Sheet。"""
     if not rows:
         return {"updated": 0}
@@ -570,11 +570,13 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
         if date_str and last_date and last_date != date_str:
             last_row += 1
 
-        # 去重索引：按 (A=日期, D=账户ID)
+        # 去重索引：按 (A=日期, D=账户ID, G=产品名, J=线名)
         existing_map = {}
         for i, row in enumerate(existing):
             if len(row) > 3 and row[0] and row[3]:
-                key = (row[0].strip(), row[3].strip())
+                key = (row[0].strip(), row[3].strip(),
+                       (row[6] if len(row) > 6 else '').strip(),
+                       (row[9] if len(row) > 9 else '').strip())
                 existing_map[key] = i
 
         # 获取 sheet 最大行数，不够则扩容
@@ -596,7 +598,9 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
             row_data = [str(v) if not isinstance(v, (int, float)) else v for v in r]
             d = str(r[0]) if isinstance(r, list) else date_str
             acct_id = str(r[3]).lstrip("'") if isinstance(r, list) else ""
-            key = (d, acct_id)
+            prod = str(r[6]) if isinstance(r, list) and len(r) > 6 else ""
+            line = str(r[9]) if isinstance(r, list) and len(r) > 9 else ""
+            key = (d, acct_id, prod, line)
 
             if key in existing_map:
                 row_idx = existing_map[key]
