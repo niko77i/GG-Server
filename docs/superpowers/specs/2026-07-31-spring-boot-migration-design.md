@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.4  
-> **日期**: 2026-07-31（v1.4 更新于 2026-08-01）  
+> **文档版本**: v1.5  
+> **日期**: 2026-07-31（v1.5 更新于 2026-08-03）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.5 变更**: 同步 GG 账户管理最新实现——双向同步（含H列解绑）、软删除/恢复/物理删除、已删除列表  
 > **v1.4 变更**: 清账逻辑兜底——改为直接查未清充值记录，不依赖 status_changed_date  
 > **v1.3 变更**: FB 数据提取增加回流数据过滤 + $ 金额去重（行数与正常数据一致，仅消耗全为 $0.00）  
 > **v1.2 变更**: 确定项目名 LM-Server、包名更新为 com.lmserver  
@@ -18,7 +19,7 @@
 3. [项目结构设计](#3-项目结构设计)
 4. [技术栈与依赖](#4-技术栈与依赖)
 5. [数据库设计 — 40 张表 MySQL DDL](#5-数据库设计)
-6. [API Controller 设计 — 236 个接口](#6-api-controller-设计)
+6. [API Controller 设计 — 239 个接口](#6-api-controller-设计)
 7. [认证与安全](#7-认证与安全)
 8. [业务服务层设计](#8-业务服务层设计)
 9. [外部集成](#9-外部集成)
@@ -35,7 +36,7 @@
 | 维度 | 数量 |
 |------|------|
 | 后端代码行数 | ~19,400 行 Python |
-| API 路由 | **236 个** |
+| API 路由 | **239 个** |
 | 数据库表 | **40 张** |
 | 前端页面 | 25 个 Vue 组件 |
 | 外部集成 | 10 个（Google Sheets/Ads/AI/FFmpeg/邮件/Telegram 等） |
@@ -48,7 +49,7 @@
 |------|--------|------|
 | 认证系统 | 12 | 登录、注册、JWT、个人信息、改密 |
 | GG 产品管理 | 17 | 产品 CRUD、包管理、在跑人员、掉包检测 |
-| GG 账户管理 | 18 | 广告账户 CRUD、MCC 关联、批量操作、Sheet 同步 |
+| GG 账户管理 | 21 | 广告账户 CRUD、MCC 关联、批量操作、Sheet 双向同步、软删除/恢复/物理删除 |
 | GG MCC 管理 | 8 | MCC CRUD、关联、详情 |
 | GG 充值管理 | 5 | 单个/批量充值、Sheet 写入 |
 | GG 广告报告 | 17 | 报告 CRUD、去重、分析、AI 对话、导出 |
@@ -1512,7 +1513,10 @@ public class AccountController {
         return ApiResponse.ok(accountService.batchUpdate(principal.getUserId(), req));
     }
 
-    // POST /api/accounts/sync-from-sheet
+    // POST /api/accounts/sync-from-sheet（双向同步）
+    //   dry_run=true: 返回 diff（to_create / to_update / unchanged）
+    //   dry_run=false: 执行创建+状态更新 → db.commit() → 系统→Sheet 同步 F列(备注)+H列(是否解绑)
+    //   跳过 H列="解绑" 的账户，跳过系统已逻辑删除的账户
     @PostMapping("/sync-from-sheet")
     public ApiResponse<SyncResult> syncFromSheet(
             @AuthenticationPrincipal UserPrincipal principal,
@@ -1521,8 +1525,11 @@ public class AccountController {
             principal.getUserId(), req));
     }
 
-    // ... 其余路由 (delete, restore, permanent-delete, batch-delete,
-    //     batch-lookup, lookup, recharge-records, mcc-history, ...)
+    // DELETE /api/accounts/{aid} — 软删除（设 deleted_at，后台写 Sheet H列"解绑"）
+    // POST /api/accounts/{aid}/restore — 恢复（清 deleted_at，后台清 Sheet H列）
+    // DELETE /api/accounts/{aid}/permanent — 物理删除（不可恢复，清充值记录+MCC历史）
+    // GET /api/accounts/deleted — 已删除账户列表
+    // ... 其余路由 (batch-delete, batch-lookup, lookup, recharge-records, mcc-history, ...)
 }
 ```
 
@@ -1541,7 +1548,7 @@ public class AccountController {
 | `FbReportController` | `/api/fb/reports/*` | 9 | JWT + FB |
 | `FbUserController` | `/api/fb/users` | 1 | JWT + FB |
 | `ProductController` | `/api/products/*` | 17 | JWT + 混合 |
-| `AccountController` | `/api/accounts/*` | 18 | JWT |
+| `AccountController` | `/api/accounts/*` | 21 | JWT |
 | `MccController` | `/api/mcc/*` | 8 | JWT |
 | `RechargeController` | `/api/recharge/*` | 5 | JWT |
 | `AdReportController` | `/api/ad-reports/*` | 17 | JWT |
@@ -1562,7 +1569,7 @@ public class AccountController {
 | `UtilityController` | `/api/browse-*`, `/api/translate` | 5 | 混合 |
 | `GoogleSheetsController` | `/api/google-sheets/*` | 4 | JWT |
 | `GoogleAdsController` | `/api/google-ads/*` | 2 | 无 |
-| **合计** | | **236** | |
+| **合计** | | **239** | |
 
 ---
 
@@ -2058,6 +2065,50 @@ public class GoogleSheetsService {
         //   3. 去重键：(日期, 账户ID, 产品名, 线名)
         //   4. 12列输出
         //   详略（代码结构与 upsertZuobiao 类似）
+    }
+    /**
+     * 「我的看板」Sheet 双向同步（对应 Python accounts_sync_from_sheet + update_cell_by_account_id）
+     *
+     * 我的看板列结构（A-H，8列）：
+     *   A=运营, B=账户ID, C=所属渠道, D=国家, E=时区, F=备注, G=是否封户, H=是否解绑
+     *
+     * Sheet→系统 (dry_run):
+     *   1. 读取 A:H 列
+     *   2. 门禁校验：A列运营 == 当前用户 display_name
+     *   3. 跳过 H列="解绑" 的账户
+     *   4. 按 B列 account_id 匹配系统账户（含软删除）
+     *   5. 系统没有 → to_create；系统有+未删除 → 根据 G列封户值建议状态；
+     *      系统有+已删除 → 跳过
+     *
+     * Sheet→系统 (execute):
+     *   1. 创建新账户（name/MCC留空，状态默认"存活"，代理自动创建）
+     *   2. 执行确认后的状态变更（不触发清账逻辑，同步 death_date）
+     *
+     * 系统→Sheet (execute后自动):
+     *   1. 重新查询所有匹配账户最新状态（含 deleted_at）
+     *   2. F列(备注) ← 系统状态
+     *   3. H列(是否解绑) ← 已删除写"解绑"，未删除清空
+     *
+     * 系统→Sheet (状态变更时自动):
+     *   accounts_update / batch_update 状态变更时，后台线程更新 F列(备注)
+     *   accounts_delete 时后台写 H列"解绑"
+     *   accounts_restore 时后台清 H列
+     */
+    public SyncResult syncFromSheet(Long userId, SyncRequest req) {
+        // dry_run: 比对返回 diff
+        // execute: 执行 + commit + 系统→Sheet 同步
+    }
+
+    /** 按 account_id 更新 Sheet 指定列 */
+    public void updateCellByAccountId(String spreadsheetId, String sheetName,
+            String accountId, String value, int colIndex) {
+        // colIndex: 5=F列(备注), 7=H列(是否解绑)
+    }
+
+    /** 通用读取 Sheet 指定范围 */
+    public List<List<Object>> readSheetValues(String spreadsheetId,
+            String sheetName, String range) {
+        // 返回二维列表
     }
 }
 ```
