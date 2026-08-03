@@ -4454,11 +4454,12 @@ def accounts_sync_from_sheet():
     placeholders = ",".join(["?" for _ in sheet_ids])
     existing_rows = db.execute(
         f"""SELECT a.id, a.account_id, a.timezone, a.agent_id, a.status_id,
+                   a.deleted_at,
                    ag.name AS agent_name, st.name AS status_name
             FROM accounts a
             LEFT JOIN agents ag ON a.agent_id = ag.id
             LEFT JOIN account_statuses st ON a.status_id = st.id
-            WHERE a.account_id IN ({placeholders}) AND a.owner_id = ? AND a.deleted_at IS NULL""",
+            WHERE a.account_id IN ({placeholders}) AND a.owner_id = ?""",
         sheet_ids + [user_id]
     ).fetchall()
 
@@ -4483,8 +4484,11 @@ def accounts_sync_from_sheet():
                 "timezone": sa["timezone"],
                 "operator": sa["operator"],
             })
+        elif existing.get("deleted_at"):
+            # 系统已逻辑删除 → 跳过（不新增也不更新）
+            unchanged += 1
         else:
-            # 系统有 → 根据"是否封户"判断是否需要状态变更
+            # 系统有且未删除 → 根据"是否封户"判断是否需要状态变更
             blocked = sa["blocked"]
             current_status = existing["status_name"] or "存活"
 
@@ -4599,30 +4603,42 @@ def accounts_sync_from_sheet():
         # 10c. 系统 → Sheet：将系统当前状态同步回「我的看板」备注列
         if sheet_id and dashboard_name:
             # 重新查询所有 sheet 中账户的最新状态（10b 可能已更新 status_id）
-            _sync_back_rows = []
+            # 同时查询 deleted_at，用于写 H 列"解绑"
+            _sync_back_rows = []      # (account_id, status, deleted_at)
             if sheet_ids:
                 _fresh_rows = db.execute(
-                    f"""SELECT a.account_id, COALESCE(st.name, '存活') AS status_name
+                    f"""SELECT a.account_id, COALESCE(st.name, '存活') AS status_name,
+                               a.deleted_at
                         FROM accounts a
                         LEFT JOIN account_statuses st ON a.status_id = st.id
-                        WHERE a.account_id IN ({placeholders}) AND a.owner_id = ? AND a.deleted_at IS NULL""",
+                        WHERE a.account_id IN ({placeholders}) AND a.owner_id = ?""",
                     sheet_ids + [user_id]
                 ).fetchall()
                 for r in _fresh_rows:
-                    _sync_back_rows.append((r["account_id"], r["status_name"] or "存活"))
+                    _sync_back_rows.append((
+                        r["account_id"],
+                        r["status_name"] or "存活",
+                        r["deleted_at"] or ""
+                    ))
 
             if _sync_back_rows:
                 def _sync_back_to_dashboard():
                     import google_sheets_service as gs
                     svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                    for aid, st in _sync_back_rows:
+                    for aid, st, deleted in _sync_back_rows:
                         try:
+                            # 备注列（F列）：写状态
                             gs.update_cell_by_account_id(svc, sheet_id, dashboard_name, aid, st)
+                            # 是否解绑（H列）：已删除写"解绑"，未删除清空
+                            gs.update_cell_by_account_id(
+                                svc, sheet_id, dashboard_name, aid,
+                                "解绑" if deleted else "", col_index=7
+                            )
                         except Exception as e:
-                            log.warning("同步备注列失败 account_id=%s: %s", aid, e)
+                            log.warning("同步Sheet失败 account_id=%s: %s", aid, e)
 
                 _sync_sheets_background(_sync_back_to_dashboard,
-                                        lambda s, e: log.warning("批量同步备注列失败: %s", e) if e else None)
+                                        lambda s, e: log.warning("批量同步Sheet失败: %s", e) if e else None)
     finally:
         db.close()
 
