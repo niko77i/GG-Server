@@ -2239,7 +2239,13 @@ def youtube_consumption_dates():
 @jwt_required()
 def youtube_tags_get():
     db = _yt_db()
-    tags = {}
+    tags = {
+        "regions": [],
+        "frame_types": [],
+        "effectiveness": [],
+        "product_names": [],
+        "review_statuses": [],
+    }
     for r in db.execute("SELECT key, value FROM tags").fetchall():
         try: tags[r["key"]] = _json.loads(r["value"])
         except: tags[r["key"]] = []
