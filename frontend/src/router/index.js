@@ -96,17 +96,17 @@ const routes = [
   {
     path: '/fb/accounts',
     component: () => import('../views/fb/FbAccountPanel.vue'),
-    meta: { platform: 'fb', admin: true, title: 'FB账户管理' }
+    meta: { platform: 'fb', title: 'FB账户管理' }
   },
   {
     path: '/fb/bms',
     component: () => import('../views/fb/FbBmPanel.vue'),
-    meta: { platform: 'fb', admin: true, title: 'BM管理' }
+    meta: { platform: 'fb', title: 'BM管理' }
   },
   {
     path: '/fb/pixels',
     component: () => import('../views/fb/FbPixelPanel.vue'),
-    meta: { platform: 'fb', admin: true, title: '像素管理' }
+    meta: { platform: 'fb', title: '像素管理' }
   },
   {
     path: '/fb/extract',
@@ -121,7 +121,7 @@ const routes = [
   {
     path: '/fb/settings',
     component: () => import('../views/fb/FbSettingsPanel.vue'),
-    meta: { platform: 'fb', admin: true, title: 'FB设置' }
+    meta: { platform: 'fb', title: 'FB设置' }
   },
 ]
 

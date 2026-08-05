@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.5  
-> **日期**: 2026-07-31（v1.5 更新于 2026-08-03）  
+> **文档版本**: v1.6  
+> **日期**: 2026-07-31（v1.6 更新于 2026-08-03）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.6 变更**: 账户表格内联编辑扩展（时区/代理/状态）、表格UI整体优化、YouTube标签配置页空白修复  
 > **v1.5 变更**: 同步 GG 账户管理最新实现——双向同步（含H列解绑）、软删除/恢复/物理删除、已删除列表  
 > **v1.4 变更**: 清账逻辑兜底——改为直接查未清充值记录，不依赖 status_changed_date  
 > **v1.3 变更**: FB 数据提取增加回流数据过滤 + $ 金额去重（行数与正常数据一致，仅消耗全为 $0.00）  
@@ -3147,3 +3148,84 @@ public class AuthService {
 - `deleted_at` 字段统一使用 `DATETIME NULL`
 - `JSON` 列迁移前用 `JSON_VALID()` 校验
 - `videos` 复合主键 `(id, owner_id)` 确保所有引用表 FK 一致
+
+---
+
+## 附录 E: v1.6 前端优化 + YouTube 标签修复
+
+> **日期**: 2026-08-03
+
+### E.1 账户表格内联编辑扩展
+
+**文件**: `frontend/src/views/AdsAccountPanel.vue`
+
+原有账户表格只有"账户名称"和"所属 MCC"两列支持内联编辑。本次扩展到**全部 5 个可编辑字段**：
+
+| 列 | 编辑组件 | API 字段 | 说明 |
+|---|---|---|---|
+| 账户名称 | `<el-input>` | `{ name }` | 已有，不变 |
+| 所属 MCC | `<el-select>` filterable | `{ mcc_id }` | 已有，不变 |
+| **时区** | `<el-select>` filterable + allow-create | `{ timezone }` | **新增**，支持输入新区值 |
+| **代理** | `<el-select>` filterable + clearable | `{ agent_id }` | **新增**，可清空 |
+| **状态** | `<el-select>` filterable | `{ status_id }` | **新增**，后端自动处理状态变更时间+清账 |
+
+交互模式统一：hover 显示 ✏️ 按钮 → 点击切换为编辑组件 → 选择/输入后自动保存 → blur 取消。
+
+### E.2 表格 UI 整体优化
+
+**列宽协调**（全部 10 列重新分配）：
+
+| 列 | 宽度 | 说明 |
+|---|---|---|
+| 选择框 | width=45 | 不变 |
+| 账号名称 | min-width=140 | 中文名需要空间 |
+| 账号 ID | min-width=140 | 长数字 ID |
+| 所属 MCC | min-width=140 | 两行显示（名/ID） |
+| 时区 | min-width=120 | "Asia/Shanghai" |
+| 代理 | min-width=140 | 中文代理名 |
+| 状态 | min-width=120 | 标签+编辑按钮 |
+| 到手时间 | min-width=100 | YYYY-MM-DD |
+| 状态变更时间 | min-width=110 | YYYY-MM-DD |
+| 操作 | width=200 | 4 个按钮 |
+
+**文本截断统一**：所有 inline-edit-cell 中的 `.inline-cell-text` 统一应用：
+```css
+white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto;
+```
+
+**MCC 列改为上下行**：原来单行 `名字 · ID` 改为两行堆叠显示——上行名字、下行 ID，编辑按钮右侧垂直居中。
+
+### E.3 YouTube 标签配置页空白修复
+
+**问题**: 标签配置页（TagsConfig）textarea 全部显示为空，即使用户之前配置过标签。
+
+**根因**:
+1. **后端** `GET /api/youtube/tags`：数据库 `tags` 表无记录时返回 `{}`，前端 `store.tags = {}` 导致所有字段 `undefined`
+2. **前端** TagsConfig 用 `v-show` 渲染，在父组件 `onMounted` 中 `store.loadTags()` 异步完成前就已挂载
+
+**修复**:
+1. **后端** [main.py](py/main.py) — `youtube_tags_get()` 加默认结构兜底：
+   ```python
+   tags = {
+       "regions": [], "frame_types": [], "effectiveness": [],
+       "product_names": [], "review_statuses": [],
+   }
+   ```
+2. **前端** [TagsConfig.vue](frontend/src/components/youtube/TagsConfig.vue) — 新增 watch 监听：
+   ```javascript
+   watch(() => store.tags, () => loadCfgFromStore(), { deep: true })
+   ```
+
+### E.4 数据恢复说明
+
+标签数据在 GitHub 的默认种子数据为（设计文档第 1194-1199 行）：
+```sql
+INSERT INTO tags (`key`, `value`) VALUES
+('regions', '["巴西","菲律宾","孟加拉","印尼","东南亚通用","通用"]'),
+('frame_types', '["融帧","非融帧"]'),
+('effectiveness', '["","成效","一般"]'),
+('review_statuses', '["能过审","不能过审"]'),
+('product_names', '["p222","93ok"]');
+```
+
+迁移到 Spring Boot 后通过 MySQL 种子脚本自动初始化，无需手动配置。

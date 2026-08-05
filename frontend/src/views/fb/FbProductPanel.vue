@@ -28,7 +28,7 @@
       </el-col>
       <el-col :xs="12" :sm="6">
         <div class="stat-card">
-          <div class="stat-number" style="color: #7c3aed">{{ runnerFilter === 'mine' ? total : items.filter(function(i){return i.runners && i.runners.some(function(r){return r.id === auth.user.id})}).length }}</div>
+          <div class="stat-number" style="color: #7c3aed">{{ filterRunner ? total : (runnerFilter === 'mine' ? total : items.filter(function(i){return i.runners && i.runners.some(function(r){return r.id === auth.user.id})}).length) }}</div>
           <div class="stat-label">我在跑的</div>
         </div>
       </el-col>
@@ -36,12 +36,15 @@
 
     <!-- 筛选栏卡片 -->
     <div class="filter-card">
-      <el-radio-group v-if="!filterArchived" v-model="runnerFilter" @change="loadData" size="small">
+      <el-radio-group v-if="!filterArchived && !filterRunner" v-model="runnerFilter" @change="loadData" size="small">
         <el-radio-button value="mine">我在跑的</el-radio-button>
         <el-radio-button value="all">全部产品</el-radio-button>
       </el-radio-group>
       <el-select v-model="filterRegion" placeholder="全部地区" clearable size="small" style="width:120px" @change="loadData">
         <el-option v-for="r in regionOptions" :key="r.name" :label="r.name" :value="r.name" />
+      </el-select>
+      <el-select v-if="!filterArchived" v-model="filterRunner" placeholder="筛选在跑人" clearable filterable size="small" style="width:160px" @change="loadData">
+        <el-option v-for="u in fbUsers" :key="u.id" :label="(u.display_name||u.username)+' ('+u.username+')'" :value="u.id" />
       </el-select>
       <el-input v-model="search" placeholder="搜索产品或KPI..." @input="onSearch" clearable size="small" style="flex:1;min-width:160px" />
       <el-radio-group v-model="filterStatus" size="small" @change="loadData">
@@ -251,7 +254,7 @@ const auth = useAuthStore()
 const items = ref([]); const loading = ref(false)
 const page = ref(1); const size = ref(5); const total = ref(0)
 const search = ref(''); const filterStatus = ref(''); const filterRegion = ref('')
-const filterArchived = ref('')
+const filterArchived = ref(''); const filterRunner = ref(null)
 const runnerFilter = ref('mine')
 const dialogVisible = ref(false); const editingId = ref(null); const saving = ref(false)
 const bmOptions = ref([]); const fbUsers = ref([]); const salesOptions = ref([]); const regionOptions = ref([])
@@ -289,7 +292,8 @@ async function loadData() {
     if (search.value) p.search = search.value
     if (filterStatus.value) p.status = filterStatus.value
     if (filterRegion.value) p.region = filterRegion.value
-    if (runnerFilter.value === 'mine') p.runner = auth.user?.id
+    if (filterRunner.value) { p.runner = filterRunner.value }
+    else if (runnerFilter.value === 'mine') p.runner = auth.user?.id
     if (filterArchived.value) p.archived = filterArchived.value
     const res = await fbApi.listProducts(p)
     items.value = res.items || []; total.value = res.total || 0
@@ -310,19 +314,27 @@ async function loadOptions() {
   } catch(e) {}
 }
 
-function openCreate() {
+// 快速刷新地区/商务选项（每次打开弹窗时调用，确保最新）
+async function refreshOptions() {
+  try { const r = await client.get('/sales-persons/list'); salesOptions.value = r.sales_persons || [] } catch(e) {}
+  try { const r = await client.get('/regions/list'); regionOptions.value = (r.regions || []).map(r => typeof r === 'string' ? { name: r } : r) } catch(e) {}
+}
+
+async function openCreate() {
   editingId.value = null
   Object.assign(form, { product_name:'', kpi:'', region:'', status:'active', sales_person_id:null, agency_ratio:0, bm_ids:[], runner_ids:[] })
   formLines.value = []
   pixelFilterQuery.value = ''
+  await refreshOptions()
   dialogVisible.value = true
 }
 
-function openEdit(row) {
+async function openEdit(row) {
   editingId.value = row.id
   Object.assign(form, { product_name: row.product_name, kpi: row.kpi, region: row.region, status: row.status || 'active', sales_person_id: row.sales_person_id, agency_ratio: row.agency_ratio, bm_ids: (row.bms||[]).map(b=>b.id), runner_ids: (row.runners||[]).map(r=>r.id) })
   formLines.value = (row.lines||[]).map(l=>({ line_name:l.line_name, link:l.link, pixel_id:l.pixel_id }))
   pixelFilterQuery.value = ''
+  await refreshOptions()
   dialogVisible.value = true
 }
 

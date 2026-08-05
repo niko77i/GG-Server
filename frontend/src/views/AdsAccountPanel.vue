@@ -45,7 +45,7 @@
     <div style="flex:1;min-height:0;overflow-y:auto;">
       <el-table :data="store.accounts" @selection-change="val => selected = val" :row-class-name="mccRowClass">
         <el-table-column type="selection" width="45" />
-        <el-table-column label="账号名称" min-width="120">
+        <el-table-column label="账号名称" min-width="140">
           <template #default="{ row }">
             <div class="inline-edit-cell" v-if="editingNameId === row.id">
               <el-input v-model="editNameValue" size="small" class="inline-name-input"
@@ -58,8 +58,8 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="account_id" label="账号 ID" min-width="130" show-overflow-tooltip />
-        <el-table-column label="所属 MCC" min-width="130">
+        <el-table-column prop="account_id" label="账号 ID" min-width="140" show-overflow-tooltip />
+        <el-table-column label="所属 MCC" min-width="140">
           <template #default="{ row }">
             <div class="inline-edit-cell" v-if="editingMccId === row.id">
               <el-select v-model="editMccValue" size="small" class="inline-mcc-select"
@@ -71,26 +71,65 @@
               </el-select>
             </div>
             <div class="inline-edit-cell" v-else>
-              <template v-if="row.mcc_name">
-                <span style="color:#0891b2;">{{ row.mcc_name }}</span>
-                <span style="font-size:10px;color:#0891b2;"> · {{ row.mcc_code }}</span>
-              </template>
-              <span v-else style="color:#888;">未分配</span>
+              <div class="mcc-text-block" v-if="row.mcc_name">
+                <div class="inline-cell-text" style="color:#0891b2;">{{ row.mcc_name }}</div>
+                <div style="font-size:10px;color:#0891b2;white-space:nowrap;">{{ row.mcc_code }}</div>
+              </div>
+              <span v-else style="color:#888;white-space:nowrap;">未分配</span>
               <el-button link size="small" class="inline-edit-btn" @click.stop="startEditMcc(row)">✏️</el-button>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="timezone" label="时区" min-width="60" />
-        <el-table-column prop="agent" label="代理" min-width="70" />
-        <el-table-column label="状态" width="105">
+        <el-table-column label="时区" min-width="120">
           <template #default="{ row }">
-            <div style="display:flex;align-items:center;gap:4px;flex-wrap:nowrap;">
-              <el-tag size="small" :type="row.status === '存活' ? 'success' : row.status === '验证' ? 'warning' : row.status === '死亡' ? 'danger' : 'info'">{{ row.status || '未知' }}</el-tag>
+            <div class="inline-edit-cell" v-if="editingTimezoneId === row.id">
+              <el-select v-model="editTimezoneValue" size="small" class="inline-tz-select"
+                filterable allow-create default-first-option placeholder="时区"
+                @change="saveTimezone(row)" @blur="onTimezoneBlur"
+                @visible-change="v => { if (!v && !tzPending) cancelTimezoneEdit() }">
+                <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+              </el-select>
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <span class="inline-cell-text">{{ row.timezone || '—' }}</span>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditTimezone(row)">✏️</el-button>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="acquired_date" label="到手时间" width="110" show-overflow-tooltip />
-        <el-table-column label="状态变更时间" width="120" show-overflow-tooltip>
+        <el-table-column label="代理" min-width="140">
+          <template #default="{ row }">
+            <div class="inline-edit-cell" v-if="editingAgentId === row.id">
+              <el-select v-model="editAgentValue" size="small" class="inline-agent-select"
+                filterable clearable placeholder="选择代理"
+                @change="saveAgent(row)" @blur="onAgentBlur"
+                @visible-change="v => { if (!v && !agentPending) cancelAgentEdit() }">
+                <el-option v-for="a in agentOptions" :key="a.id" :label="a.name" :value="a.id" />
+              </el-select>
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <span class="inline-cell-text">{{ row.agent || '—' }}</span>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditAgent(row)">✏️</el-button>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" min-width="120">
+          <template #default="{ row }">
+            <div class="inline-edit-cell" v-if="editingStatusId === row.id">
+              <el-select v-model="editStatusValue" size="small" class="inline-status-select"
+                filterable placeholder="选择状态"
+                @change="saveStatus(row)" @blur="onStatusBlur"
+                @visible-change="v => { if (!v && !statusPending) cancelStatusEdit() }">
+                <el-option v-for="s in store.options.statuses" :key="s.id" :label="s.name" :value="s.id" />
+              </el-select>
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <el-tag size="small" class="status-tag" :type="row.status === '存活' ? 'success' : row.status === '验证' ? 'warning' : row.status === '死亡' ? 'danger' : 'info'">{{ row.status || '未知' }}</el-tag>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditStatus(row)">✏️</el-button>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="acquired_date" label="到手时间" min-width="100" show-overflow-tooltip />
+        <el-table-column label="状态变更时间" min-width="110" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.status_changed_date" style="font-size:12px;">{{ row.status_changed_date }}</span>
             <span v-else style="color:#ccc;">—</span>
@@ -163,10 +202,19 @@ const statusCounts = ref({})
 // 内联编辑状态
 const editingNameId = ref(null)
 const editingMccId = ref(null)
+const editingTimezoneId = ref(null)
+const editingAgentId = ref(null)
+const editingStatusId = ref(null)
 const editNameValue = ref('')
 const editMccValue = ref(null)
+const editTimezoneValue = ref('')
+const editAgentValue = ref(null)
+const editStatusValue = ref(null)
 let nameInputRef = null
 let mccPending = false
+let tzPending = false
+let agentPending = false
+let statusPending = false
 let searchTimer = null
 
 onMounted(() => {
@@ -303,6 +351,112 @@ function onMccBlur() {
   }, 200)
 }
 
+// ===== 时区内联编辑 =====
+function startEditTimezone(row) {
+  editingTimezoneId.value = row.id
+  editTimezoneValue.value = row.timezone || ''
+  tzPending = false
+}
+function cancelTimezoneEdit() {
+  editingTimezoneId.value = null
+  editTimezoneValue.value = ''
+  tzPending = false
+}
+async function saveTimezone(row) {
+  const v = editTimezoneValue.value || ''
+  if (v === (row.timezone || '')) { cancelTimezoneEdit(); return }
+  tzPending = true
+  try {
+    await store.updateAccount(row.id, { timezone: v })
+    row.timezone = v
+    // 如果新时区不在选项中，加入列表
+    if (v && !timezoneOptions.value.includes(v)) {
+      timezoneOptions.value.push(v)
+    }
+    ElMessage.success('时区已更新')
+  } catch (e) {
+    ElMessage.error('更新时区失败')
+  }
+  cancelTimezoneEdit()
+}
+function onTimezoneBlur() {
+  setTimeout(() => {
+    if (!tzPending && editingTimezoneId.value !== null) cancelTimezoneEdit()
+  }, 200)
+}
+
+// ===== 代理内联编辑 =====
+function startEditAgent(row) {
+  editingAgentId.value = row.id
+  // 根据 row.agent 名称找到对应的 agent_id
+  const found = agentOptions.value.find(a => a.name === row.agent)
+  editAgentValue.value = found ? found.id : null
+  agentPending = false
+}
+function cancelAgentEdit() {
+  editingAgentId.value = null
+  editAgentValue.value = null
+  agentPending = false
+}
+async function saveAgent(row) {
+  const v = editAgentValue.value ?? null
+  const currentAgentId = agentOptions.value.find(a => a.name === row.agent)?.id ?? null
+  if (v === currentAgentId) { cancelAgentEdit(); return }
+  agentPending = true
+  try {
+    await store.updateAccount(row.id, { agent_id: v })
+    const a = agentOptions.value.find(x => x.id === v)
+    row.agent = a ? a.name : null
+    row.agent_name = a ? a.name : null
+    ElMessage.success('代理已更新')
+  } catch (e) {
+    ElMessage.error('更新代理失败')
+  }
+  cancelAgentEdit()
+}
+function onAgentBlur() {
+  setTimeout(() => {
+    if (!agentPending && editingAgentId.value !== null) cancelAgentEdit()
+  }, 200)
+}
+
+// ===== 状态内联编辑 =====
+function startEditStatus(row) {
+  editingStatusId.value = row.id
+  // 根据 row.status 名称找到对应的 status_id
+  const found = store.options.statuses.find(s => s.name === row.status)
+  editStatusValue.value = found ? found.id : null
+  statusPending = false
+}
+function cancelStatusEdit() {
+  editingStatusId.value = null
+  editStatusValue.value = null
+  statusPending = false
+}
+async function saveStatus(row) {
+  const v = editStatusValue.value ?? null
+  const currentStatusId = store.options.statuses.find(s => s.name === row.status)?.id ?? null
+  if (v === currentStatusId) { cancelStatusEdit(); return }
+  statusPending = true
+  try {
+    await store.updateAccount(row.id, { status_id: v })
+    const s = store.options.statuses.find(x => x.id === v)
+    row.status = s ? s.name : null
+    row.status_name = s ? s.name : null
+    // 后端会自动处理 status_changed_date，这里先乐观更新
+    row.status_changed_date = new Date().toISOString().slice(0, 10)
+    ElMessage.success('状态已更新')
+  } catch (e) {
+    ElMessage.error('更新状态失败')
+  }
+  cancelStatusEdit()
+}
+function onStatusBlur() {
+  setTimeout(() => {
+    if (!statusPending && editingStatusId.value !== null) cancelStatusEdit()
+  }, 200)
+}
+
 async function doBatchStatus(val) {
   if (!val) return
   const st = store.options.statuses.find(s => s.id === val)
@@ -344,6 +498,21 @@ async function doBatchMcc(val) {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+}
+.inline-cell-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.mcc-text-block {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
 }
 .inline-edit-btn {
   opacity: 0;
@@ -354,8 +523,18 @@ async function doBatchMcc(val) {
 .inline-edit-cell:hover .inline-edit-btn {
   opacity: 1;
 }
+.status-tag {
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
 .inline-name-input,
-.inline-mcc-select {
+.inline-mcc-select,
+.inline-tz-select,
+.inline-agent-select,
+.inline-status-select {
   width: 100%;
 }
 </style>

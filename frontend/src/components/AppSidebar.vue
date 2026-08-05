@@ -89,7 +89,7 @@ const fbNavItems = [
       { icon:'📊',label:'像素管理',path:'/fb/pixels'},
     ]},
     { title: '系统', items: [
-      { icon:'⚙',label:'FB设置',path:'/fb/settings',admin:true},
+      { icon:'⚙',label:'FB设置',path:'/fb/settings'},
     ]}
   ]},
   { key: 'fb-extract', icon: '📋', label: '数据提取', sections: [{ title: '提取', items: [{ icon:'📥',label:'FB数据提取',path:'/fb/extract'}]}]},

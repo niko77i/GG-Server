@@ -12,7 +12,7 @@ export const useAuthStore = defineStore('auth', {
     isAdmin: (state) => ['developer', 'admin'].includes(state.user?.role),
     isDeveloper: (state) => state.user?.role === 'developer',
     isViewer: (state) => state.user?.role === 'viewer',
-    canAccessProducts: (state) => ['developer', 'admin', 'viewer'].includes(state.user?.role),
+    canAccessProducts: (state) => ['developer', 'admin', 'viewer', 'user'].includes(state.user?.role),
     isFbUser: (state) => state.currentPlatform === 'fb',
     isGgUser: (state) => state.currentPlatform === 'gg',
     effectivePlatform: (state) => {

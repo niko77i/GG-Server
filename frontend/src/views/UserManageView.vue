@@ -4,6 +4,13 @@
       <h3 style="margin:0;font-size:18px;font-weight:600;color:#111827;">用户管理</h3>
       <el-button @click="$router.push('/profile')">👤 个人信息</el-button>
     </div>
+
+    <!-- 平台切换 Tab -->
+    <el-tabs v-model="platformFilter" @tab-change="onPlatformChange" style="margin-bottom:8px;">
+      <el-tab-pane label="全部" name="" />
+      <el-tab-pane label="GG" name="gg" />
+      <el-tab-pane label="FB" name="fb" />
+    </el-tabs>
     <el-card shadow="never" style="margin-bottom:16px;">
       <el-row :gutter="12" align="middle">
         <el-col :span="8">
@@ -181,6 +188,7 @@ const loading = ref(false)
 const search = ref('')
 const currentPage = ref(1)
 const pageSize = ref(20)
+const platformFilter = ref('')
 
 function isSelf(uid) {
   return authStore.user?.id === uid
@@ -205,7 +213,7 @@ function roleLabel(role) {
 async function fetchUsers() {
   loading.value = true
   try {
-    const res = await adminApi.listUsers({ search: search.value, page: currentPage.value, page_size: pageSize.value })
+    const res = await adminApi.listUsers({ search: search.value, page: currentPage.value, page_size: pageSize.value, platform: platformFilter.value || undefined })
     users.value = res.users
     total.value = res.total
   } catch (e) {
@@ -222,6 +230,10 @@ function handleSearch() {
 }
 function handlePageChange(page) {
   currentPage.value = page
+  fetchUsers()
+}
+function onPlatformChange() {
+  currentPage.value = 1
   fetchUsers()
 }
 

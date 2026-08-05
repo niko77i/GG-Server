@@ -13,7 +13,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useYoutubeStore } from '@/stores/youtube'
 
 const store = useYoutubeStore()
@@ -48,4 +48,6 @@ async function saveConfig() {
 }
 
 onMounted(() => loadCfgFromStore())
+// 监听 tags 变化 — v-show 导致组件挂载时 tags 可能尚未加载
+watch(() => store.tags, () => loadCfgFromStore(), { deep: true })
 </script>
