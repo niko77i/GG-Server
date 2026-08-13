@@ -18,7 +18,7 @@ export const productsApi = {
   // 掉包检测
   checkDelist:  (pid)    => api.post(`/products/${pid}/check-delist`),
   getDelistStatus: ()    => api.get('/products/delist-status'),
-  dismissDelist: (pkgId) => api.post('/delist/dismiss', { package_id: pkgId }),
+  dismissDelist: (packageIds) => api.post('/delist/dismiss', { package_ids: packageIds }),
   getPendingDelist: ()   => api.get('/delist/pending'),
   // 审计日志
   auditLogList: (params) => api.get('/audit-log/list', { params }),

@@ -46,62 +46,53 @@ def _build_mentions(usernames: list[str]) -> str:
     return " ".join(f"@{u}" for u in usernames)
 
 
-def _build_message(pkg_info: dict, usernames: list[str]) -> str:
-    """构建发往 Telegram 的通知消息正文（HTML 格式）。
+def _build_product_message(product_name: str, series_names: list[str], usernames: list[str]) -> str:
+    """构建产品级掉包通知消息正文（HTML 格式）。
 
     Args:
-        pkg_info: 包含 product_name, series_name, package_name, url 的字典
+        product_name: 产品名称
+        series_names: 掉包系列名列表（已去重）
         usernames: Telegram 用户名列表（不带 @ 前缀）
 
     Returns:
         HTML 格式的通知消息
     """
-    product_name = _escape_html(pkg_info.get("product_name", "") or "-")
-    series_name = _escape_html(pkg_info.get("series_name", "") or "-")
-    package_name = _escape_html(pkg_info.get("package_name", "") or "-")
-    url = pkg_info.get("url", "")
-
+    product_name = _escape_html(product_name or "-")
     mentions = _build_mentions(usernames)
 
     lines = [
         "<b>【GG-Server 掉包通知】</b>",
     ]
-
     if mentions:
         lines.append("")
         lines.append(mentions)
 
-    lines.extend([
-        "",
-        f"<b>产品：</b>{product_name}",
-        f"<b>系列：</b>{series_name}",
-        f"<b>包名：</b><code>{package_name}</code>",
-    ])
-
-    if url:
-        escaped_url = _escape_html(url)
-        lines.append(f'<b>链接：</b><a href="{escaped_url}">Google Play</a>')
-    else:
-        lines.append("<b>链接：</b>-")
+    lines.append("")
+    lines.append(f"<b>产品：</b>{product_name}")
+    lines.append("<b>掉包系列：</b>")
+    for sn in series_names:
+        lines.append(f"· {_escape_html(sn or '-')}")
 
     lines.extend([
         "",
-        '该包已被下架，请尽快将包状态设置为"掉包"。',
+        '该产品的多个包已被下架，请尽快将包状态设置为"掉包"。',
     ])
 
     return "\n".join(lines)
 
 
-def send_delist_notification(
+def send_product_delist_notification(
     config: _TelegramConfig,
-    pkg_info: dict,
+    product_name: str,
+    series_names: list[str],
     usernames: list[str],
 ) -> bool:
-    """发送掉包通知到 Telegram 群组。
+    """发送产品级掉包通知到 Telegram 群组。
 
     Args:
         config: Telegram Bot 配置
-        pkg_info: 包含 product_name, series_name, package_name, url 的字典
+        product_name: 产品名称
+        series_names: 掉包系列名列表
         usernames: Telegram 用户名列表（不带 @ 前缀），空列表表示不 @任何人
 
     Returns:
@@ -110,7 +101,7 @@ def send_delist_notification(
     if not config.bot_token or not config.chat_id:
         return False
 
-    text = _build_message(pkg_info, usernames)
+    text = _build_product_message(product_name, series_names, usernames)
 
     payload = {
         "chat_id": config.chat_id,

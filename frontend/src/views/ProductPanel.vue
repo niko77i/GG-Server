@@ -179,16 +179,22 @@ async function load() {
 const { debounced: debouncedLoad } = useDebounce(load, 200)
 
 // 已在产品页时点击通知（路由 query 变化），同样滚动
-watch(() => route.query.highlight_pkg, () => { scrollToHighlightedPackage() })
+watch(() => route.query.highlight_pkgs, () => { scrollToHighlightedPackage() })
 
 async function scrollToHighlightedPackage() {
-  const pkgId = route.query.highlight_pkg
-  if (!pkgId) return
+  const raw = route.query.highlight_pkgs || route.query.highlight_pkg || ''
+  const pkgIds = String(raw).split(',').filter(Boolean)
+  if (!pkgIds.length) return
   router.replace({ query: {} })  // 清除 query，避免后续重复滚动
   await nextTick()
-  const el = document.getElementById('pkg-' + pkgId)
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  let scrolled = false
+  for (const pkgId of pkgIds) {
+    const el = document.getElementById('pkg-' + pkgId)
+    if (!el) continue
+    if (!scrolled) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      scrolled = true
+    }
     el.style.boxShadow = '0 0 0 3px #ef4444'
     el.style.transition = 'box-shadow 0.3s'
     setTimeout(() => { el.style.boxShadow = '' }, 2000)

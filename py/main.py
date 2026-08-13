@@ -3221,23 +3221,18 @@ def products_check_delist(pid):
 
     db.commit()
 
-    # 新掉包 → Telegram 群组通知
+    # 新掉包 → Telegram 群组通知（按产品聚合）
     if newly_delisted:
-        try:
-            rids = _json.loads(runner_ids_raw)
-        except Exception:
-            rids = []
-        # 补齐包详情字段
         tg_pkgs = []
         for r in newly_delisted:
             orig = pkg_map.get(r["package_id"], {})
             tg_pkgs.append({
+                "product_id": pid,
                 "product_name": product_name,
                 "series_name": orig.get("series_name", ""),
-                "package_name": orig.get("package_name", ""),
-                "url": orig.get("url", ""),
+                "runner_ids": runner_ids_raw,
             })
-        _send_telegram_notifications(db, tg_pkgs, rids)
+        _send_telegram_notifications(db, tg_pkgs)
 
     db.close()
     return jsonify({"success": True, "results": results})
@@ -3280,32 +3275,41 @@ def products_delist_status():
 @app.route("/api/delist/dismiss", methods=["POST"])
 @jwt_required()
 def delist_dismiss():
-    """记录用户关闭掉包通知的时间。"""
+    """记录用户关闭掉包通知的时间（支持批量 package_ids）。"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
-    package_id = data.get("package_id")
-    if not package_id:
-        return jsonify({"success": False, "error": "缺少 package_id"}), 400
+    package_ids = data.get("package_ids")
+    if not package_ids:
+        # 兼容旧的单包字段
+        package_id = data.get("package_id")
+        if package_id:
+            package_ids = [package_id]
+    if not package_ids:
+        return jsonify({"success": False, "error": "缺少 package_ids"}), 400
+
+    if not isinstance(package_ids, list):
+        package_ids = [package_ids]
 
     db = _yt_db()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    existing = db.execute(
-        "SELECT id, first_notified FROM delist_notifications WHERE package_id=? AND user_id=?",
-        (package_id, user_id)
-    ).fetchone()
+    for package_id in package_ids:
+        existing = db.execute(
+            "SELECT id, first_notified FROM delist_notifications WHERE package_id=? AND user_id=?",
+            (package_id, user_id)
+        ).fetchone()
 
-    if existing:
-        db.execute(
-            "UPDATE delist_notifications SET dismissed_at=?, reminder_count=reminder_count+1 WHERE package_id=? AND user_id=?",
-            (now, package_id, user_id)
-        )
-    else:
-        db.execute(
-            "INSERT INTO delist_notifications(package_id, user_id, first_notified, dismissed_at, reminder_count) "
-            "VALUES(?, ?, 1, ?, 0)",
-            (package_id, user_id, now)
-        )
+        if existing:
+            db.execute(
+                "UPDATE delist_notifications SET dismissed_at=?, reminder_count=reminder_count+1 WHERE package_id=? AND user_id=?",
+                (now, package_id, user_id)
+            )
+        else:
+            db.execute(
+                "INSERT INTO delist_notifications(package_id, user_id, first_notified, dismissed_at, reminder_count) "
+                "VALUES(?, ?, 1, ?, 0)",
+                (package_id, user_id, now)
+            )
 
     db.commit(); db.close()
     return jsonify({"success": True})
@@ -3314,17 +3318,16 @@ def delist_dismiss():
 @app.route("/api/delist/pending", methods=["GET"])
 @jwt_required()
 def delist_pending():
-    """获取当前用户待处理的掉包通知列表。
+    """获取当前用户待处理的掉包通知列表（按产品聚合）。
 
     返回两种类型的通知：
-    - type='first': 首次通知（尚未弹出过）
-    - type='reminder': 提醒通知（已关闭超过 3 分钟，且包状态未设为 dropped）
+    - type='first': 首次通知（组内任一包尚未弹出过）
+    - type='reminder': 提醒通知（组内任一包已关闭超过 3 分钟，且未 dropped）
     """
     user_id = int(get_jwt_identity())
     db = _yt_db()
     uid_s = str(user_id)
 
-    # 查询当前用户作为 runner 的产品中已掉包且未 dropped 的包
     rows = db.execute(
         "SELECT dc.package_id, dc.product_id, dc.is_delisted, dc.checked_at, "
         "pkg.package_name, pkg.series_name, pkg.url, pkg.status AS pkg_status, "
@@ -3342,8 +3345,9 @@ def delist_pending():
         (user_id, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]")
     ).fetchall()
 
-    notifications = []
     now = datetime.datetime.now(datetime.timezone.utc)
+    # 先按包计算 first/reminder
+    pkg_notifications = []
     for r in rows:
         d = dict(r)
         pkg_status = (d.get("pkg_status") or "").strip()
@@ -3354,15 +3358,13 @@ def delist_pending():
         dismissed_at = d.get("dismissed_at")
 
         if not first_notified:
-            # 首次通知
-            notifications.append({
-                "package_id": d["package_id"],
+            pkg_notifications.append({
                 "product_id": d["product_id"],
                 "product_name": d["product_name"],
-                "package_name": d["package_name"],
-                "series_name": d["series_name"],
-                "url": d["url"],
+                "series_name": d["series_name"] or "",
+                "package_id": d["package_id"],
                 "type": "first",
+                "reminder_count": 0,
             })
         elif dismissed_at:
             try:
@@ -3371,18 +3373,40 @@ def delist_pending():
                     dismissed_dt = dismissed_dt.replace(tzinfo=datetime.timezone.utc)
                 elapsed = (now - dismissed_dt).total_seconds()
                 if elapsed >= 180:  # 3 分钟 = 180 秒
-                    notifications.append({
-                        "package_id": d["package_id"],
+                    pkg_notifications.append({
                         "product_id": d["product_id"],
                         "product_name": d["product_name"],
-                        "package_name": d["package_name"],
-                        "series_name": d["series_name"],
-                        "url": d["url"],
+                        "series_name": d["series_name"] or "",
+                        "package_id": d["package_id"],
                         "type": "reminder",
                         "reminder_count": d.get("reminder_count", 0),
                     })
             except (ValueError, TypeError):
                 pass
+
+    # 按 product_id 聚合（dict 保持插入顺序）
+    groups = {}
+    for n in pkg_notifications:
+        pid = n["product_id"]
+        g = groups.setdefault(pid, {
+            "product_id": pid,
+            "product_name": n["product_name"],
+            "series_names": [],
+            "package_ids": [],
+            "type": n["type"],
+            "reminder_count": 0,
+        })
+        sn = (n["series_name"] or "").strip()
+        if sn and sn not in g["series_names"]:
+            g["series_names"].append(sn)
+        if n["package_id"] not in g["package_ids"]:
+            g["package_ids"].append(n["package_id"])
+        if n["type"] == "first":
+            g["type"] = "first"  # first 优先于 reminder
+        if n["reminder_count"] > g["reminder_count"]:
+            g["reminder_count"] = n["reminder_count"]
+
+    notifications = list(groups.values())
 
     db.close()
     return jsonify({"success": True, "notifications": notifications})
@@ -7702,13 +7726,12 @@ def _run_weekly_cleanup_once():
     log.info("已清理爬取图片、视频、音频替换临时文件及过期任务记录")
 
 
-def _send_telegram_notifications(db, pkgs, runner_ids):
-    """发送 Telegram 群组掉包通知（公共辅助函数）。
+def _send_telegram_notifications(db, pkgs):
+    """按产品分组发送 Telegram 群组掉包通知。
 
     Args:
         db: 数据库连接
-        pkgs: 掉包字典列表，每项含 product_name, series_name, package_name, url
-        runner_ids: 在跑人员 ID 列表
+        pkgs: 掉包字典列表，每项含 product_id, product_name, series_name, runner_ids(JSON字符串)
     """
     tg_cfg = APP_CONFIG.get("telegram", {})
     if not (tg_cfg.get("bot_token") and tg_cfg.get("chat_id") and pkgs):
@@ -7721,22 +7744,37 @@ def _send_telegram_notifications(db, pkgs, runner_ids):
         parse_mode=tg_cfg.get("parse_mode", "HTML"),
     )
 
-    usernames = []
-    if runner_ids:
-        rows = db.execute(
-            f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
-            runner_ids
-        ).fetchall()
-        usernames = [r["telegram_username"] for r in rows]
-
+    # 按 product_id 分组（dict 保持插入顺序）
+    groups = {}
     for pkg in pkgs:
-        pkg_info = {
-            "product_name": pkg.get("product_name", ""),
-            "series_name": pkg.get("series_name", ""),
-            "package_name": pkg.get("package_name", ""),
-            "url": pkg.get("url", ""),
-        }
-        _tg_sender.send_delist_notification(tg_config, pkg_info, usernames)
+        pid = pkg.get("product_id")
+        groups.setdefault(pid, []).append(pkg)
+
+    for pid, group_pkgs in groups.items():
+        product_name = group_pkgs[0].get("product_name", "") if group_pkgs else ""
+        series_names = []
+        runner_ids = []
+        for pkg in group_pkgs:
+            sn = (pkg.get("series_name") or "").strip()
+            if sn and sn not in series_names:
+                series_names.append(sn)
+            try:
+                rids = _json.loads(pkg.get("runner_ids", "[]"))
+            except Exception:
+                rids = []
+            for rid in rids:
+                if rid not in runner_ids:
+                    runner_ids.append(rid)
+
+        usernames = []
+        if runner_ids:
+            rows = db.execute(
+                f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
+                runner_ids
+            ).fetchall()
+            usernames = [r["telegram_username"] for r in rows]
+
+        _tg_sender.send_product_delist_notification(tg_config, product_name, series_names, usernames)
 
 
 def _run_delist_check_once():
@@ -7843,14 +7881,9 @@ def _run_delist_check_once():
                             }
                             _email_sender.send_delist_notification(smtp_config, emails, pkg_info)
 
-            # --- Telegram 群组通知（仅发本轮新掉包的包，不重复发送）---
+            # --- Telegram 群组通知（按产品聚合，仅发本轮新掉包，不重复发送）---
             if newly_delisted_list:
-                for pkg in newly_delisted_list:
-                    try:
-                        rids = _json.loads(pkg.get("runner_ids", "[]"))
-                    except Exception:
-                        rids = []
-                    _send_telegram_notifications(db, [pkg], rids)
+                _send_telegram_notifications(db, newly_delisted_list)
 
         return {"total": len(pkgs), "delisted": len(delisted_list), "results": results}
     except Exception as e:
