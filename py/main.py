@@ -3258,6 +3258,7 @@ def products_delist_status():
         "AND (EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = prod.id AND pr.user_id = ?) "
         "OR prod.runner_ids = ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ?) "
         "AND (prod.is_archived IS NULL OR prod.is_archived = 0) "
+        "AND (prod.status IS NULL OR prod.status = '' OR prod.status = '0') "
         "ORDER BY dc.checked_at DESC",
         (user_id, f"[{user_id}]", f"[{user_id},%", f"%, {user_id},%", f"%, {user_id}]")
     ).fetchall()
@@ -3341,6 +3342,7 @@ def delist_pending():
         "AND (pkg.status IS NULL OR pkg.status = '' OR pkg.status = '0' OR pkg.status NOT IN ('dropped', 'paused')) "
         "AND (prod.runner_ids = ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ? OR prod.runner_ids LIKE ?) "
         "AND (prod.is_archived IS NULL OR prod.is_archived = 0) "
+        "AND (prod.status IS NULL OR prod.status = '' OR prod.status = '0') "
         "ORDER BY dc.checked_at DESC",
         (user_id, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]")
     ).fetchall()

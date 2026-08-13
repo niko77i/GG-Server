@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.12  
-> **日期**: 2026-07-31（v1.12 更新于 2026-08-13）  
+> **文档版本**: v1.13  
+> **日期**: 2026-07-31（v1.13 更新于 2026-08-13）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.13 变更**: 修复「暂停/删除产品仍弹掉包通知」——`delist/pending` 与 `products/delist-status` 两个查询此前只过滤 `pkg.status`（包状态）、漏过滤 `prod.status`（产品状态），导致产品暂停/删除后前端仍反复弹掉包通知（首次 + 3 分钟提醒循环）。两处查询补 `AND (prod.status IS NULL OR prod.status='' OR prod.status='0')`，与定时检测 `_run_delist_check_once` 保持一致。迁移到 Spring Boot 时，DelistService 查询通知/掉包状态的 SQL 必须同时过滤包状态与产品状态（详见 6.3 说明）
 > **v1.12 变更**: 修复产品包列表勾选框视觉不同步 bug 并补充 Shift 范围取消——checkbox 由 `@click.stop.prevent` 改为 `@mousedown`（记录 Shift）+ `@change`（处理切换），解决「状态已更新但勾选框视觉不同步、再次点击取消不了」的问题；Shift 范围选择由「只追加勾选」改为按目标状态统一设置（支持选中/取消）。详见附录 F
 > **v1.11 变更**: 修复 Python SQLite 端全新数据库建库崩溃的两个 bug——① `_ensure_schema` 中 `idx_products_archived` 索引先于 `is_archived` 列创建（该列由 `_ensure_columns` 补），删除该冗余索引；② `_migrate_options_tables` 的 guard 用「agent_id 非 NULL 记录数」判断迁移状态，空表时失效导致重复迁移报 `no such column: agent`，改为迁移前先检查旧 `agent` 列是否存在。迁移到 MySQL 时注意：DDL 索引不得先于列定义；数据迁移 guard 应用明确的迁移标记（config/版本表）而非记录数判断
 > **v1.10 变更**: 掉包通知按产品聚合——`delist/pending` 返回产品聚合结构、`delist/dismiss` 接受 `package_ids[]`、Telegram 通知改为产品级（产品名 + 多系列名，不展示包名/链接）；前端弹窗按产品统一为一条（详见 6.3 说明）
@@ -1711,6 +1712,11 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > （`{ product_id, product_name, series_names[], package_ids[], type, reminder_count }`），
 > `delist/dismiss` 入参为 `package_ids[]`（批量）。对应 Python 端 `delist_pending` / `delist_dismiss`
 > 已同步改造为按产品聚合/批量关闭；前端 `App.vue` 按产品统一弹窗、`ProductPanel.vue` 支持多包跳转高亮。
+>
+> **说明（v1.13 新增）**：掉包通知查询必须**同时过滤包状态与产品状态**，否则暂停/删除的产品仍会弹通知：
+> - `GET /api/products/delist-status` 与 `GET /api/delist/pending` 的 WHERE 除过滤 `pkg.status`（`IS NULL/''/'0'`，排除 dropped/paused 包）外，还必须过滤 `prod.status`（`IS NULL/''/'0'`，排除 paused/dropped 产品）。
+> - 漏掉 `prod.status` 的后果：产品暂停后，只要掉包的包未手动标成 `dropped`，前端 `App.vue` 每 30 秒轮询 `delist/pending` 仍命中，反复弹「首次通知」+ 关闭 3 分钟后的「提醒通知」。
+> - Python 端定时检测 `_run_delist_check_once` 一直含 `prod.status` 过滤；`delist-status`/`delist/pending` 曾缺失，已于 v1.13 补齐。迁移到 Spring Boot 的 DelistService 时务必保留此过滤。
 
 ---
 
