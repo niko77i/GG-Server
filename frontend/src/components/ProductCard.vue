@@ -82,6 +82,7 @@
         <span style="display:flex;align-items:center;gap:6px;">
           <el-button size="small" text @click.stop="toggleAll">{{ allChecked ? '☑ 取消全选' : '☑ 全选' }}</el-button>
           <span style="font-size:11px;color:#888;">已选 {{ checkedIds.length }} 个</span>
+          <el-button v-if="checkedIds.length" size="small" text type="info" @click.stop="clearSelection">✕ 取消选择</el-button>
           <el-select v-if="checkedIds.length && !auth.isViewer" :model-value="''" @change="v => batchStatusChange(v)" size="small" style="width:110px;" placeholder="批量改状态">
             <el-option label="正常" value="normal" /><el-option label="没事件" value="no_events" /><el-option label="暂停" value="paused" /><el-option label="掉包" value="dropped" /><el-option label="拒登" value="rejected" />
           </el-select>
@@ -284,6 +285,10 @@ const allChecked = computed(() => {
 function toggleAll() {
   if (allChecked.value) { checkedIds.value = [] }
   else { checkedIds.value = packages.value.filter(p => normalizeStatus(p.status) !== 'dropped').map(p => p.id) }
+}
+function clearSelection() {
+  checkedIds.value = []
+  anchorId.value = null
 }
 function batchStatusChange(status) {
   if (!checkedIds.value.length) return

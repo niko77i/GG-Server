@@ -1,11 +1,13 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.13  
-> **日期**: 2026-07-31（v1.13 更新于 2026-08-13）  
+> **文档版本**: v1.15  
+> **日期**: 2026-07-31（v1.15 更新于 2026-08-13）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.15 变更**: 产品包列表多选后新增「取消选择」按钮——工具栏「已选 N 个」旁新增「✕ 取消选择」按钮（选中任意包后显示），点击一键清空已选并重置 Shift 锚点，补齐「部分选择时无清空入口」的缺口（纯前端，详见附录 F）
 > **v1.13 变更**: 修复「暂停/删除产品仍弹掉包通知」——`delist/pending` 与 `products/delist-status` 两个查询此前只过滤 `pkg.status`（包状态）、漏过滤 `prod.status`（产品状态），导致产品暂停/删除后前端仍反复弹掉包通知（首次 + 3 分钟提醒循环）。两处查询补 `AND (prod.status IS NULL OR prod.status='' OR prod.status='0')`，与定时检测 `_run_delist_check_once` 保持一致。迁移到 Spring Boot 时，DelistService 查询通知/掉包状态的 SQL 必须同时过滤包状态与产品状态（详见 6.3 说明）
+> **v1.14 变更**: FB 数据提取动态分组补充「短纯数字作为组起点」判断——账户名可能是短纯数字（如 `100M$` 被识别为文本、但某些账户名是 <10 位纯数字），此前分组条件只认「文本行 + 下一行 ≥10 位账户 ID」，会漏掉以短数字开头的账户。现分组起点改为 `(is_text_header OR is_short_number) AND next_is_account_id`，其中 `is_short_number = 纯数字且去逗号后 <10 位`。详见 8.2 节 `parseExtract` 动态分组实现
 > **v1.12 变更**: 修复产品包列表勾选框视觉不同步 bug 并补充 Shift 范围取消——checkbox 由 `@click.stop.prevent` 改为 `@mousedown`（记录 Shift）+ `@change`（处理切换），解决「状态已更新但勾选框视觉不同步、再次点击取消不了」的问题；Shift 范围选择由「只追加勾选」改为按目标状态统一设置（支持选中/取消）。详见附录 F
 > **v1.11 变更**: 修复 Python SQLite 端全新数据库建库崩溃的两个 bug——① `_ensure_schema` 中 `idx_products_archived` 索引先于 `is_archived` 列创建（该列由 `_ensure_columns` 补），删除该冗余索引；② `_migrate_options_tables` 的 guard 用「agent_id 非 NULL 记录数」判断迁移状态，空表时失效导致重复迁移报 `no such column: agent`，改为迁移前先检查旧 `agent` 列是否存在。迁移到 MySQL 时注意：DDL 索引不得先于列定义；数据迁移 guard 应用明确的迁移标记（config/版本表）而非记录数判断
 > **v1.10 变更**: 掉包通知按产品聚合——`delist/pending` 返回产品聚合结构、`delist/dismiss` 接受 `package_ids[]`、Telegram 通知改为产品级（产品名 + 多系列名，不展示包名/链接）；前端弹窗按产品统一为一条（详见 6.3 说明）
@@ -2319,7 +2321,36 @@ public class FbExtractService {
             }
         }
 
-        // ... 动态分组、提取每组 account_name/account_id/cost 等（与 Python 一致）
+        // === 动态分组（v1.14：支持短纯数字作为组起点） ===
+        // 规则：当前行是「文本头」或「短纯数字(<10位，可能是账户名)」且下一行是 ≥10 位账户 ID → 新组开始
+        List<String> dataLines = lines.subList(startIdx, endIdx);
+        List<List<String>> groups = new ArrayList<>();
+        List<String> currentGroup = new ArrayList<>();
+        Pattern pureDigit = Pattern.compile("^[\\d,]+$");
+
+        for (int i = 0; i < dataLines.size(); i++) {
+            String line = dataLines.get(i);
+            boolean isPureDigit = pureDigit.matcher(line).matches();
+            int digitLen = isPureDigit ? line.replace(",", "").length() : 0;
+            boolean isAccountId = digitLen >= 10;
+            boolean isTextHeader = !isPureDigit
+                && !line.startsWith("$") && !line.startsWith("[");
+            boolean isShortNumber = isPureDigit && digitLen < 10;  // 短纯数字可能是账户名
+
+            boolean nextIsAccountId = i + 1 < dataLines.size()
+                && pureDigit.matcher(dataLines.get(i + 1)).matches()
+                && dataLines.get(i + 1).replace(",", "").length() >= 10;
+
+            if ((isTextHeader || isShortNumber) && nextIsAccountId) {
+                if (!currentGroup.isEmpty()) groups.add(currentGroup);
+                currentGroup = new ArrayList<>(List.of(line));
+            } else {
+                currentGroup.add(line);
+            }
+        }
+        if (!currentGroup.isEmpty()) groups.add(currentGroup);
+
+        // 逐组提取：group[0]=账户名, group[1]=账户ID(去逗号), group[2:]=$金额/纯数字
 
         // === 每组提取后的过滤逻辑（2026-08-01 新增） ===
         // 1. 去重：收集到的 $ 金额用 distinct 去重，相同值视为重复数据只保留一个
@@ -3420,6 +3451,7 @@ INSERT INTO tags (`key`, `value`) VALUES
 - 普通点击包 checkbox：正常勾选/取消该包，并更新锚点。
 - **按住 Shift 点击包 checkbox**：按当前展示顺序，把「锚点包 ↔ 当前包」之间的连续所有包统一设为当前包的目标状态（选中或取消）。
 - checkbox 由 `v-model` 改为 `:checked` 绑定 + `@change` 处理切换，并用 `@mousedown` 记录 Shift 状态（`change` 事件不携带 `shiftKey`）。视觉状态完全由 `checkedIds` 驱动；不再使用 `@click.prevent`（其会取消浏览器原生切换、导致勾选框视觉与状态不同步）。
+- 工具栏「已选 N 个」旁新增 **「✕ 取消选择」** 按钮（`checkedIds.length > 0` 时显示），点击清空 `checkedIds` 并重置 `anchorId`，提供「部分选择时一键清空」的入口（v1.15 新增）。
 
 ### F.4 名字排序
 
