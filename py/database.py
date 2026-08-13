@@ -125,6 +125,8 @@ def _ensure_columns(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
     if _table_exists(conn, "products"):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_archived ON products(is_archived)")
     _add_column_if_missing(conn, "products", "customer", "customer TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "deleted_at", "deleted_at TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "agency_ratio", "agency_ratio REAL DEFAULT NULL")
@@ -314,6 +316,8 @@ def _ensure_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_products_name ON products(product_name);
         CREATE INDEX IF NOT EXISTS idx_products_region ON products(region);
         CREATE INDEX IF NOT EXISTS idx_products_mcc ON products(mcc_id);
+        CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at);
+        CREATE INDEX IF NOT EXISTS idx_products_archived ON products(is_archived);
 
         CREATE TABLE IF NOT EXISTS packages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

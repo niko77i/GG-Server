@@ -5,6 +5,7 @@ export const productsApi = {
   create:      (body)   => api.post('/products/create', body),
   update:      (id, body) => api.put(`/products/${id}`, body),
   delete:      (id)     => api.delete(`/products/${id}`),
+  restore:     (id)     => api.post(`/products/${id}/restore`),
   detail:      (id)     => api.get(`/products/${id}/detail`),
   addPackage:  (pid, body) => api.post(`/products/${pid}/packages`, body),
   updatePackage: (pkgId, body) => api.put(`/products/packages/${pkgId}`, body),

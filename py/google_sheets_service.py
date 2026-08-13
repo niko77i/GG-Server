@@ -482,8 +482,11 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     # 获取产品信息（商务、地区等）
     product_info = db.execute(
         "SELECT p.product_name, p.region, p.agency_ratio, sp.name as sales_person "
-        "FROM fb_products p LEFT JOIN sales_persons sp ON sp.id = p.sales_person_id "
-        "WHERE p.product_name=?", (product_name,)
+        "FROM fb_products p "
+        "JOIN fb_product_runners pr ON pr.product_id = p.id AND pr.user_id = ? "
+        "LEFT JOIN sales_persons sp ON sp.id = p.sales_person_id "
+        "WHERE p.product_name=? AND (p.is_archived IS NULL OR p.is_archived=0) "
+        "ORDER BY p.id DESC LIMIT 1", (user_id, product_name)
     ).fetchone()
 
     if not product_info:
@@ -500,7 +503,7 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
         rows.append([
             report_date,                                      # A: 日期（用户选择的日期）
             operator_name,                                    # B: 运营
-            rec.get('account_name', ''),                     # C: 账户名称
+            f"'{rec.get('account_name', '')}",                 # C: 账户名称（文本，防止纯数字被当数值）
             f"'{rec.get('account_id', '')}",                 # D: 广告账户ID（文本）
             float(rec.get('cost', 0)),                       # E: 账号消耗
             '',                                               # F: 报给客户

@@ -49,12 +49,6 @@
           <span v-if="product.related_account_count" style="font-size:12px;color:#888;">
             👤 {{ product.related_account_count }} 账户
           </span>
-          <template v-for="(cnt, key) in pkgCounts" :key="key">
-            <el-tag v-if="cnt > 0" size="small" :type="key === 'normal' ? 'success' : key === 'rejected' ? 'warning' : key === 'paused' ? 'danger' : 'info'"
-              style="cursor:pointer;" @click.stop="filterStatus = filterStatus === key ? 'all' : key">
-              {{ cnt }} {{ key === 'normal' ? '正常' : key === 'rejected' ? '拒登' : key === 'paused' ? '暂停' : '掉包' }}
-            </el-tag>
-          </template>
         </div>
         <div style="display:flex;gap:4px;">
           <el-button size="small" @click.stop="$emit('detail', product.id)">📋</el-button>
@@ -71,22 +65,35 @@
 
     <div v-show="expanded">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #eee;flex-wrap:wrap;gap:6px;">
+        <span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <el-tag size="small" type="info" :effect="filterStatus === 'all' ? 'dark' : 'light'" style="cursor:pointer;" @click.stop="filterStatus = 'all'">
+            {{ packages.length }} 全部
+          </el-tag>
+          <template v-for="(cnt, key) in pkgCounts" :key="key">
+            <el-tag v-if="cnt > 0" size="small" :type="key === 'normal' ? 'success' : key === 'rejected' ? 'warning' : key === 'no_events' ? '' : key === 'paused' ? 'danger' : 'info'"
+              :effect="filterStatus === key ? 'dark' : 'light'"
+              style="cursor:pointer;" @click.stop="filterStatus = key">
+              {{ cnt }} {{ key === 'normal' ? '正常' : key === 'no_events' ? '没事件' : key === 'rejected' ? '拒登' : key === 'paused' ? '暂停' : '掉包' }}
+            </el-tag>
+          </template>
+          <el-button size="small" text @click.stop="cycleNameSort">{{ nameSortLabel }}</el-button>
+          <el-button v-if="nameSort !== 'default'" size="small" text type="warning" @click.stop="resetNameSort">恢复默认排序</el-button>
+        </span>
         <span style="display:flex;align-items:center;gap:6px;">
           <el-button size="small" text @click.stop="toggleAll">{{ allChecked ? '☑ 取消全选' : '☑ 全选' }}</el-button>
-          <span style="font-size:11px;color:#888;">包含 {{ packages.length }} 个包</span>
+          <span style="font-size:11px;color:#888;">已选 {{ checkedIds.length }} 个</span>
           <el-select v-if="checkedIds.length && !auth.isViewer" :model-value="''" @change="v => batchStatusChange(v)" size="small" style="width:110px;" placeholder="批量改状态">
-            <el-option label="正常" value="normal" /><el-option label="暂停" value="paused" /><el-option label="掉包" value="dropped" /><el-option label="拒登" value="rejected" />
+            <el-option label="正常" value="normal" /><el-option label="没事件" value="no_events" /><el-option label="暂停" value="paused" /><el-option label="掉包" value="dropped" /><el-option label="拒登" value="rejected" />
           </el-select>
           <el-button v-if="checkedIds.length" size="small" @click.stop="batchCopyLinks" type="primary">📋 复制链接</el-button>
           <el-button v-if="checkedIds.length && !auth.isViewer" size="small" @click.stop="batchDelPkgs" type="danger">🗑 批量删除</el-button>
         </span>
-        <span style="font-size:11px;color:#888;">已选 {{ checkedIds.length }} 个</span>
       </div>
       <div v-for="pkg in filteredPackages" :key="pkg.id" :id="'pkg-' + pkg.id"
         class="pkg-row"
-        :class="{ 'pkg-row--paused': normalizeStatus(pkg.status) === 'paused', 'pkg-row--dropped': normalizeStatus(pkg.status) === 'dropped', 'pkg-row--delisted': pkg.is_delisted && normalizeStatus(pkg.status) !== 'dropped' }">
+        :class="{ 'pkg-row--paused': normalizeStatus(pkg.status) === 'paused', 'pkg-row--no-events': normalizeStatus(pkg.status) === 'no_events', 'pkg-row--dropped': normalizeStatus(pkg.status) === 'dropped', 'pkg-row--delisted': pkg.is_delisted && normalizeStatus(pkg.status) !== 'dropped' }">
         <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;overflow:hidden;">
-          <input type="checkbox" :value="pkg.id" v-model="checkedIds" @click.stop style="width:auto;flex-shrink:0;" />
+          <input type="checkbox" :checked="checkedIds.includes(pkg.id)" @click.stop.prevent="onPkgCheck(pkg, $event)" style="width:auto;flex-shrink:0;" />
           <span style="font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer;"
   @click.stop="copySeriesName(pkg.series_name)"
   :title="'点击复制'">{{ pkg.series_name || '-' }}</span>
@@ -100,12 +107,13 @@
         <div style="display:flex;gap:4px;flex-shrink:0;">
           <el-select v-if="!auth.isViewer" :model-value="normalizeStatus(pkg.status)" @change="v => setPkgStatus(pkg.id, v)" size="small" style="width:80px;">
             <el-option label="正常" value="normal" />
+            <el-option label="没事件" value="no_events" />
             <el-option label="暂停" value="paused" />
             <el-option label="掉包" value="dropped" />
             <el-option label="拒登" value="rejected" />
           </el-select>
           <span v-else style="font-size:11px;color:#888;width:80px;text-align:center;">
-            {{ { normal: '正常', paused: '暂停', dropped: '掉包', rejected: '拒登' }[normalizeStatus(pkg.status)] || normalizeStatus(pkg.status) }}
+            {{ { normal: '正常', no_events: '没事件', paused: '暂停', dropped: '掉包', rejected: '拒登' }[normalizeStatus(pkg.status)] || normalizeStatus(pkg.status) }}
           </span>
           <el-button v-if="!auth.isViewer" size="small" @click.stop="editPkg(pkg)">✏️</el-button>
           <el-button v-if="!auth.isViewer" size="small" type="danger" @click.stop="delPkg(pkg.id)">✕</el-button>
@@ -135,7 +143,9 @@ const auth = useAuthStore()
 const store = useProductStore()
 const expanded = ref(false)
 const checkedIds = ref([])
-const filterStatus = ref('all')
+const anchorId = ref(null)
+const filterStatus = ref('normal')
+const nameSort = ref('default')
 const editPkgModal = ref(null)
 const productSuffix = ref(props.customName)
 const checkingDelist = ref(false)
@@ -192,7 +202,7 @@ const parsedRunnerIds = computed(() => {
 const packages = computed(() => {
   const pkgs = [...(props.product.packages || [])]
   pkgs.sort((a, b) => {
-    const o = { '': 0, '0': 0, rejected: 1, paused: 2, dropped: 3 }
+    const o = { '': 0, '0': 0, no_events: 1, rejected: 2, paused: 3, dropped: 4 }
     const sa = o[(a.status || '').trim()] ?? 0; const sb = o[(b.status || '').trim()] ?? 0
     if (sa !== sb) return sa - sb
     return (a.created_at || '').localeCompare(b.created_at || '')
@@ -201,15 +211,69 @@ const packages = computed(() => {
 })
 
 const pkgCounts = computed(() => {
-  const c = { normal: 0, rejected: 0, paused: 0, dropped: 0 }
+  const c = { normal: 0, no_events: 0, rejected: 0, paused: 0, dropped: 0 }
   packages.value.forEach(p => { const s = normalizeStatus(p.status); c[s] = (c[s] || 0) + 1 })
   return c
 })
 
 const filteredPackages = computed(() => {
-  if (filterStatus.value === 'all') return packages.value
-  return packages.value.filter(p => normalizeStatus(p.status) === filterStatus.value)
+  let list = filterStatus.value === 'all'
+    ? packages.value
+    : packages.value.filter(p => normalizeStatus(p.status) === filterStatus.value)
+  if (nameSort.value !== 'default') {
+    const dir = nameSort.value === 'desc' ? -1 : 1
+    const cmpName = (x, y) => dir * (x.series_name || '').localeCompare(y.series_name || '', undefined, { numeric: true })
+    if (filterStatus.value === 'all') {
+      // 展示所有包：只对「正常」包按名字排序，其它状态保持原有顺序
+      const normal = list.filter(p => normalizeStatus(p.status) === 'normal').sort(cmpName)
+      const others = list.filter(p => normalizeStatus(p.status) !== 'normal')
+      list = [...normal, ...others]
+    } else {
+      // 筛选单一状态：对当前展示的所有包整体按名字排序
+      list = [...list].sort(cmpName)
+    }
+  }
+  return list
 })
+
+const nameSortLabel = computed(() => {
+  if (nameSort.value === 'desc') return '🔤 名字 ↓'
+  if (nameSort.value === 'asc') return '🔤 名字 ↑'
+  return '🔤 名字排序'
+})
+
+function cycleNameSort() {
+  nameSort.value = (nameSort.value === 'desc') ? 'asc' : 'desc'
+}
+
+function resetNameSort() {
+  nameSort.value = 'default'
+}
+
+function onPkgCheck(pkg, event) {
+  const idx = checkedIds.value.indexOf(pkg.id)
+  let didRange = false
+  // Shift 首尾范围选择：按住 Shift 点击，选中锚点包 ↔ 当前包之间连续的所有包
+  if (event.shiftKey && anchorId.value != null && anchorId.value !== pkg.id) {
+    const list = filteredPackages.value
+    const i1 = list.findIndex(p => p.id === anchorId.value)
+    const i2 = list.findIndex(p => p.id === pkg.id)
+    if (i1 !== -1 && i2 !== -1) {
+      const lo = Math.min(i1, i2), hi = Math.max(i1, i2)
+      for (let i = lo; i <= hi; i++) {
+        const id = list[i].id
+        if (!checkedIds.value.includes(id)) checkedIds.value.push(id)
+      }
+      didRange = true
+    }
+  }
+  // 未触发范围选择（普通点击，或锚点已不在当前列表）→ 退化为普通勾选/取消
+  if (!didRange) {
+    if (idx === -1) checkedIds.value.push(pkg.id)
+    else checkedIds.value.splice(idx, 1)
+  }
+  anchorId.value = pkg.id
+}
 
 const allChecked = computed(() => {
   const nonDropped = packages.value.filter(p => normalizeStatus(p.status) !== 'dropped')
@@ -221,7 +285,7 @@ function toggleAll() {
 }
 function batchStatusChange(status) {
   if (!checkedIds.value.length) return
-  const labels = { normal:'正常',paused:'暂停',dropped:'掉包',rejected:'拒登' }
+  const labels = { normal:'正常',no_events:'没事件',paused:'暂停',dropped:'掉包',rejected:'拒登' }
   ElMessageBox.confirm(`将选中的 ${checkedIds.value.length} 个包改为「${labels[status]}」？`,'批量改状态',{type:'warning'}).then(async()=>{
     const dbStatus = status==='normal'?'':status
     for(const id of checkedIds.value){ await store.updatePackage(id,{status:dbStatus}) }
@@ -303,6 +367,7 @@ watch(editPkgModal, async (pkg) => {
 }
 .pkg-row:hover { background: rgba(8,145,178,.06); }
 .pkg-row--paused { opacity: 0.6; }
+.pkg-row--no-events { opacity: 0.6; }
 .pkg-row--dropped { opacity: 0.4; text-decoration: line-through; }
 .pkg-row--delisted { background: #fef2f2; border-left: 3px solid #ef4444; }
 </style>

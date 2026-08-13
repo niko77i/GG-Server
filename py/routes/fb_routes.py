@@ -946,10 +946,17 @@ def _parse_fb_extract(text: str, sorted_mode: bool) -> dict:
     current_group = []
     for i, line in enumerate(data_lines):
         is_pure_digit = re.match(r'^[\d,]+$', line)
-        is_account_id = is_pure_digit and len(re.sub(r'[,]', '', line)) >= 10
+        digit_len = len(re.sub(r'[,]', '', line)) if is_pure_digit else 0
+        is_account_id = digit_len >= 10
         is_text_header = not is_pure_digit and not re.match(r'^\$', line) and not re.match(r'^\[', line)
+        is_short_number = is_pure_digit and digit_len < 10  # 短纯数字可能是账户名
 
-        if is_text_header and i + 1 < len(data_lines) and re.match(r'^[\d,]+$', data_lines[i + 1]) and len(re.sub(r'[,]', '', data_lines[i + 1])) >= 10:
+        next_is_account_id = (
+            i + 1 < len(data_lines)
+            and re.match(r'^[\d,]+$', data_lines[i + 1])
+            and len(re.sub(r'[,]', '', data_lines[i + 1])) >= 10
+        )
+        if (is_text_header or is_short_number) and next_is_account_id:
             if current_group:
                 groups.append(current_group)
             current_group = [line]

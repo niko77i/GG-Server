@@ -34,7 +34,7 @@
         <el-table-column prop="package_name" label="包名" />
         <el-table-column label="状态">
           <template #default="{ row }">
-            {{ row.status === 'paused' ? '暂停' : row.status === 'dropped' ? '掉包' : row.status === 'rejected' ? '拒登' : '正常' }}
+            {{ row.status === 'paused' ? '暂停' : row.status === 'dropped' ? '掉包' : row.status === 'rejected' ? '拒登' : row.status === 'no_events' ? '没事件' : '正常' }}
           </template>
         </el-table-column>
       </el-table>

@@ -2369,23 +2369,19 @@ def products_list():
         except Exception:
             user_id = None
         if user_id:
-            uid_s = str(user_id)
             where.append(
-                "(EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
-                " OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)"
+                "EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
             )
-            params.extend([user_id, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"])
+            params.append(user_id)
     elif runner == "all":
         pass
     elif runner.isdigit():
         rid = int(runner)
-        uid_s = runner
         where.append(
             "(EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
-            " OR p.owner_id = ?"
-            " OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)"
+            " OR p.owner_id = ?)"
         )
-        params.extend([rid, rid, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"])
+        params.extend([rid, rid])
     if search:
         where.append("(p.product_name LIKE ? OR p.kpi LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
@@ -2480,40 +2476,42 @@ def products_list():
         mcc_options_for_filter = [dict(r) for r in db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()]
         _app_cache.set("products:mcc_options", mcc_options_for_filter, ttl=120)
 
-    # runner 统计（跟随 status 过滤）
-    stat_clause = "1=1"
-    stat_params_all = []
-    stat_params_mine = []
-    if status_filter is not None:
-        status_filter_val = status_filter.strip() if isinstance(status_filter, str) else status_filter
-        if status_filter_val:
-            stat_clause = "p.status = ?"
-            stat_params_all = [status_filter_val]
-            stat_params_mine = [status_filter_val]
-        else:
-            stat_clause = "(p.status IS NULL OR p.status = '' OR p.status = '0' OR p.status = 0)"
-            stat_params_all = []
-            stat_params_mine = []
+    # runner 统计（缓存 60 秒，避免每次请求重复 COUNT）
+    cache_key = f"runner_counts:{runner}:{status_filter}"
+    runner_counts = _app_cache.get(cache_key)
+    if runner_counts is None:
+        stat_clause = "1=1"
+        stat_params_all = []
+        stat_params_mine = []
+        if status_filter is not None:
+            status_filter_val = status_filter.strip() if isinstance(status_filter, str) else status_filter
+            if status_filter_val:
+                stat_clause = "p.status = ?"
+                stat_params_all = [status_filter_val]
+                stat_params_mine = [status_filter_val]
+            else:
+                stat_clause = "(p.status IS NULL OR p.status = '' OR p.status = '0' OR p.status = 0)"
+                stat_params_all = []
+                stat_params_mine = []
 
-    runner_counts = {"all": db.execute(
-        f"SELECT COUNT(*) FROM products p WHERE {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
-        stat_params_all
-    ).fetchone()[0]}
-    try:
-        uid = int(get_jwt_identity())
-    except Exception:
-        uid = None
-    if uid:
-        uid_s = str(uid)
-        runner_counts["mine"] = db.execute(
-            f"SELECT COUNT(*) FROM products p WHERE "
-            f"(EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
-            f" OR p.runner_ids = ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ? OR p.runner_ids LIKE ?)"
-            f" AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
-            [uid, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"] + stat_params_mine
-        ).fetchone()[0]
-    else:
-        runner_counts["mine"] = runner_counts["all"]
+        runner_counts = {"all": db.execute(
+            f"SELECT COUNT(*) FROM products p WHERE {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
+            stat_params_all
+        ).fetchone()[0]}
+        try:
+            uid = int(get_jwt_identity())
+        except Exception:
+            uid = None
+        if uid:
+            runner_counts["mine"] = db.execute(
+                f"SELECT COUNT(*) FROM products p WHERE "
+                f"EXISTS (SELECT 1 FROM product_runners pr WHERE pr.product_id = p.id AND pr.user_id = ?)"
+                f" AND {stat_clause} AND (is_archived IS NULL OR is_archived = 0)",
+                [uid] + stat_params_mine
+            ).fetchone()[0]
+        else:
+            runner_counts["mine"] = runner_counts["all"]
+        _app_cache.set(cache_key, runner_counts, ttl=60)
 
     db.close()
     return jsonify({"success": True, "products": products, "total": total, "regions": regions, "mcc_options": mcc_options_for_filter, "runner_counts": runner_counts})
@@ -2539,6 +2537,18 @@ def products_create():
             agency_ratio = None
     packages = data.get("packages") or []
 
+    if not product_name:
+        return jsonify({"success": False, "error": "产品名不能为空"}), 400
+
+    db = _yt_db()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # 获取当前用户
+    try:
+        user_id = int(get_jwt_identity())
+    except Exception:
+        user_id = None
+
     # --- sales_person_id 兼容处理 ---
     sales_person_id = data.get("sales_person_id") or None
     if sales_person_id is None and sales_person:
@@ -2550,20 +2560,28 @@ def products_create():
         else:
             db.execute("INSERT INTO sales_persons(name, owner_id) VALUES(?,?)", (sales_person, user_id))
             sales_person_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    if not product_name:
-        return jsonify({"success": False, "error": "产品名不能为空"}), 400
-    db = _yt_db()
 
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    # 查找同名产品（含已删除/已暂停，用于冲突检测与追加包）
+    existing = db.execute(
+        "SELECT id, runner_ids, product_name, is_archived, deleted_at, status "
+        "FROM products WHERE product_name=?",
+        (product_name,)
+    ).fetchone()
 
-    # 获取当前用户
-    try:
-        user_id = int(get_jwt_identity())
-    except Exception:
-        user_id = None
+    # 冲突检测：同名产品已删除或已暂停 → 返回冲突，由前端提示用户恢复
+    if existing:
+        is_deleted = (existing["is_archived"] == 1) or bool(existing["deleted_at"])
+        is_paused = (existing["status"] or "").strip() == "paused"
+        if is_deleted or is_paused:
+            db.close()
+            return jsonify({
+                "success": False,
+                "conflict": "deleted" if is_deleted else "paused",
+                "product_id": existing["id"],
+                "product_name": existing["product_name"],
+                "message": "该产品已删除，是否恢复？" if is_deleted else "该产品已暂停，是否恢复？",
+            }), 409
 
-    # 已有同名产品则追加包
-    existing = db.execute("SELECT id, runner_ids FROM products WHERE product_name=?", (product_name,)).fetchone()
     if existing:
         pid = existing["id"]
         if mcc_id is not None:
@@ -2688,6 +2706,65 @@ def products_delete(pid):
 
     db.commit(); db.close()
     return jsonify({"success": True})
+
+
+@app.route("/api/products/<int:pid>/restore", methods=["POST"])
+@jwt_required()
+def products_restore(pid):
+    """恢复已删除或已暂停的产品（普通用户可操作，无需管理员确认）。
+
+    已删除产品：清除 is_archived/deleted_at，并从审计日志快照恢复关联包。
+    已暂停产品：清空 status 恢复为正常。
+    """
+    reject = _reject_viewer()
+    if reject: return reject
+    db = _yt_db()
+
+    prod = db.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+    if not prod:
+        db.close()
+        return jsonify({"success": False, "error": "产品不存在"}), 404
+
+    is_deleted = (prod["is_archived"] == 1) or bool(prod["deleted_at"])
+    is_paused = (prod["status"] or "").strip() == "paused"
+
+    if is_deleted:
+        # 恢复软删除产品
+        db.execute("UPDATE products SET is_archived=0, deleted_at='' WHERE id=?", (pid,))
+        # 从审计日志快照恢复关联包（删除时包已被物理删除）
+        log = db.execute(
+            "SELECT detail FROM audit_log WHERE action='delete_product' AND target_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (pid,)
+        ).fetchone()
+        restored_pkgs = 0
+        if log:
+            try:
+                detail = json.loads(log["detail"] or "{}")
+            except Exception:
+                detail = {}
+            for pkg in detail.get("packages", []):
+                exists = db.execute("SELECT id FROM packages WHERE id=?", (pkg["id"],)).fetchone()
+                if exists:
+                    continue
+                db.execute(
+                    "INSERT INTO packages(id, product_id, series_name, package_name, url, status, created_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (pkg["id"], pid, pkg.get("series_name", ""), pkg.get("package_name", ""),
+                     pkg.get("url", ""), pkg.get("status", ""), pkg.get("created_at", ""))
+                )
+                restored_pkgs += 1
+        message = f"产品已恢复，恢复了 {restored_pkgs} 个包"
+    elif is_paused:
+        # 恢复暂停产品
+        db.execute("UPDATE products SET status='' WHERE id=?", (pid,))
+        message = "产品已恢复"
+    else:
+        db.close()
+        return jsonify({"success": False, "error": "产品无需恢复"}), 400
+
+    db.commit(); db.close()
+    return jsonify({"success": True, "message": message, "product_id": pid})
 
 
 @app.route("/api/products/merge", methods=["POST"])
@@ -6232,17 +6309,19 @@ def google_sheets_update_zuobiao():
     ).fetchall()
     # 注意：不调 db.close()，因为 _yt_db() 使用 Flask g 共享连接
     pkg_names = set((p["series_name"] or "").strip() for p in pkgs)
+    product_warning = None
     if pkg_names:
         campaigns = set((r.get("campaign") or "").strip() for r in rows)
         matched = pkg_names & campaigns
         if not matched:
-            # 系列名没匹配上，检查是否有养户行（符合养户关键词的也放行）
             has_yanghu = any(r.get("is_yanghu") for r in rows)
             if not has_yanghu:
                 return jsonify({
                     "success": False,
                     "error": f"产品选择有误！「{product_name}」的包系列与数据中的广告系列不匹配，请重新选择产品。"
                 }), 400
+            # 有养户行但非养户行不匹配 → 放行但返回警告
+            product_warning = f"⚠️ 产品「{product_name}」的包系列与数据中的非养户广告系列不匹配，请确认产品选择是否正确。"
 
     sheets, active_config = _get_user_sheets_config(user_id)
     if not sheets:
@@ -6408,11 +6487,14 @@ def google_sheets_update_zuobiao():
 
     _sync_sheets_background(_do_sync, _on_fail)
 
-    return jsonify({
+    resp = {
         "success": True,
         "sheets_status": "syncing",
         "db_saved": db_saved,
-    })
+    }
+    if product_warning:
+        resp["warning"] = product_warning
+    return jsonify(resp)
 
 
 @app.route("/api/google-sheets/sync-status", methods=["GET"])
@@ -8123,12 +8205,9 @@ def _auto_link_mcc_and_accounts(db, user_id, product_name, region, rows):
                         "VALUES(?,?,?,?)",
                         (account_name, account_id, mcc_id, user_id)
                     )
-                elif existing_acc["mcc_id"] != mcc_id and mcc_id:
-                    # 同 account_id 但不同 mcc_id：更新 mcc
-                    db.execute(
-                        "UPDATE accounts SET mcc_id=? WHERE account_id=?",
-                        (mcc_id, account_id)
-                    )
+                # 注意：已存在的账户不自动修改其 MCC 归属。
+                # MCC 是用户手动管理的归属关系，在做表时自动覆盖会导致手动修改被反复回滚。
+                # 用户如需修改 MCC，应在账户管理页面手动操作。
 
 
 @app.route("/api/ad-reports/save", methods=["POST"])

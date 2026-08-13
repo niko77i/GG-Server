@@ -12,14 +12,14 @@
       <el-select v-model="runnerUserId" @change="onRunnerUserChange" placeholder="按 runner 筛选" clearable size="small" style="width:160px;" filterable>
         <el-option v-for="u in runnerUserOptions" :key="u.id" :label="u.display_name || u.username" :value="u.id" />
       </el-select>
-      <el-select v-model="store.filters.region" @change="load" placeholder="全部地区" clearable style="width:120px;" filterable>
+      <el-select v-model="store.filters.region" @change="debouncedLoad" placeholder="全部地区" clearable style="width:120px;" filterable>
         <el-option v-for="r in regions" :key="r" :label="r" :value="r" />
       </el-select>
-      <el-select v-model="store.filters.mcc_id" @change="load" placeholder="全部 MCC" clearable style="width:180px;" filterable>
+      <el-select v-model="store.filters.mcc_id" @change="debouncedLoad" placeholder="全部 MCC" clearable style="width:180px;" filterable>
         <el-option v-for="m in mccOptions" :key="m.id" :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
       </el-select>
       <el-input v-model="store.filters.search" placeholder="搜索产品或 KPI..." @input="search" style="flex:1;min-width:160px;" clearable />
-      <el-radio-group v-model="store.pausedMode" @change="load">
+      <el-radio-group v-model="store.pausedMode" @change="debouncedLoad">
         <el-radio-button :value="false">正常</el-radio-button>
         <el-radio-button :value="true">已暂停</el-radio-button>
       </el-radio-group>
@@ -103,6 +103,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { useDebounce } from '@/composables/useDebounce'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useProductStore } from '@/stores/products'
@@ -175,6 +176,8 @@ async function load() {
   scrollToHighlightedPackage()
 }
 
+const { debounced: debouncedLoad } = useDebounce(load, 200)
+
 // 已在产品页时点击通知（路由 query 变化），同样滚动
 watch(() => route.query.highlight_pkg, () => { scrollToHighlightedPackage() })
 
@@ -201,11 +204,11 @@ async function loadRunnerUsers() {
 
 function onRunnerFilterChange() {
   runnerUserId.value = null
-  load()
+  debouncedLoad()
 }
 
 function onRunnerUserChange(uid) {
-  load()
+  debouncedLoad()
 }
 
 function toggleSelect(id) {

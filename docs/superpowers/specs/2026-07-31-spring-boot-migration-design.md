@@ -1,10 +1,13 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.6  
-> **日期**: 2026-07-31（v1.6 更新于 2026-08-03）  
+> **文档版本**: v1.9  
+> **日期**: 2026-07-31（v1.9 更新于 2026-08-13）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.9 变更**: 补充 `GoogleSheetsController` 的 `update-zuobiao` 接口产品/包名校验——包系列名与数据广告系列取交集，不匹配且无养户行时报错，有养户行时放行并返回 warning（此前该逻辑在迁移文档中完全缺失）
+> **v1.8 变更**: 产品包列表前端交互增强——默认只展示「正常」状态包、状态筛选与排序按钮置于包列表工具栏、Shift 首尾范围选择勾选、按系列名（series_name）排序（降序/升序）+ 恢复默认排序按钮（纯前端，后端无改动，详见附录 F）  
+> **v1.7 变更**: 产品创建冲突检测——同名已删除/已暂停产品返回 409 提示恢复（普通用户可恢复，无需管理员确认）；新增 `/api/products/{pid}/restore` 接口；修复 `products_create` 中 sales_person 兼容处理在 db/user_id 初始化前引用的隐患  
 > **v1.6 变更**: 账户表格内联编辑扩展（时区/代理/状态）、表格UI整体优化、YouTube标签配置页空白修复  
 > **v1.5 变更**: 同步 GG 账户管理最新实现——双向同步（含H列解绑）、软删除/恢复/物理删除、已删除列表  
 > **v1.4 变更**: 清账逻辑兜底——改为直接查未清充值记录，不依赖 status_changed_date  
@@ -20,7 +23,7 @@
 3. [项目结构设计](#3-项目结构设计)
 4. [技术栈与依赖](#4-技术栈与依赖)
 5. [数据库设计 — 40 张表 MySQL DDL](#5-数据库设计)
-6. [API Controller 设计 — 239 个接口](#6-api-controller-设计)
+6. [API Controller 设计 — 240 个接口](#6-api-controller-设计)
 7. [认证与安全](#7-认证与安全)
 8. [业务服务层设计](#8-业务服务层设计)
 9. [外部集成](#9-外部集成)
@@ -37,7 +40,7 @@
 | 维度 | 数量 |
 |------|------|
 | 后端代码行数 | ~19,400 行 Python |
-| API 路由 | **239 个** |
+| API 路由 | **240 个** |
 | 数据库表 | **40 张** |
 | 前端页面 | 25 个 Vue 组件 |
 | 外部集成 | 10 个（Google Sheets/Ads/AI/FFmpeg/邮件/Telegram 等） |
@@ -1534,6 +1537,135 @@ public class AccountController {
 }
 ```
 
+#### ProductController (GG)
+
+```java
+@RestController
+@RequestMapping("/api/products")
+@RequiredArgsConstructor
+public class ProductController {
+
+    private final ProductService productService;
+
+    // POST /api/products/create — 创建产品（含同名冲突检测）
+    //   前置：校验 product_name → 初始化上下文（db/user_id）→ sales_person 兼容处理
+    //   sales_person 兼容：仅传 sales_person（字符串）时，查/建 sales_persons 表得到 sales_person_id
+    //     （Python 原实现曾把该处理放在 db/user_id 初始化之前，存在 UnboundLocalError 隐患，迁移时注意顺序）
+    //   逻辑：先按 product_name 查同名产品（不过滤 is_archived/deleted_at/status）
+    //     · 同名产品已删除 (is_archived=1 或 deleted_at 非空) → 返回 409 + {conflict:"deleted", product_id, product_name}
+    //     · 同名产品已暂停 (status="paused")               → 返回 409 + {conflict:"paused", product_id, product_name}
+    //     · 同名产品正常                                     → 追加包/更新字段 + 加入 runner
+    //     · 无同名产品                                       → 新建
+    //   前端收到 409 后弹窗询问"该产品已删除/已暂停，是否恢复？"
+    @PostMapping("/create")
+    public ApiResponse<Long> create(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @Valid @RequestBody CreateProductRequest req) {
+        return productService.createProduct(principal.getUserId(), req);
+    }
+
+    // POST /api/products/{pid}/restore — 恢复已删除或已暂停的产品
+    //   普通用户可操作（无需 developer/admin 确认）
+    //   · 已删除产品：is_archived=0, deleted_at=null，并从 audit_log 快照恢复关联包
+    //   · 已暂停产品：status=""（恢复正常）
+    @PostMapping("/{pid}/restore")
+    public ApiResponse<RestoreResult> restore(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @PathVariable Long pid) {
+        return ApiResponse.ok(productService.restoreProduct(pid));
+    }
+}
+```
+
+> **说明（v1.7 新增）**：原 Python `products_create` 的 existing 查询未过滤 `is_archived`/`deleted_at`，
+> 导致创建与已删除产品同名的产品时静默更新旧记录（返回 200 但产品不可见）。
+> 迁移时改为：创建接口先做冲突检测返回 409，新增独立 restore 接口统一处理"已删除/已暂停"两类恢复，
+> 且恢复不再要求 developer 权限。
+
+#### GoogleSheetsController
+
+```java
+@RestController
+@RequestMapping("/api/google-sheets")
+@RequiredArgsConstructor
+public class GoogleSheetsController {
+
+    private final GoogleSheetsService sheetsService;
+
+    // POST /api/google-sheets/update-zuobiao — 做表数据写入（产品校验 + 入库 + 后台同步 Sheet）
+    //   前置校验：
+    //     1. product_name 必填（空 → 400 "产品名不能为空"）
+    //     2. rows 必填（空 → 400 "做表数据不能为空"）
+    //   产品/包名校验（核心，迁移易漏，详见下方 validateProductMatches）：
+    //     查该 product_name 下正常状态包的 series_name，与 rows 的 campaign 求交集
+    //       · 有交集                          → 放行
+    //       · 无交集 且 无养户行(is_yanghu)    → 400 "产品选择有误！..."
+    //       · 无交集 但有养户行                → 放行，响应附 warning 字段（前端弹警告）
+    //   通过后：非养户行入库 ad_reports（同键覆盖）→ 后台线程写 Sheets
+    @PostMapping("/update-zuobiao")
+    public ApiResponse<UpdateZuobiaoResponse> updateZuobiao(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @Valid @RequestBody UpdateZuobiaoRequest req) {
+        return ApiResponse.ok(sheetsService.updateZuobiao(principal.getUserId(), req));
+    }
+
+    // GET /api/google-sheets/sync-status — 查询指定产品 Sheets 同步失败记录（含行数据）
+    // POST /api/google-sheets/retry-sync — 手动重试做表数据 Sheets 同步
+    // GET /api/google-sheets/status — Google Sheets API 配置状态
+    // GET /api/google-sheets/sheets — 读取 spreadsheet 所有 sheet 列表
+}
+```
+
+产品/包名校验逻辑（Service 层）：
+
+```java
+/**
+ * 校验产品包系列与数据广告系列是否匹配。
+ * @return 匹配/无包返回 null；不匹配但有养户行时返回 warning 文案；不匹配且无养户行时抛 BusinessException。
+ */
+private String validateProductMatches(String productName, List<ZuobiaoRow> rows) {
+    // 1. 查该产品下正常状态的包系列名
+    Set<String> pkgNames = packageRepository
+        .findSeriesNamesByProductName(productName).stream()
+        .map(s -> s == null ? "" : s.trim())
+        .filter(s -> !s.isEmpty())
+        .collect(Collectors.toSet());
+    if (pkgNames.isEmpty()) {
+        return null;  // 产品无包，跳过校验
+    }
+    // 2. 取数据中的广告系列名，求交集
+    Set<String> campaigns = rows.stream()
+        .map(r -> r.getCampaign() == null ? "" : r.getCampaign().trim())
+        .filter(s -> !s.isEmpty())
+        .collect(Collectors.toSet());
+    Set<String> matched = new HashSet<>(pkgNames);
+    matched.retainAll(campaigns);
+    if (!matched.isEmpty()) {
+        return null;  // 有交集，放行
+    }
+    // 3. 无交集 → 看是否含养户行
+    boolean hasYanghu = rows.stream().anyMatch(ZuobiaoRow::isYanghu);
+    if (!hasYanghu) {
+        throw new BusinessException(
+            "产品选择有误！「" + productName + "」的包系列与数据中的广告系列不匹配，请重新选择产品。");
+    }
+    // 4. 有养户行但非养户行不匹配 → 放行并返回警告
+    return "⚠️ 产品「" + productName + "」的包系列与数据中的非养户广告系列不匹配，请确认产品选择是否正确。";
+}
+```
+
+> **说明（v1.9 新增）**：此校验在 Python 位于 `main.py` 的 `google_sheets_update_zuobiao` 接口层
+> （不在 `google_sheets_service.upsert_zuobiao` 服务函数内），迁移文档此前未记录，极易遗漏。
+> 三种场景行为对照：
+>
+> | 场景 | 行为 |
+> |------|------|
+> | 非养户行与包系列有交集 | 正常放行 |
+> | 无交集 + 无养户行 | 阻断，400 "产品选择有误！..." |
+> | 无交集 + 有养户行 | 放行 + 响应 `warning` 字段（前端 8 秒警告弹窗，可关闭） |
+>
+> 前端 `ToolkitView.vue` 收到 `warning` 后调用 `ElMessage.warning({ duration: 8000, showClose: true })`。
+
 ### 6.3 完整 Controller 清单
 
 | Controller | 路由前缀 | 接口数 | 认证 |
@@ -1548,7 +1680,7 @@ public class AccountController {
 | `FbExtractController` | `/api/fb/extract/*` | 3 | JWT + FB |
 | `FbReportController` | `/api/fb/reports/*` | 9 | JWT + FB |
 | `FbUserController` | `/api/fb/users` | 1 | JWT + FB |
-| `ProductController` | `/api/products/*` | 17 | JWT + 混合 |
+| `ProductController` | `/api/products/*` | 18 | JWT + 混合 |
 | `AccountController` | `/api/accounts/*` | 21 | JWT |
 | `MccController` | `/api/mcc/*` | 8 | JWT |
 | `RechargeController` | `/api/recharge/*` | 5 | JWT |
@@ -1570,7 +1702,7 @@ public class AccountController {
 | `UtilityController` | `/api/browse-*`, `/api/translate` | 5 | 混合 |
 | `GoogleSheetsController` | `/api/google-sheets/*` | 4 | JWT |
 | `GoogleAdsController` | `/api/google-ads/*` | 2 | 无 |
-| **合计** | | **239** | |
+| **合计** | | **240** | |
 
 ---
 
@@ -3229,3 +3361,45 @@ INSERT INTO tags (`key`, `value`) VALUES
 ```
 
 迁移到 Spring Boot 后通过 MySQL 种子脚本自动初始化，无需手动配置。
+
+---
+
+## 附录 F: v1.8 产品包列表前端交互增强
+
+> **日期**: 2026-08-13  
+> **性质**: 纯前端改动，后端无变更  
+> **文件**: `frontend/src/components/ProductCard.vue`
+
+### F.1 需求背景
+
+一个产品可能包含大量包。原实现将产品下所有包一次性展示、仅按「状态分组 → 导入时间」排序，且勾选只能逐个点击。本次增强三点：**状态过滤（默认只看正常包）**、**Shift 首尾范围选择**、**按系列名（series_name）排序**。
+
+### F.2 状态过滤
+
+- `filterStatus` 默认值由 `'all'` 改为 `'normal'`：产品展开后**默认只显示「正常」状态的包**。
+- 状态筛选标签（全部/正常/没事件/暂停/掉包/拒登）放在**包列表顶部工具栏左侧**，不放产品栏 header。
+- 最前面的 **「全部 N」** 标签（N=总包数）用于回到展示所有包的视图；各状态标签点击显示对应状态的包。
+- 当前激活的状态标签以 `effect="dark"` 高亮，非激活为 `light`。
+
+### F.3 Shift 首尾范围选择
+
+- 新增锚点 `anchorId`：记录最近一次单独点击（不带 Shift）的包。
+- 普通点击包 checkbox：正常勾选/取消该包，并更新锚点。
+- **按住 Shift 点击包 checkbox**：按当前展示顺序，把「锚点包 ↔ 当前包」之间的连续所有包一并勾选（追加语义）。
+- checkbox 由 `v-model` 改为 `:checked` 绑定 + `@click.stop.prevent` 手动处理，视觉状态完全由 `checkedIds` 驱动。
+
+### F.4 名字排序
+
+- 排序按钮放在**包列表顶部工具栏左侧**（紧跟状态筛选标签），不放产品栏、不放工具栏右侧。
+- 排序键为 **`series_name`（系列名）**，用 `localeCompare(..., undefined, { numeric: true })` 字典序比较（数字感知，`GG-9` 排在 `GG-10` 前）。
+- 排序主按钮在 **「降序(Z→A) ↔ 升序(A→Z)」** 之间切换（首次点击进入降序），不在降序/升序/默认三态间循环。
+- 进入排序状态后，旁边出现 **「恢复默认排序」** 按钮，点击恢复默认（状态分组 → 导入时间）。
+- 排序生效范围（用户确认的规则）：
+  - **展示所有包**（`filter='all'`，多状态混合）：只对「正常」包按系列名排序，其它状态包保持底部原有顺序不动；
+  - **筛选单一状态**：对当前展示的所有包整体按系列名排序。
+
+### F.5 后端影响
+
+**无**。过滤、排序、勾选均在 `ProductCard.vue` 前端完成（`props.product.packages` 已随产品列表一次性返回）。
+
+迁移到 Spring Boot 后，`GET /api/products/*` 接口只需按当前 Python 实现原样返回 `packages` 数组（原始顺序），**不做**按状态或名字的排序/过滤——这些逻辑由前端负责，迁移时不要在 Service 层重复实现。

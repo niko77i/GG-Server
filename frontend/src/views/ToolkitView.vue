@@ -501,6 +501,9 @@ async function zbUpdateSheet() {
       agency_ratio: p?.agency_ratio ?? null,
     })
     ElMessage.success(`数据库已保存 ${res.db_saved || (taggedRows.length)} 条，表格后台同步中...`)
+    if (res.warning) {
+      ElMessage.warning({ message: res.warning, duration: 8000, showClose: true })
+    }
     // 启动轮询检测同步结果
     startZbSyncPolling()
   } catch (e) {

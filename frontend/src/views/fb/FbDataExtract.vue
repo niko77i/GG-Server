@@ -22,9 +22,10 @@
           <el-checkbox v-model="sortedMode">是否排序（提取全列）</el-checkbox>
         </el-form-item>
       </el-form>
-      <el-input v-model="pasteText" type="textarea" :rows="6" placeholder="在此粘贴 FB 数据透视表内容..." style="margin-bottom:12px" />
+      <el-input v-model="pasteText" type="textarea" :rows="6" placeholder="在此粘贴 FB 数据透视表内容..." style="margin-bottom:12px" clearable />
       <div style="display:flex;gap:8px">
         <el-button type="primary" :loading="parsing" @click="handleParse">🔍 解析数据</el-button>
+        <el-button @click="pasteText = ''" :disabled="!pasteText">🗑 清空</el-button>
         <el-button type="success" :disabled="!parsedData.length || !selectedProductId" :loading="saving" @click="openSaveDialog">💾 保存到数据管理</el-button>
       </div>
     </el-card>

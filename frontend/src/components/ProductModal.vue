@@ -42,6 +42,8 @@
 import { ref, reactive, computed } from 'vue'
 import { useProductStore } from '@/stores/products'
 import { useAccountStore } from '@/stores/accounts'
+import { productsApi } from '@/api/products'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api/client'
 
 const props = defineProps({ visible: Boolean, editId: [Number, null], mccOptions: Array })
@@ -83,11 +85,40 @@ async function submit() {
   try {
     if (props.editId) {
       await store.updateProduct(props.editId, { ...form, mcc_id: form.mcc_id || null })
+      emit('update:visible', false)
+      emit('saved')
     } else {
-      await store.createProduct(form)
+      const done = await createOrRestore()
+      if (done) {
+        emit('update:visible', false)
+        emit('saved')
+      }
     }
-    emit('update:visible', false)
-    emit('saved')
   } finally { saving.value = false }
+}
+
+// 新建产品；若同名产品已删除/已暂停，弹窗询问是否恢复（普通用户可恢复）
+// 返回 true 表示已创建或已恢复，false 表示用户取消
+async function createOrRestore() {
+  try {
+    await store.createProduct(form)
+    return true
+  } catch (e) {
+    const data = e?.response?.data || {}
+    if (e?.response?.status !== 409 || !data.conflict) throw e
+    const label = data.conflict === 'deleted' ? '已删除' : '已暂停'
+    try {
+      await ElMessageBox.confirm(
+        `存在同名产品「${data.product_name}」，该产品${label}，是否恢复？`,
+        '同名产品' + label,
+        { confirmButtonText: '恢复', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch {
+      return false
+    }
+    const res = await productsApi.restore(data.product_id)
+    ElMessage.success(res.message || '已恢复')
+    return true
+  }
 }
 </script>
