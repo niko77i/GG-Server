@@ -130,7 +130,7 @@ async function checkDelistNotifications() {
       const title = n.type === 'first' ? '⚠️ 检测到包已掉包' : '⏰ 掉包提醒'
       const lines = []
       if (n.product_name) lines.push(`【${n.product_name}】`)
-      for (const s of (n.series_names || [])) lines.push(s)
+      for (const s of [...new Set(n.series_names || [])]) lines.push(s)
       lines.push('请将包状态设置为"掉包"（点击跳转到对应包）')
 
       const notifInst = ElNotification({
