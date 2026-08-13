@@ -93,7 +93,7 @@
         class="pkg-row"
         :class="{ 'pkg-row--paused': normalizeStatus(pkg.status) === 'paused', 'pkg-row--no-events': normalizeStatus(pkg.status) === 'no_events', 'pkg-row--dropped': normalizeStatus(pkg.status) === 'dropped', 'pkg-row--delisted': pkg.is_delisted && normalizeStatus(pkg.status) !== 'dropped' }">
         <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;overflow:hidden;">
-          <input type="checkbox" :checked="checkedIds.includes(pkg.id)" @click.stop.prevent="onPkgCheck(pkg, $event)" style="width:auto;flex-shrink:0;" />
+          <input type="checkbox" :checked="checkedIds.includes(pkg.id)" @mousedown="shiftDown = $event.shiftKey" @change="onPkgChange(pkg, $event)" style="width:auto;flex-shrink:0;" />
           <span style="font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer;"
   @click.stop="copySeriesName(pkg.series_name)"
   :title="'点击复制'">{{ pkg.series_name || '-' }}</span>
@@ -144,6 +144,7 @@ const store = useProductStore()
 const expanded = ref(false)
 const checkedIds = ref([])
 const anchorId = ref(null)
+const shiftDown = ref(false)
 const filterStatus = ref('normal')
 const nameSort = ref('default')
 const editPkgModal = ref(null)
@@ -250,29 +251,30 @@ function resetNameSort() {
   nameSort.value = 'default'
 }
 
-function onPkgCheck(pkg, event) {
-  const idx = checkedIds.value.indexOf(pkg.id)
-  let didRange = false
-  // Shift 首尾范围选择：按住 Shift 点击，选中锚点包 ↔ 当前包之间连续的所有包
-  if (event.shiftKey && anchorId.value != null && anchorId.value !== pkg.id) {
+function onPkgChange(pkg, event) {
+  const target = event.target.checked
+  // Shift 范围选择：按住 Shift 点击，将锚点包 ↔ 当前包之间的所有包统一设为当前包的目标状态（支持选中/取消）
+  if (shiftDown.value && anchorId.value != null && anchorId.value !== pkg.id) {
     const list = filteredPackages.value
     const i1 = list.findIndex(p => p.id === anchorId.value)
     const i2 = list.findIndex(p => p.id === pkg.id)
     if (i1 !== -1 && i2 !== -1) {
       const lo = Math.min(i1, i2), hi = Math.max(i1, i2)
       for (let i = lo; i <= hi; i++) {
-        const id = list[i].id
-        if (!checkedIds.value.includes(id)) checkedIds.value.push(id)
+        setChecked(list[i].id, target)
       }
-      didRange = true
     }
-  }
-  // 未触发范围选择（普通点击，或锚点已不在当前列表）→ 退化为普通勾选/取消
-  if (!didRange) {
-    if (idx === -1) checkedIds.value.push(pkg.id)
-    else checkedIds.value.splice(idx, 1)
+  } else {
+    setChecked(pkg.id, target)
   }
   anchorId.value = pkg.id
+  shiftDown.value = false
+}
+
+function setChecked(id, on) {
+  const j = checkedIds.value.indexOf(id)
+  if (on && j === -1) checkedIds.value.push(id)
+  else if (!on && j !== -1) checkedIds.value.splice(j, 1)
 }
 
 const allChecked = computed(() => {

@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.11  
-> **日期**: 2026-07-31（v1.11 更新于 2026-08-13）  
+> **文档版本**: v1.12  
+> **日期**: 2026-07-31（v1.12 更新于 2026-08-13）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.12 变更**: 修复产品包列表勾选框视觉不同步 bug 并补充 Shift 范围取消——checkbox 由 `@click.stop.prevent` 改为 `@mousedown`（记录 Shift）+ `@change`（处理切换），解决「状态已更新但勾选框视觉不同步、再次点击取消不了」的问题；Shift 范围选择由「只追加勾选」改为按目标状态统一设置（支持选中/取消）。详见附录 F
 > **v1.11 变更**: 修复 Python SQLite 端全新数据库建库崩溃的两个 bug——① `_ensure_schema` 中 `idx_products_archived` 索引先于 `is_archived` 列创建（该列由 `_ensure_columns` 补），删除该冗余索引；② `_migrate_options_tables` 的 guard 用「agent_id 非 NULL 记录数」判断迁移状态，空表时失效导致重复迁移报 `no such column: agent`，改为迁移前先检查旧 `agent` 列是否存在。迁移到 MySQL 时注意：DDL 索引不得先于列定义；数据迁移 guard 应用明确的迁移标记（config/版本表）而非记录数判断
 > **v1.10 变更**: 掉包通知按产品聚合——`delist/pending` 返回产品聚合结构、`delist/dismiss` 接受 `package_ids[]`、Telegram 通知改为产品级（产品名 + 多系列名，不展示包名/链接）；前端弹窗按产品统一为一条（详见 6.3 说明）
 > **v1.9 变更**: 补充 `GoogleSheetsController` 的 `update-zuobiao` 接口产品/包名校验——包系列名与数据广告系列取交集，不匹配且无养户行时报错，有养户行时放行并返回 warning（此前该逻辑在迁移文档中完全缺失）
@@ -3409,10 +3410,10 @@ INSERT INTO tags (`key`, `value`) VALUES
 
 ### F.3 Shift 首尾范围选择
 
-- 新增锚点 `anchorId`：记录最近一次单独点击（不带 Shift）的包。
+- 新增锚点 `anchorId`：记录最近一次点击的包。
 - 普通点击包 checkbox：正常勾选/取消该包，并更新锚点。
-- **按住 Shift 点击包 checkbox**：按当前展示顺序，把「锚点包 ↔ 当前包」之间的连续所有包一并勾选（追加语义）。
-- checkbox 由 `v-model` 改为 `:checked` 绑定 + `@click.stop.prevent` 手动处理，视觉状态完全由 `checkedIds` 驱动。
+- **按住 Shift 点击包 checkbox**：按当前展示顺序，把「锚点包 ↔ 当前包」之间的连续所有包统一设为当前包的目标状态（选中或取消）。
+- checkbox 由 `v-model` 改为 `:checked` 绑定 + `@change` 处理切换，并用 `@mousedown` 记录 Shift 状态（`change` 事件不携带 `shiftKey`）。视觉状态完全由 `checkedIds` 驱动；不再使用 `@click.prevent`（其会取消浏览器原生切换、导致勾选框视觉与状态不同步）。
 
 ### F.4 名字排序
 
