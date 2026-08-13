@@ -317,7 +317,6 @@ def _ensure_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_products_region ON products(region);
         CREATE INDEX IF NOT EXISTS idx_products_mcc ON products(mcc_id);
         CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at);
-        CREATE INDEX IF NOT EXISTS idx_products_archived ON products(is_archived);
 
         CREATE TABLE IF NOT EXISTS packages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -924,6 +923,10 @@ def _migrate_mcc_dedup(conn: sqlite3.Connection):
 
 def _migrate_options_tables(conn: sqlite3.Connection):
     """将旧 TEXT 列中的选项值迁移到新选项表，并填充外键列。"""
+    # 若旧 agent 列已被清理（_cleanup_old_option_columns 已 DROP），说明迁移已完成，跳过
+    acct_cols = [r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()]
+    if "agent" not in acct_cols:
+        return
     # 检查是否已迁移：如果 accounts 表已有 agent_id 不为 NULL 的记录，跳过
     count = conn.execute("SELECT COUNT(*) FROM accounts WHERE agent_id IS NOT NULL").fetchone()[0]
     if count > 0:
