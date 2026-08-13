@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.9  
-> **日期**: 2026-07-31（v1.9 更新于 2026-08-13）  
+> **文档版本**: v1.10  
+> **日期**: 2026-07-31（v1.10 更新于 2026-08-13；v1.9 更新于 2026-08-13）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.10 变更**: 掉包通知按产品聚合——`delist/pending` 返回产品聚合结构、`delist/dismiss` 接受 `package_ids[]`、Telegram 通知改为产品级（产品名 + 多系列名，不展示包名/链接）；前端弹窗按产品统一为一条（详见附录 G）
 > **v1.9 变更**: 补充 `GoogleSheetsController` 的 `update-zuobiao` 接口产品/包名校验——包系列名与数据广告系列取交集，不匹配且无养户行时报错，有养户行时放行并返回 warning（此前该逻辑在迁移文档中完全缺失）
 > **v1.8 变更**: 产品包列表前端交互增强——默认只展示「正常」状态包、状态筛选与排序按钮置于包列表工具栏、Shift 首尾范围选择勾选、按系列名（series_name）排序（降序/升序）+ 恢复默认排序按钮（纯前端，后端无改动，详见附录 F）  
 > **v1.7 变更**: 产品创建冲突检测——同名已删除/已暂停产品返回 409 提示恢复（普通用户可恢复，无需管理员确认）；新增 `/api/products/{pid}/restore` 接口；修复 `products_create` 中 sales_person 兼容处理在 db/user_id 初始化前引用的隐患  
@@ -1704,6 +1705,11 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 | `GoogleAdsController` | `/api/google-ads/*` | 2 | 无 |
 | **合计** | | **240** | |
 
+> **说明（v1.10 新增）**：`DelistController` 的 `delist/pending` 返回**产品聚合**结构
+> （`{ product_id, product_name, series_names[], package_ids[], type, reminder_count }`），
+> `delist/dismiss` 入参为 `package_ids[]`（批量）。对应 Python 端 `delist_pending` / `delist_dismiss`
+> 已同步改造为按产品聚合/批量关闭；前端 `App.vue` 按产品统一弹窗、`ProductPanel.vue` 支持多包跳转高亮。
+
 ---
 
 ## 7. 认证与安全
@@ -2738,10 +2744,11 @@ public class TelegramSender {
     @Value("${notification.telegram.chat-id}")
     private String chatId;
 
+    // 产品级掉包通知：一个产品一条消息，展示产品名 + 多个系列名（不展示包名/链接）
     @Async
-    public void sendDelistNotification(PackageInfo pkgInfo,
-            List<String> usernames) {
-        String text = buildHtmlMessage(pkgInfo, usernames);
+    public void sendProductDelistNotification(String productName,
+            List<String> seriesNames, List<String> usernames) {
+        String text = buildProductHtmlMessage(productName, seriesNames, usernames);
         String url = "https://api.telegram.org/bot" + botToken + "/sendMessage";
 
         Map<String, Object> body = Map.of(
@@ -2753,13 +2760,31 @@ public class TelegramSender {
 
         try {
             restTemplate.postForEntity(url, body, String.class);
-            log.info("Telegram 通知已发送: {}", pkgInfo.getPackageName());
+            log.info("Telegram 产品级掉包通知已发送: {}", productName);
         } catch (Exception e) {
             log.error("Telegram 发送失败", e);
         }
     }
+
+    private String buildProductHtmlMessage(String productName, List<String> seriesNames,
+            List<String> usernames) {
+        StringBuilder sb = new StringBuilder("<b>【GG-Server 掉包通知】</b>\n");
+        if (!usernames.isEmpty()) {
+            sb.append("\n").append(usernames.stream()
+                .map(u -> "@" + u).collect(Collectors.joining(" ")));
+        }
+        sb.append("\n<b>产品：</b>").append(escapeHtml(productName)).append("\n");
+        sb.append("<b>掉包系列：</b>\n");
+        for (String sn : seriesNames) {
+            sb.append("· ").append(escapeHtml(sn)).append("\n");
+        }
+        sb.append("\n该产品的多个包已被下架，请尽快将包状态设置为\"掉包\"。");
+        return sb.toString();
+    }
 }
 ```
+
+> **说明（v1.10 新增）**：对应 Python `telegram_sender.py` 的 `send_product_delist_notification`，消息不再包含包名与链接。
 
 ### 9.7 Google Play 抓取 (Jsoup)
 
