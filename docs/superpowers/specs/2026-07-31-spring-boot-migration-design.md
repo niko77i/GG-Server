@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.15  
-> **日期**: 2026-07-31（v1.15 更新于 2026-08-13）  
+> **文档版本**: v1.16  
+> **日期**: 2026-07-31（v1.16 更新于 2026-08-14）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.16 变更**: 产品管理列表吸顶交互——展开产品后「产品头部」滚动到列表区顶部即吸顶（`position: sticky`），包滚完才释放、往回滚自动重新钉住；「包筛选工具栏」移入产品头部 header 内、随头部一起吸顶固定。纯 CSS + DOM 移动，无后端改动（详见附录 G）
 > **v1.15 变更**: 产品包列表多选后新增「取消选择」按钮——工具栏「已选 N 个」旁新增「✕ 取消选择」按钮（选中任意包后显示），点击一键清空已选并重置 Shift 锚点，补齐「部分选择时无清空入口」的缺口（纯前端，详见附录 F）
 > **v1.13 变更**: 修复「暂停/删除产品仍弹掉包通知」——`delist/pending` 与 `products/delist-status` 两个查询此前只过滤 `pkg.status`（包状态）、漏过滤 `prod.status`（产品状态），导致产品暂停/删除后前端仍反复弹掉包通知（首次 + 3 分钟提醒循环）。两处查询补 `AND (prod.status IS NULL OR prod.status='' OR prod.status='0')`，与定时检测 `_run_delist_check_once` 保持一致。迁移到 Spring Boot 时，DelistService 查询通知/掉包状态的 SQL 必须同时过滤包状态与产品状态（详见 6.3 说明）
 > **v1.14 变更**: FB 数据提取动态分组补充「短纯数字作为组起点」判断——账户名可能是短纯数字（如 `100M$` 被识别为文本、但某些账户名是 <10 位纯数字），此前分组条件只认「文本行 + 下一行 ≥10 位账户 ID」，会漏掉以短数字开头的账户。现分组起点改为 `(is_text_header OR is_short_number) AND next_is_account_id`，其中 `is_short_number = 纯数字且去逗号后 <10 位`。详见 8.2 节 `parseExtract` 动态分组实现
@@ -3468,3 +3469,34 @@ INSERT INTO tags (`key`, `value`) VALUES
 **无**。过滤、排序、勾选均在 `ProductCard.vue` 前端完成（`props.product.packages` 已随产品列表一次性返回）。
 
 迁移到 Spring Boot 后，`GET /api/products/*` 接口只需按当前 Python 实现原样返回 `packages` 数组（原始顺序），**不做**按状态或名字的排序/过滤——这些逻辑由前端负责，迁移时不要在 Service 层重复实现。
+
+---
+
+## 附录 G: v1.16 产品头部与包筛选工具栏吸顶
+
+> **日期**: 2026-08-14  
+> **性质**: 纯前端改动，后端无变更  
+> **文件**: `frontend/src/components/ProductCard.vue`
+
+### G.1 需求背景
+
+一个产品可能包含大量包。展开产品后往下滚包列表时，产品头部（产品名/KPI/地区那一栏）会滚出视野，用户既看不到「当前在看哪个产品」，也够不着包筛选工具栏。本次增强两点：**产品头部吸顶**、**包筛选工具栏随头部一起吸顶**。
+
+### G.2 产品头部吸顶（position: sticky）
+
+- 产品卡片根 `el-card` 增加类名 `product-card`。
+- **关键坑**：Element Plus `.el-card` 默认 `overflow: hidden`，会把 `position: sticky` 的滚动容器锁定为卡片自身（卡片内部并不滚动），导致头部无法相对外层列表区（ProductPanel 的 `overflow-y:auto`）吸顶。必须先覆盖 `.product-card { overflow: visible }`。
+- `.product-card :deep(.el-card__header)` 设 `position: sticky; top: 0; z-index: 10; overflow: hidden;`，并加不透明背景 `var(--el-card-bg-color)` 挡住从下方滚上来的包。
+- sticky 天然满足「释放 / 重新钉住」语义：header 约束范围是 `.el-card`（整个产品卡片），滚到 `top:0` 后钉住，卡片底部（最后一个包）触到头部时被「推」着滚走释放，往回滚自动重新钉住，无需 JS。
+- 圆角裁剪下放：覆盖 `overflow:visible` 后卡片原本靠 `overflow:hidden` 做的圆角裁剪失效，改为 header 加顶部圆角、`.el-card__body` 加 `overflow:hidden` + 底部圆角。
+
+### G.3 包筛选工具栏吸顶（移入 header）
+
+- 原「包筛选工具栏」（状态筛选标签 / 名字排序 / 全选 / 批量操作，原在 `.el-card__body` 内）整体移入 `<template #header>` 插槽、产品头部 div 之后，并加 `v-show="expanded"`（原来靠外层 `v-show` 控制）。
+- 这样它随 `.el-card__header`（已 sticky）一起吸顶，**无需动态计算 `top`**（产品头部 flex-wrap 换行、高度不固定，单独 sticky 会因 `top` 值无法确定而错位）。
+- 去掉工具栏自身 `border-bottom`（避免与 header 自带 border 双线），加 `margin-bottom: -10px` 抵消 header 默认 18px 底部 padding，使工具栏上下间距对称。
+- 工具栏移出产品头部 div 后成为其兄弟节点，点击工具栏不再触发展开/收起（原来也不触发）；内部 `@click.stop` 保留，行为不变。
+
+### G.4 后端影响
+
+**无**。吸顶为纯 CSS（`position: sticky`）+ DOM 位置移动，不涉及任何接口、数据或 Service 逻辑。迁移到 Spring Boot 时无需在 Controller/Service 层做任何处理。

@@ -1,5 +1,5 @@
 <template>
-  <el-card style="margin-bottom:12px;" :class="{ 'is-paused': product.status }">
+  <el-card class="product-card" style="margin-bottom:12px;" :class="{ 'is-paused': product.status }">
     <template #header>
       <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" @click="expanded = !expanded">
         <div style="display:flex;align-items:center;gap:12px;">
@@ -61,10 +61,7 @@
           <span style="margin-left:4px;color:#888;">{{ expanded ? '▲' : '▼' }}</span>
         </div>
       </div>
-    </template>
-
-    <div v-show="expanded">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #eee;flex-wrap:wrap;gap:6px;">
+      <div v-show="expanded" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0 0;margin-bottom:-10px;flex-wrap:wrap;gap:6px;">
         <span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <el-tag size="small" type="info" :effect="filterStatus === 'all' ? 'dark' : 'light'" style="cursor:pointer;" @click.stop="filterStatus = 'all'">
             {{ packages.length }} 全部
@@ -90,6 +87,9 @@
           <el-button v-if="checkedIds.length && !auth.isViewer" size="small" @click.stop="batchDelPkgs" type="danger">🗑 批量删除</el-button>
         </span>
       </div>
+    </template>
+
+    <div v-show="expanded">
       <div v-for="pkg in filteredPackages" :key="pkg.id" :id="'pkg-' + pkg.id"
         class="pkg-row"
         :class="{ 'pkg-row--paused': normalizeStatus(pkg.status) === 'paused', 'pkg-row--no-events': normalizeStatus(pkg.status) === 'no_events', 'pkg-row--dropped': normalizeStatus(pkg.status) === 'dropped', 'pkg-row--delisted': pkg.is_delisted && normalizeStatus(pkg.status) !== 'dropped' }">
@@ -367,6 +367,22 @@ watch(editPkgModal, async (pkg) => {
 
 <style scoped>
 .is-paused { opacity: 0.88; }
+/* 展开产品头部吸顶：解除 el-card 默认 overflow:hidden 对 sticky 的锁定 */
+.product-card {
+  overflow: visible;
+}
+.product-card :deep(.el-card__header) {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  overflow: hidden;
+  background: var(--el-card-bg-color);
+  border-radius: var(--el-card-border-radius) var(--el-card-border-radius) 0 0;
+}
+.product-card :deep(.el-card__body) {
+  overflow: hidden;
+  border-radius: 0 0 var(--el-card-border-radius) var(--el-card-border-radius);
+}
 .pkg-row {
   display: flex; justify-content: space-between; align-items: center;
   padding: 6px 0; border-bottom: 1px solid #f5f5f5; font-size: 12px;
