@@ -74,14 +74,14 @@ onMessage((msg) => {
   }
   if (msg.type === MSG.DELIST_DISMISSED) {
     const productId = msg.payload?.product_id
-    if (productId) _dismissRemotePkg(productId)
+    if (productId) _dismissRemoteProduct(productId)
   }
   // TASK_ADDED / TASK_UPDATED 由 taskStore 内部 _setupBroadcastListener 处理，此处不重复
 })
 
 // 远程 dismiss：关闭本地同名 ElNotification（需持有引用，key 为 product_id）
 const _notifRefs = {}
-function _dismissRemotePkg(productId) {
+function _dismissRemoteProduct(productId) {
   const ref = _notifRefs[productId]
   if (ref) { ref.close(); delete _notifRefs[productId] }
 }

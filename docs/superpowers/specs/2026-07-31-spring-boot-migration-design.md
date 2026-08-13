@@ -1,11 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
 > **文档版本**: v1.10  
-> **日期**: 2026-07-31（v1.10 更新于 2026-08-13；v1.9 更新于 2026-08-13）  
+> **日期**: 2026-07-31（v1.10 更新于 2026-08-13）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
-> **v1.10 变更**: 掉包通知按产品聚合——`delist/pending` 返回产品聚合结构、`delist/dismiss` 接受 `package_ids[]`、Telegram 通知改为产品级（产品名 + 多系列名，不展示包名/链接）；前端弹窗按产品统一为一条（详见附录 G）
+> **v1.10 变更**: 掉包通知按产品聚合——`delist/pending` 返回产品聚合结构、`delist/dismiss` 接受 `package_ids[]`、Telegram 通知改为产品级（产品名 + 多系列名，不展示包名/链接）；前端弹窗按产品统一为一条（详见 6.3 说明）
 > **v1.9 变更**: 补充 `GoogleSheetsController` 的 `update-zuobiao` 接口产品/包名校验——包系列名与数据广告系列取交集，不匹配且无养户行时报错，有养户行时放行并返回 warning（此前该逻辑在迁移文档中完全缺失）
 > **v1.8 变更**: 产品包列表前端交互增强——默认只展示「正常」状态包、状态筛选与排序按钮置于包列表工具栏、Shift 首尾范围选择勾选、按系列名（series_name）排序（降序/升序）+ 恢复默认排序按钮（纯前端，后端无改动，详见附录 F）  
 > **v1.7 变更**: 产品创建冲突检测——同名已删除/已暂停产品返回 409 提示恢复（普通用户可恢复，无需管理员确认）；新增 `/api/products/{pid}/restore` 接口；修复 `products_create` 中 sales_person 兼容处理在 db/user_id 初始化前引用的隐患  
