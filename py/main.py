@@ -3287,6 +3287,9 @@ def delist_dismiss():
     if not package_ids:
         return jsonify({"success": False, "error": "缺少 package_ids"}), 400
 
+    if not isinstance(package_ids, list):
+        package_ids = [package_ids]
+
     db = _yt_db()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
