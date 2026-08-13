@@ -3221,23 +3221,18 @@ def products_check_delist(pid):
 
     db.commit()
 
-    # 新掉包 → Telegram 群组通知
+    # 新掉包 → Telegram 群组通知（按产品聚合）
     if newly_delisted:
-        try:
-            rids = _json.loads(runner_ids_raw)
-        except Exception:
-            rids = []
-        # 补齐包详情字段
         tg_pkgs = []
         for r in newly_delisted:
             orig = pkg_map.get(r["package_id"], {})
             tg_pkgs.append({
+                "product_id": pid,
                 "product_name": product_name,
                 "series_name": orig.get("series_name", ""),
-                "package_name": orig.get("package_name", ""),
-                "url": orig.get("url", ""),
+                "runner_ids": runner_ids_raw,
             })
-        _send_telegram_notifications(db, tg_pkgs, rids)
+        _send_telegram_notifications(db, tg_pkgs)
 
     db.close()
     return jsonify({"success": True, "results": results})
@@ -7702,13 +7697,12 @@ def _run_weekly_cleanup_once():
     log.info("已清理爬取图片、视频、音频替换临时文件及过期任务记录")
 
 
-def _send_telegram_notifications(db, pkgs, runner_ids):
-    """发送 Telegram 群组掉包通知（公共辅助函数）。
+def _send_telegram_notifications(db, pkgs):
+    """按产品分组发送 Telegram 群组掉包通知。
 
     Args:
         db: 数据库连接
-        pkgs: 掉包字典列表，每项含 product_name, series_name, package_name, url
-        runner_ids: 在跑人员 ID 列表
+        pkgs: 掉包字典列表，每项含 product_id, product_name, series_name, runner_ids(JSON字符串)
     """
     tg_cfg = APP_CONFIG.get("telegram", {})
     if not (tg_cfg.get("bot_token") and tg_cfg.get("chat_id") and pkgs):
@@ -7721,22 +7715,37 @@ def _send_telegram_notifications(db, pkgs, runner_ids):
         parse_mode=tg_cfg.get("parse_mode", "HTML"),
     )
 
-    usernames = []
-    if runner_ids:
-        rows = db.execute(
-            f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
-            runner_ids
-        ).fetchall()
-        usernames = [r["telegram_username"] for r in rows]
-
+    # 按 product_id 分组（dict 保持插入顺序）
+    groups = {}
     for pkg in pkgs:
-        pkg_info = {
-            "product_name": pkg.get("product_name", ""),
-            "series_name": pkg.get("series_name", ""),
-            "package_name": pkg.get("package_name", ""),
-            "url": pkg.get("url", ""),
-        }
-        _tg_sender.send_delist_notification(tg_config, pkg_info, usernames)
+        pid = pkg.get("product_id")
+        groups.setdefault(pid, []).append(pkg)
+
+    for pid, group_pkgs in groups.items():
+        product_name = group_pkgs[0].get("product_name", "") if group_pkgs else ""
+        series_names = []
+        runner_ids = []
+        for pkg in group_pkgs:
+            sn = (pkg.get("series_name") or "").strip()
+            if sn and sn not in series_names:
+                series_names.append(sn)
+            try:
+                rids = _json.loads(pkg.get("runner_ids", "[]"))
+            except Exception:
+                rids = []
+            for rid in rids:
+                if rid not in runner_ids:
+                    runner_ids.append(rid)
+
+        usernames = []
+        if runner_ids:
+            rows = db.execute(
+                f"SELECT telegram_username FROM users WHERE id IN ({','.join('?'*len(runner_ids))}) AND telegram_username != ''",
+                runner_ids
+            ).fetchall()
+            usernames = [r["telegram_username"] for r in rows]
+
+        _tg_sender.send_product_delist_notification(tg_config, product_name, series_names, usernames)
 
 
 def _run_delist_check_once():
@@ -7843,14 +7852,9 @@ def _run_delist_check_once():
                             }
                             _email_sender.send_delist_notification(smtp_config, emails, pkg_info)
 
-            # --- Telegram 群组通知（仅发本轮新掉包的包，不重复发送）---
+            # --- Telegram 群组通知（按产品聚合，仅发本轮新掉包，不重复发送）---
             if newly_delisted_list:
-                for pkg in newly_delisted_list:
-                    try:
-                        rids = _json.loads(pkg.get("runner_ids", "[]"))
-                    except Exception:
-                        rids = []
-                    _send_telegram_notifications(db, [pkg], rids)
+                _send_telegram_notifications(db, newly_delisted_list)
 
         return {"total": len(pkgs), "delisted": len(delisted_list), "results": results}
     except Exception as e:
