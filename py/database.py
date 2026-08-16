@@ -1151,12 +1151,17 @@ def _migrate_if_needed(conn: sqlite3.Connection):
         conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_font_recent','1')")
 
     # 4. 迁移 videos 表为复合主键 (id, owner_id) — 支持多人私有同一视频
-    # 先用 INSERT OR IGNORE 抢占标记，避免并发时多个连接同时执行 DDL 导致锁冲突
-    conn.execute("INSERT OR IGNORE INTO config(key,value) VALUES('migrated_videos_composite_pk','0')")
-    conn.commit()
+    # 先 SELECT 判断是否已迁移，避免每个请求都执行写操作（INSERT OR IGNORE 也会抢占 SQLite 写锁）
     claimed = conn.execute(
         "SELECT value FROM config WHERE key='migrated_videos_composite_pk'"
     ).fetchone()
+    if not claimed:
+        # 首次：INSERT OR IGNORE 抢占标记，避免并发时多个连接同时执行 DDL 导致锁冲突
+        conn.execute("INSERT OR IGNORE INTO config(key,value) VALUES('migrated_videos_composite_pk','0')")
+        conn.commit()
+        claimed = conn.execute(
+            "SELECT value FROM config WHERE key='migrated_videos_composite_pk'"
+        ).fetchone()
     if claimed and claimed["value"] == "0":
         try:
             _migrate_videos_composite_pk(conn)
@@ -1168,9 +1173,15 @@ def _migrate_if_needed(conn: sqlite3.Connection):
             conn.rollback()
 
     # 4.1 重建 product_assets / video_consumption 的 FK 引用（DROP+RENAME 后 FK 内部 ID 失效）
-    conn.execute("INSERT OR IGNORE INTO config(key,value) VALUES('migrated_fk_rebuild_after_composite_pk','0')")
-    conn.commit()
-    fk_claim = conn.execute("SELECT value FROM config WHERE key='migrated_fk_rebuild_after_composite_pk'").fetchone()
+    fk_claim = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_fk_rebuild_after_composite_pk'"
+    ).fetchone()
+    if not fk_claim:
+        conn.execute("INSERT OR IGNORE INTO config(key,value) VALUES('migrated_fk_rebuild_after_composite_pk','0')")
+        conn.commit()
+        fk_claim = conn.execute(
+            "SELECT value FROM config WHERE key='migrated_fk_rebuild_after_composite_pk'"
+        ).fetchone()
     if fk_claim and fk_claim["value"] == "0":
         try:
             _rebuild_dependent_fks(conn)

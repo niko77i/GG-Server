@@ -1,10 +1,12 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.16  
-> **日期**: 2026-07-31（v1.16 更新于 2026-08-14）  
+> **文档版本**: v1.18  
+> **日期**: 2026-07-31（v1.18 更新于 2026-08-17）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.18 变更**: 修复静态资源请求 500 导致前端路由跳转不过去（两层根因叠加）——① `_attach_db`（`before_request`）此前对每个请求无条件调用 `database.get_db()` 打开数据库连接并执行迁移，静态资源请求（`/assets/*.js`）也被波及；当数据库被占用（掉包检测定时任务写库）时，静态资源请求抛 `sqlite3.OperationalError: database is locked` → 500。② `_add_static_cache`（`after_request`）未判断响应状态码，给 500 错误响应也加了 `Cache-Control: max-age=31536000`，浏览器把一次性 500 缓存 1 年——即使服务端已恢复该浏览器仍持续加载失败（表现为换浏览器就好、本机正常）。修复：`_attach_db` 对非 `/api/` 请求直接跳过、不打开数据库；`_add_static_cache` 对 `status_code >= 400` 的错误响应直接跳过、不缓存。迁移到 Spring Boot 时：①请求入口的数据库连接绑定/上下文初始化（Filter、Interceptor、`@RequestScope` 等）应只对 API 请求生效，静态资源与页面请求不得触发任何数据库访问；②静态资源缓存策略（`Cache-Control` / `CacheWebFilter` 等）必须对错误响应禁用缓存
+> **v1.17 变更**: 修复手动执行掉包检测时 500 报错（sqlite3.OperationalError: database is locked）。根因是两处 SQLite 并发写锁叠加——① `_migrate_if_needed` 的两个迁移 claim 标记（`migrated_videos_composite_pk` / `migrated_fk_rebuild_after_composite_pk`）用无条件 `INSERT OR IGNORE`，导致每个请求（含前端高频轮询 `/api/delist/pending`）都要抢写锁；② `_run_delist_check_once` 在并行 HTTP 检测循环内边检测边 `INSERT OR REPLACE` 写 `delist_checks`、直到整个网络检测结束才 commit，写锁被占用数分钟。修复：掉包检测改为先收集全部结果、循环结束后统一写库（写锁只占用纯 DB 循环的极短时间）；两个 claim 标记改为先 SELECT 判断、仅首次（标记缺失）才写。迁移到 Spring Boot 时 DelistService 检测任务同样应「先聚合结果、后批量写」，避免在长网络调用期间持有事务/行锁（详见 6.3 说明）
 > **v1.16 变更**: 产品管理列表吸顶交互——展开产品后「产品头部」滚动到列表区顶部即吸顶（`position: sticky`），包滚完才释放、往回滚自动重新钉住；「包筛选工具栏」移入产品头部 header 内、随头部一起吸顶固定。纯 CSS + DOM 移动，无后端改动（详见附录 G）
 > **v1.15 变更**: 产品包列表多选后新增「取消选择」按钮——工具栏「已选 N 个」旁新增「✕ 取消选择」按钮（选中任意包后显示），点击一键清空已选并重置 Shift 锚点，补齐「部分选择时无清空入口」的缺口（纯前端，详见附录 F）
 > **v1.13 变更**: 修复「暂停/删除产品仍弹掉包通知」——`delist/pending` 与 `products/delist-status` 两个查询此前只过滤 `pkg.status`（包状态）、漏过滤 `prod.status`（产品状态），导致产品暂停/删除后前端仍反复弹掉包通知（首次 + 3 分钟提醒循环）。两处查询补 `AND (prod.status IS NULL OR prod.status='' OR prod.status='0')`，与定时检测 `_run_delist_check_once` 保持一致。迁移到 Spring Boot 时，DelistService 查询通知/掉包状态的 SQL 必须同时过滤包状态与产品状态（详见 6.3 说明）
@@ -1720,6 +1722,13 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - `GET /api/products/delist-status` 与 `GET /api/delist/pending` 的 WHERE 除过滤 `pkg.status`（`IS NULL/''/'0'`，排除 dropped/paused 包）外，还必须过滤 `prod.status`（`IS NULL/''/'0'`，排除 paused/dropped 产品）。
 > - 漏掉 `prod.status` 的后果：产品暂停后，只要掉包的包未手动标成 `dropped`，前端 `App.vue` 每 30 秒轮询 `delist/pending` 仍命中，反复弹「首次通知」+ 关闭 3 分钟后的「提醒通知」。
 > - Python 端定时检测 `_run_delist_check_once` 一直含 `prod.status` 过滤；`delist-status`/`delist/pending` 曾缺失，已于 v1.13 补齐。迁移到 Spring Boot 的 DelistService 时务必保留此过滤。
+>
+> **说明（v1.17 新增）**：掉包检测与数据库迁移存在 SQLite 写锁并发问题，迁移到 Spring Boot 时注意：
+> - `_run_delist_check_once` 不得在慢网络请求期间持有写事务——先并行完成所有 URL 检测、收集结果，循环结束后再一次性写入 `delist_checks` 并提交。
+> - 迁移标记（`config` 表的 claim key）应「先查后写」，已迁移后每个请求只读不写，避免每个请求都抢写锁。
+> - MySQL/InnoDB 下虽为行锁而非库级写锁，但同样应避免长事务跨越外部网络调用（会长时间占用连接与锁）。
+>
+> **说明（v1.18 新增）**：请求入口的数据库连接绑定必须跳过静态资源与页面请求。Python 端 `_attach_db`（`before_request`）此前对每个请求无条件 `database.get_db()`，导致 `/assets/*.js` 等静态资源在数据库被占用时抛 `database is locked` → 500，前端动态 import 的 chunk 加载失败、页面跳不过去。修复为仅对 `/api/` 请求打开数据库连接。另注意：静态资源缓存（`_add_static_cache`）必须跳过错误响应，否则 500 会被 `Cache-Control: max-age` 缓存 1 年造成缓存污染（表现为换浏览器才好）。迁移到 Spring Boot 时：不要在全局 Filter / Interceptor / `@RequestScope` 初始化里对所有请求做数据库访问，应排除静态资源与 SPA 页面（Spring Security `permitAll` + 静态资源 handler 通常已覆盖，但仍需注意自定义 Filter 不得无条件查库）；静态资源缓存策略（`CacheControl` / `CacheWebFilter`）同样必须对错误响应禁用缓存。
 
 ---
 

@@ -102,7 +102,14 @@ def _log_response(response):
 
 @app.after_request
 def _add_static_cache(response):
-    """为带 hash 的前端静态资源添加长期缓存头。"""
+    """为带 hash 的前端静态资源添加长期缓存头。
+
+    仅对成功响应加缓存，错误响应（如 500）绝不能缓存——否则浏览器会把
+    一次性的错误（如数据库锁导致的静态资源 500）缓存 1 年，即使服务端已
+    恢复，该浏览器仍持续加载失败（表现为换浏览器就好、本机正常）。
+    """
+    if response.status_code >= 400:
+        return response
     if request.path.startswith('/assets/'):
         ext = request.path.rsplit('.', 1)[-1] if '.' in request.path else ''
         if ext in ('js', 'css', 'woff2', 'woff', 'ttf', 'png', 'svg', 'jpg', 'ico'):
@@ -133,7 +140,14 @@ def _refresh_jwt(response):
 
 @app.before_request
 def _attach_db():
-    """每个请求附加一个共享的数据库连接（通过 flask.g）。"""
+    """每个 API 请求附加一个共享的数据库连接（通过 flask.g）。
+
+    静态资源（/assets/*）与 SPA 页面请求无需数据库，跳过以避免在数据库
+    被占用（如掉包检测写库）时误触发锁，导致静态资源 500、前端路由 chunk
+    加载失败（表现为页面跳转不过去）。
+    """
+    if not request.path.startswith('/api/'):
+        return None
     g.db = database.get_db()
 
 
@@ -7830,37 +7844,41 @@ def _run_delist_check_once():
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_check_one, pkg): pkg for pkg in pkgs}
+            checked = []
             for future in as_completed(futures):
                 result = future.result()
-                if result is None:
-                    continue
-                pkg, is_delisted, error = result
-                # 检查是否此前已标记为掉包（用于 Telegram 去重）
-                was_delisted = False
-                if is_delisted:
-                    prev = db.execute(
-                        "SELECT is_delisted FROM delist_checks WHERE package_id=?",
-                        (pkg["package_id"],)
-                    ).fetchone()
-                    was_delisted = prev is not None and prev["is_delisted"] == 1
+                if result is not None:
+                    checked.append(result)
 
-                # 写 DB（主线程安全）
-                db.execute(
-                    "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
-                    "VALUES(?, ?, ?, ?, ?)",
-                    (pkg["package_id"], pkg["product_id"], 1 if is_delisted else 0, now, error)
-                )
-                results.append({
-                    "package_id": pkg["package_id"],
-                    "product_id": pkg["product_id"],
-                    "package_name": pkg.get("package_name", ""),
-                    "is_delisted": is_delisted,
-                    "error": error,
-                })
-                if is_delisted:
-                    delisted_list.append(pkg)
-                    if not was_delisted:
-                        newly_delisted_list.append(pkg)
+        # HTTP 检测全部完成后，再统一写 DB。
+        # 避免在慢网络请求期间持有 SQLite 写锁（写锁只占用下面这段纯内存/DB 循环的极短时间）。
+        for pkg, is_delisted, error in checked:
+            # 检查是否此前已标记为掉包（用于 Telegram 去重）
+            was_delisted = False
+            if is_delisted:
+                prev = db.execute(
+                    "SELECT is_delisted FROM delist_checks WHERE package_id=?",
+                    (pkg["package_id"],)
+                ).fetchone()
+                was_delisted = prev is not None and prev["is_delisted"] == 1
+
+            # 写 DB
+            db.execute(
+                "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (pkg["package_id"], pkg["product_id"], 1 if is_delisted else 0, now, error)
+            )
+            results.append({
+                "package_id": pkg["package_id"],
+                "product_id": pkg["product_id"],
+                "package_name": pkg.get("package_name", ""),
+                "is_delisted": is_delisted,
+                "error": error,
+            })
+            if is_delisted:
+                delisted_list.append(pkg)
+                if not was_delisted:
+                    newly_delisted_list.append(pkg)
 
         db.commit()
 
