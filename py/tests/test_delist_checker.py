@@ -196,3 +196,105 @@ class TestCheckProductPackages:
             results = check_product_packages(1, packages)
 
         assert len(results) == 3
+
+
+# ============================================================
+# 测试 check_url_delisted 的代理重试逻辑
+# ============================================================
+
+class TestCheckUrlDelistedWithProxy:
+    """测试带代理池的掉包检测。"""
+
+    def _make_pool(self, n=2):
+        from proxy_pool import ProxyPool
+        proxies = [
+            {"ip": f"1.2.3.{i}", "port": 800 + i, "username": "u", "password": "p"}
+            for i in range(1, n + 1)
+        ]
+        return ProxyPool(proxies, max_retries=n)
+
+    def test_retries_next_proxy_after_failure(self):
+        """第一个代理失败后换下一个代理重试，最终成功。"""
+        from delist_checker import check_url_delisted
+
+        pool = self._make_pool(2)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "Normal app page"
+
+        with patch("delist_checker.requests.get", side_effect=[requests.ConnectionError("fail"), mock_resp]) as mock_get:
+            is_delisted, error = check_url_delisted(
+                "https://play.google.com/store/apps/details?id=test.a", pool
+            )
+
+        assert is_delisted is False
+        assert error == ""
+        assert mock_get.call_count == 2
+
+    def test_all_proxies_fail_returns_proxy_error(self):
+        """所有代理都失败，返回带「代理」标识的错误，不判为掉包。"""
+        from delist_checker import check_url_delisted
+
+        pool = self._make_pool(2)
+
+        with patch("delist_checker.requests.get", side_effect=requests.ConnectionError("fail")) as mock_get:
+            is_delisted, error = check_url_delisted(
+                "https://play.google.com/store/apps/details?id=test.a", pool
+            )
+
+        assert is_delisted is False
+        assert "代理" in error
+        assert mock_get.call_count == 2
+
+    def test_judges_delisted_through_proxy(self):
+        """通过代理请求成功，404 判定为掉包，且请求携带 proxies。"""
+        from delist_checker import check_url_delisted
+
+        pool = self._make_pool(1)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.text = ""
+
+        with patch("delist_checker.requests.get", return_value=mock_resp) as mock_get:
+            is_delisted, error = check_url_delisted(
+                "https://play.google.com/store/apps/details?id=test.a", pool
+            )
+
+        assert is_delisted is True
+        assert error == ""
+        assert mock_get.call_args.kwargs.get("proxies") is not None
+
+    def test_no_pool_keeps_direct_connection(self):
+        """不传 proxy_pool 时，请求不带 proxies（直连）。"""
+        from delist_checker import check_url_delisted
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "Normal app page"
+
+        with patch("delist_checker.requests.get", return_value=mock_resp) as mock_get:
+            is_delisted, error = check_url_delisted(
+                "https://play.google.com/store/apps/details?id=test.a"
+            )
+
+        assert is_delisted is False
+        assert error == ""
+        assert mock_get.call_args.kwargs.get("proxies") is None
+
+    def test_empty_pool_returns_proxy_error(self):
+        """空代理池返回「代理池为空」错误，不发请求、不判为掉包。"""
+        from delist_checker import check_url_delisted
+        from proxy_pool import ProxyPool
+
+        pool = ProxyPool([])
+
+        with patch("delist_checker.requests.get") as mock_get:
+            is_delisted, error = check_url_delisted(
+                "https://play.google.com/store/apps/details?id=test.a", pool
+            )
+
+        assert is_delisted is False
+        assert error == "代理池为空"
+        mock_get.assert_not_called()

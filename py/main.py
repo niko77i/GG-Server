@@ -3190,6 +3190,23 @@ def audit_log_restore(log_id):
 
 import delist_checker
 
+
+def _build_delist_proxy_pool():
+    """从配置构造掉包检测代理池；未启用或配置异常时返回 None（直连）。"""
+    import proxy_pool as _proxy_pool
+    cfg = APP_CONFIG.get("delist_proxy") or {}
+    if not isinstance(cfg, dict) or not cfg.get("enabled"):
+        return None
+    proxies = cfg.get("proxies") or []
+    if not proxies:
+        return None
+    try:
+        max_retries = int(cfg.get("max_retries", 3) or 3)
+    except (TypeError, ValueError):
+        max_retries = 3
+    return _proxy_pool.ProxyPool(proxies, max_retries=max_retries)
+
+
 @app.route("/api/products/<int:pid>/check-delist", methods=["POST"])
 @jwt_required()
 def products_check_delist(pid):
@@ -3212,7 +3229,7 @@ def products_check_delist(pid):
     pkg_list = [dict(p) for p in pkgs]
     # 建立 package_id → 原始包数据的映射（check_product_packages 返回不含 series_name/url 等）
     pkg_map = {p["id"]: p for p in pkg_list}
-    results = delist_checker.check_product_packages(pid, pkg_list)
+    results = delist_checker.check_product_packages(pid, pkg_list, _build_delist_proxy_pool())
 
     # 获取产品信息（用于通知）
     prod = db.execute(
@@ -7834,12 +7851,13 @@ def _run_delist_check_once():
         # 并行 HTTP 检测（IO 密集型，最多 10 并发）
         from concurrent.futures import ThreadPoolExecutor, as_completed
         max_workers = min(len(pkgs), 10)
+        proxy_pool = _build_delist_proxy_pool()
 
         def _check_one(pkg):
             url = (pkg.get("url") or "").strip()
             if not url:
                 return None
-            is_delisted, error = _delist_checker.check_url_delisted(url)
+            is_delisted, error = _delist_checker.check_url_delisted(url, proxy_pool)
             return (pkg, is_delisted, error)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
