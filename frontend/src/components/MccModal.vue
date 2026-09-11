@@ -14,7 +14,7 @@
         </el-select>
       </el-form-item>
       <el-form-item label="上级 MCC">
-        <el-select v-model="form.parent_mcc_id" clearable placeholder="（顶级）" style="width:100%;">
+        <el-select v-model="form.parent_mcc_id" filterable clearable placeholder="（顶级）" style="width:100%;">
           <el-option label="（顶级）" value="" />
           <el-option v-for="m in parentOpts" :key="m.id" :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
         </el-select>
@@ -41,6 +41,7 @@ const parentOpts = ref([])
 const form = reactive({ name: '', mcc_id: '', level_id: '', parent_mcc_id: '' })
 
 async function init() {
+  if (!store.options.mccLevels.length) await store.loadMccLevels()
   const res = await mccApi.options()
   parentOpts.value = (res.options || []).filter(m => m.id !== props.editId)
   if (props.editId) {

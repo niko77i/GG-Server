@@ -4,11 +4,11 @@
  *
  * @param {string} rawText - 粘贴的原始文本
  * @param {object} opts
- * @param {boolean} opts.isYanghu - 养户模式（7列），默认 false
- * @param {boolean} opts.includeCampaignId - 含广告系列ID（11列），默认 false（10列）
+ * @param {boolean} opts.isSevenCols - 7列模式（无安装/应用指标），默认 false
+ * @param {boolean} opts.includeCampaignId - 含广告系列ID（10列→11列 / 7列→8列），默认 false
  * @returns {{ raw: object[], zuobiao: object[], kehu: object[] }}
  */
-export function parseAdsData(rawText, { isYanghu = false, includeCampaignId = false } = {}) {
+export function parseAdsData(rawText, { isSevenCols = false, includeCampaignId = false } = {}) {
   const input = rawText.trim()
   if (!input) throw new Error('请输入数据')
 
@@ -21,8 +21,11 @@ export function parseAdsData(rawText, { isYanghu = false, includeCampaignId = fa
   if (startIdx >= endIdx) throw new Error('数据顺序异常')
 
   let step, costIdx, imprIdx, clickIdx
-  if (isYanghu) {
-    step = 7; costIdx = 4; imprIdx = 5; clickIdx = 6
+  if (isSevenCols) {
+    step = includeCampaignId ? 8 : 7
+    costIdx = includeCampaignId ? 5 : 4
+    imprIdx = includeCampaignId ? 6 : 5
+    clickIdx = includeCampaignId ? 7 : 6
   } else {
     step = includeCampaignId ? 11 : 10
     costIdx = includeCampaignId ? 5 : 4
@@ -42,7 +45,7 @@ export function parseAdsData(rawText, { isYanghu = false, includeCampaignId = fa
 
   /** @type {object[]} */
   let raw
-  if (isYanghu) {
+  if (isSevenCols) {
     raw = chunks.map(r => ({
       account: r[0], customerId: r[1],
       campaign: r[2].replace(/-[^-]*$/, '').trim(),

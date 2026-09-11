@@ -1,10 +1,13 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.18  
-> **日期**: 2026-07-31（v1.18 更新于 2026-08-17）  
+> **文档版本**: v1.21  
+> **日期**: 2026-07-31（v1.21 更新于 2026-09-11）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.21 变更**: 做表数据与 MCC 管理三处前端修复/增强（均纯前端，后端无改动）——① 做表数据「包含广告系列ID」与「7列数据」两个勾选项此前互斥（`zbIncludeCampaignId` 被 `:disabled="zbSevenCols"` 禁用），现改为可同时勾选，`adsParser.js` 增加「7列 + 含广告系列ID = 8列」组合（step=8、指标列整体后移1位、第5列广告系列ID自动剔除）；② MCC 新增/编辑弹窗「等级」下拉框此前依赖设置页 `loadMccLevels()` 才填充、直接进 MCC 面板为空，改为 `MccModal.vue` `init()` 懒加载（`if (!store.options.mccLevels.length) await store.loadMccLevels()`），并将「上级 MCC」下拉框加 `filterable` 支持搜索；③ 做表数据日期 `zbSelectedDate` 此前仅在组件初始化时算一次「昨天」、跨天后不更新导致覆盖到错误日期，新增 `scheduleZbMidnightRefresh()` 定时器在 0 点后自动更新为新「昨天」并递归调度到下一 0 点
+> **v1.20 变更**: 做表数据「养户」与「7列」判定解耦——前端 `ToolkitView.vue` 做表数据 Tab 的 `is_yanghu` 此前由 `zbYanghu（勾选7列）|| 命中养户关键词` 决定，导致勾选「7列（无安装/应用指标）」时所有行被误判为养户（G列写「养户」、H列写「止戈」、L列写「0%」，且不入库）。现改为**仅按系列名（campaign）命中养户关键词判定**：变量 `zbYanghu`→`zbSevenCols`（表示7列数据格式）、`adsParser.js` 参数 `isYanghu`→`isSevenCols`、勾选项文案改为「7列数据（无安装/应用指标）」。副作用：7 列非养户行现在会入库 `ad_reports`，因 7 列解析不含 `installs/in_app_actions/cost_per_in_app` 三字段，入库时按 0 写入（覆盖旧值）。后端接口契约不变（`is_yanghu` 仍由前端传入，详见 6.2 说明）
+> **v1.19 变更**: 掉包检测改为走代理 IP 访问 Google Play 链接（不再用服务端自身 IP，避免被风控/限流）。新增 `py/proxy_pool.py` 代理池模块（随机取用 + 失败自动切换下一个代理 + `enabled` 开关 + `max_retries` 重试）；`config/config.json` 新增 `delist_proxy` 段；`check_url_delisted` / `check_product_packages` 增加可选 `proxy_pool` 参数（缺省直连，向后兼容）；定时任务与手动检测均接入。迁移到 Spring Boot 时 DelistChecker 需支持代理池访问（详见 6.3、8.5 说明）
 > **v1.18 变更**: 修复静态资源请求 500 导致前端路由跳转不过去（两层根因叠加）——① `_attach_db`（`before_request`）此前对每个请求无条件调用 `database.get_db()` 打开数据库连接并执行迁移，静态资源请求（`/assets/*.js`）也被波及；当数据库被占用（掉包检测定时任务写库）时，静态资源请求抛 `sqlite3.OperationalError: database is locked` → 500。② `_add_static_cache`（`after_request`）未判断响应状态码，给 500 错误响应也加了 `Cache-Control: max-age=31536000`，浏览器把一次性 500 缓存 1 年——即使服务端已恢复该浏览器仍持续加载失败（表现为换浏览器就好、本机正常）。修复：`_attach_db` 对非 `/api/` 请求直接跳过、不打开数据库；`_add_static_cache` 对 `status_code >= 400` 的错误响应直接跳过、不缓存。迁移到 Spring Boot 时：①请求入口的数据库连接绑定/上下文初始化（Filter、Interceptor、`@RequestScope` 等）应只对 API 请求生效，静态资源与页面请求不得触发任何数据库访问；②静态资源缓存策略（`Cache-Control` / `CacheWebFilter` 等）必须对错误响应禁用缓存
 > **v1.17 变更**: 修复手动执行掉包检测时 500 报错（sqlite3.OperationalError: database is locked）。根因是两处 SQLite 并发写锁叠加——① `_migrate_if_needed` 的两个迁移 claim 标记（`migrated_videos_composite_pk` / `migrated_fk_rebuild_after_composite_pk`）用无条件 `INSERT OR IGNORE`，导致每个请求（含前端高频轮询 `/api/delist/pending`）都要抢写锁；② `_run_delist_check_once` 在并行 HTTP 检测循环内边检测边 `INSERT OR REPLACE` 写 `delist_checks`、直到整个网络检测结束才 commit，写锁被占用数分钟。修复：掉包检测改为先收集全部结果、循环结束后统一写库（写锁只占用纯 DB 循环的极短时间）；两个 claim 标记改为先 SELECT 判断、仅首次（标记缺失）才写。迁移到 Spring Boot 时 DelistService 检测任务同样应「先聚合结果、后批量写」，避免在长网络调用期间持有事务/行锁（详见 6.3 说明）
 > **v1.16 变更**: 产品管理列表吸顶交互——展开产品后「产品头部」滚动到列表区顶部即吸顶（`position: sticky`），包滚完才释放、往回滚自动重新钉住；「包筛选工具栏」移入产品头部 header 内、随头部一起吸顶固定。纯 CSS + DOM 移动，无后端改动（详见附录 G）
@@ -1674,6 +1677,8 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > | 无交集 + 有养户行 | 放行 + 响应 `warning` 字段（前端 8 秒警告弹窗，可关闭） |
 >
 > 前端 `ToolkitView.vue` 收到 `warning` 后调用 `ElMessage.warning({ duration: 8000, showClose: true })`。
+>
+> **说明（v1.20 新增）**：前端 `is_yanghu` 的判定来源已变更——原实现为 `zbYanghu(勾选7列) || 命中养户关键词`，v1.20 起改为**仅按系列名（campaign）命中养户关键词**（`zbYanghuKeywords`，默认 `['养户','Website traffic-Search','Campaign #1']`，可在输入框增删）。原因：Google 报告现调不出「安装/应用」指标，7 列数据也是真实投放数据而非养户，是否养户应只看系列名。前端变量语义化：`zbYanghu`→`zbSevenCols`（7列格式）、`parseAdsData` 参数 `isYanghu`→`isSevenCols`。**后端契约不变**：`is_yanghu` 仍由前端逐行传入，`ZuobiaoRow.isYanghu` 字段与 `validateProductMatches` 逻辑均无需改动；非养户的 7 列行会入库 `ad_reports`，`installs/in_app_actions/cost_per_in_app` 按 0 写（覆盖旧值，7 列解析本无这三列）。
 
 ### 6.3 完整 Controller 清单
 
@@ -1729,6 +1734,12 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - MySQL/InnoDB 下虽为行锁而非库级写锁，但同样应避免长事务跨越外部网络调用（会长时间占用连接与锁）。
 >
 > **说明（v1.18 新增）**：请求入口的数据库连接绑定必须跳过静态资源与页面请求。Python 端 `_attach_db`（`before_request`）此前对每个请求无条件 `database.get_db()`，导致 `/assets/*.js` 等静态资源在数据库被占用时抛 `database is locked` → 500，前端动态 import 的 chunk 加载失败、页面跳不过去。修复为仅对 `/api/` 请求打开数据库连接。另注意：静态资源缓存（`_add_static_cache`）必须跳过错误响应，否则 500 会被 `Cache-Control: max-age` 缓存 1 年造成缓存污染（表现为换浏览器才好）。迁移到 Spring Boot 时：不要在全局 Filter / Interceptor / `@RequestScope` 初始化里对所有请求做数据库访问，应排除静态资源与 SPA 页面（Spring Security `permitAll` + 静态资源 handler 通常已覆盖，但仍需注意自定义 Filter 不得无条件查库）；静态资源缓存策略（`CacheControl` / `CacheWebFilter`）同样必须对错误响应禁用缓存。
+>
+> **说明（v1.19 新增）**：掉包检测改为走代理 IP，迁移到 Spring Boot 的 DelistChecker 时注意：
+> - 新增 `delist_proxy` 配置段（`enabled` / `max_retries` / `proxies[]`，每个代理含 `ip`/`port`/`username`/`password`/`scheme`）。`enabled=false` 或 `proxies` 为空时**完全回退直连**（与历史行为一致，出问题可一键关闭）。
+> - 代理池按 `(ip, port)` 去重，随机取一个；请求失败（连接失败/超时）时换下一个代理重试，最多 `max_retries` 次。
+> - **关键：区分「代理挂了」和「真掉包」**。代理全部失败时返回 `is_delisted=false` + 带「代理」标识的 error（如 `代理全部失败: ...`），**绝不误判为掉包**；仅当通过代理拿到明确 404 / 关键词时才判 `is_delisted=true`。
+> - Java 侧映射：`py/proxy_pool.py` → `delist/DelistProxyPool.java`（解析配置、去重、随机取用、生成代理参数）；`check_url_delisted(url, proxy_pool)` → `DelistChecker.checkUrlDelisted(url, proxyPool)`。**注意 `RestTemplate` 默认不支持按请求动态切换代理**（`SimpleClientHttpRequestFactory.setProxy()` 为全局单一代理），需用 Apache HttpClient（每请求 `RequestConfig`/`HttpClientContext` 指定 proxy）或 OkHttp（每请求 `newBuilder().proxy(...)`）实现逐请求换代理。
 
 ---
 
@@ -2469,7 +2480,7 @@ public class FbExtractService {
 | **VideoService** | AI 视频生成、FFmpeg 合成 | ProcessBuilder + @Async |
 | **AuthService** | 登录/注册、JWT 签发、角色管理 | BCrypt + jjwt |
 | **DataImportExportService** | 数据导入导出、备份恢复 | Jackson |
-| **DelistService** | 掉包检测、通知 | @Scheduled + RestTemplate |
+| **DelistService** | 掉包检测、通知 | @Scheduled + RestTemplate（代理池访问） |
 | **NotificationService** | 邮件 + Telegram 通知 | JavaMailSender + RestTemplate |
 | **FbService** | FB 全平台业务（BM/账户/产品/Pixel） | JPA + @Transactional |
 | **OptionService** | 选项表 CRUD | JPA |
@@ -2540,6 +2551,56 @@ public class ScheduledTasks {
     }
 }
 ```
+
+### 8.5.1 掉包检测代理池（v1.19）
+
+**需求**: 掉包检测不再用服务端自身 IP，改走代理 IP 访问 Google Play，多出口轮换降低单 IP 被限流风险。
+
+**结构**（对应 Python `py/proxy_pool.py` + `py/delist_checker.py`）：
+
+```java
+// delist/DelistProxyPool.java
+@Component
+public class DelistProxyPool {
+    private final List<ProxyConfig> proxies;   // 启动时解析 delist-proxy.proxies[]，按 (ip,port) 去重
+    private final boolean enabled;
+    private final int maxRetries;
+
+    /** 随机取一个代理，排除 exclude 中已尝试的 (ip,port)。无可用返回 null。 */
+    public ProxyConfig next(Set<String> exclude) { ... }
+
+    public boolean isEnabled() { ... }
+    public boolean isEmpty() { return proxies.isEmpty(); }
+    public int maxRetries() { ... }
+}
+
+// delist/DelistChecker.java
+public DelistResult checkUrlDelisted(String url, DelistProxyPool proxyPool) {
+    if (proxyPool == null || !proxyPool.isEnabled()) {
+        return directCheck(url);   // 直连，行为与历史一致
+    }
+    if (proxyPool.isEmpty()) return DelistResult.notDelisted("代理池为空");
+    Set<String> tried = new HashSet<>();
+    String lastError = "";
+    for (int i = 0; i < proxyPool.maxRetries(); i++) {
+        ProxyConfig p = proxyPool.next(tried);
+        if (p == null) break;
+        tried.add(p.ip() + ":" + p.port());
+        try {
+            return requestAndJudge(url, p);   // 逐请求设置代理发请求，判 404/关键词
+        } catch (TimeoutException | ConnectException e) {
+            lastError = "代理失败 " + p.ip() + ":" + p.port();
+        }
+    }
+    return DelistResult.notDelisted("代理全部失败: " + lastError);  // 绝不误判为掉包
+}
+```
+
+**关键点**:
+- `RestTemplate` 默认不支持按请求动态切换代理（`SimpleClientHttpRequestFactory.setProxy()` 是全局单一代理）。用 **Apache HttpClient**（每请求 `RequestConfig`/`HttpClientContext` 指定 proxy）或 **OkHttp**（每请求 `newBuilder().proxy(...)` 构造临时 client）实现逐请求换代理。
+- 代理失败只返回 `is_delisted=false` + 带「代理」标识的 error；仅当拿到明确 404 / 关键词才判 `is_delisted=true`。切勿把代理异常当成掉包。
+- `enabled=false` 或 `proxies` 为空时完全回退直连，与历史行为一致（向后兼容，出问题可一键关闭）。
+- 代理池在单次检测任务内构造一次、复用，避免每 URL 重复解析配置。
 
 ### 8.6 异步配置
 
@@ -2977,6 +3038,18 @@ scheduler:
   weekly-cleanup: "0 0 2 * * SUN"
   delist-check: "0 0 9 * * *"
 
+# 掉包检测代理（v1.19，enabled=false 时直连）
+delist-proxy:
+  enabled: ${DELIST_PROXY_ENABLED:false}
+  max-retries: ${DELIST_PROXY_MAX_RETRIES:3}
+  proxies:
+    - ip: ${DELIST_PROXY_1_IP:}
+      port: ${DELIST_PROXY_1_PORT:0}
+      username: ${DELIST_PROXY_1_USERNAME:}
+      password: ${DELIST_PROXY_1_PASSWORD:}
+      scheme: http        # http / socks5
+    # ... 更多代理（按 (ip,port) 去重）
+
 # 日志
 logging:
   level:
@@ -3000,6 +3073,9 @@ logging:
 | `SMTP_HOST/USERNAME/PASSWORD` | SMTP 配置 | (空) |
 | `TELEGRAM_BOT_TOKEN/CHAT_ID` | Telegram 配置 | (空) |
 | `FFMPEG_PATH` | FFmpeg 可执行文件路径 | ffmpeg |
+| `DELIST_PROXY_ENABLED` | 掉包检测代理开关（false=直连） | false |
+| `DELIST_PROXY_MAX_RETRIES` | 单 URL 最多尝试代理数 | 3 |
+| `DELIST_PROXY_N_IP/PORT/USERNAME/PASSWORD` | 第 N 个代理配置 | (空) |
 
 ---
 
@@ -3248,6 +3324,7 @@ public class AuthService {
 | `py/telegram_sender.py` | `TelegramSender` |
 | `py/scraper.py` | `ScrapeService` |
 | `py/delist_checker.py` | `DelistChecker` |
+| `py/proxy_pool.py` | `delist/DelistProxyPool` |
 | `py/cache.py` | Caffeine `@Cacheable` |
 | `py/resizer.py` | `ImageService` (Thumbnailator) |
 | `py/data_service.py` | `DataImportExportService` |

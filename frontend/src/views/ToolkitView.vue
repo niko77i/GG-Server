@@ -20,8 +20,8 @@
           <el-select v-model="zbYanghuKeywords" multiple filterable allow-create placeholder="养户关键词（匹配到的行→养户/止戈）" style="flex:1;min-width:250px;" size="small" />
         </div>
         <p style="color:#888;margin-bottom:8px;font-size:13px;">粘贴包含"添加过滤条件"和"Total"的原始竖排数据：</p>
-        <el-checkbox v-model="zbIncludeCampaignId" size="small" style="margin-bottom:8px;" :disabled="zbYanghu">包含广告系列ID（原数据11列，自动剔除第5列）</el-checkbox>
-        <el-checkbox v-model="zbYanghu" size="small" style="margin-bottom:8px;margin-left:12px;">养户（7列：账号/客户ID/广告系列/状态/费用/展示/点击）</el-checkbox>
+        <el-checkbox v-model="zbIncludeCampaignId" size="small" style="margin-bottom:8px;">包含广告系列ID（自动剔除第5列）</el-checkbox>
+        <el-checkbox v-model="zbSevenCols" size="small" style="margin-bottom:8px;margin-left:12px;">7列数据（无安装/应用指标）</el-checkbox>
         <el-input v-model="zbInput" type="textarea" :rows="8" placeholder="在此粘贴原始数据..." />
         <div style="display:flex;gap:8px;margin-top:8px;">
           <el-button type="primary" @click="zbProcess">🚀 一键解析并生成所有报表</el-button>
@@ -328,7 +328,7 @@ function switchTab(name) { router.push(`/toolkit/${name}`) }
 // ========== 做表数据 ==========
 const zbInput = ref('')
 const zbIncludeCampaignId = ref(false)
-const zbYanghu = ref(false)
+const zbSevenCols = ref(false)
 const zbRaw = ref([])
 const zbZuobiao = ref([])
 const zbKehu = ref([])
@@ -346,6 +346,7 @@ const zbRetryCountdown = ref(0)       // 30s 倒计时
 const zbShowSyncData = ref(false)
 let _zbSyncTimer = null
 let _zbCountdownTimer = null
+let _zbMidnightTimer = null
 
 // 选择产品时查询是否有未同步记录
 watch(zbSelectedProduct, (name) => {
@@ -418,6 +419,17 @@ function _yesterday() {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
 }
 
+// 转点后自动把做表日期更新为新的「昨天」，避免隔天仍用旧日期覆盖数据
+function scheduleZbMidnightRefresh() {
+  if (_zbMidnightTimer) clearTimeout(_zbMidnightTimer)
+  const now = new Date()
+  const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0)
+  _zbMidnightTimer = setTimeout(() => {
+    zbSelectedDate.value = _yesterday()
+    scheduleZbMidnightRefresh()
+  }, nextMidnight.getTime() - now.getTime() + 1000)
+}
+
 async function onSaveDialogOpen() {
   saveRows.value = [...zbRaw.value]
 }
@@ -475,7 +487,7 @@ async function zbUpdateSheet() {
     const keywords = zbYanghuKeywords.value.filter(Boolean)
     const taggedRows = zbZuobiao.value.map(row => ({
       ...row,
-      is_yanghu: zbYanghu.value || keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
+      is_yanghu: keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
     }))
     // raw 数据也打上养户标记，供后端过滤后保存到数据库
     const taggedRaw = zbRaw.value.map(row => ({
@@ -488,7 +500,7 @@ async function zbUpdateSheet() {
       installs: row.installs,
       inAppActions: row.inAppActions,
       costPerInApp: row.costPerInApp,
-      is_yanghu: zbYanghu.value || keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
+      is_yanghu: keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
     }))
     zbSyncStatus.value = null  // 清除旧状态
     const res = await googleSheetsApi.updateZuobiao({
@@ -621,7 +633,7 @@ function zbProcess() {
   zbRaw.value = []; zbZuobiao.value = []; zbKehu.value = []
   try {
     const { raw, zuobiao, kehu } = parseAdsData(zbInput.value, {
-      isYanghu: zbYanghu.value,
+      isSevenCols: zbSevenCols.value,
       includeCampaignId: zbIncludeCampaignId.value,
     })
     zbRaw.value = raw
@@ -683,7 +695,7 @@ function _revokeAudioBlobs() {
   if (audioVideoBlobUrl.value) { URL.revokeObjectURL(audioVideoBlobUrl.value); audioVideoBlobUrl.value = '' }
   if (audioSourceBlobUrl.value) { URL.revokeObjectURL(audioSourceBlobUrl.value); audioSourceBlobUrl.value = '' }
 }
-onUnmounted(() => { _revokeAudioBlobs(); clearZbSyncState() })
+onUnmounted(() => { _revokeAudioBlobs(); clearZbSyncState(); if (_zbMidnightTimer) clearTimeout(_zbMidnightTimer) })
 
 function onAudioVideoFileChange(e) {
   audioVideoFile.value = e.target.files?.[0] || null
@@ -745,7 +757,7 @@ function audioHistoryDownload(item) {
   window.open(`/api/audio-replace/download?path=${encodeURIComponent(item.output_path)}`, '_blank')
 }
 
-onMounted(() => { audioLoadHistory(); loadZbProducts() })
+onMounted(() => { audioLoadHistory(); loadZbProducts(); scheduleZbMidnightRefresh() })
 
 // ========== 翻译工具 ==========
 const TL_LANGS = [
