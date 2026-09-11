@@ -1094,10 +1094,20 @@ def extract_save():
                  rec.get('cost', 0), rec.get('impressions', 0), rec.get('clicks', 0),
                  rec.get('registrations', 0), rec.get('purchases', 0), rec.get('cost_per_purchase', 0)))
         db.commit()
-        # 异步写 Google Sheets
-        _schedule_fb_sheets_write(uid, product_name, line_name, report_date, records)
 
-        return ok({'saved': len(records)})
+        # 先插入一条 pending 同步日志并拿到 id，供前端精确轮询本次写表结果
+        import json as _json
+        db.execute(
+            "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, rows_json) "
+            "VALUES (?,?,?,'','pending',?)",
+            (uid, product_name, '', _json.dumps(records, ensure_ascii=False)[:10000]))
+        log_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+
+        # 异步写 Google Sheets（完成后会更新这条日志的状态为 synced/failed）
+        _schedule_fb_sheets_write(uid, product_name, line_name, report_date, records, log_id)
+
+        return ok({'saved': len(records), 'sync_log_id': log_id})
     except Exception as e:
         db.rollback()
         return err(f'保存数据失败: {str(e)}'), 500
@@ -1139,8 +1149,8 @@ def _get_sheet_config_key(db, user_id):
     return f"google_sheets_fb_{user_id}" if platform == 'fb' else f"google_sheets_{user_id}"
 
 
-def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, records):
-    """后台线程写 Google Sheets + 失败记录到 sheets_sync_log"""
+def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, records, log_id):
+    """后台线程写 Google Sheets，并更新对应的 sheets_sync_log 状态（synced/failed）。"""
     def _do_write():
         import database as _db
         import traceback
@@ -1150,26 +1160,24 @@ def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, rec
             import google_sheets_service as gs
             result = gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
             print(f"[FB-Sheets] 写入成功: {result}")
-            # 记录成功
+            # 更新本次同步日志为 synced
             db.execute(
-                "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, rows_json) "
-                "VALUES (?,?,?,'','synced',?)",
-                (user_id, product_name, '', json.dumps(records, ensure_ascii=False)[:10000]))
+                "UPDATE sheets_sync_log SET status='synced', error_msg='', rows_json=?, "
+                "updated_at=datetime('now','localtime') WHERE id=?",
+                (json.dumps(records, ensure_ascii=False)[:10000], log_id))
             db.commit()
         except Exception as e:
             err_msg = str(e)[:500]
             traceback.print_exc()
             try:
                 db.execute(
-                    "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, error_msg, rows_json) "
-                    "VALUES (?, ?, ?, '', 'failed', ?, ?)",
-                    (user_id, product_name, '',
-                     err_msg,
-                     json.dumps(records, ensure_ascii=False)[:10000]))
+                    "UPDATE sheets_sync_log SET status='failed', error_msg=?, rows_json=?, "
+                    "updated_at=datetime('now','localtime') WHERE id=?",
+                    (err_msg, json.dumps(records, ensure_ascii=False)[:10000], log_id))
                 db.commit()
                 print(f"[FB-Sheets] 写入失败已记录: {err_msg}")
             except Exception as ex2:
-                print(f"[FB-Sheets] 日志写入也失败: {ex2}")
+                print(f"[FB-Sheets] 日志更新也失败: {ex2}")
         finally:
             try:
                 db.close()
@@ -1227,6 +1235,22 @@ def fb_last_sync():
     result = dict(row)
     result['rows_json'] = (result.get('rows_json') or '')[:200]  # 截断
     return ok(result)
+
+
+@fb_bp.route('/api/fb/reports/sync-status/<int:log_id>', methods=['GET'])
+@jwt_required()
+@fb_required
+def fb_sync_status_by_id(log_id):
+    """查询特定同步日志的状态（供前端在保存后精确轮询本次写表结果）。"""
+    db = get_db()
+    uid = get_uid()
+    row = db.execute(
+        "SELECT id, status, error_msg FROM sheets_sync_log WHERE id=? AND user_id=?",
+        (log_id, uid)
+    ).fetchone()
+    if not row:
+        return err('同步记录不存在'), 404
+    return ok({'id': row['id'], 'status': row['status'], 'error_msg': row['error_msg'] or ''})
 
 
 @fb_bp.route('/api/fb/reports/sync-status', methods=['GET'])

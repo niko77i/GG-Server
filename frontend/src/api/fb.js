@@ -65,4 +65,5 @@ export const fbApi = {
   exportReports(params = {}) { return client.get('/fb/reports/export', { params }) },
   retrySheetsSync() { return client.post('/fb/reports/retry-sync') },
   lastSyncStatus() { return client.get('/fb/reports/last-sync') },
+  getSyncStatus(logId) { return client.get(`/fb/reports/sync-status/${logId}`) },
 }

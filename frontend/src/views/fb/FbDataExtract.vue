@@ -7,7 +7,7 @@
       <el-form label-width="80px" inline>
         <el-form-item label="产品">
           <el-select v-model="selectedProductId" placeholder="选择产品" style="width:200px" @change="onProductChange">
-            <el-option v-for="p in products" :key="p.id" :label="p.product_name" :value="p.id" />
+            <el-option v-for="p in products" :key="p.id" :label="p.product_name + (p.sales_person_name ? ' ' + p.sales_person_name : '')" :value="p.id" />
           </el-select>
         </el-form-item>
         <el-form-item v-if="selectedLines.length > 1" label="线名">
@@ -239,7 +239,7 @@ async function doSave() {
   const ln = selectedLineName.value
   saving.value = true
   try {
-    await fbApi.saveExtract({
+    const res = await fbApi.saveExtract({
       product_name: prod.product_name,
       line_name: ln,
       report_date: reportDate.value,
@@ -247,16 +247,22 @@ async function doSave() {
     })
     ElMessage.success(`已保存 ${parsedData.value.length} 条` + (dupCount.value ? `（覆盖 ${dupCount.value} 条）` : '') + `，后台写表中...`)
     saveDialogVisible.value = false
-    // 3秒后检查写表结果
-    setTimeout(async () => {
-      try {
-        const r = await fbApi.lastSyncStatus()
-        if (r.status === 'synced') ElMessage.success('✅ 写表成功')
-        else if (r.status === 'failed') ElMessage.error(`❌ 写表失败: ${r.error_msg || ''}`)
-      } catch(e) {}
-    }, 1500)
+    // 用本次保存返回的 sync_log_id 精确轮询写表结果（不再依赖"最新一条"）
+    if (res.sync_log_id) pollSyncStatus(res.sync_log_id)
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败') }
   finally { saving.value = false }
+}
+
+// 轮询本次写表结果：pending 则 1 秒后再查，最多 15 次
+async function pollSyncStatus(syncLogId, attempt = 0) {
+  const MAX_ATTEMPTS = 15
+  try {
+    const r = await fbApi.getSyncStatus(syncLogId)
+    if (r.status === 'synced') return ElMessage.success('✅ 写表成功')
+    if (r.status === 'failed') return ElMessage.error(`❌ 写表失败: ${r.error_msg || ''}`)
+    if (attempt >= MAX_ATTEMPTS) return ElMessage.warning('写表结果未返回，请稍后到「数据管理」页重试写表')
+    setTimeout(() => pollSyncStatus(syncLogId, attempt + 1), 1000)
+  } catch (e) { /* 查询失败不再打扰用户 */ }
 }
 
 onMounted(loadProducts)
