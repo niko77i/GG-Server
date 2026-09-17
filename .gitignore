@@ -19,7 +19,7 @@ temp/app.db
 temp/audio_replace
 
 # 配置敏感信息（含密码）
-config/config.json
+config/config.local.json
 
 # Google Sheets 凭据
 config/google_sheets_credentials.json

@@ -62,7 +62,7 @@ ALTER TABLE users ADD COLUMN telegram_username TEXT DEFAULT '';
 
 ```json
 "telegram": {
-    "bot_token": "8705623419:AAHTV7MUQ9xlYe2FGzwgJFJI6AI_afeu07Y",
+    "bot_token": "<BOT_TOKEN>",
     "chat_id": "7381484473"
 }
 ```

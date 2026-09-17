@@ -313,12 +313,35 @@ def _resolve_product_name(campaign: str, mapping: dict) -> str:
 
 # --- GG-Server: Config ---
 _CONFIG_PATH = os.path.join(os.path.dirname(_current_dir), "config", "config.json")
+_CONFIG_LOCAL_PATH = os.path.join(os.path.dirname(_current_dir), "config", "config.local.json")
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """递归合并 override 到 base（用于敏感信息覆盖层）。"""
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 try:
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
         APP_CONFIG = json.load(f)
 except (FileNotFoundError, json.JSONDecodeError):
     print("[WARN] config.json not found, using defaults")
     APP_CONFIG = {}
+
+# 敏感信息覆盖层（config.local.json，不入库）：叠加真实密钥/密码
+if os.path.isfile(_CONFIG_LOCAL_PATH):
+    try:
+        with open(_CONFIG_LOCAL_PATH, "r", encoding="utf-8") as f:
+            _local_config = json.load(f)
+        APP_CONFIG = _deep_merge(APP_CONFIG, _local_config)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[WARN] config.local.json read failed: {e}")
 
 app.config["JWT_SECRET_KEY"] = APP_CONFIG.get("secret_key", "gg-server-default-secret")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = APP_CONFIG.get("jwt_expire_hours", 24) * 3600

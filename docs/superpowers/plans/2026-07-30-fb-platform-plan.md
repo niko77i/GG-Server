@@ -345,7 +345,7 @@ def test_login_returns_platform():
     db = get_db()
     _ensure_schema(db)
     from auth import authenticate
-    result = authenticate(db, 'carl567', '1976xiaobai')
+    result = authenticate(db, 'carl567', '<developer-password>')
     assert result is not None
     assert 'platform' in result
 ```
@@ -527,7 +527,7 @@ def client():
 
 @pytest.fixture
 def dev_token(client):
-    resp = client.post('/api/auth/login', json={'username': 'carl567', 'password': '1976xiaobai'})
+    resp = client.post('/api/auth/login', json={'username': 'carl567', 'password': '<developer-password>'})
     return resp.get_json()['access_token']
 
 

@@ -1,10 +1,10 @@
 {
-    "secret_key": "gg-server-jwt-secret-2026",
+    "secret_key": "",
     "jwt_expire_hours": 24,
     "jwt_refresh_days": 7,
     "developer": {
-        "username": "carl567",
-        "password": "1976xiaobai"
+        "username": "developer",
+        "password": ""
     },
     "server": {
         "host": "0.0.0.0",
@@ -15,25 +15,18 @@
     "smtp": {
         "host": "smtp.qq.com",
         "port": 465,
-        "user": "2350574164@qq.com",
-        "password": "vassdzilljbpdibe",
+        "user": "",
+        "password": "",
         "from_name": "GG-Server 掉包通知"
     },
     "telegram": {
-        "bot_token": "8705623419:AAHTV7MUQ9xlYe2FGzwgJFJI6AI_afeu07Y",
-        "chat_id": "-5220122275"
+        "bot_token": "",
+        "chat_id": ""
     },
     "delist_proxy": {
         "enabled": true,
         "max_retries": 3,
-        "proxies": [
-            {"ip": "107.151.249.31", "port": 2615, "username": "e9072b8752f3", "password": "vfnmncwlzz8xw5"},
-            {"ip": "107.151.249.31", "port": 2203, "username": "46d0d9faad55", "password": "vfnmncwlzz8xw5"},
-            {"ip": "107.151.249.31", "port": 2019, "username": "e678acaf32a6", "password": "vfnmncwlzz8xw5"},
-            {"ip": "107.151.249.31", "port": 800, "username": "e5b0e45eacaa", "password": "vfnmncwlzz8xw5"},
-            {"ip": "107.151.249.31", "port": 623, "username": "e9262ccf58ba", "password": "vfnmncwlzz8xw5"},
-            {"ip": "200.160.208.55", "port": 443, "username": "fEHuJstQfffB", "password": "rDutU7FOf5"}
-        ]
+        "proxies": []
     },
     "google_sheets": {
         "credentials_path": "config/fit-boulevard-503111-u4-812bc02c2000.json"
