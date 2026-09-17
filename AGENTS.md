@@ -5,7 +5,7 @@
 
 ## 项目概述
 
-谷歌广告运营工具箱的多人协作版本 — 包含图片爬取、AI 视频生成、YouTube 视频管理、产品管理、数据做表、广告账户管理、充值管理、掉包检测、数据分析、全局任务追踪等模块。
+谷歌广告运营工具箱的多人协作版本 — 包含图片爬取、AI 视频生成、YouTube 视频管理、产品管理、数据做表、广告账户管理、充值管理、掉包检测、数据分析、全局任务追踪、Facebook（FB）广告平台管理、代理池等模块。
 
 ### 与 ImageCrawling 的关系
 - **ImageCrawling**：单用户本地工具，PyInstaller 打包为独立 EXE
@@ -16,15 +16,16 @@
 
 | 组件 | 选择 | 说明 |
 |------|------|------|
-| 后端框架 | Flask | 纯 API 服务，main.py ~7300 行 + routes/ 目录 |
+| 后端框架 | Flask | 纯 API 服务，main.py ~9800 行 + routes/ 目录 |
 | 数据库 | SQLite (WAL 模式) | `temp/app.db`，局域网 20 人以下足够 |
 | 认证 | Flask-JWT-Extended | JWT token，24h 过期，支持滑动刷新 |
 | 密码 | Werkzeug pbkdf2:sha256 | Flask 内置哈希 |
 | 前端 | Vue 3 + Vite + Element Plus + Pinia + Vue Router | Composition API |
 | HTTP | axios | 全局拦截器自动携带 JWT token |
-| 定时任务 | 后台 daemon 线程 | 掉包检测（每小时）、每周清理 |
+| 定时任务 | 后台 daemon 线程 | 掉包检测（每小时，走代理池）、每周清理 |
 | 跨标签同步 | BroadcastChannel | 多 Tab 任务状态和通知同步 |
 | 外部通知 | Telegram Bot + Email | 掉包通知推送到群组/邮件 |
+| 代理池 | proxy_pool.py | 掉包检测随机切换代理 IP，避免风控/限流 |
 | 部署 | 常开 Python 服务（`python main.py`） | 暂不打包 EXE |
 
 ## 核心架构
@@ -65,11 +66,13 @@ CREATE TABLE users (
     password    TEXT NOT NULL,
     role        TEXT NOT NULL DEFAULT 'user',
     display_name TEXT DEFAULT '',
+    custom_name TEXT DEFAULT '',
+    platform    TEXT DEFAULT 'gg',   -- 'gg' | 'fb'，developer 双平台
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     last_login  TEXT,
     created_by  INTEGER REFERENCES users(id),
-    config      TEXT DEFAULT '{}',
-    telegram_username TEXT DEFAULT ''
+    config      TEXT DEFAULT '{}'
+    -- telegram_username / email 由迁移新增
 );
 ```
 
@@ -86,21 +89,22 @@ CREATE TABLE users (
 ### 数据隔离设计
 
 #### 共享数据（所有人可见）
-- `products` / `packages` — 产品管理
+- `products` / `packages` — GG 产品管理
 - `scrape_cache` — 爬取缓存（同包名命中跳过爬取）
-- `yt_videos`（is_public=1）— YouTube 公共视频库
+- `videos`（is_public=1）— YouTube 公共视频库
+- `fb_products` / `fb_bms` / `fb_pixel_bms` / `fb_pixels` / `fb_lines` — FB 平台数据
+- 字典表 `agents` / `account_statuses` / `mcc_levels` / `sales_persons` / `regions` — GG/FB 共用
 
 #### 个人数据（按 user_id 隔离）
-- `user_accounts` — 广告账户管理
-- `user_mcc` — MCC 管理
-- `scrape_history` — 图片爬取记录
+- `accounts` — GG 广告账户管理（owner_id）
+- `mcc` — GG MCC 管理（owner_id）
 - `video_history` — AI 视频生成历史
-- `yt_videos`（is_public=0）— YouTube 个人视频库
-- `ad_reports` — 做表数据
+- `videos`（is_public=0）— YouTube 个人视频库
+- `ad_reports` / `fb_ad_reports` — 做表数据
 - `recharge_records` — 充值记录（created_by 隔离）
 
 #### YouTube 双层模型
-- `yt_videos` 表有 `owner_id` 和 `is_public` 字段
+- `videos` 表有 `owner_id` 和 `is_public` 字段
 - `is_public=1` → 公共库，所有人可查看
 - `is_public=0` → 仅 owner 可见
 - 导入时 admin/developer 默认私人，普通用户/viewer 默认公开
@@ -140,7 +144,8 @@ GG-Server/
 │   │   │   ├── google-sheets.js    # Google Sheets 配置 API
 │   │   │   ├── reports.js          # 做表数据 API
 │   │   │   ├── data.js             # 数据分析 API
-│   │   │   └── browse.js           # 文件浏览 API
+│   │   │   ├── browse.js           # 文件浏览 API
+│   │   │   └── fb.js               # FB 平台 API
 │   │   ├── stores/                 # Pinia 状态管理
 │   │   │   ├── auth.js             # 认证状态
 │   │   │   ├── products.js         # 产品状态
@@ -155,6 +160,9 @@ GG-Server/
 │   │   │   ├── adsParser.js        # 广告数据解析
 │   │   │   ├── clipboard.js        # 剪贴板工具
 │   │   │   └── env.js              # 环境判断
+│   │   ├── composables/            # 组合式函数
+│   │   │   ├── useDebounce.js      # 防抖
+│   │   │   └── usePagination.js    # 分页
 │   │   ├── views/                  # 页面组件
 │   │   │   ├── LoginView.vue
 │   │   │   ├── RegisterView.vue
@@ -172,7 +180,16 @@ GG-Server/
 │   │   │   ├── ToolkitView.vue         # 做表数据 + 音频替换
 │   │   │   ├── AnalysisView.vue        # 数据分析看板
 │   │   │   ├── DataManageView.vue      # 数据管理
-│   │   │   └── SchedulerView.vue       # 定时任务手动触发（developer）
+│   │   │   ├── SchedulerView.vue       # 定时任务手动触发（developer）
+│   │   │   └── fb/                     # FB 平台页面
+│   │   │       ├── FbAccountPanel.vue  # FB 账户管理
+│   │   │       ├── FbBmPanel.vue       # FB 账户 BM 管理
+│   │   │       ├── FbProductPanel.vue  # FB 产品管理
+│   │   │       ├── FbPixelPanel.vue    # FB 像素管理
+│   │   │       ├── FbPixelBmPanel.vue  # FB 像素 BM 管理
+│   │   │       ├── FbDataExtract.vue   # FB 数据提取
+│   │   │       ├── FbDataManage.vue    # FB 数据管理
+│   │   │       └── FbSettingsPanel.vue # FB 系统设置
 │   │   ├── components/             # 公共组件
 │   │   │   ├── AppSidebar.vue
 │   │   │   ├── ProductCard.vue
@@ -181,6 +198,8 @@ GG-Server/
 │   │   │   ├── AddPackageModal.vue
 │   │   │   ├── AccountModal.vue        # 账户编辑弹窗（含死亡清账提醒）
 │   │   │   ├── AccountDetailModal.vue  # 账户详情（含充值记录+MCC 历史）
+│   │   │   ├── AccountSyncModal.vue     # 账户表格同步弹窗
+│   │   │   ├── AccountDeletedModal.vue  # 已删除账户恢复/永久删除弹窗
 │   │   │   ├── AccountBatchImportModal.vue
 │   │   │   ├── AccountBatchLookupModal.vue  # 批量查户弹窗
 │   │   │   ├── RechargeModal.vue       # 单次充值弹窗
@@ -197,9 +216,9 @@ GG-Server/
 │   │   └── App.vue                # 根组件（全局通知轮询 + 任务面板）
 │   └── dist/                      # 生产构建产物
 ├── py/
-│   ├── main.py                    # Flask 入口 + 大量路由（~7300 行，持续拆分中）
+│   ├── main.py                    # Flask 入口 + 大量路由（~9800 行，持续拆分中）
 │   ├── auth.py                    # 认证模块（登录/注册/角色管理）
-│   ├── database.py                # SQLite 统一存储（24 张表，自动迁移）
+│   ├── database.py                # SQLite 统一存储（40 张表，自动迁移）
 │   ├── scraper.py                 # Google Play 图片爬取
 │   ├── resizer.py                 # 图片缩放处理
 │   ├── utils.py                   # 工具函数
@@ -210,14 +229,17 @@ GG-Server/
 │   ├── google_sheets_service.py   # Google Sheets API 封装（充值/做表写入）
 │   ├── google_ads_service.py      # Google Ads API 封装
 │   ├── delist_checker.py          # 掉包检测核心逻辑
+│   ├── proxy_pool.py              # 代理池（掉包检测走代理 IP 防风控）
 │   ├── telegram_sender.py         # Telegram Bot 通知
 │   ├── email_sender.py            # 邮件通知
 │   ├── manage.py                  # 管理工具脚本
+│   ├── migrate_from_production.py # 生产环境数据迁移脚本
 │   ├── routes/
-│   │   ├── __init__.py            # Blueprint 注册
+│   │   ├── __init__.py            # 包标记（Blueprint 在 main.py 注册）
 │   │   ├── decorators.py          # 权限装饰器（_reject_viewer、_require_developer 等）
 │   │   ├── helpers.py             # 公共工具函数（scope_where、can_modify 等）
-│   │   └── auth_routes.py         # 认证相关 Blueprint（已激活）
+│   │   ├── auth_routes.py         # 认证相关 Blueprint（已激活）
+│   │   └── fb_routes.py           # FB 平台 Blueprint（已激活，49 路由）
 │   └── tests/                     # 测试文件
 ├── config/
 │   └── config.json                # 服务器配置（含 developer 账号）
@@ -237,31 +259,66 @@ GG-Server/
 | POST | /api/auth/register | 注册（仅 user 级别） |
 | POST | /api/auth/refresh | 刷新 token |
 | GET | /api/auth/me | 获取当前用户信息 |
+| GET/PUT | /api/auth/custom-name | 自定义昵称 |
+| GET/PUT | /api/auth/email | 邮箱 |
+| PUT | /api/auth/telegram-username | Telegram 用户名 |
+| PUT | /api/auth/password | 修改密码 |
+| PUT | /api/auth/profile | 更新个人信息 |
+| GET | /api/auth/names | 用户列表（下拉用） |
 
 ### 用户管理（admin/developer）
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | /api/admin/users | 用户列表（搜索/分页） |
+| POST | /api/admin/users/create | 创建用户（选 GG/FB 平台） |
 | POST | /api/admin/users/:id/role | 修改用户角色 |
 | POST | /api/admin/users/:id/toggle | 启用/禁用 |
+| PUT | /api/admin/users/:id | 编辑用户 |
+| PUT | /api/admin/users/:id/password | 重置密码 |
+| PUT | /api/admin/users/:id/telegram-username | 设置 Telegram 用户名 |
 | DELETE | /api/admin/users/:id | 删除用户 |
+
+### 广告账户管理（GG）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | /api/accounts/list | 账户列表 |
+| POST | /api/accounts/create | 创建账户 |
+| POST | /api/accounts/batch-create | 批量导入 |
+| POST | /api/accounts/batch-update | 批量更新 |
+| POST | /api/accounts/sync-from-sheet | 从 Google Sheets 同步账户 |
+| PUT | /api/accounts/:id | 编辑账户 |
+| PUT | /api/accounts/:id/reassign | 账户认领转移 |
+| DELETE | /api/accounts/:id | 删除账户（软删除） |
+| GET | /api/accounts/deleted | 已删除账户列表 |
+| POST | /api/accounts/:id/restore | 恢复账户 |
+| DELETE | /api/accounts/:id/permanent | 永久删除 |
+
+### 字典表（选项表，GG/FB 共用）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET/POST/PUT/DELETE | /api/agents[/:id] | 代理管理 |
+| GET/POST/PUT/DELETE | /api/statuses[/:id] | 账户状态管理 |
+| GET/POST/PUT/DELETE | /api/mcc-levels[/:id] | MCC 等级管理 |
+| GET/POST/PUT/DELETE | /api/sales-persons[/:id] | 商务管理 |
+| GET/POST/PUT/DELETE | /api/regions[/:id] | 地区管理 |
 
 ### 充值管理
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | /api/recharge/submit | 单次充值 |
 | POST | /api/recharge/batch-submit | 批量充值 |
-| GET | /api/recharge/records | 查询充值记录（按账户ID） |
-| PUT | /api/recharge/records/:id | 编辑充值记录 |
-| DELETE | /api/recharge/records/:id | 删除充值记录 |
+| GET | /api/accounts/:id/recharge-records | 查询充值记录（按账户ID） |
+| PUT | /api/recharge/:id | 编辑充值记录 |
+| DELETE | /api/recharge/:id | 删除充值记录 |
+| POST | /api/recharge/:id/retry-sheets | 重试写充值表 |
 
 ### 掉包检测
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | /api/products/:pid/check-delist | 手动检测产品掉包 |
+| POST | /api/products/:pid/check-delist | 手动检测产品掉包（走代理池） |
 | GET | /api/products/delist-status | 获取掉包检测状态 |
-| GET | /api/delist/pending | 获取当前用户待处理通知 |
-| POST | /api/delist/dismiss | 关闭掉包通知 |
+| GET | /api/delist/pending | 获取当前用户待处理通知（按产品聚合） |
+| POST | /api/delist/dismiss | 关闭掉包通知（支持批量） |
 
 ### 定时任务（仅 developer）
 | 方法 | 路径 | 说明 |
@@ -274,20 +331,33 @@ GG-Server/
 |------|------|------|
 | GET/POST | /api/config/google-sheets | 用户 Google Sheets 配置 |
 | GET/POST | /api/settings/account | 账户设置（含 recharge_sheet_id） |
-| POST | /api/google-sheets/upsert | 做表数据写入用户表格 |
+| POST | /api/google-sheets/update-zuobiao | 做表数据写入用户表格 |
 
 ### 数据分析
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | /api/ad-reports/dashboard | 仪表盘关键指标 |
-| GET | /api/ad-reports/trend | 趋势数据 |
+| GET | /api/ad-reports/trends | 趋势数据 |
 | GET | /api/ad-reports/compare | 对比分析 |
 | GET | /api/ad-reports/multi-analysis | 多维自由分析（散点图/相关性） |
-| POST | /api/ad-reports/ai-analysis | AI 智能解读 |
+| POST | /api/ad-reports/analyze | AI 智能解读 |
+
+### FB 平台（fb_routes.py，49 路由）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET/POST/PUT/DELETE | /api/fb/bms/... | 账户 BM 管理（含 ban-and-migrate） |
+| GET/POST/PUT/DELETE | /api/fb/accounts/... | FB 账户管理（软删除/恢复/BM 历史） |
+| GET/POST/PUT/DELETE | /api/fb/products/... | FB 产品管理（线名、在跑 BM） |
+| GET/POST/PUT/DELETE | /api/fb/pixel-bms/... | 像素 BM 管理 |
+| GET/POST/PUT/DELETE | /api/fb/pixels/... | 像素管理 |
+| POST | /api/fb/extract/parse | 解析粘贴的 FB 数据透视表 |
+| POST | /api/fb/extract/save | 保存提取数据（双写 DB + Sheets） |
+| POST | /api/fb/extract/check-duplicates | 重复校验 |
+| GET/POST/PUT/DELETE | /api/fb/reports/... | FB 做表数据管理 + Sheets 同步 |
 
 ### 其他模块路由
 
-所有路由均需 `@jwt_required()`，返回 `{"success": bool, ...}` 格式。路由总数约 157 个，分布在 15+ 个模块中。
+所有路由均需 `@jwt_required()`，返回 `{"success": bool, ...}` 格式。路由总数约 240 个（main.py 177 + fb_routes 49 + auth_routes 12），分布在 GG/FB 双平台 15+ 个模块中。
 
 ## 新增功能模块
 
@@ -407,19 +477,71 @@ GG-Server/
 
 ### 大规模重构（进行中）
 
-- **后端**：main.py (~7300 行) 逐步拆分为 Flask Blueprint，目标 18 个 route 文件
+- **后端**：main.py (~9800 行) 逐步拆分为 Flask Blueprint，目标 18 个 route 文件
 - **前端**：大组件（YoutubeView/MediaView/AnalysisView/VideoView）逐步拆分为子组件
-- **已完成**：auth_routes.py Blueprint 激活、helpers 扩展、JWT 滑动过期、前端 3 个 Tab 独立、dedupLoader 公共化
+- **已完成**：auth_routes.py、fb_routes.py Blueprint 激活、helpers 扩展、JWT 滑动过期、前端 3 个 Tab 独立、dedupLoader 公共化
 
 ### 数据库完整性改进
 
-- 24 张表之间的关系梳理和孤儿数据清理
+- 40 张表之间的关系梳理和孤儿数据清理
 - 视频删除 → 同步清理 product_assets、video_consumption
 - 包删除 → 同步清理 delist_notifications
 - 用户删除 → 补充 7 处遗漏的关联清理
 - MCC 删除 → 增加产品关联检查
 - 产品合并 → 补充关联数据清理
 - 所有改动为补充清理，不改现有业务逻辑
+
+### FB 平台（Facebook 广告管理）
+
+GG-Server 在 GG（Google Ads）基础上新增 FB（Facebook）广告管理能力，GG/FB 双平台并行。
+
+**核心设计**：
+- **用户平台划分**：users 表新增 `platform` 字段（'gg'/'fb'），仅 developer 可访问双平台
+- **FB 独立页面**：不复用 GG 页面，新建 8 个视图（产品/账户/账户BM/像素BM/像素/数据提取/数据管理/设置）
+- **结构差异**：FB 用 BM（Business Manager）而非 MCC，分**账户BM**和**像素BM**两种；产品可有多条"线"，一条线对应一个像素
+- **后端独立**：`routes/fb_routes.py`（49 路由）+ `database.py` 新增 11 张 fb_* 表
+- **共享层**：users/platform、侧边栏切换、路由守卫、数据分析、选项表（地区/商务/状态等）GG/FB 共用
+
+**FB 数据提取**（FbDataExtract.vue）：
+- 粘贴 FB 广告后台数据透视表 → 后端 `_parse_fb_extract()` 解析
+- 支持"是否排序（提取全列）"两种模式，尾部校验（行数 + 总消耗一致性）
+- 保存走**数据库 + Google Sheets 双写**，失败 30s 重试，精确轮询本次写表结果（sync_log_id）
+- 保存前重复校验（check-duplicates）
+
+### 代理池（掉包检测防风控）
+
+掉包检测直接请求 Google Play 链接易被风控/限流，现通过代理池随机切换 IP 规避。
+
+- `proxy_pool.py`：代理池封装，从 config 的 `delist_proxy.proxies` 读取代理列表，失败自动切换
+- 配置项：`delist_proxy.enabled`（开关）、`max_retries`（重试次数）、`proxies`（代理列表）
+- 掉包检测 HTTP 请求统一走代理，降低风控/限流概率
+
+### 账户软删除 & 表格同步
+
+- **软删除**：账户删除不再物理删除，标记为已删除，支持恢复（restore）和永久删除（permanent）
+- **已删除账户列表**：AccountDeletedModal 弹窗查看/恢复/永久删除
+- **账户表格同步**：从 Google Sheets 同步账户（sync-from-sheet），跳过已删除账户避免重复创建
+- **Sheet 映射配置**：字段映射可配置（sheet-mappings-config）
+
+### 字典表（选项表管理）
+
+账户相关的枚举字段从硬编码改为字典表，支持在 SettingsPanel 中管理。
+
+- `agents`（代理）、`account_statuses`（状态）、`mcc_levels`（MCC 等级）、`sales_persons`（商务）、`regions`（地区）
+- 每个字典表提供标准 CRUD API，GG/FB 平台共用
+- MCC 等级下拉懒加载修复
+
+### 掉包通知按产品聚合
+
+掉包通知从按包聚合改为按产品聚合，同一产品多包掉包合并为一条通知。
+
+- `delist/pending` 按产品聚合返回，前端弹窗按产品展示
+- `delist/dismiss` 支持批量关闭
+- Telegram 通知按产品分组发送
+
+### 视频频道名
+
+YouTube 视频新增频道名（channel name）字段，导入时自动获取频道信息。
 
 ## 共享功能知识（来自 ImageCrawling）
 
@@ -572,37 +694,73 @@ GG-Server/
 - [数据库完整性改进](docs/superpowers/specs/2026-07-22-db-integrity-improvement-design.md)
 - [优化测试](docs/superpowers/specs/2026-07-22-optimization-tests-design.md)
 - [Sheets 异步化 & 性能优化](docs/superpowers/specs/2026-07-22-async-sheets-performance-design.md)
+- [账户表格同步](docs/superpowers/specs/2026-07-28-account-sheet-sync-design.md)
+- [设置选项表（字典表）](docs/superpowers/specs/2026-07-28-settings-option-tables-design.md)
+- [设置面板 UI 重构](docs/superpowers/specs/2026-07-28-settings-panel-ui-redesign.md)
+- [Sheet 映射配置](docs/superpowers/specs/2026-07-28-sheet-mappings-config-design.md)
+- [账户软删除](docs/superpowers/specs/2026-07-29-account-soft-delete-design.md)
+- [FB 账户页面 UI 重构](docs/superpowers/specs/2026-07-30-fb-account-pages-ui-redesign.md)
+- [FB 平台](docs/superpowers/specs/2026-07-30-fb-platform-design.md)
+- [视频频道名](docs/superpowers/specs/2026-07-30-video-channel-name-design.md)
+- [Spring Boot 迁移](docs/superpowers/specs/2026-07-31-spring-boot-migration-design.md)
+- [FB 提取校验](docs/superpowers/specs/2026-08-01-fb-extract-validation-design.md)
+- [掉包通知按产品聚合](docs/superpowers/specs/2026-08-13-delist-notification-group-by-product-design.md)
+- [产品包筛选工具栏吸顶](docs/superpowers/specs/2026-08-13-product-pkg-filter-toolbar-sticky-design.md)
+- [产品吸顶表头](docs/superpowers/specs/2026-08-13-product-sticky-header-design.md)
+- [掉包检测代理](docs/superpowers/specs/2026-08-27-delist-check-proxy-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
 
+> 共 40 张表：GG 平台 29 张 + FB 平台 11 张。字典表（选项表）5 张 GG/FB 共用。
+
+### GG 平台
 | 表名 | 用途 | 隔离方式 |
 |------|------|----------|
-| `users` | 用户账户 | - |
-| `config` | 键值配置（含 Google Sheets、AI 配置等） | key 含 user_id |
-| `products` | 产品管理 | 共享 |
-| `packages` | 产品包 | 共享 |
+| `users` | 用户账户（含 platform 平台字段） | - |
+| `config` | 键值配置（字体最近使用、Google Sheets/AI 配置等） | key |
+| `tags` | 标签（通用 key-value，含 YouTube tags） | key |
+| `products` | GG 产品管理 | 共享 |
+| `packages` | GG 产品包 | 共享 |
 | `product_assets` | 产品成效素材 | 共享 |
 | `product_runners` | 产品在跑人员 | 共享 |
-| `user_accounts` | 广告账户 | owner_id 隔离 |
-| `user_mcc` | MCC 管理 | owner_id 隔离 |
+| `accounts` | GG 广告账户 | owner_id 隔离 |
+| `mcc` | GG MCC 管理 | owner_id 隔离 |
 | `account_mcc_history` | 账户 MCC 变更历史 | 关联 accounts |
+| `agents` | 代理字典 | 共享 |
+| `account_statuses` | 账户状态字典 | 共享 |
+| `mcc_levels` | MCC 等级字典 | 共享 |
+| `sales_persons` | 商务字典 | 共享 |
+| `regions` | 地区字典 | 共享 |
 | `scrape_cache` | 爬取缓存 | 共享 |
-| `scrape_history` | 爬取记录 | user_id 隔离 |
+| `import_history` | 导入历史 | user_id 隔离 |
 | `video_history` | 视频生成历史 | user_id 隔离 |
 | `video_tasks` | 视频任务追踪（DB 持久化） | 共享 |
-| `yt_videos` | YouTube 视频库 | owner_id + is_public |
+| `videos` | YouTube 视频库 | owner_id + is_public |
 | `video_consumption` | 视频广告消耗 | user_id 关联 |
 | `copywritings` | 视频文案 | owner_id 隔离 |
-| `import_history` | 导入历史 | user_id 隔离 |
-| `ad_reports` | 做表数据 | user_id 隔离 |
+| `ad_reports` | GG 做表数据 | user_id 隔离 |
 | `recharge_records` | 充值记录 | created_by 隔离 |
 | `delist_checks` | 掉包检测结果 | 关联 packages |
 | `delist_notifications` | 掉包通知状态 | user_id 隔离 |
 | `audio_replace_history` | 音频替换历史 | 共享 |
 | `sheets_sync_log` | Sheets 同步失败日志 + 行数据 | user_id 隔离 |
 | `audit_log` | 产品删除审计日志 | 共享 |
-| `settings` | 系统设置（键值） | 共享 |
+
+### FB 平台
+| 表名 | 用途 | 隔离方式 |
+|------|------|----------|
+| `fb_bms` | FB 账户 BM | 共享 |
+| `fb_accounts` | FB 广告账户 | 关联 bms |
+| `fb_account_bm` | FB 账户-BM 归属 | 关联 |
+| `fb_account_bm_history` | FB 账户 BM 变更历史 | 关联 |
+| `fb_products` | FB 产品管理 | 共享 |
+| `fb_product_runners` | FB 产品在跑人员 | 共享 |
+| `fb_product_bms` | FB 产品在跑 BM | 共享 |
+| `fb_pixel_bms` | FB 像素 BM | 共享 |
+| `fb_pixels` | FB 像素 | 关联 pixel_bms |
+| `fb_lines` | FB 产品线名 | 关联 fb_products |
+| `fb_ad_reports` | FB 做表数据 | user_id 隔离 |
 
 ## 启动方式
 
@@ -611,7 +769,7 @@ GG-Server/
 pip install -r requirements.txt
 pip install flask-jwt-extended
 
-# 2. 修改 config/config.json 中的 developer 账号和 secret_key
+# 2. 在 config/config.local.json 中填真实 developer 账号和 secret_key（敏感信息不入库）
 
 # 3. 启动
 cd py
@@ -624,7 +782,7 @@ npm run dev
 # Vite dev server :5173，自动代理 /api 到 Flask :5001
 ```
 
-## 配置说明 (config/config.json)
+## 配置说明（config/config.json + config/config.local.json）
 
 ```json
 {
@@ -632,8 +790,8 @@ npm run dev
   "jwt_expire_hours": 24,
   "jwt_refresh_days": 7,
   "developer": {
-    "username": "carl567",
-    "password": "1976xiaobai"
+    "username": "developer",
+    "password": ""
   },
   "server": {
     "host": "0.0.0.0",
@@ -644,9 +802,28 @@ npm run dev
   "telegram": {
     "bot_token": "",
     "chat_id": ""
+  },
+  "smtp": {
+    "host": "smtp.qq.com",
+    "port": 465,
+    "user": "xxx@qq.com",
+    "password": "",
+    "from_name": "GG-Server 掉包通知"
+  },
+  "delist_proxy": {
+    "enabled": true,
+    "max_retries": 3,
+    "proxies": [
+      {"ip": "x.x.x.x", "port": 0, "username": "", "password": ""}
+    ]
+  },
+  "google_sheets": {
+    "credentials_path": "config/xxx.json"
   }
 }
 ```
+
+> **敏感信息分离**：真实密钥（`secret_key`、developer 密码、smtp 密码、Telegram token、代理账号密码）放在 `config/config.local.json`（已加入 `.gitignore`，不入库）。`config.json` 只保留结构与非敏感默认值，启动时 `main.py` 将两者深合并。
 
 ## 开发注意
 
