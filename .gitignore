@@ -15,6 +15,7 @@ temp/*.bak.*
 temp/server.*
 temp/*.db-shm
 temp/*.db-wal
+temp/app.db
 temp/audio_replace
 
 # 配置敏感信息（含密码）
