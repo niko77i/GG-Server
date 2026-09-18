@@ -71,3 +71,26 @@ def test_copy_gg_options_to_tt():
     assert "巴西" in names, "TT 地区选项未从 GG 复制"
     conn.close()
     os.unlink(db_path)
+
+
+def test_tt_headers_creates_tt_user(client, tt_headers):
+    """tt_headers fixture 应注册并改成 tt 平台用户后登录成功。"""
+    resp = client.get('/api/auth/me', headers=tt_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # 兼容 me 接口返回结构：可能是 {user: {...}} 或直接平铺
+    user = body.get('user', body)
+    assert user['platform'] == 'tt'
+
+
+def test_require_platform_tt_blocks_gg_user(app, monkeypatch):
+    """gg 用户调用 require_platform('tt') 应被拦截返回 403。"""
+    import routes.decorators as dec
+    # require_platform 内部从 get_jwt_identity() 取 uid、再 auth.get_user_by_id() 取用户。
+    # 直接 patch 这两个引用，模拟一个 platform='gg' 的已登录用户，验证 403 分支。
+    monkeypatch.setattr(dec, 'get_jwt_identity', lambda: '1')
+    monkeypatch.setattr(dec.auth, 'get_user_by_id', lambda uid: {'id': 1, 'role': 'user', 'platform': 'gg'})
+    with app.app_context():
+        resp = dec.require_platform('tt')
+    assert resp is not None
+    assert resp[1] == 403

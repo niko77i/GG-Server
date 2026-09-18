@@ -172,8 +172,8 @@ def _guard_gg_platform():
     # OPTIONS 预检请求直接放行（CORS）
     if request.method == 'OPTIONS':
         return None
-    # 跳过 FB 专用路由（由 fb_routes 的 @fb_required 守卫）
-    if request.path.startswith('/api/fb/'):
+    # 跳过 FB / TT 专用路由（由各自 blueprint 的 @fb_required/@tt_required 守卫）
+    if request.path.startswith('/api/fb/') or request.path.startswith('/api/tt/'):
         return None
     # 跳过认证与共享路由
     if request.path.startswith(('/api/auth/', '/api/admin/', '/api/regions',
@@ -7367,7 +7367,7 @@ def admin_create_user():
         return jsonify(success=False, error="Password must be at least 6 characters"), 400
     if role not in ("user", "admin", "viewer"):
         return jsonify(success=False, error="Invalid role"), 400
-    if platform not in ("gg", "fb"):
+    if platform not in ("gg", "fb", "tt"):
         return jsonify(success=False, error="Invalid platform"), 400
     # 只有 developer 可以设置 platform
     if user["role"] != "developer" and platform != "gg":
@@ -7525,7 +7525,7 @@ def admin_update_user(uid):
     # 只有 developer 可以修改 platform
     if platform is not None and user["role"] != "developer":
         return jsonify(success=False, error="仅开发者可修改平台"), 403
-    if platform is not None and platform not in ("gg", "fb"):
+    if platform is not None and platform not in ("gg", "fb", "tt"):
         return jsonify(success=False, error="无效的平台值"), 400
 
     result = auth.update_user(uid, username=username, display_name=display_name, platform=platform)

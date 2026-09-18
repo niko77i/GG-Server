@@ -56,3 +56,21 @@ def auth_headers(client):
     data = resp.get_json()
     token = data.get("access_token", "")
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def tt_headers(client):
+    """创建 TT 平台测试用户并返回带 JWT token 的请求头。"""
+    client.post("/api/auth/register", json={
+        "username": "ttuser", "password": "test123",
+    })
+    # 直接把用户平台改为 tt（register 默认 gg）
+    db = database.get_db()
+    db.execute("UPDATE users SET platform='tt' WHERE username='ttuser'")
+    db.commit()
+    db.close()
+    resp = client.post("/api/auth/login", json={
+        "username": "ttuser", "password": "test123",
+    })
+    token = resp.get_json().get("access_token", "")
+    return {"Authorization": f"Bearer {token}"}
