@@ -1,4 +1,6 @@
 """TikTok 平台 API 路由 — 产品管理 / BC管理 / 投放对象 / 掉包检测 / 素材关联"""
+import re
+
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 from .helpers import ok, err, get_uid, get_db, parse_body
@@ -536,6 +538,245 @@ def delist_status():
     rows = db.execute(base_sql + where + "ORDER BY dc.checked_at DESC", params).fetchall()
     delisted = [dict(r) for r in rows]
     return ok({'delisted_packages': delisted})
+
+
+# ==================== 合并 / 粘贴解析 / 素材 / 用户 ====================
+
+@tt_bp.route('/api/tt/products/merge', methods=['POST'])
+@jwt_required()
+@tt_required
+def products_merge():
+    """合并多个产品到主产品（迁移投放对象 + 在跑人员，删除副产品）。"""
+    db = get_db()
+    uid = get_uid()
+    data = parse_body()
+    master_id = data.get("master_id")
+    merge_ids = data.get("merge_ids") or []
+
+    if not master_id or not merge_ids:
+        return err('请指定主产品和被合并产品')
+    if master_id in merge_ids:
+        return err('主产品不能在被合并列表中')
+
+    # 任一产品非本人所有则整体拒绝（含不存在的情况，反枚举 403），不做部分合并
+    denied = _check_product_owner(db, uid, master_id)
+    if denied:
+        return denied
+    for mid in merge_ids:
+        denied = _check_product_owner(db, uid, mid)
+        if denied:
+            return denied
+
+    db.execute("PRAGMA foreign_keys=OFF")
+    merged_packages = 0
+    for mid in merge_ids:
+        # 迁移投放对象
+        for p in db.execute("SELECT * FROM tt_packages WHERE product_id=?", (mid,)).fetchall():
+            existing = db.execute(
+                "SELECT id FROM tt_packages WHERE product_id=? AND package_name=? AND url=?",
+                (master_id, p["package_name"], p["url"])
+            ).fetchone()
+            if not existing:
+                db.execute(
+                    "INSERT INTO tt_packages (product_id, type, series_name, package_name, url, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (master_id, p["type"], p["series_name"], p["package_name"], p["url"], p["status"]))
+                merged_packages += 1
+
+        # 迁移在跑人员
+        for pr in db.execute("SELECT user_id FROM tt_product_runners WHERE product_id=?", (mid,)).fetchall():
+            db.execute("INSERT OR IGNORE INTO tt_product_runners (product_id, user_id) VALUES (?, ?)",
+                       (master_id, pr["user_id"]))
+
+        # 清理并删除副产品
+        db.execute("DELETE FROM tt_product_assets WHERE product_id=?", (mid,))
+        db.execute("DELETE FROM tt_packages WHERE product_id=?", (mid,))
+        db.execute("DELETE FROM tt_product_runners WHERE product_id=?", (mid,))
+        db.execute("DELETE FROM tt_products WHERE id=?", (mid,))
+
+    db.execute("PRAGMA foreign_keys=ON")
+    db.commit()
+    return ok({'merged_packages': merged_packages, 'merged_products': len(merge_ids)})
+
+
+@tt_bp.route('/api/tt/products/import-text', methods=['POST'])
+@jwt_required()
+@tt_required
+def import_text():
+    """粘贴文本解析成投放对象列表（第一阶段仅跑包 Google Play 链接）。"""
+    data = parse_body()
+    text = (data.get("text") or "").strip()
+    prefix = (data.get("prefix") or "").strip()
+    suffix = (data.get("suffix") or "").strip()
+    if not text:
+        return err('未提供文本内容')
+
+    links = re.findall(r'https?://play\.google\.com/store/apps/details\?id=[\w.&=/\-?%]+', text)
+    results = []
+    for link in links:
+        pkg = _extract_pkg_from_url(link)
+        series = _guess_series(text, link)
+        if prefix:
+            if not series.startswith(prefix):
+                prefix_base = prefix.split("-")[0]
+                series_base = series.split("-")[0] if "-" in series else series
+                if prefix_base == series_base:
+                    rest = series[len(series_base):].lstrip("-")
+                    sep = "" if prefix.endswith("-") else "-"
+                    series = prefix + sep + rest if rest else prefix
+                else:
+                    sep = "" if prefix.endswith("-") else "-"
+                    series = prefix + sep + series
+        if suffix:
+            if not series.endswith("-" + suffix) and series != suffix:
+                series = series + "-" + suffix
+        results.append({"type": "package", "series_name": series, "package_name": pkg, "url": link})
+    return ok({'parsed': results})
+
+
+def _extract_pkg_from_url(url):
+    m = re.search(r'[?&]id=([\w.]+)', url)
+    return m.group(1) if m else ""
+
+
+def _guess_series(text, link):
+    """从文本猜测链接对应的系列名（与 GG 逻辑一致）。"""
+    lines = text.split("\n")
+    link_idx = -1
+    for i, line in enumerate(lines):
+        if link in line:
+            link_idx = i
+            break
+    if link_idx < 0:
+        return _extract_pkg_from_url(link)
+    for j in range(max(0, link_idx - 8), link_idx):
+        l = lines[j].strip()
+        if "神包上线" in l:
+            name = l.split("神包上线：")[-1].split("神包上线")[-1].strip()
+            if name:
+                return name
+    for j in range(max(0, link_idx - 2), min(len(lines), link_idx + 5)):
+        l = lines[j].strip()
+        for prefix in ["广告命名：", "广告命名:", "渠道命名：", "渠道命名:"]:
+            if prefix in l:
+                name = l.split(prefix)[-1].strip()
+                if name:
+                    return name
+    for j in range(link_idx, max(-1, link_idx - 10), -1):
+        l = lines[j].strip()
+        if "神包上线" in l:
+            continue
+        if ("APK" in l or ("包" in l and re.search(r'包\d+', l))) and "-" in l:
+            for token in l.split():
+                token = re.sub(r'^[^\w]*', '', token)
+                if '-' in token and len(token) > 2:
+                    return token
+    for j in range(link_idx + 1, min(len(lines), link_idx + 6)):
+        l = lines[j].strip()
+        if "应用名：" in l or "应用名:" in l:
+            name = l.split("应用名：")[-1].split("应用名:")[-1].strip()
+            if name:
+                return name
+    for j in range(max(0, link_idx - 3), min(len(lines), link_idx)):
+        l = lines[j].strip()
+        if "名称：" in l or "名称:" in l:
+            name = l.split("名称：")[-1].split("名称:")[-1].strip()
+            if name:
+                return name
+    for j in range(link_idx, max(-1, link_idx - 3), -1):
+        l = lines[j].strip()
+        tokens = l.split()
+        if tokens:
+            first = re.sub(r'^[^\w]*', '', tokens[0])
+            if '-' in first and len(first) > 2:
+                return first
+    return _extract_pkg_from_url(link)
+
+
+# ==================== 素材关联（共享视频库） ====================
+
+@tt_bp.route('/api/tt/products/<int:pid>/assets', methods=['GET'])
+@jwt_required()
+@tt_required
+def list_assets(pid):
+    db = get_db()
+    uid = get_uid()
+    denied = _check_product_view(db, uid, pid)
+    if denied:
+        return denied
+    rows = db.execute("""
+        SELECT v.*, pa.added_by, pa.added_at, u.display_name AS added_by_name
+        FROM tt_product_assets pa
+        JOIN videos v ON pa.video_id = v.id AND pa.video_owner_id = v.owner_id
+        LEFT JOIN users u ON pa.added_by = u.id
+        WHERE pa.product_id = ?
+        ORDER BY pa.added_at DESC
+    """, (pid,)).fetchall()
+    return ok({'assets': [dict(r) for r in rows]})
+
+
+@tt_bp.route('/api/tt/products/<int:pid>/assets', methods=['POST'])
+@jwt_required()
+@tt_required
+def add_assets(pid):
+    """从共享视频库选择已有视频建立关联。body: { video_ids: [...] }。"""
+    db = get_db()
+    uid = get_uid()
+    denied = _check_product_owner(db, uid, pid)
+    if denied:
+        return denied
+    data = parse_body()
+    video_ids = data.get('video_ids') or []
+    if not video_ids:
+        return err('请选择至少一个视频')
+
+    added = 0
+    for vid in video_ids:
+        existing = db.execute(
+            "SELECT id FROM tt_product_assets WHERE product_id=? AND video_id=?", (pid, vid)
+        ).fetchone()
+        if existing:
+            continue
+        # 记录视频真实 owner，保证 list_assets 的 JOIN 能命中
+        video = db.execute("SELECT owner_id FROM videos WHERE id=?", (vid,)).fetchone()
+        if not video:
+            continue
+        db.execute(
+            "INSERT INTO tt_product_assets(product_id, video_id, video_owner_id, added_by) "
+            "VALUES(?,?,?,?)", (pid, vid, video['owner_id'], uid))
+        added += 1
+    db.commit()
+    return ok({'added': added})
+
+
+@tt_bp.route('/api/tt/products/<int:pid>/assets/<video_id>', methods=['DELETE'])
+@jwt_required()
+@tt_required
+def delete_asset(pid, video_id):
+    db = get_db()
+    uid = get_uid()
+    denied = _check_product_owner(db, uid, pid)
+    if denied:
+        return denied
+    db.execute("DELETE FROM tt_product_assets WHERE product_id=? AND video_id=?", (pid, video_id))
+    db.commit()
+    return ok()
+
+
+# ==================== 用户查询（TT 平台） ====================
+
+@tt_bp.route('/api/tt/users', methods=['GET'])
+@jwt_required()
+@tt_required
+def list_tt_users():
+    """返回 TT 平台用户列表（供「在跑人员」选择器使用）。"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, username, display_name, platform FROM users "
+        "WHERE (platform = 'tt' OR role = 'developer') AND role != 'hidden' "
+        "ORDER BY display_name, username"
+    ).fetchall()
+    return ok({"users": [dict(r) for r in rows]})
 
 
 # ==================== 工具函数 ====================

@@ -397,3 +397,121 @@ def test_delist_status_scope(client, tt_headers):
     other_headers = _make_tt_headers(client, "ttuser2")
     resp = client.get("/api/tt/products/delist-status", headers=other_headers)
     assert resp.get_json()["delisted_packages"] == []
+
+
+def test_import_text_parse(client, tt_headers):
+    text = "神包上线：战神系列\nhttps://play.google.com/store/apps/details?id=com.hero.war"
+    resp = client.post("/api/tt/products/import-text", headers=tt_headers, json={
+        "text": text, "prefix": "P9", "suffix": "B",
+    })
+    assert resp.status_code == 200
+    parsed = resp.get_json()["parsed"]
+    assert len(parsed) == 1
+    assert parsed[0]["package_name"] == "com.hero.war"
+
+
+def test_merge_products(client, tt_headers):
+    p1 = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "主产品",
+        "packages": [{"type": "package", "series_name": "A", "package_name": "com.a", "url": "https://play.google.com/store/apps/details?id=com.a"}],
+    }).get_json()["id"]
+    p2 = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "副产品",
+        "packages": [{"type": "package", "series_name": "B", "package_name": "com.b", "url": "https://play.google.com/store/apps/details?id=com.b"}],
+    }).get_json()["id"]
+
+    resp = client.post("/api/tt/products/merge", headers=tt_headers, json={
+        "master_id": p1, "merge_ids": [p2],
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["merged_packages"] == 1
+
+    # 副产品被删除，主产品含 2 个投放对象
+    resp = client.get(f"/api/tt/products/{p1}/detail", headers=tt_headers)
+    assert len(resp.get_json()["packages"]) == 2
+
+
+def test_list_tt_users(client, tt_headers):
+    resp = client.get("/api/tt/users", headers=tt_headers)
+    users = resp.get_json()["users"]
+    assert any(u["username"] == "ttuser" for u in users)
+
+
+def test_assets_add_list_delete(client, tt_headers):
+    """素材关联：从共享视频库选择已有视频建立关联，video_owner_id 存视频真实 owner。"""
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "素材产品",
+    }).get_json()["id"]
+
+    # 第二个用户拥有一个共享视频（owner 与当前用户不同，验证 video_owner_id 修复）
+    _make_tt_headers(client, "ttuser2")
+    db = database.get_db()
+    other_uid = db.execute("SELECT id FROM users WHERE username='ttuser2'").fetchone()["id"]
+    db.execute(
+        "INSERT INTO videos (id, owner_id, url, title) VALUES (?, ?, ?, ?)",
+        ("vid-abc", other_uid, "https://example.com/v.mp4", "测试视频"))
+    db.commit()
+    db.close()
+
+    # ttuser 将他人拥有的共享视频关联到自己产品
+    resp = client.post(f"/api/tt/products/{pid}/assets", headers=tt_headers,
+                       json={"video_ids": ["vid-abc"]})
+    assert resp.status_code == 200
+    assert resp.get_json()["added"] == 1
+
+    # 列表应能 JOIN 出该视频
+    resp = client.get(f"/api/tt/products/{pid}/assets", headers=tt_headers)
+    assert resp.status_code == 200
+    assets = resp.get_json()["assets"]
+    assert len(assets) == 1
+    assert assets[0]["id"] == "vid-abc"
+    assert assets[0]["title"] == "测试视频"
+
+    # 删除关联
+    resp = client.delete(f"/api/tt/products/{pid}/assets/vid-abc", headers=tt_headers)
+    assert resp.status_code == 200
+    resp = client.get(f"/api/tt/products/{pid}/assets", headers=tt_headers)
+    assert resp.get_json()["assets"] == []
+
+
+def test_merge_requires_owner(client, tt_headers):
+    """IDOR 修复：非 owner 不能合并他人产品（403），任一被合并产品非本人即整体拒绝。"""
+    p1 = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "主产品",
+    }).get_json()["id"]
+    p2 = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "副产品",
+    }).get_json()["id"]
+
+    other_headers = _make_tt_headers(client, "ttuser2")
+    p3 = client.post("/api/tt/products/create", headers=other_headers, json={
+        "product_name": "他人自己的产品",
+    }).get_json()["id"]
+
+    # master 是他人产品 → 403
+    assert client.post("/api/tt/products/merge", headers=other_headers,
+                       json={"master_id": p1, "merge_ids": [p3]}).status_code == 403
+    # merge_ids 含他人产品 → 403（整体拒绝）
+    assert client.post("/api/tt/products/merge", headers=other_headers,
+                       json={"master_id": p3, "merge_ids": [p1]}).status_code == 403
+
+    # 副产品 p2 未被删除（整体拒绝，不做部分合并）
+    resp = client.get(f"/api/tt/products/{p1}/detail", headers=tt_headers)
+    assert resp.status_code == 200
+
+
+def test_assets_require_owner_or_view(client, tt_headers):
+    """IDOR 修复：非 owner/runner 不能增/删/查他人产品的素材（403）。"""
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "他人素材产品",
+    }).get_json()["id"]
+
+    other_headers = _make_tt_headers(client, "ttuser2")
+
+    # 越权 add / delete / list → 403
+    assert client.post(f"/api/tt/products/{pid}/assets", headers=other_headers,
+                       json={"video_ids": ["vid-x"]}).status_code == 403
+    assert client.delete(f"/api/tt/products/{pid}/assets/vid-x",
+                         headers=other_headers).status_code == 403
+    assert client.get(f"/api/tt/products/{pid}/assets",
+                      headers=other_headers).status_code == 403
