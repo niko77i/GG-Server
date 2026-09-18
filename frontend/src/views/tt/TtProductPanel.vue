@@ -232,7 +232,7 @@ async function loadData() {
     if (filterArchived.value) p.archived = filterArchived.value
     const res = await ttApi.listProducts(p)
     items.value = res.items || []; total.value = res.total || 0
-  } finally { loading.value = false }
+  } catch(e) { ElMessage.error(e.response?.data?.error || '加载失败') } finally { loading.value = false }
 }
 
 async function loadOptions() {
@@ -315,8 +315,8 @@ async function handleImportText() {
   } catch(e) { ElMessage.error(e.response?.data?.error || '解析失败') }
 }
 
-function handleDelete(id) { ttApi.deleteProduct(id).then(() => { ElMessage.success('已删除'); loadData() }) }
-function handleRestore(id) { ttApi.restoreProduct(id).then(() => { ElMessage.success('已恢复'); loadData() }) }
+function handleDelete(id) { ttApi.deleteProduct(id).then(() => { ElMessage.success('已删除'); loadData() }).catch(e => ElMessage.error(e.response?.data?.error || '删除失败')) }
+function handleRestore(id) { ttApi.restoreProduct(id).then(() => { ElMessage.success('已恢复'); loadData() }).catch(e => ElMessage.error(e.response?.data?.error || '恢复失败')) }
 
 onMounted(() => { loadOptions(); loadData() })
 </script>
