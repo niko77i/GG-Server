@@ -535,3 +535,49 @@ def test_assets_require_owner_or_view(client, tt_headers):
                          headers=other_headers).status_code == 403
     assert client.get(f"/api/tt/products/{pid}/assets",
                       headers=other_headers).status_code == 403
+
+
+def test_create_product_rejects_package_without_name(client, tt_headers):
+    resp = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "空包名产品",
+        "packages": [{"type": "package", "series_name": "S", "package_name": ""}],
+    })
+    assert resp.status_code == 400
+
+
+def test_create_product_rejects_invalid_type(client, tt_headers):
+    resp = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "坏类型产品",
+        "packages": [{"type": "bad", "series_name": "S", "package_name": "com.x"}],
+    })
+    assert resp.status_code == 400
+
+
+def test_update_product_partial_does_not_clear_fields(client, tt_headers):
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "部分更新产品", "kpi": "K1", "region": "巴西",
+        "customer": "客户X", "status": "active",
+    }).get_json()["id"]
+
+    # 只改 status，其余字段应保留
+    resp = client.put(f"/api/tt/products/{pid}", headers=tt_headers, json={"status": "paused"})
+    assert resp.status_code == 200
+    detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+    assert detail["status"] == "paused"
+    assert detail["kpi"] == "K1"
+    assert detail["region"] == "巴西"
+    assert detail["customer"] == "客户X"
+
+    # 空 product_name 应 400
+    resp = client.put(f"/api/tt/products/{pid}", headers=tt_headers, json={"product_name": ""})
+    assert resp.status_code == 400
+
+
+def test_update_product_rejects_package_without_name(client, tt_headers):
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "改包产品",
+    }).get_json()["id"]
+    resp = client.put(f"/api/tt/products/{pid}", headers=tt_headers, json={
+        "packages": [{"type": "package", "series_name": "S", "package_name": ""}],
+    })
+    assert resp.status_code == 400

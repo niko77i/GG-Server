@@ -227,6 +227,12 @@ def create_product():
     if not product_name:
         return err('产品名不能为空')
 
+    # 批量 packages 在 INSERT 前校验（type 二值 / 跑包必须包名）
+    for pkg in packages:
+        err_resp = _validate_package(pkg)
+        if err_resp:
+            return err_resp
+
     uid = get_uid()
     try:
         db.execute(
@@ -262,26 +268,39 @@ def update_product(pid):
     if denied:
         return denied
     data = parse_body()
-    fields = {
-        'product_name': data.get('product_name', '').strip(),
-        'kpi': data.get('kpi', ''),
-        'region': data.get('region', ''),
-        'status': data.get('status', 'active'),
-        'bc_id': data.get('bc_id', None),
-        'sales_person_id': data.get('sales_person_id', None),
-        'agency_ratio': data.get('agency_ratio', 0),
-        'customer': data.get('customer', ''),
-    }
+
+    # 只覆盖请求 JSON 中实际出现的 key，未传字段保留原值（与 update_package 语义一致）
+    updates = {}
+    if 'product_name' in data:
+        product_name = (data.get('product_name') or '').strip()
+        if not product_name:
+            return err('产品名不能为空', 400)
+        updates['product_name'] = product_name
+    for key in ('kpi', 'region', 'status', 'customer'):
+        if key in data:
+            updates[key] = data.get(key, '')
+    for key in ('bc_id', 'sales_person_id'):
+        if key in data:
+            updates[key] = data.get(key, None)
+    if 'agency_ratio' in data:
+        updates['agency_ratio'] = data.get('agency_ratio', 0)
+
     runner_ids = data.get('runner_ids', None)
     packages = data.get('packages', None)
 
-    if fields['product_name']:
+    # packages 删除重建前先逐个校验（type 二值 / 跑包必须包名）
+    if packages is not None:
+        for pkg in packages:
+            err_resp = _validate_package(pkg)
+            if err_resp:
+                return err_resp
+
+    if updates:
+        set_clause = ", ".join(f"{key}=?" for key in updates)
+        params = list(updates.values()) + [pid]
         db.execute(
-            "UPDATE tt_products SET product_name=?, kpi=?, region=?, status=?, bc_id=?, "
-            "sales_person_id=?, agency_ratio=?, customer=?, updated_at=datetime('now','localtime') WHERE id=?",
-            (fields['product_name'], fields['kpi'], fields['region'], fields['status'],
-             fields['bc_id'], fields['sales_person_id'], fields['agency_ratio'],
-             fields['customer'], pid))
+            f"UPDATE tt_products SET {set_clause}, updated_at=datetime('now','localtime') WHERE id=?",
+            params)
 
     if runner_ids is not None:
         db.execute("DELETE FROM tt_product_runners WHERE product_id=?", (pid,))
@@ -296,6 +315,9 @@ def update_product(pid):
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (pid, pkg.get('type', 'package'), pkg.get('series_name', ''),
                  pkg.get('package_name', ''), pkg.get('url', ''), pkg.get('status', '')))
+
+    if not updates and runner_ids is None and packages is None:
+        return ok()
 
     db.commit()
     return ok()
@@ -373,10 +395,9 @@ def add_package(pid):
     url = data.get('url', '').strip()
     status = data.get('status', '')
 
-    if pkg_type not in ('package', 'pwa'):
-        return err('无效的投放对象类型')
-    if pkg_type == 'package' and not package_name:
-        return err('跑包必须填写包名')
+    err_resp = _validate_package(data)
+    if err_resp:
+        return err_resp
 
     try:
         db.execute(
@@ -789,6 +810,16 @@ def _get_pkg_product_id(db, pkg_id):
     """反查投放对象所属 product_id，不存在返回 None。"""
     row = db.execute("SELECT product_id FROM tt_packages WHERE id=?", (pkg_id,)).fetchone()
     return row['product_id'] if row else None
+
+
+def _validate_package(pkg):
+    """校验投放对象：type 必须 package/pwa；跑包必须填写包名。返回 None 或 err 响应。"""
+    pkg_type = pkg.get('type', 'package')
+    if pkg_type not in ('package', 'pwa'):
+        return err('无效的投放对象类型', 400)
+    if pkg_type == 'package' and not (pkg.get('package_name') or '').strip():
+        return err('跑包必须填写包名', 400)
+    return None
 
 
 def _get_role(db, uid):
