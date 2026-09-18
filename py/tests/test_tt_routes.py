@@ -56,6 +56,26 @@ def test_bc_crud(client, tt_headers):
     assert resp.get_json()["items"] == []
 
 
+def test_bc_list_search(client, tt_headers):
+    """BC 列表 search 参数：按名称或 BCID 模糊匹配。"""
+    client.post("/api/tt/bcs/create", headers=tt_headers, json={
+        "name": "Alpha", "bc_id": "111",
+    })
+    client.post("/api/tt/bcs/create", headers=tt_headers, json={
+        "name": "Beta", "bc_id": "222",
+    })
+
+    # 按名称模糊匹配
+    resp = client.get("/api/tt/bcs/list?search=Alp", headers=tt_headers)
+    items = resp.get_json()["items"]
+    assert [it["name"] for it in items] == ["Alpha"]
+
+    # 按 bc_id 模糊匹配
+    resp = client.get("/api/tt/bcs/list?search=222", headers=tt_headers)
+    items = resp.get_json()["items"]
+    assert [it["name"] for it in items] == ["Beta"]
+
+
 def test_bc_create_validates_digit(client, tt_headers):
     resp = client.post("/api/tt/bcs/create", headers=tt_headers, json={
         "name": "坏BC", "bc_id": "abc",

@@ -19,6 +19,7 @@ def list_bcs():
     page = request.args.get('page', 1, type=int)
     size = request.args.get('size', 50, type=int)
     status = request.args.get('status', '')
+    search = request.args.get('search', '')
     offset = (page - 1) * size
     uid = get_uid()
 
@@ -31,6 +32,9 @@ def list_bcs():
     if status:
         where.append("status = ?")
         params.append(status)
+    if search:
+        where.append("(name LIKE ? OR bc_id LIKE ?)")
+        params += [f"%{search}%", f"%{search}%"]
     where_clause = " AND ".join(where)
 
     total = db.execute(
