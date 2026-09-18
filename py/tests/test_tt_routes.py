@@ -7,6 +7,7 @@ if _py_dir not in sys.path:
     sys.path.insert(0, _py_dir)
 
 import database  # noqa: E402
+import unittest.mock as mock  # noqa: E402
 
 
 def _make_tt_headers(client, username):
@@ -339,3 +340,60 @@ def test_package_update_delete_batch_requires_owner(client, tt_headers):
     assert client.post("/api/tt/packages/batch-delete", headers=tt_headers,
                        json={"ids": [pwa_id]}).status_code == 200
     assert client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()["packages"] == []
+
+
+def test_check_delist(client, tt_headers):
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "掉包产品",
+        "packages": [{"type": "package", "series_name": "S", "package_name": "com.a.b", "url": "https://play.google.com/store/apps/details?id=com.a.b"}],
+    }).get_json()["id"]
+
+    # 从真实数据取 package id，避免硬编码 id=1 依赖「全新临时 DB 首个插入」这一事实
+    detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+    pkg_id = detail["packages"][0]["id"]
+
+    fake = [{"package_id": pkg_id, "product_id": pid, "is_delisted": True, "error": ""}]
+    with mock.patch("delist_checker.check_product_packages", return_value=fake):
+        resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()["results"][0]["is_delisted"] is True
+
+    # 掉包状态查询
+    resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
+    assert len(resp.get_json()["delisted_packages"]) == 1
+
+
+def test_check_delist_requires_owner(client, tt_headers):
+    """IDOR 修复：第二个 TT 用户不能对他人产品触发掉包检测（403）。"""
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "他人掉包产品",
+        "packages": [{"type": "package", "series_name": "S", "package_name": "com.owner.delist", "url": "https://play.google.com/store/apps/details?id=com.owner.delist"}],
+    }).get_json()["id"]
+
+    other_headers = _make_tt_headers(client, "ttuser2")
+    resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=other_headers)
+    assert resp.status_code == 403
+
+
+def test_delist_status_scope(client, tt_headers):
+    """横向越权修复：非 owner/runner 用户看不到他人产品的掉包记录；owner 能看到自己的。"""
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "我的掉包产品",
+        "packages": [{"type": "package", "series_name": "S", "package_name": "com.mine.delist", "url": "https://play.google.com/store/apps/details?id=com.mine.delist"}],
+    }).get_json()["id"]
+    detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+    pkg_id = detail["packages"][0]["id"]
+
+    fake = [{"package_id": pkg_id, "product_id": pid, "is_delisted": True, "error": ""}]
+    with mock.patch("delist_checker.check_product_packages", return_value=fake):
+        resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+    assert resp.status_code == 200
+
+    # owner 能看到自己产品的掉包记录
+    resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
+    assert len(resp.get_json()["delisted_packages"]) == 1
+
+    # 非 owner/runner 用户看不到他人产品的掉包记录
+    other_headers = _make_tt_headers(client, "ttuser2")
+    resp = client.get("/api/tt/products/delist-status", headers=other_headers)
+    assert resp.get_json()["delisted_packages"] == []

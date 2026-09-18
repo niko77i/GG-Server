@@ -470,6 +470,74 @@ def batch_delete_packages():
     return ok({'deleted': len(ids)})
 
 
+# ==================== 掉包检测（仅跑包 type='package'） ====================
+
+@tt_bp.route('/api/tt/products/<int:pid>/check-delist', methods=['POST'])
+@jwt_required()
+@tt_required
+def check_delist(pid):
+    import delist_checker
+    import datetime
+    db = get_db()
+    uid = get_uid()
+    denied = _check_product_owner(db, uid, pid)
+    if denied:
+        return denied
+
+    pkgs = db.execute(
+        "SELECT id, package_name, series_name, url FROM tt_packages "
+        "WHERE product_id=? AND type='package' AND url != ''",
+        (pid,)
+    ).fetchall()
+    if not pkgs:
+        return ok({'results': [], 'message': '没有需要检测的跑包'})
+
+    pkg_list = [dict(p) for p in pkgs]
+    results = delist_checker.check_product_packages(pid, pkg_list, None)
+
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for r in results:
+        db.execute(
+            "INSERT OR REPLACE INTO tt_delist_checks(package_id, is_delisted, checked_at) "
+            "VALUES(?, ?, ?)",
+            (r["package_id"], 1 if r["is_delisted"] else 0, now))
+    db.commit()
+    return ok({'results': results})
+
+
+@tt_bp.route('/api/tt/products/delist-status', methods=['GET'])
+@jwt_required()
+@tt_required
+def delist_status():
+    """获取当前用户可见的掉包检测状态。"""
+    db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+
+    base_sql = (
+        "SELECT dc.package_id, dc.is_delisted, dc.checked_at, "
+        "pkg.series_name, pkg.package_name, pkg.url, pkg.status AS pkg_status, "
+        "prod.product_name "
+        "FROM tt_delist_checks dc "
+        "JOIN tt_packages pkg ON dc.package_id = pkg.id "
+        "JOIN tt_products prod ON pkg.product_id = prod.id "
+    )
+    if role in ('developer', 'admin'):
+        where = "WHERE dc.is_delisted = 1 AND prod.is_archived = 0 "
+        params = []
+    else:
+        where = (
+            "WHERE dc.is_delisted = 1 AND prod.is_archived = 0 AND "
+            "(prod.owner_id = ? OR pkg.product_id IN "
+            "(SELECT product_id FROM tt_product_runners WHERE user_id=?)) "
+        )
+        params = [uid, uid]
+
+    rows = db.execute(base_sql + where + "ORDER BY dc.checked_at DESC", params).fetchall()
+    delisted = [dict(r) for r in rows]
+    return ok({'delisted_packages': delisted})
+
+
 # ==================== 工具函数 ====================
 
 def _get_pkg_product_id(db, pkg_id):
