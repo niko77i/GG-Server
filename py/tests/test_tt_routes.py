@@ -91,3 +91,79 @@ def test_bc_update_delete_requires_owner(client, tt_headers):
     assert resp.status_code == 200
     resp = client.delete(f"/api/tt/bcs/{bid}", headers=tt_headers)
     assert resp.status_code == 200
+
+
+def _create_bc(client, tt_headers, name="BC1", bc_id="1111111111"):
+    return client.post("/api/tt/bcs/create", headers=tt_headers,
+                       json={"name": name, "bc_id": bc_id}).get_json()["id"]
+
+
+def test_product_crud(client, tt_headers):
+    bc_id = _create_bc(client, tt_headers)
+
+    # 创建（含投放对象）
+    resp = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "产品A", "kpi": "KPI-A", "region": "巴西",
+        "bc_id": bc_id, "customer": "客户X",
+        "runner_ids": [], "packages": [
+            {"type": "package", "series_name": "系列1", "package_name": "com.a.b", "url": "https://play.google.com/store/apps/details?id=com.a.b"},
+            {"type": "pwa", "series_name": "PWA系列", "url": "https://example.com/pwa"},
+        ],
+    })
+    assert resp.status_code == 200
+    pid = resp.get_json()["id"]
+
+    # 列表
+    resp = client.get("/api/tt/products/list", headers=tt_headers)
+    items = resp.get_json()["items"]
+    assert len(items) == 1
+    assert items[0]["product_name"] == "产品A"
+    assert len(items[0]["packages"]) == 2
+
+    # 详情
+    resp = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers)
+    assert resp.get_json()["customer"] == "客户X"
+    assert len(resp.get_json()["packages"]) == 2
+
+    # 更新
+    resp = client.put(f"/api/tt/products/{pid}", headers=tt_headers, json={
+        "product_name": "产品A改", "kpi": "KPI-B",
+    })
+    assert resp.status_code == 200
+    resp = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers)
+    assert resp.get_json()["product_name"] == "产品A改"
+
+    # 软删除 + 恢复
+    client.delete(f"/api/tt/products/{pid}", headers=tt_headers)
+    resp = client.get("/api/tt/products/list", headers=tt_headers)
+    assert resp.get_json()["items"] == []
+    client.post(f"/api/tt/products/{pid}/restore", headers=tt_headers)
+    resp = client.get("/api/tt/products/list", headers=tt_headers)
+    assert len(resp.get_json()["items"]) == 1
+
+
+def test_runner_products(client, tt_headers):
+    # 未在任何产品担任 runner 时返回空（ok(list) 包装为 {"data": []}）
+    resp = client.get("/api/tt/products/runner-products", headers=tt_headers)
+    assert resp.get_json()["data"] == []
+
+
+def test_product_update_delete_requires_owner(client, tt_headers):
+    """IDOR 修复：第二个 TT 用户不能更新/删除/查看他人产品（403），所有者仍可（200）。"""
+    bc_id = _create_bc(client, tt_headers)
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "所有者产品", "bc_id": bc_id,
+    }).get_json()["id"]
+
+    other_headers = _make_tt_headers(client, "ttuser2")
+
+    # 越权更新 / 删除 / 详情 → 403
+    assert client.put(f"/api/tt/products/{pid}", headers=other_headers,
+                      json={"product_name": "越权改名"}).status_code == 403
+    assert client.delete(f"/api/tt/products/{pid}", headers=other_headers).status_code == 403
+    assert client.get(f"/api/tt/products/{pid}/detail", headers=other_headers).status_code == 403
+
+    # 所有者仍可更新 / 删除 → 200
+    assert client.put(f"/api/tt/products/{pid}", headers=tt_headers,
+                      json={"product_name": "改名成功"}).status_code == 200
+    assert client.delete(f"/api/tt/products/{pid}", headers=tt_headers).status_code == 200
