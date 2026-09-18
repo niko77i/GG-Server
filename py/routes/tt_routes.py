@@ -395,18 +395,34 @@ def update_package(pkg_id):
     denied = _check_product_owner(db, uid, product_id)
     if denied:
         return denied
+    existing = db.execute("SELECT * FROM tt_packages WHERE id=?", (pkg_id,)).fetchone()
+    if existing is None:
+        return err('无权限', 403)
     data = parse_body()
-    fields = {
-        'series_name': data.get('series_name', '').strip(),
-        'package_name': data.get('package_name', '').strip(),
-        'url': data.get('url', '').strip(),
-        'status': data.get('status', ''),
-    }
+
+    # 只覆盖请求 JSON 中实际出现的 key，未传字段保留原值（避免部分更新清空其它字段）
+    updates = {}
+    for key in ('series_name', 'package_name', 'url'):
+        if key in data:
+            updates[key] = data.get(key, '').strip()
+    if 'status' in data:
+        updates['status'] = data.get('status', '')
+    if 'type' in data:
+        updates['type'] = data.get('type', '')
+
+    # re-enforce type 规则：package 必须填写包名（与 add_package 语义一致）
+    pkg_type = updates.get('type', existing['type'])
+    if pkg_type == 'package' and 'package_name' in updates and not updates['package_name']:
+        return err('跑包必须填写包名', 400)
+
+    if not updates:
+        return ok()
+
+    set_clause = ", ".join(f"{key}=?" for key in updates)
+    params = list(updates.values()) + [pkg_id]
     db.execute(
-        "UPDATE tt_packages SET series_name=?, package_name=?, url=?, status=?, "
-        "updated_at=datetime('now','localtime') WHERE id=?",
-        (fields['series_name'], fields['package_name'], fields['url'],
-         fields['status'], pkg_id))
+        f"UPDATE tt_packages SET {set_clause}, updated_at=datetime('now','localtime') WHERE id=?",
+        params)
     db.commit()
     return ok()
 

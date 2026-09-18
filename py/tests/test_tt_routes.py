@@ -273,6 +273,42 @@ def test_package_crud_and_batch_delete(client, tt_headers):
     assert resp.get_json()["packages"] == []
 
 
+def test_package_update_status_only_preserves_fields(client, tt_headers):
+    """部分更新：只传 status 时，series_name/package_name/url 等未传字段必须保留原值。"""
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "字段幸存产品",
+    }).get_json()["id"]
+    pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+        "type": "package", "series_name": "系列X", "package_name": "com.survive.pkg",
+        "url": "https://play.google.com/store/apps/details?id=com.survive.pkg",
+    }).get_json()["id"]
+
+    resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                      json={"status": "dropped"})
+    assert resp.status_code == 200
+
+    pkgs = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()["packages"]
+    pkg = next(p for p in pkgs if p["id"] == pkg_id)
+    assert pkg["status"] == "dropped"
+    assert pkg["series_name"] == "系列X"
+    assert pkg["package_name"] == "com.survive.pkg"
+    assert pkg["url"] == "https://play.google.com/store/apps/details?id=com.survive.pkg"
+
+
+def test_package_update_requires_package_name_for_package_type(client, tt_headers):
+    """type=package 的投放对象，PUT 传空 package_name → 400。"""
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "空包名产品",
+    }).get_json()["id"]
+    pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+        "type": "package", "series_name": "系列Y", "package_name": "com.existing.pkg",
+    }).get_json()["id"]
+
+    resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                      json={"package_name": ""})
+    assert resp.status_code == 400
+
+
 def test_package_update_delete_batch_requires_owner(client, tt_headers):
     """IDOR 修复：第二个 TT 用户不能更新/删除/批量删除他人的投放对象（403），所有者仍可（200）。"""
     pid = client.post("/api/tt/products/create", headers=tt_headers, json={
