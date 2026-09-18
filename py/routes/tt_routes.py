@@ -349,7 +349,118 @@ def product_detail(pid):
     return ok(item)
 
 
+# ==================== 投放对象（跑包 / PWA，单表） ====================
+
+@tt_bp.route('/api/tt/products/<int:pid>/packages', methods=['POST'])
+@jwt_required()
+@tt_required
+def add_package(pid):
+    db = get_db()
+    uid = get_uid()
+    denied = _check_product_owner(db, uid, pid)
+    if denied:
+        return denied
+    data = parse_body()
+    pkg_type = data.get('type', 'package')
+    series_name = data.get('series_name', '').strip()
+    package_name = data.get('package_name', '').strip()
+    url = data.get('url', '').strip()
+    status = data.get('status', '')
+
+    if pkg_type not in ('package', 'pwa'):
+        return err('无效的投放对象类型')
+    if pkg_type == 'package' and not package_name:
+        return err('跑包必须填写包名')
+
+    try:
+        db.execute(
+            "INSERT INTO tt_packages (product_id, type, series_name, package_name, url, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (pid, pkg_type, series_name, package_name, url, status))
+        db.commit()
+        return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
+    except Exception as e:
+        return err(str(e))
+
+
+@tt_bp.route('/api/tt/packages/<int:pkg_id>', methods=['PUT'])
+@jwt_required()
+@tt_required
+def update_package(pkg_id):
+    db = get_db()
+    uid = get_uid()
+    product_id = _get_pkg_product_id(db, pkg_id)
+    if product_id is None:
+        return err('无权限', 403)
+    denied = _check_product_owner(db, uid, product_id)
+    if denied:
+        return denied
+    data = parse_body()
+    fields = {
+        'series_name': data.get('series_name', '').strip(),
+        'package_name': data.get('package_name', '').strip(),
+        'url': data.get('url', '').strip(),
+        'status': data.get('status', ''),
+    }
+    db.execute(
+        "UPDATE tt_packages SET series_name=?, package_name=?, url=?, status=?, "
+        "updated_at=datetime('now','localtime') WHERE id=?",
+        (fields['series_name'], fields['package_name'], fields['url'],
+         fields['status'], pkg_id))
+    db.commit()
+    return ok()
+
+
+@tt_bp.route('/api/tt/packages/<int:pkg_id>', methods=['DELETE'])
+@jwt_required()
+@tt_required
+def delete_package(pkg_id):
+    db = get_db()
+    uid = get_uid()
+    product_id = _get_pkg_product_id(db, pkg_id)
+    if product_id is None:
+        return err('无权限', 403)
+    denied = _check_product_owner(db, uid, product_id)
+    if denied:
+        return denied
+    db.execute("DELETE FROM tt_delist_checks WHERE package_id=?", (pkg_id,))
+    db.execute("DELETE FROM tt_packages WHERE id=?", (pkg_id,))
+    db.commit()
+    return ok()
+
+
+@tt_bp.route('/api/tt/packages/batch-delete', methods=['POST'])
+@jwt_required()
+@tt_required
+def batch_delete_packages():
+    db = get_db()
+    uid = get_uid()
+    data = parse_body()
+    ids = data.get('ids') or []
+    if not ids:
+        return err('请选择要删除的投放对象')
+    # 任一投放对象非本人所有则整体拒绝，避免部分删除
+    for pkg_id in ids:
+        product_id = _get_pkg_product_id(db, pkg_id)
+        if product_id is None:
+            return err('无权限', 403)
+        denied = _check_product_owner(db, uid, product_id)
+        if denied:
+            return denied
+    placeholders = ",".join(["?"] * len(ids))
+    db.execute(f"DELETE FROM tt_delist_checks WHERE package_id IN ({placeholders})", ids)
+    db.execute(f"DELETE FROM tt_packages WHERE id IN ({placeholders})", ids)
+    db.commit()
+    return ok({'deleted': len(ids)})
+
+
 # ==================== 工具函数 ====================
+
+def _get_pkg_product_id(db, pkg_id):
+    """反查投放对象所属 product_id，不存在返回 None。"""
+    row = db.execute("SELECT product_id FROM tt_packages WHERE id=?", (pkg_id,)).fetchone()
+    return row['product_id'] if row else None
+
 
 def _get_role(db, uid):
     user = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()

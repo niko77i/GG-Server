@@ -230,3 +230,76 @@ def test_product_update_delete_requires_owner(client, tt_headers):
     assert client.put(f"/api/tt/products/{pid}", headers=tt_headers,
                       json={"product_name": "改名成功"}).status_code == 200
     assert client.delete(f"/api/tt/products/{pid}", headers=tt_headers).status_code == 200
+
+
+def test_package_crud_and_batch_delete(client, tt_headers):
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "包产品",
+    }).get_json()["id"]
+
+    # 添加跑包
+    resp = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+        "type": "package", "series_name": "S1", "package_name": "com.x.y", "url": "https://play.google.com/store/apps/details?id=com.x.y",
+    })
+    assert resp.status_code == 200
+    pkg_id = resp.get_json()["id"]
+
+    # 添加 PWA
+    resp = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+        "type": "pwa", "series_name": "PWA-1", "url": "https://pwa.example.com",
+    })
+    pwa_id = resp.get_json()["id"]
+
+    # 校验 type 字段
+    resp = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers)
+    pkgs = resp.get_json()["packages"]
+    types = {p["id"]: p["type"] for p in pkgs}
+    assert types[pkg_id] == "package"
+    assert types[pwa_id] == "pwa"
+    assert {p["package_name"] for p in pkgs} == {"com.x.y", ""}
+
+    # 更新
+    resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers, json={"status": "dropped"})
+    assert resp.status_code == 200
+
+    # 单个删除
+    resp = client.delete(f"/api/tt/packages/{pkg_id}", headers=tt_headers)
+    assert resp.status_code == 200
+
+    # 批量删除
+    resp = client.post("/api/tt/packages/batch-delete", headers=tt_headers, json={"ids": [pwa_id]})
+    assert resp.status_code == 200
+    resp = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers)
+    assert resp.get_json()["packages"] == []
+
+
+def test_package_update_delete_batch_requires_owner(client, tt_headers):
+    """IDOR 修复：第二个 TT 用户不能更新/删除/批量删除他人的投放对象（403），所有者仍可（200）。"""
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "所有者包产品",
+    }).get_json()["id"]
+    pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+        "type": "package", "series_name": "S1", "package_name": "com.owner.pkg",
+    }).get_json()["id"]
+    pwa_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+        "type": "pwa", "series_name": "PWA-1", "url": "https://owner.example.com",
+    }).get_json()["id"]
+
+    other_headers = _make_tt_headers(client, "ttuser2")
+
+    # 越权更新 / 删除 → 403
+    assert client.put(f"/api/tt/packages/{pkg_id}", headers=other_headers,
+                      json={"status": "dropped"}).status_code == 403
+    assert client.delete(f"/api/tt/packages/{pkg_id}", headers=other_headers).status_code == 403
+
+    # 越权批量删除（任一非 owner 即整体拒绝，不部分删除）→ 403
+    assert client.post("/api/tt/packages/batch-delete", headers=other_headers,
+                       json={"ids": [pwa_id]}).status_code == 403
+
+    # 所有者仍可更新 / 删除 / 批量删除 → 200
+    assert client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                      json={"status": "dropped"}).status_code == 200
+    assert client.delete(f"/api/tt/packages/{pkg_id}", headers=tt_headers).status_code == 200
+    assert client.post("/api/tt/packages/batch-delete", headers=tt_headers,
+                       json={"ids": [pwa_id]}).status_code == 200
+    assert client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()["packages"] == []
