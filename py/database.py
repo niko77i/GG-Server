@@ -669,6 +669,84 @@ def _ensure_schema(conn: sqlite3.Connection):
             ON fb_ad_reports(product_name, report_date);
     """)
 
+    # ==================== TT 平台表 ====================
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS tt_bcs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            bc_id TEXT NOT NULL UNIQUE,
+            note TEXT DEFAULT '',
+            status TEXT DEFAULT 'normal',
+            owner_id INTEGER REFERENCES users(id),
+            deleted_at TEXT DEFAULT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_bcs_owner ON tt_bcs(owner_id);
+        CREATE INDEX IF NOT EXISTS idx_tt_bcs_status ON tt_bcs(status);
+
+        CREATE TABLE IF NOT EXISTS tt_products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            kpi TEXT DEFAULT '',
+            region TEXT DEFAULT '',
+            status TEXT DEFAULT 'active',
+            bc_id INTEGER REFERENCES tt_bcs(id),
+            sales_person_id INTEGER REFERENCES sales_persons(id),
+            agency_ratio REAL DEFAULT 0,
+            customer TEXT DEFAULT '',
+            owner_id INTEGER REFERENCES users(id),
+            is_archived INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_products_owner ON tt_products(owner_id);
+        CREATE INDEX IF NOT EXISTS idx_tt_products_region ON tt_products(region);
+        CREATE INDEX IF NOT EXISTS idx_tt_products_bc ON tt_products(bc_id);
+
+        CREATE TABLE IF NOT EXISTS tt_product_runners (
+            product_id INTEGER NOT NULL REFERENCES tt_products(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            PRIMARY KEY (product_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_product_runners_user ON tt_product_runners(user_id);
+
+        CREATE TABLE IF NOT EXISTS tt_packages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL REFERENCES tt_products(id) ON DELETE CASCADE,
+            type TEXT DEFAULT 'package',
+            series_name TEXT DEFAULT '',
+            package_name TEXT DEFAULT '',
+            url TEXT DEFAULT '',
+            status TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_packages_product ON tt_packages(product_id);
+        CREATE INDEX IF NOT EXISTS idx_tt_packages_type ON tt_packages(type);
+
+        CREATE TABLE IF NOT EXISTS tt_delist_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_id INTEGER NOT NULL REFERENCES tt_packages(id) ON DELETE CASCADE,
+            is_delisted INTEGER DEFAULT 0,
+            checked_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(package_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_delist_checks_package ON tt_delist_checks(package_id);
+
+        CREATE TABLE IF NOT EXISTS tt_product_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL REFERENCES tt_products(id),
+            video_id TEXT NOT NULL,
+            video_owner_id INTEGER NOT NULL DEFAULT 1,
+            added_by INTEGER REFERENCES users(id),
+            added_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(product_id, video_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_product_assets_product ON tt_product_assets(product_id);
+        CREATE INDEX IF NOT EXISTS idx_tt_product_assets_video ON tt_product_assets(video_id);
+    """)
+
     # 列迁移已移至 _ensure_columns()（每次连接都执行）
 
     # 初始化默认标签
@@ -1119,12 +1197,48 @@ def _copy_gg_options_to_fb(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _copy_gg_options_to_tt(conn: sqlite3.Connection):
+    """一次性迁移：将 GG 平台的选项数据复制一份到 TT 平台。
+
+    注意：选项表（regions/sales_persons/account_statuses）已含 platform 列，
+    无需重建表，只需插入 platform='tt' 数据即可。
+    """
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_copy_options_to_tt'"
+    ).fetchone()
+    if migrated:
+        return
+
+    # 复制地区
+    for r in conn.execute("SELECT name, timezone FROM regions WHERE platform='gg'").fetchall():
+        conn.execute(
+            "INSERT OR IGNORE INTO regions(name, timezone, platform) VALUES(?,?,'tt')",
+            (r["name"], r["timezone"]))
+
+    # 复制商务
+    for s in conn.execute("SELECT DISTINCT name FROM sales_persons WHERE platform='gg'").fetchall():
+        conn.execute(
+            "INSERT OR IGNORE INTO sales_persons(name, owner_id, platform) VALUES(?,1,'tt')",
+            (s["name"],))
+
+    # 复制状态
+    for s in conn.execute("SELECT DISTINCT name FROM account_statuses WHERE platform='gg'").fetchall():
+        conn.execute(
+            "INSERT OR IGNORE INTO account_statuses(name, owner_id, platform) VALUES(?,1,'tt')",
+            (s["name"],))
+
+    conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_copy_options_to_tt','1')")
+    conn.commit()
+
+
 def _migrate_if_needed(conn: sqlite3.Connection):
     """首次启动时从旧格式导入数据。"""
     root = os.path.dirname(os.path.dirname(_db_path()))
 
     # 复制 GG 选项到 FB
     _copy_gg_options_to_fb(conn)
+    # 复制 GG 选项到 TT
+    _copy_gg_options_to_tt(conn)
 
     # 1. 迁移 video_set/*.json → video_history
     migrated = conn.execute(
