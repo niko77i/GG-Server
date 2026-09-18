@@ -12,7 +12,7 @@ api.interceptors.request.use(config => {
     const user = JSON.parse(localStorage.getItem('user') || '{}')
     if (user.role === 'developer') {
       const path = window.location.hash.replace('#', '')
-      const platform = path.startsWith('/fb') ? 'fb' : 'gg'
+      const platform = path.startsWith('/tt') ? 'tt' : path.startsWith('/fb') ? 'fb' : 'gg'
       if (!config.params) config.params = {}
       if (!config.params.platform) config.params.platform = platform
     }
