@@ -10,6 +10,7 @@
       <el-tab-pane label="全部" name="" />
       <el-tab-pane label="GG" name="gg" />
       <el-tab-pane label="FB" name="fb" />
+      <el-tab-pane label="TT" name="tt" />
     </el-tabs>
     <el-card shadow="never" style="margin-bottom:16px;">
       <el-row :gutter="12" align="middle">
@@ -36,8 +37,8 @@
       </el-table-column>
       <el-table-column label="平台" width="70">
         <template #default="{ row }">
-          <el-tag :type="row.platform === 'fb' ? 'primary' : 'success'" size="small">
-            {{ row.platform === 'fb' ? 'FB' : 'GG' }}
+          <el-tag :type="row.platform === 'fb' ? 'primary' : row.platform === 'tt' ? 'warning' : 'success'" size="small">
+            {{ row.platform === 'fb' ? 'FB' : row.platform === 'tt' ? 'TT' : 'GG' }}
           </el-tag>
         </template>
       </el-table-column>
@@ -99,6 +100,7 @@
           <el-select v-model="createForm.platform" style="width:100%">
             <el-option label="GG (Google Ads)" value="gg" />
             <el-option label="FB (Facebook)" value="fb" />
+            <el-option label="TT (TikTok)" value="tt" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -124,6 +126,7 @@
           <el-select v-model="editForm.platform" style="width:100%">
             <el-option label="GG (Google Ads)" value="gg" />
             <el-option label="FB (Facebook)" value="fb" />
+            <el-option label="TT (TikTok)" value="tt" />
           </el-select>
         </el-form-item>
       </el-form>

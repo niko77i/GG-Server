@@ -15,6 +15,7 @@ export const useAuthStore = defineStore('auth', {
     canAccessProducts: (state) => ['developer', 'admin', 'viewer', 'user'].includes(state.user?.role),
     isFbUser: (state) => state.currentPlatform === 'fb',
     isGgUser: (state) => state.currentPlatform === 'gg',
+    isTtUser: (state) => state.currentPlatform === 'tt',
     effectivePlatform: (state) => {
       if (state.user?.role === 'developer') return state.currentPlatform
       return state.user?.platform || 'gg'

@@ -18,7 +18,9 @@ const routes = [
       const token = localStorage.getItem('token')
       if (!token) return '/login'
       const user = JSON.parse(localStorage.getItem('user') || '{}')
-      return user.platform === 'fb' ? '/fb/products' : '/accounts/products'
+      if (user.platform === 'fb') return '/fb/products'
+      if (user.platform === 'tt') return '/tt/products'
+      return '/accounts/products'
     }
   },
   {
@@ -123,6 +125,22 @@ const routes = [
     component: () => import('../views/fb/FbSettingsPanel.vue'),
     meta: { platform: 'fb', title: 'FB设置' }
   },
+  // ==================== TT 平台路由 ====================
+  {
+    path: '/tt',
+    redirect: '/tt/products',
+    meta: { platform: 'tt' }
+  },
+  {
+    path: '/tt/products',
+    component: () => import('../views/tt/TtProductPanel.vue'),
+    meta: { platform: 'tt', title: 'TT产品管理' }
+  },
+  {
+    path: '/tt/bcs',
+    component: () => import('../views/tt/TtBcPanel.vue'),
+    meta: { platform: 'tt', title: 'BC管理' }
+  },
 ]
 
 const router = createRouter({
@@ -142,7 +160,9 @@ router.beforeEach((to, from, next) => {
   }
   // 根据用户平台获取首页
   const userPlatform = auth.user?.platform || 'gg'
-  const platformHome = userPlatform === 'fb' ? '/fb/products' : '/accounts/products'
+  const platformHome = userPlatform === 'fb' ? '/fb/products'
+    : userPlatform === 'tt' ? '/tt/products'
+    : '/accounts/products'
 
   // 平台守卫
   if (to.meta.platform && !auth.isDeveloper) {

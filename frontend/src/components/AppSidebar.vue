@@ -1,7 +1,7 @@
 <template>
   <div class="sidebar-wrap">
     <nav class="icon-rail">
-      <div class="rail-brand" @click="selectTab(auth.effectivePlatform === 'fb' ? '/fb/products' : '/accounts')" title="首页">
+      <div class="rail-brand" @click="selectTab(auth.effectivePlatform === 'fb' ? '/fb/products' : auth.effectivePlatform === 'tt' ? '/tt/products' : '/accounts')" title="首页">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
           <rect x="2" y="2" width="20" height="20" rx="4" stroke="#0891b2" stroke-width="1.5"/>
           <circle cx="12" cy="10" r="3" stroke="#0891b2" stroke-width="1.5"/>
@@ -12,6 +12,7 @@
       <div v-if="auth.isDeveloper" class="platform-switch">
         <button class="plat-btn" :class="{ active: auth.currentPlatform === 'gg' }" @click="switchPlatform('gg')">GG</button>
         <button class="plat-btn" :class="{ active: auth.currentPlatform === 'fb' }" @click="switchPlatform('fb')">FB</button>
+        <button class="plat-btn" :class="{ active: auth.currentPlatform === 'tt' }" @click="switchPlatform('tt')">TT</button>
       </div>
       <div class="rail-icons">
         <button v-for="item in visibleNavItems" :key="item.key" class="rail-btn" :class="{ active: activeSection === item.key }" :title="item.label" @click="selectTab(item.key)">
@@ -63,6 +64,9 @@ function switchPlatform(platform) {
   if (platform === 'fb') {
     router.push('/fb/products')
     activeSection.value = 'fb-accounts'
+  } else if (platform === 'tt') {
+    router.push('/tt/products')
+    activeSection.value = 'tt-accounts'
   } else {
     router.push('/accounts/products')
     activeSection.value = 'accounts'
@@ -98,10 +102,24 @@ const fbNavItems = [
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
 ]
 
-const currentNavItems = computed(() => auth.effectivePlatform === 'fb' ? fbNavItems : ggNavItems)
+const ttNavItems = [
+  { key: 'tt-accounts', icon: '🏢', label: '产品管理', sections: [
+    { title: '产品', items: [
+      { icon:'📦',label:'产品管理',path:'/tt/products'},
+      { icon:'🏢',label:'BC管理',path:'/tt/bcs'},
+    ]},
+  ]},
+  { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
+]
+
+const currentNavItems = computed(() =>
+  auth.effectivePlatform === 'fb' ? fbNavItems
+  : auth.effectivePlatform === 'tt' ? ttNavItems
+  : ggNavItems)
 
 const visibleNavItems = computed(() => currentNavItems.value.filter(n => {
-  if (n.key === 'accounts' || n.key === 'fb-accounts') return auth.canAccessProducts
+  if (n.key === 'accounts' || n.key === 'fb-accounts' || n.key === 'tt-accounts') return auth.canAccessProducts
   if (n.admin) return auth.isAdmin
   return true
 }))
@@ -151,7 +169,7 @@ watch(() => route.path, (p) => {
       activeSection.value = item.key; return
     }
   }
-  if (p.startsWith('/accounts/settings') || p.startsWith('/fb/settings')) activeSection.value = 'settings'
+  if (p.startsWith('/accounts/settings') || p.startsWith('/fb/settings') || p.startsWith('/tt/settings')) activeSection.value = 'settings'
 }, { immediate: true })
 </script>
 
