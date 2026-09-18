@@ -353,6 +353,10 @@ app.register_blueprint(auth_bp, url_prefix="/api/auth")
 from routes.fb_routes import fb_bp
 app.register_blueprint(fb_bp)
 
+# TT 平台路由
+from routes.tt_routes import tt_bp
+app.register_blueprint(tt_bp)
+
 try:
     auth.init_developer(APP_CONFIG)
 except Exception as e:
