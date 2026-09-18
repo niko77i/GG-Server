@@ -148,6 +148,69 @@ def test_runner_products(client, tt_headers):
     assert resp.get_json()["data"] == []
 
 
+def test_product_update_writes_packages(client, tt_headers):
+    """update_product 传入 packages 时覆盖写入；不传 packages 时保持原 packages 不变。"""
+    bc_id = _create_bc(client, tt_headers)
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "带包产品", "bc_id": bc_id,
+        "packages": [
+            {"type": "package", "series_name": "系列1", "package_name": "com.a.b", "url": "https://a"},
+            {"type": "pwa", "series_name": "PWA系列", "url": "https://b"},
+        ],
+    }).get_json()["id"]
+
+    detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+    assert len(detail["packages"]) == 2
+
+    # 更新 packages → 数量与内容变化
+    resp = client.put(f"/api/tt/products/{pid}", headers=tt_headers, json={
+        "packages": [
+            {"type": "package", "series_name": "新系列", "package_name": "com.c.d", "url": "https://c"},
+        ],
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+    assert len(detail["packages"]) == 1
+    assert detail["packages"][0]["package_name"] == "com.c.d"
+
+    # 不传 packages 的更新 → packages 保持不变
+    resp = client.put(f"/api/tt/products/{pid}", headers=tt_headers, json={
+        "product_name": "改名不带包",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+    assert len(detail["packages"]) == 1
+    assert detail["packages"][0]["package_name"] == "com.c.d"
+
+
+def test_list_products_runner_param_no_idor(client, tt_headers):
+    """横向越权修复：普通用户带 runner=他人uid 过滤时，仍只能看到自己的产品。"""
+    # 第一个 TT 用户创建自己的产品
+    bc_id = _create_bc(client, tt_headers)
+    pid_own = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "我的产品", "bc_id": bc_id,
+    }).get_json()["id"]
+
+    # 第二个 TT 用户创建产品
+    other_headers = _make_tt_headers(client, "ttuser2")
+    bc2_id = _create_bc(client, other_headers, name="BC2", bc_id="2222222222")
+    pid_other = client.post("/api/tt/products/create", headers=other_headers, json={
+        "product_name": "他人产品", "bc_id": bc2_id,
+    }).get_json()["id"]
+
+    # 查 ttuser2 的 uid
+    db = database.get_db()
+    row = db.execute("SELECT id FROM users WHERE username='ttuser2'").fetchone()
+    db.close()
+    other_uid = row["id"]
+
+    # 第一个用户带 runner=<ttuser2_id> 过滤，只能看到自己的产品，看不到他人产品
+    resp = client.get(f"/api/tt/products/list?runner={other_uid}", headers=tt_headers)
+    ids = [it["id"] for it in resp.get_json()["items"]]
+    assert pid_own in ids
+    assert pid_other not in ids
+
+
 def test_product_update_delete_requires_owner(client, tt_headers):
     """IDOR 修复：第二个 TT 用户不能更新/删除/查看他人产品（403），所有者仍可（200）。"""
     bc_id = _create_bc(client, tt_headers)

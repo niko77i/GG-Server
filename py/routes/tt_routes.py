@@ -137,11 +137,13 @@ def list_products():
     where = ["p.is_archived = 1" if archived == '1' else "p.is_archived = 0"]
     params = []
     role = _get_role(db, uid)
-    if runner and runner.isdigit():
-        where.append("p.id IN (SELECT product_id FROM tt_product_runners WHERE user_id=?)")
-        params.append(int(runner))
-    elif role not in ('developer', 'admin'):
-        # 非 developer/admin 用户只能看到自己拥有或在跑的产品
+    if role in ('developer', 'admin'):
+        # developer/admin 可按任意数字 runner 过滤
+        if runner and runner.isdigit():
+            where.append("p.id IN (SELECT product_id FROM tt_product_runners WHERE user_id=?)")
+            params.append(int(runner))
+    else:
+        # 非 developer/admin 用户只能看到自己拥有或在跑的产品；忽略 runner 参数，避免横向越权
         where.append("(p.owner_id = ? OR p.id IN (SELECT product_id FROM tt_product_runners WHERE user_id=?))")
         params.append(uid)
         params.append(uid)
@@ -265,6 +267,7 @@ def update_product(pid):
         'customer': data.get('customer', ''),
     }
     runner_ids = data.get('runner_ids', None)
+    packages = data.get('packages', None)
 
     if fields['product_name']:
         db.execute(
@@ -278,6 +281,15 @@ def update_product(pid):
         db.execute("DELETE FROM tt_product_runners WHERE product_id=?", (pid,))
         for ruid in runner_ids:
             db.execute("INSERT OR IGNORE INTO tt_product_runners (product_id, user_id) VALUES (?, ?)", (pid, ruid))
+
+    if packages is not None:
+        db.execute("DELETE FROM tt_packages WHERE product_id=?", (pid,))
+        for pkg in packages:
+            db.execute(
+                "INSERT INTO tt_packages (product_id, type, series_name, package_name, url, status) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (pid, pkg.get('type', 'package'), pkg.get('series_name', ''),
+                 pkg.get('package_name', ''), pkg.get('url', ''), pkg.get('status', '')))
 
     db.commit()
     return ok()
