@@ -72,6 +72,10 @@ def create_bc():
 @tt_required
 def update_bc(bid):
     db = get_db()
+    uid = get_uid()
+    denied = _check_bc_owner(db, uid, bid)
+    if denied:
+        return denied
     data = parse_body()
     name = data.get('name', '').strip()
     note = data.get('note', '').strip()
@@ -93,6 +97,10 @@ def update_bc(bid):
 @tt_required
 def delete_bc(bid):
     db = get_db()
+    uid = get_uid()
+    denied = _check_bc_owner(db, uid, bid)
+    if denied:
+        return denied
     db.execute("UPDATE tt_bcs SET deleted_at=datetime('now','localtime') WHERE id=?", (bid,))
     db.commit()
     return ok()
@@ -114,3 +122,14 @@ def bc_options():
 def _get_role(db, uid):
     user = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
     return user['role'] if user else 'user'
+
+
+def _check_bc_owner(db, uid, bid):
+    """非 developer/admin 用户只能更新/删除自己的 BC。返回 None 或 403 错误响应。"""
+    role = _get_role(db, uid)
+    if role in ('developer', 'admin'):
+        return None
+    row = db.execute("SELECT owner_id FROM tt_bcs WHERE id=?", (bid,)).fetchone()
+    if not row or row['owner_id'] != uid:
+        return err('无权限', 403)
+    return None
