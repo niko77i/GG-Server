@@ -6025,7 +6025,10 @@ def sales_persons_delete(sid):
     fb_products = db.execute(
         "SELECT product_name FROM fb_products WHERE sales_person_id=? AND is_archived=0", (sid,)
     ).fetchall()
-    all_products = [p["product_name"] for p in gg_products] + [p["product_name"] for p in fb_products]
+    tt_products = db.execute(
+        "SELECT product_name FROM tt_products WHERE sales_person_id=? AND is_archived=0", (sid,)
+    ).fetchall()
+    all_products = [p["product_name"] for p in gg_products] + [p["product_name"] for p in fb_products] + [p["product_name"] for p in tt_products]
     if all_products:
         db.close()
         return jsonify({
@@ -6036,6 +6039,7 @@ def sales_persons_delete(sid):
     # 先解除已归档产品的引用，再删除
     db.execute("UPDATE products SET sales_person_id=NULL WHERE sales_person_id=?", (sid,))
     db.execute("UPDATE fb_products SET sales_person_id=NULL WHERE sales_person_id=?", (sid,))
+    db.execute("UPDATE tt_products SET sales_person_id=NULL WHERE sales_person_id=?", (sid,))
     db.execute("DELETE FROM sales_persons WHERE id=?", (sid,))
     db.commit()
     db.close()

@@ -1,4 +1,6 @@
 """TT 路由集成测试。"""
+import io
+import json
 import os
 import sys
 
@@ -378,6 +380,10 @@ def test_check_delist(client, tt_headers):
     assert resp.status_code == 200
     assert resp.get_json()["results"][0]["is_delisted"] is True
 
+    # 检测掉包后，list_products 通过 LEFT JOIN 返回 is_delisted，用于卡片红边持久标记
+    items = client.get("/api/tt/products/list", headers=tt_headers).get_json()["items"]
+    assert items[0]["packages"][0]["is_delisted"] == 1
+
     # 掉包状态查询
     resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
     assert len(resp.get_json()["delisted_packages"]) == 1
@@ -581,3 +587,137 @@ def test_update_product_rejects_package_without_name(client, tt_headers):
         "packages": [{"type": "package", "series_name": "S", "package_name": ""}],
     })
     assert resp.status_code == 400
+
+
+# ==================== 设置（Google 表格配置） ====================
+
+def test_settings_get_default(client, tt_headers):
+    resp = client.get("/api/tt/settings", headers=tt_headers)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["success"] is True
+    assert data["settings"]["sheet_mappings"]["accounts"] == "账户明细"
+
+
+def test_settings_save_requires_admin(client, tt_headers):
+    """普通 TT 用户保存配置 → 403。"""
+    resp = client.post("/api/tt/settings", headers=tt_headers, json={
+        "sheet_id": "abc", "sheet_mappings": {"accounts": "账户"},
+    })
+    assert resp.status_code == 403
+
+
+def test_settings_save_and_readback(client, tt_headers):
+    """admin 保存后读回。"""
+    db = database.get_db()
+    db.execute("UPDATE users SET role='admin' WHERE username='ttuser'")
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/settings", headers=tt_headers, json={
+        "sheet_id": "abc123", "sheet_mappings": {"accounts": "账户明细表"},
+    })
+    assert resp.status_code == 200
+
+    resp = client.get("/api/tt/settings", headers=tt_headers)
+    data = resp.get_json()
+    assert data["settings"]["sheet_id"] == "abc123"
+    assert data["settings"]["sheet_mappings"]["accounts"] == "账户明细表"
+
+
+# ==================== 数据导出 / 导入 ====================
+
+def test_data_export_import_roundtrip(client, tt_headers):
+    """导出当前用户数据 → 导入到第二个用户 → 第二个用户可见。"""
+    sp_id = client.post("/api/sales-persons/create", headers=tt_headers,
+                        json={"name": "商务A"}).get_json()["id"]
+    bc_id = _create_bc(client, tt_headers)
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "导出产品", "bc_id": bc_id, "sales_person_id": sp_id,
+        "packages": [{"type": "package", "series_name": "S",
+                      "package_name": "com.exp.pkg",
+                      "url": "https://play.google.com/store/apps/details?id=com.exp.pkg"}],
+    }).get_json()["id"]
+
+    # 导出
+    resp = client.get("/api/tt/data/export", headers=tt_headers)
+    assert resp.status_code == 200
+    assert "attachment" in (resp.headers.get("Content-Disposition") or "")
+    payload = resp.get_json()
+    assert payload["source"] == "tt-server"
+    data = payload["data"]
+    assert len(data["bcs"]) == 1
+    assert len(data["products"]) == 1
+    assert len(data["packages"]) == 1
+    assert len(data["sales_persons"]) == 1
+
+    # 导入到第二个用户
+    other_headers = _make_tt_headers(client, "ttuser2")
+    file_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    resp = client.post("/api/tt/data/import", headers=other_headers,
+                       data={"file": (io.BytesIO(file_bytes), "export.json")},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 200
+    report = resp.get_json()["report"]
+    assert report["bcs"] == 1
+    assert report["products"] == 1
+    assert report["packages"] == 1
+
+    # 第二个用户现在能看到导入的产品
+    resp = client.get("/api/tt/products/list", headers=other_headers)
+    assert len(resp.get_json()["items"]) == 1
+
+
+def test_data_import_rejects_non_json(client, tt_headers):
+    """仅支持 .json 文件。"""
+    resp = client.post("/api/tt/data/import", headers=tt_headers,
+                       data={"file": (io.BytesIO(b"not-json"), "export.txt")},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 400
+
+
+def test_data_import_tolerates_malformed_elements(client, tt_headers):
+    """数据块里混入非 dict 元素不应 500，而是被跳过。"""
+    payload = {"data": {"bcs": ["x", {"id": 1, "bc_id": "123", "name": "BC"}]}}
+    file_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    resp = client.post("/api/tt/data/import", headers=tt_headers,
+                       data={"file": (io.BytesIO(file_bytes), "export.json")},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 200
+    assert resp.get_json()["report"]["bcs"] == 1
+
+
+# ==================== 商务人员删除的 TT 引用检查 ====================
+
+def test_sales_persons_delete_blocks_tt_product_ref(client, tt_headers):
+    """被 TT 在跑产品引用的商务人员删除 → 409。"""
+    sp_id = client.post("/api/sales-persons/create", headers=tt_headers,
+                        json={"name": "被引用商务"}).get_json()["id"]
+    bc_id = _create_bc(client, tt_headers)
+    client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "引用产品", "bc_id": bc_id, "sales_person_id": sp_id,
+    })
+    resp = client.delete(f"/api/sales-persons/{sp_id}", headers=tt_headers)
+    assert resp.status_code == 409
+    assert "在跑产品" in resp.get_json()["error"]
+
+
+def test_sales_persons_delete_clears_archived_tt_ref(client, tt_headers):
+    """被已归档 TT 产品引用的商务人员可删除，且解除引用。"""
+    sp_id = client.post("/api/sales-persons/create", headers=tt_headers,
+                        json={"name": "归档引用商务"}).get_json()["id"]
+    bc_id = _create_bc(client, tt_headers)
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "归档产品", "bc_id": bc_id, "sales_person_id": sp_id,
+    }).get_json()["id"]
+    # 归档产品
+    client.delete(f"/api/tt/products/{pid}", headers=tt_headers)
+
+    resp = client.delete(f"/api/sales-persons/{sp_id}", headers=tt_headers)
+    assert resp.status_code == 200
+
+    # 归档产品的 sales_person_id 已解除
+    db = database.get_db()
+    row = db.execute("SELECT sales_person_id FROM tt_products WHERE id=?", (pid,)).fetchone()
+    db.close()
+    assert row["sales_person_id"] is None

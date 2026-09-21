@@ -141,6 +141,11 @@ const routes = [
     component: () => import('../views/tt/TtBcPanel.vue'),
     meta: { platform: 'tt', title: 'BC管理' }
   },
+  {
+    path: '/tt/settings',
+    component: () => import('../views/tt/TtSettingsPanel.vue'),
+    meta: { platform: 'tt', title: 'TT设置' }
+  },
 ]
 
 const router = createRouter({

@@ -108,6 +108,9 @@ const ttNavItems = [
       { icon:'📦',label:'产品管理',path:'/tt/products'},
       { icon:'🏢',label:'BC管理',path:'/tt/bcs'},
     ]},
+    { title: '系统', items: [
+      { icon:'⚙',label:'TT设置',path:'/tt/settings'},
+    ]}
   ]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
@@ -125,7 +128,7 @@ const visibleNavItems = computed(() => currentNavItems.value.filter(n => {
 }))
 const currentNav = computed(() => currentNavItems.value.find(n => n.key === activeSection.value))
 const detailTitle = computed(() => activeSection.value === 'settings' ? '设置' : (currentNav.value?.label || ''))
-const settingsPath = computed(() => auth.effectivePlatform === 'fb' ? '/fb/settings' : '/accounts/settings')
+const settingsPath = computed(() => auth.effectivePlatform === 'fb' ? '/fb/settings' : auth.effectivePlatform === 'tt' ? '/tt/settings' : '/accounts/settings')
 const detailSections = computed(() => {
   if (activeSection.value === 'settings') return [{ title: '系统', items: [{ icon:'⚙',label:'设置',path:settingsPath.value}] }]
   let sections = currentNav.value?.sections || []

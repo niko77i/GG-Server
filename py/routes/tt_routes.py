@@ -1,4 +1,5 @@
 """TikTok 平台 API 路由 — 产品管理 / BC管理 / 投放对象 / 掉包检测 / 素材关联"""
+import json
 import re
 
 from flask import Blueprint, request
@@ -184,7 +185,9 @@ def list_products():
             "JOIN tt_product_runners pr ON pr.user_id = u.id WHERE pr.product_id=?", (r['id'],)
         ).fetchall()]
         item['packages'] = [dict(pk) for pk in db.execute(
-            "SELECT * FROM tt_packages WHERE product_id=? ORDER BY id", (r['id'],)
+            "SELECT pk.*, dc.is_delisted FROM tt_packages pk "
+            "LEFT JOIN tt_delist_checks dc ON dc.package_id = pk.id "
+            "WHERE pk.product_id=? ORDER BY pk.id", (r['id'],)
         ).fetchall()]
         items.append(item)
 
@@ -372,7 +375,9 @@ def product_detail(pid):
         "JOIN tt_product_runners pr ON pr.user_id = u.id WHERE pr.product_id=?", (pid,)
     ).fetchall()]
     item['packages'] = [dict(pk) for pk in db.execute(
-        "SELECT * FROM tt_packages WHERE product_id=? ORDER BY id", (pid,)
+        "SELECT pk.*, dc.is_delisted FROM tt_packages pk "
+        "LEFT JOIN tt_delist_checks dc ON dc.package_id = pk.id "
+        "WHERE pk.product_id=? ORDER BY pk.id", (pid,)
     ).fetchall()]
     return ok(item)
 
@@ -802,6 +807,257 @@ def list_tt_users():
         "ORDER BY display_name, username"
     ).fetchall()
     return ok({"users": [dict(r) for r in rows]})
+
+
+# ==================== 设置（Google 表格配置） ====================
+
+_TT_SHEET_MAPPING_DEFAULTS = {"accounts": "账户明细"}
+
+
+@tt_bp.route('/api/tt/settings', methods=['GET'])
+@jwt_required()
+@tt_required
+def tt_settings_get():
+    """返回 TT 平台的 Google 表格配置（全局 tags，独立于 GG 的 recharge_sheet_id）。"""
+    db = get_db()
+    sheet_id = ""
+    row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_id'").fetchone()
+    if row and row["value"]:
+        sheet_id = row["value"]
+    mappings = dict(_TT_SHEET_MAPPING_DEFAULTS)
+    sm_row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_mappings'").fetchone()
+    if sm_row and sm_row["value"]:
+        try:
+            loaded = json.loads(sm_row["value"])
+            if isinstance(loaded, dict):
+                mappings.update(loaded)
+        except Exception:
+            pass
+    return ok({"settings": {"sheet_id": sheet_id, "sheet_mappings": mappings}})
+
+
+@tt_bp.route('/api/tt/settings', methods=['POST'])
+@jwt_required()
+@tt_required
+def tt_settings_save():
+    """保存 TT 平台的 Google 表格配置（仅 admin/developer 可写全局 tags）。"""
+    db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    if role not in ('admin', 'developer'):
+        return err('权限不足，仅管理员可操作', 403)
+    data = parse_body()
+    if 'sheet_id' in data:
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
+                   ("tt_sheet_id", str(data['sheet_id'] or '')))
+    if 'sheet_mappings' in data:
+        mappings = data['sheet_mappings']
+        if not isinstance(mappings, dict):
+            mappings = {}
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
+                   ("tt_sheet_mappings", json.dumps(mappings, ensure_ascii=False)))
+    db.commit()
+    return ok()
+
+
+# ==================== 数据导出 / 导入 ====================
+
+@tt_bp.route('/api/tt/data/export', methods=['GET'])
+@jwt_required()
+@tt_required
+def tt_data_export():
+    """导出当前用户的 TT 数据为 JSON 文件下载（不含 tt_product_assets）。"""
+    import datetime
+    from flask import Response
+    db = get_db()
+    uid = get_uid()
+
+    bcs = [dict(r) for r in db.execute(
+        "SELECT * FROM tt_bcs WHERE owner_id=? AND deleted_at IS NULL", (uid,)).fetchall()]
+    products = [dict(r) for r in db.execute(
+        "SELECT * FROM tt_products WHERE owner_id=? AND is_archived=0", (uid,)).fetchall()]
+
+    packages, runners, delist_checks = [], [], []
+    product_ids = [p['id'] for p in products]
+    if product_ids:
+        p_ph = ",".join(["?"] * len(product_ids))
+        packages = [dict(r) for r in db.execute(
+            f"SELECT * FROM tt_packages WHERE product_id IN ({p_ph})", product_ids).fetchall()]
+        runners = [dict(r) for r in db.execute(
+            f"SELECT * FROM tt_product_runners WHERE product_id IN ({p_ph})", product_ids).fetchall()]
+        pkg_ids = [p['id'] for p in packages]
+        if pkg_ids:
+            k_ph = ",".join(["?"] * len(pkg_ids))
+            delist_checks = [dict(r) for r in db.execute(
+                f"SELECT * FROM tt_delist_checks WHERE package_id IN ({k_ph})", pkg_ids).fetchall()]
+
+    sales_persons = [dict(r) for r in db.execute(
+        "SELECT id, name FROM sales_persons WHERE platform='tt'").fetchall()]
+
+    export_data = {
+        "version": 1,
+        "exported_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "tt-server",
+        "data": {
+            "bcs": bcs,
+            "products": products,
+            "packages": packages,
+            "product_runners": runners,
+            "delist_checks": delist_checks,
+            "sales_persons": sales_persons,
+        },
+    }
+    json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    filename = f"tt-server-export-{uid}-{date_str}.json"
+    return Response(json_str, mimetype="application/json",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@tt_bp.route('/api/tt/data/import', methods=['POST'])
+@jwt_required()
+@tt_required
+def tt_data_import():
+    """导入 TT 导出的 JSON 文件到当前用户（按外键依赖顺序重建，外键重映射）。"""
+    db = get_db()
+    uid = get_uid()
+    if 'file' not in request.files:
+        return err('请上传文件')
+    file = request.files['file']
+    if not file.filename or not file.filename.lower().endswith('.json'):
+        return err('仅支持 .json 文件')
+    if file.content_length and file.content_length > 20 * 1024 * 1024:
+        return err('文件过大，最大 20MB')
+    try:
+        payload = json.loads(file.read())
+    except Exception:
+        return err('文件解析失败，请上传合法的 JSON 文件')
+    data = payload.get('data', payload) if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return err('无效的导出文件结构')
+
+    def _as_dict_list(x):
+        return [e for e in (x if isinstance(x, list) else []) if isinstance(e, dict)]
+
+    bcs = _as_dict_list(data.get('bcs'))
+    products = _as_dict_list(data.get('products'))
+    packages = _as_dict_list(data.get('packages'))
+    runners = _as_dict_list(data.get('product_runners'))
+    delist_checks = _as_dict_list(data.get('delist_checks'))
+    sales_persons = _as_dict_list(data.get('sales_persons'))
+
+    db.execute("PRAGMA foreign_keys=OFF")
+    runner_count = 0
+    delist_count = 0
+    try:
+        # 1. 商务人员（按 name 匹配/新建 TT 平台，建 old_id→new_id 映射）
+        sp_map = {}
+        for sp in sales_persons:
+            name = (sp.get('name') or '').strip()
+            sid = sp.get('id')
+            if not name or sid is None:
+                continue
+            existing = db.execute(
+                "SELECT id FROM sales_persons WHERE name=? AND platform='tt'", (name,)).fetchone()
+            if existing:
+                sp_map[sid] = existing['id']
+            else:
+                db.execute("INSERT INTO sales_persons(name, owner_id, platform) VALUES(?,?,?)",
+                           (name, uid, 'tt'))
+                sp_map[sid] = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 2. BC（优先复用本人 BC；否则按全局唯一 bc_id 复用——bc_id 全局 UNIQUE，无法重复建）
+        bc_map = {}
+        for bc in bcs:
+            bc_id = (bc.get('bc_id') or '').strip()
+            bid = bc.get('id')
+            if not bc_id or bid is None:
+                continue
+            existing = db.execute(
+                "SELECT id FROM tt_bcs WHERE bc_id=? AND owner_id=? AND deleted_at IS NULL",
+                (bc_id, uid)).fetchone()
+            if not existing:
+                existing = db.execute(
+                    "SELECT id FROM tt_bcs WHERE bc_id=? AND deleted_at IS NULL", (bc_id,)).fetchone()
+            if existing:
+                bc_map[bid] = existing['id']
+            else:
+                db.execute(
+                    "INSERT INTO tt_bcs(name, bc_id, note, status, owner_id) VALUES(?,?,?,?,?)",
+                    (bc.get('name', ''), bc_id, bc.get('note', ''), bc.get('status', 'normal'), uid))
+                bc_map[bid] = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 3. 产品（owner_id 固定为当前用户，映射 bc/sales_person）
+        prod_map = {}
+        for prod in products:
+            pid = prod.get('id')
+            if not (prod.get('product_name') or '').strip() or pid is None:
+                continue
+            db.execute(
+                "INSERT INTO tt_products (product_name, kpi, region, status, bc_id, "
+                "sales_person_id, agency_ratio, customer, owner_id, is_archived) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (prod.get('product_name', ''), prod.get('kpi', ''), prod.get('region', ''),
+                 prod.get('status', 'active'), bc_map.get(prod.get('bc_id')),
+                 sp_map.get(prod.get('sales_person_id')), prod.get('agency_ratio', 0),
+                 prod.get('customer', ''), uid, 0))
+            prod_map[pid] = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 4. 包
+        pkg_map = {}
+        for pkg in packages:
+            old_pid = pkg.get('product_id')
+            pkg_id = pkg.get('id')
+            if old_pid not in prod_map or pkg_id is None:
+                continue
+            db.execute(
+                "INSERT INTO tt_packages (product_id, type, series_name, package_name, url, status) "
+                "VALUES (?,?,?,?,?,?)",
+                (prod_map[old_pid], pkg.get('type', 'package'), pkg.get('series_name', ''),
+                 pkg.get('package_name', ''), pkg.get('url', ''), pkg.get('status', '')))
+            pkg_map[pkg_id] = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 5. 在跑人员（user_id 固定为当前用户，同产品多 runner 折叠为一条）
+        for pr in runners:
+            old_pid = pr.get('product_id')
+            if old_pid not in prod_map:
+                continue
+            db.execute("INSERT OR IGNORE INTO tt_product_runners (product_id, user_id) VALUES (?,?)",
+                       (prod_map[old_pid], uid))
+            runner_count += 1
+
+        # 6. 掉包检测
+        for dc in delist_checks:
+            old_pkg = dc.get('package_id')
+            if old_pkg not in pkg_map:
+                continue
+            checked_at = dc.get('checked_at')
+            if checked_at is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO tt_delist_checks (package_id, is_delisted, checked_at) "
+                    "VALUES (?,?,?)",
+                    (pkg_map[old_pkg], dc.get('is_delisted', 0), checked_at))
+            else:
+                db.execute(
+                    "INSERT OR REPLACE INTO tt_delist_checks (package_id, is_delisted) VALUES (?,?)",
+                    (pkg_map[old_pkg], dc.get('is_delisted', 0)))
+            delist_count += 1
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return err(f'导入失败：{e}')
+    finally:
+        db.execute("PRAGMA foreign_keys=ON")
+
+    report = {
+        "bcs": len(bc_map),
+        "products": len(prod_map),
+        "packages": len(pkg_map),
+        "runners": runner_count,
+        "delist_checks": delist_count,
+    }
+    return ok({'report': report})
 
 
 # ==================== 工具函数 ====================

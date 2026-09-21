@@ -40,3 +40,23 @@ export const ttApi = {
   // 用户
   listTtUsers() { return client.get('/tt/users') },
 }
+
+/** TT 设置（Google 表格配置） */
+export const ttSettingsApi = {
+  getSettings() { return client.get('/tt/settings') },
+  saveSettings(data) { return client.post('/tt/settings', data) },
+}
+
+/** TT 数据管理（导出/导入） */
+export const ttDataApi = {
+  exportData() {
+    return client.get('/tt/data/export', { responseType: 'blob' })
+  },
+  importFile(file) {
+    const form = new FormData()
+    form.append('file', file)
+    return client.post('/tt/data/import', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+}
