@@ -127,11 +127,14 @@
               <el-tag v-if="isAdmin" size="small" type="warning" style="margin-left:8px;">仅管理员</el-tag>
             </template>
 
-            <!-- Google Sheets URL（仅管理员） -->
-            <div v-if="isAdmin" style="margin-bottom:16px;">
-              <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">Google Sheets（URL 或 ID）</div>
+            <!-- Google Sheets URL（读取对所有用户开放，内容仅管理员可改） -->
+            <div style="margin-bottom:16px;">
+              <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">
+                Google Sheets（URL 或 ID）
+                <el-tag v-if="!isAdmin" size="small" type="warning" style="margin-left:8px;">仅管理员可改</el-tag>
+              </div>
               <div style="display:flex;gap:8px;">
-                <el-input v-model="form.sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" style="flex:1;" />
+                <el-input v-model="form.sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" style="flex:1;" :disabled="!isAdmin" />
                 <el-button @click="readSheets" :loading="readingSheets">📋 读取工作表</el-button>
               </div>
             </div>

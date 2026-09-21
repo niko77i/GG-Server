@@ -1,10 +1,12 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.25  
-> **日期**: 2026-07-31（v1.25 更新于 2026-09-22）  
+> **文档版本**: v1.27  
+> **日期**: 2026-07-31（v1.27 更新于 2026-09-22）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.27 变更**: TT 设置「Google Sheets」区块权限展示修复（纯前端 `frontend/src/views/tt/TtSettingsPanel.vue`，后端无改动）——此前「Google Sheets URL 输入框 + 📋读取工作表 按钮」整块用 `v-if="isAdmin"` 包裹，投手（普通角色）看不到「读取工作表」按钮、无法加载 sheet 列表给「我的看板」选表。现改为：①「📋读取工作表」按钮对**所有登录用户**开放（投手可点，读的是管理员已配置的全局 `tt_sheet_id`，接口 `GET /api/google-sheets/sheets` 仅 `@jwt_required`、无角色限制）；② `sheet_id` 输入框内容**仅管理员可改**（投手侧 `:disabled` 只读显示管理员已配置的 ID，并加「仅管理员可改」标签）；③ 投手点「保存」提交的 `sheet_id` 被后端 `tt_settings_save` 忽略（`is_admin` 判断），仅写私有 `my_dashboard` 到 config 表 `tt_sheet_mappings_<uid>`。迁移到 Spring Boot 时前端需保持「读取开放、sheet_id 写仅管理员」的展示与后端权限边界一致
+> **v1.26 变更**: TT 账户「回收户清单」写表（对应 `py/google_sheets_service.py` 的 `append_recycle` 与 `py/routes/tt_accounts_routes.py` 的 `_trigger_recycle_if_dead`/`_maybe_write_recycle`）——账户状态更新为「非存活」（`!= 存活`，即 验证/封禁/死亡 等）且携带 `recycle_reason` 时，后台异步写「回收户清单」Sheet。该表 12 列表头（时间/账户ID/渠道/运营/国家/时区/有无消耗/回收原因/是否提交/清零金额/备注/是否二次提交），系统**只写 A(时间)/B(账户ID)/H(回收原因) 三列**，其余 C~L 列（渠道/运营/国家/时区/有无消耗/是否提交/清零金额/备注/是否二次提交）在表格里已有公式、**不得覆盖**。写入规则：① A 列时间自动写当天日期、格式「年-月-日」（如 `2026-09-22`），带前导 `'` 标记为文本；② B 列账户ID 带前导 `'` 标记为文本（防 13 位纯数字变科学计数）；③ H 列写回收原因；④ **判断最后一行（换行）只看 B 列「账户ID」有无数据**，时间列（A）有残留但账户ID为空的行忽略（与充值表 `append_recharge_tt` 一致）。回收原因由前端弹窗可搜索下拉选择（`recycle_reason` 字段），后端 `_trigger_recycle_if_dead` 若该原因不在 `tt_recycle_reasons` 表则自动 INSERT（owner_id=当前用户）；配套回收原因 CRUD 接口 `GET/POST/PUT/DELETE /api/tt/recycle-reasons/*`（owner 隔离，admin/developer 看全量）。迁移到 Spring Boot 时 `GoogleSheetsService` 需提供回收写表方法：只写 A/B/H、保留 C~L 公式、以「账户ID」列判断追加行号、时间「年-月-日」+前导 `'`、账户ID 前导 `'`
 > **v1.25 变更**: TT 账户充值写表适配（对应 `py/google_sheets_service.py` 的 `append_recharge_tt` 与 `py/routes/tt_accounts_routes.py` 的 `_append_recharge_background`）——TT 充值表表头为 9 列（时间/账户ID/金额/代理/运营/是否充值/账户ID/金额锁定/是否处理），系统**只写前 3 列**（时间/账户ID/金额），D~I 列（代理/运营/是否充值/账户ID/金额锁定/是否处理）在表格里已有公式、**不得覆盖**。写入规则：① A 列时间自动写当前日期、格式「月/日」（如 `9/22`），带前导 `'` 标记为文本（防止被解析为日期）；② B 列账户ID 带前导 `'` 标记为文本（防止 13 位纯数字变科学计数）；③ C 列金额写 `float` 数字（供 D~I 列公式计算）；④ **判断最后一行（换行）只看 B 列「账户ID」有无数据**，时间/金额列有残留但账户ID为空的行忽略。GG 的 `append_recharge` 保持不动（纯增量），TT 路由 `_append_recharge_background._do_sync` 改调 `append_recharge_tt`（submit/batch-submit/retry-sheets 三处共用）。迁移到 Spring Boot 时 `GoogleSheetsService`（或 `TtAccountService`）需提供 TT 专用充值写表方法：只写 A~C、保留 D~I 公式、以「账户ID」列判断追加行号
 > **v1.24 变更**: TT 账户「我的看板」同步新增「是否回收」列驱动账户状态（对应 `py/routes/tt_accounts_routes.py` 的 `sync_from_sheet`）——① C 列「是否回收」推导状态：「是」→「死亡」、「可用」/空 →「存活」；② 新户直接导入并写 `status_id`（死亡户同时写 `death_date`）；③ 已存在账户做状态比对（C 列推导 vs 系统 `status_name`，NULL 视为「存活」），不一致时返回 `status_conflicts`（`{advertiser_id, sheet_status, system_status}`）由前端提示用户确认、不自动改；④ 确认模式新增 `status_resolutions`（`{advertiser_id: "存活"|"死亡"}`），更新 `status_id`/`status_changed_date`/`death_date`（死亡置当天、存活清空，与手动改状态一致）；⑤ 越权保护：`status_resolutions`/`resolutions` 仅允许改当前用户看板行内（A 列「运营」匹配 display_name）的 `advertiser_id`，非 admin/developer 带 `owner_id` 条件；⑥ 状态同步**不触发** `_trigger_recycle_if_dead`（回收户清单是上游，同步只反映状态、不写清单）。本次一并修复：看板同步跳过表头第一行（避免「运营」表头误触发门禁）+ 按列 `len(r)>N` 安全取值（Google Sheets 截断尾部空列，避免 IndexError）。迁移到 Spring Boot 时 TtAccountService.syncFromSheet 需保持上述状态比对/冲突确认契约与越权保护，且状态变更路径不得触发回收清单写入
 > **v1.23 变更**: TT 设置界面最终实现细化（对应 `py/routes/tt_routes.py` 的 `/api/tt/settings`、`/api/tt/data/export`、`/api/tt/data/import` 与 `main.py` 的 `sales_persons_delete`）——① TT 数据导出按 owner_id 隔离（`tt_bcs`/`tt_products` 过滤 owner，packages/runners/delist_checks 由所属产品/包推导，`sales_persons` 导出 `platform='tt'` 全量供导入映射）；② TT 数据导入按外键依赖顺序重建（sales_persons→bcs→products→packages→runners→delist_checks）并建 old_id→new_id 映射，`owner_id`/`runners.user_id` 全部重映射为当前导入用户，BC 优先复用本人否则按全局唯一 `bc_id` 复用，商务按 name 匹配/新建；③ 导入加 JSON 结构强校验（非 dict 元素/缺 id 跳过）+ 事务 rollback（失败返回 400 不落半截数据）+ 20MB 上传上限；④ 前端商务/地区复用端点显式传 `platform=tt`，修复 admin（非 developer）平台回退 gg 的问题
@@ -1851,7 +1853,7 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - **掉包**（2）：`POST /api/tt/products/{id}/check-delist`、`GET /api/tt/products/delist-status`
 > - **素材**（3）：`GET/POST /api/tt/products/{id}/assets`、`DELETE /api/tt/products/{id}/assets/{videoId}`
 > - **用户**（1）：`GET /api/tt/users`
-> - **设置**（2，v1.22 新增）：`GET/POST /api/tt/settings`（存全局 tags `tt_sheet_id`/`tt_sheet_mappings`，供 TT 账户管理读取 Google 表格，仅 admin/developer 可写）
+> - **设置**（2，v1.22 新增，权限于 v1.27 修订）：`GET/POST /api/tt/settings`（`sheet_id` 与 `accounts/recharge/recycle` 三个内置映射存全局 tags，仅 admin/developer 可写；`my_dashboard` 为投手私有，各用户写各自 config 表 `tt_sheet_mappings_<uid>`）
 > - **数据**（2，v1.22 新增）：`GET /api/tt/data/export`、`POST /api/tt/data/import`
 > - 商务人员/地区复用 `OptionController`（`/api/sales-persons/*`、`/api/regions/*`），通过 `platform=tt` 隔离；`sales_persons_delete` 需补 `tt_products` 引用检查与解除引用（原只查 GG `products`/FB `fb_products`），否则删除被 TT 产品引用的商务人员会悬空
 >
@@ -1874,6 +1876,13 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - 列映射（`append_recharge_tt` → Java `GoogleSheetsService.appendRechargeTt`）：A 列时间 = 当前日期「月/日」（如 `9/22`），前导 `'` 标记为文本（防止被解析为日期）；B 列账户ID = 文本（前导 `'`，防止 13 位纯数字变科学计数）；C 列金额 = `float` 数字（供 D~I 列公式数值计算）；写入范围 `A{start}:C{end}`、`valueInputOption=USER_ENTERED`。
 > - **判断最后一行（换行）只看「账户ID」列（B 列）有无数据**：从末行向上扫描，仅当 B 列非空才视为「已有数据行」，时间/金额列有残留但账户ID为空的行忽略。Java 侧读 `A:C` 后取 index 1 判断；注意 Google Sheets 会截断行尾空单元格，需 `len(row) > 1` 保护（`row[1]` 存在且非空）。
 > - GG 的 `append_recharge`（7 列映射）保持不动（纯增量）；TT 路由 `_append_recharge_background._do_sync` 改调 `append_recharge_tt`，submit / batch-submit / retry-sheets 三处共用同一后台同步逻辑。
+>
+> **TT 回收户清单写表迁移要点（v1.26 补充）**：
+> - TT 回收户清单（Google Sheets）为 12 列表头：`时间 | 账户ID | 渠道 | 运营 | 国家 | 时区 | 有无消耗 | 回收原因 | 是否提交 | 清零金额 | 备注 | 是否二次提交`。系统**只写 A(时间)/B(账户ID)/H(回收原因) 三列**，C~L 列（渠道/运营/国家/时区/有无消耗/是否提交/清零金额/备注/是否二次提交）在表格里已有公式、写入时**不得覆盖**。
+> - 列映射（`append_recycle` → Java `GoogleSheetsService.appendRecycle`）：A 列时间 = 当天日期「年-月-日」（如 `2026-09-22`），前导 `'` 标记为文本（防日期解析）；B 列账户ID = 文本（前导 `'`，防 13 位纯数字变科学计数）；H 列回收原因 = 文本。用 `values().batchUpdate` 一次写 A/B/H 三个非连续 range（`A{start}:A{end}`、`B{start}:B{end}`、`H{start}:H{end}`），`valueInputOption=USER_ENTERED`。
+> - **判断最后一行（换行）只看「账户ID」列（B 列）有无数据**：从末行向上扫描，仅当 B 列非空才视为「已有数据行」，时间列（A）有残留但账户ID为空的行忽略。Java 侧读 `A:B` 后取 index 1 判断；注意 Google Sheets 会截断行尾空单元格，需 `len(row) > 1` 保护。
+> - **触发契约**：`updateAccount`（`PUT /api/tt/accounts/{id}`）与批量状态更新，当状态**真正变更**（新状态名 ≠ 旧状态名）且新状态为**非「存活」**（即 验证/封禁/死亡 等）且请求携带 `recycle_reason` 非空时，才触发写回收清单；状态同步（`sync-from-sheet`）路径**不得**触发（回收户清单是上游，同步只反映状态，见 v1.24）。写表在后台异步线程执行，失败不阻塞状态变更。
+> - **回收原因自动入库**：`recycle_reason` 若不在 `tt_recycle_reasons` 表则自动 INSERT（owner_id=当前用户）；回收原因 CRUD（`GET/POST/PUT/DELETE /api/tt/recycle-reasons/*`）owner 隔离，admin/developer 看全量、普通用户仅本人。迁移到 MySQL 时需补充 `tt_recycle_reasons` 表 DDL（`id`/`name`/`owner_id`/`created_at`，`UNIQUE(name, owner_id)`）。
 
 ---
 
