@@ -5669,7 +5669,7 @@ def agents_create():
         db.close()
         return jsonify({"success": True, "id": new_id})
     existing = db.execute(
-        "SELECT id FROM agents WHERE name=? AND owner_id=?", (name, user_id)
+        "SELECT id FROM agents WHERE name=? AND owner_id=? AND platform='gg'", (name, user_id)
     ).fetchone()
     if existing:
         db.close()
@@ -5712,7 +5712,7 @@ def agents_rename(aid):
         ).fetchone()
     else:
         dup = db.execute(
-            "SELECT id FROM agents WHERE name=? AND owner_id=? AND id!=?",
+            "SELECT id FROM agents WHERE name=? AND owner_id=? AND platform='gg' AND id!=?",
             (name, user_id, aid)
         ).fetchone()
     if dup:
@@ -5744,11 +5744,20 @@ def agents_delete(aid):
     if not row:
         db.close()
         return jsonify({"success": False, "error": "代理不存在或无权操作"}), 404
-    # 账户引用检查：有账户在使用则阻止
-    ac = db.execute("SELECT COUNT(*) FROM accounts WHERE agent_id=?", (aid,)).fetchone()[0]
-    if ac > 0:
-        db.close()
-        return jsonify({"success": False, "error": f"无法删除：被 {ac} 个账户引用，请先为这些账户更换代理"}), 409
+    # 账户引用检查：有账户在使用则阻止（TT 代理查 tt_accounts，否则查 GG accounts）
+    if platform == "tt":
+        ac = db.execute(
+            "SELECT COUNT(*) FROM tt_accounts WHERE agent_id=? AND deleted_at IS NULL", (aid,)
+        ).fetchone()[0]
+        if ac > 0:
+            db.close()
+            return jsonify({"success": False, "error": f"无法删除：被 {ac} 个账户引用，请先为这些账户更换代理"}), 409
+        db.execute("UPDATE tt_accounts SET agent_id=NULL WHERE agent_id=?", (aid,))
+    else:
+        ac = db.execute("SELECT COUNT(*) FROM accounts WHERE agent_id=?", (aid,)).fetchone()[0]
+        if ac > 0:
+            db.close()
+            return jsonify({"success": False, "error": f"无法删除：被 {ac} 个账户引用，请先为这些账户更换代理"}), 409
     # 充值记录引用：自动清空 agent_id（充值记录是历史数据，不阻止删除）
     db.execute("UPDATE recharge_records SET agent_id=NULL WHERE agent_id=?", (aid,))
     db.execute("PRAGMA foreign_keys=OFF")
@@ -5829,9 +5838,10 @@ def statuses_rename(sid):
     if not row:
         db.close()
         return jsonify({"success": False, "error": "状态不存在或无权修改"}), 404
+    platform = _get_effective_platform()
     dup = db.execute(
-        "SELECT id FROM account_statuses WHERE name=? AND owner_id=? AND id!=?",
-        (name, user_id, sid)
+        "SELECT id FROM account_statuses WHERE name=? AND platform=? AND id!=?",
+        (name, platform, sid)
     ).fetchone()
     if dup:
         db.close()
@@ -5859,12 +5869,14 @@ def statuses_delete(sid):
         return jsonify({"success": False, "error": "状态不存在或无权操作"}), 404
     ac = db.execute("SELECT COUNT(*) FROM accounts WHERE status_id=? AND deleted_at IS NULL", (sid,)).fetchone()[0]
     fac = db.execute("SELECT COUNT(*) FROM fb_accounts WHERE status_id=? AND deleted_at IS NULL", (sid,)).fetchone()[0]
-    if ac > 0 or fac > 0:
+    tac = db.execute("SELECT COUNT(*) FROM tt_accounts WHERE status_id=? AND deleted_at IS NULL", (sid,)).fetchone()[0]
+    if ac > 0 or fac > 0 or tac > 0:
         db.close()
-        return jsonify({"success": False, "error": f"无法删除：被 {ac + fac} 个账户引用，请先解除关联"}), 409
+        return jsonify({"success": False, "error": f"无法删除：被 {ac + fac + tac} 个账户引用，请先解除关联"}), 409
     # 解除已删除账户的引用
     db.execute("UPDATE accounts SET status_id=NULL WHERE status_id=?", (sid,))
     db.execute("UPDATE fb_accounts SET status_id=NULL WHERE status_id=?", (sid,))
+    db.execute("UPDATE tt_accounts SET status_id=NULL WHERE status_id=?", (sid,))
     db.execute("DELETE FROM account_statuses WHERE id=?", (sid,))
     db.commit()
     _app_cache.delete(f"accounts:statuses:{user_id}")

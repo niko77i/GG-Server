@@ -1,6 +1,7 @@
 """TikTok 广告账户 API 路由 — 账户管理 / 充值 / 同步 / 回收原因"""
 import json
 import datetime
+import sqlite3
 
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
@@ -106,16 +107,19 @@ def create_account():
     status = (data.get("status") or "").strip() or "存活"
     status_id = _resolve_status_id(db, status, data.get("status_id"))
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    db.execute(
-        "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
-        "consumption, status_id, acquired_date, remark, owner_id, created_at, updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ((data.get("name") or "").strip(), advertiser_id, bc_id,
-         (data.get("country") or "").strip(), agent_id, (data.get("timezone") or "").strip(),
-         (data.get("consumption") or "").strip(), status_id,
-         (data.get("acquired_date") or None), (data.get("remark") or "").strip(),
-         uid, now, now))
-    db.commit()
+    try:
+        db.execute(
+            "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
+            "consumption, status_id, acquired_date, remark, owner_id, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ((data.get("name") or "").strip(), advertiser_id, bc_id,
+             (data.get("country") or "").strip(), agent_id, (data.get("timezone") or "").strip(),
+             (data.get("consumption") or "").strip(), status_id,
+             (data.get("acquired_date") or None), (data.get("remark") or "").strip(),
+             uid, now, now))
+        db.commit()
+    except sqlite3.IntegrityError:
+        return err("该广告账户已存在", 409)
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     _record_bc_change(db, new_id, bc_id, uid, "create")
     db.commit()
@@ -395,6 +399,8 @@ def batch_create_accounts():
             new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             _record_bc_change(db, new_id, bc_id, uid, "import")
             db.commit()
+        except sqlite3.IntegrityError:
+            skipped.append({"advertiser_id": aid, "reason": "已存在"})
         except Exception as e:
             err_msg = str(e).lower()
             if "advertiser_id" in err_msg or "unique" in err_msg:
@@ -947,12 +953,18 @@ def _ensure_agent(db, name):
 
 
 def _region_timezone(db, country):
-    """看板时区为空时，用 regions 的时区补。"""
+    """看板时区为空时，用 regions 的时区补（归一化去掉 UTC 前缀，如 UTC+8 → +8）。"""
     row = db.execute("SELECT timezone FROM regions WHERE name=? AND platform='tt'", (country,)).fetchone()
     if row:
-        return row["timezone"]
+        return _strip_utc_prefix(row["timezone"])
     row = db.execute("SELECT timezone FROM regions WHERE platform='tt' ORDER BY id LIMIT 1").fetchone()
-    return (row["timezone"] if row else "")
+    return (_strip_utc_prefix(row["timezone"]) if row else "")
+
+
+def _strip_utc_prefix(value):
+    """去掉 UTC 前缀（仅当以 UTC 开头），如 UTC+8 → +8；非 UTC 值原样返回。"""
+    value = value or ""
+    return value[3:] if value.startswith("UTC") else value
 
 
 @tt_accounts_bp.route('/api/tt/accounts/sync-from-sheet', methods=['POST'])
@@ -1035,7 +1047,11 @@ def sync_from_sheet():
 
     # 确认模式：处理消耗冲突 — 客户端传入 resolutions: [{advertiser_id, value}]
     resolutions = data.get("resolutions") or {}
+    # 仅允许改当前用户看板行里的 advertiser_id，防止越权改任意账户消耗
+    valid_ids = {r[3].strip() for r in rows}
     for adv_id, value in resolutions.items():
+        if adv_id not in valid_ids:
+            continue
         db.execute("UPDATE tt_accounts SET consumption=? WHERE advertiser_id=?",
                    (value, adv_id))
     db.commit()

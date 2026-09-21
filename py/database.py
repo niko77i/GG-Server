@@ -1304,6 +1304,7 @@ def _rebuild_agents_platform_unique(conn: sqlite3.Connection):
     if migrated:
         return
     conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("DROP TABLE IF EXISTS agents_new")
     conn.execute("""
         CREATE TABLE agents_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -361,3 +361,81 @@ def test_agents_platform_rename_delete(client, tt_headers):
     resp = client.get("/api/agents/list?platform=tt", headers=tt_headers2)
     names = [a["name"] for a in resp.get_json()["agents"]]
     assert "TT代理B改" not in names
+
+
+def test_agents_delete_tt_referenced_by_tt_account(client, tt_headers):
+    """删除被 tt_accounts 引用的 TT 代理 → 409 拒绝。"""
+    resp = client.post("/api/agents/create", headers=tt_headers,
+                       json={"name": "TT代理引用"}, query_string={"platform": "tt"})
+    assert resp.status_code == 200
+    aid = resp.get_json()["id"]
+
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, agent_id, owner_id) VALUES(?,?,?,?)",
+               ("引用户", "9990001112223", aid, uid))
+    db.commit()
+    db.close()
+
+    resp = client.delete(f"/api/agents/{aid}", headers=tt_headers,
+                         query_string={"platform": "tt"})
+    assert resp.status_code == 409
+
+
+def test_statuses_delete_tt_referenced_by_tt_account(client, tt_headers):
+    """删除被 tt_accounts 引用的 TT 状态 → 409 拒绝。"""
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    db.execute("INSERT INTO account_statuses(name, owner_id, platform) VALUES(?,?, 'tt')",
+               ("特殊状态", uid))
+    db.commit()
+    sid = db.execute("SELECT id FROM account_statuses WHERE name='特殊状态' AND platform='tt'").fetchone()["id"]
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+               ("引用户", "9990001112224", sid, uid))
+    db.commit()
+    db.close()
+
+    resp = client.delete(f"/api/statuses/{sid}", headers=tt_headers)
+    assert resp.status_code == 409
+
+
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_confirm_resolutions_owner_guard(mock_read, mock_build, client, tt_headers):
+    """确认模式的 resolutions 只能改当前用户看板行里的 advertiser_id，越权项不生效。"""
+    mock_build.return_value = object()
+    # 看板行只含 advertiser_id=1111111111111（当前用户自己的账户）
+    mock_read.return_value = [
+        ["ttuser", "2026-09-20", "否", "1111111111111", "BC-A", "US", "渠道X", "+8", "100", "备注1"],
+    ]
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='ttuser' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    # 越权目标：不在看板行里，consumption 不应被 resolutions 改动
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, consumption, owner_id) VALUES(?,?,?,?)",
+               ("受害户", "9999999999999", "200", 1))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": False, "resolutions": {"9999999999999": "999"}})
+    assert resp.status_code == 200
+
+    db = database.get_db()
+    row = db.execute("SELECT consumption FROM tt_accounts WHERE advertiser_id='9999999999999'").fetchone()
+    db.close()
+    assert row["consumption"] == "200"
+
+
+def test_region_timezone_strips_utc_prefix(app):
+    """_region_timezone 返回值应去掉 UTC 前缀（UTC+8 → +8）。"""
+    from routes.tt_accounts_routes import _region_timezone
+
+    db = database.get_db()
+    db.execute("DELETE FROM regions WHERE platform='tt'")
+    db.execute("INSERT INTO regions(name, timezone, platform) VALUES(?,?, 'tt')", ("测试国", "UTC+8"))
+    db.commit()
+    assert _region_timezone(db, "测试国") == "+8"
+    db.close()
