@@ -310,6 +310,7 @@ Expected: FAIL — 404（端点不存在）。
 ```python
 """TikTok 广告账户 API 路由 — 账户管理 / 充值 / 同步 / 回收原因"""
 import json
+import datetime
 
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
@@ -419,7 +420,7 @@ def create_account():
     agent_id = _resolve_agent_id(db, (data.get("agent") or "").strip(), data.get("agent_id"))
     status = (data.get("status") or "").strip() or "存活"
     status_id = _resolve_status_id(db, status, data.get("status_id"))
-    now = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     db.execute(
         "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
         "consumption, status_id, acquired_date, remark, owner_id, created_at, updated_at) "
@@ -551,11 +552,6 @@ def list_accounts():
         it['owner'] = it.get('owner_name') or ''
 
     # 各状态计数（不含 status 筛选，展示所有状态数量）
-    sc_where = [w for w in where if "status_id" not in w]
-    sc_where[0] = "a.deleted_at IS NULL"
-    sc_where.append("a.owner_id = ?" if owner_id else ("a.owner_id = ?" if role not in ('developer', 'admin') else "1=1"))
-    sc_params = [p for p in params]
-    # 简化：直接用与列表相同的 owner 过滤重算
     sc_where2 = ["a.deleted_at IS NULL"]
     sc_params2 = []
     if role in ('developer', 'admin'):
@@ -680,7 +676,7 @@ def batch_create_accounts():
         "acquired_date": (data.get("acquired_date") or None),
     }
     overrides = data.get("overrides") or {}
-    now = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     created, skipped = [], []
     for aid in account_ids:
         aid = str(aid).strip()
@@ -1601,7 +1597,7 @@ def _maybe_write_recycle(db, uid, advertiser_id, agent_name, country, timezone, 
     user = db.execute("SELECT display_name FROM users WHERE id=?", (uid,)).fetchone()
     operator = (user["display_name"] or "") if user else ""
     rows = [{
-        "time": __import__("datetime").datetime.now().strftime("%Y-%m-%d"),
+        "time": datetime.datetime.now().strftime("%Y-%m-%d"),
         "account_id": advertiser_id,
         "agent": agent_name,
         "operator": operator,
@@ -1632,7 +1628,7 @@ def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason):
     if reason:
         existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=?", (reason,)).fetchone()
         if not existing:
-            db.execute("INSERT INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (reason, uid))
+            db.execute("INSERT OR IGNORE INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (reason, uid))
     ac = db.execute("SELECT a.country, a.timezone, ag.name AS agent_name FROM tt_accounts a "
                     "LEFT JOIN agents ag ON a.agent_id = ag.id WHERE a.advertiser_id=?",
                     (advertiser_id,)).fetchone()
