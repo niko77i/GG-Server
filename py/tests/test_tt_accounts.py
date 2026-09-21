@@ -172,3 +172,44 @@ def test_recharge_submit_and_list(client, tt_headers):
 
     resp = client.get(f"/api/tt/accounts/{aid}/recharge-records", headers=tt_headers)
     assert resp.get_json()["items"][0]["amount"] == "1000"
+
+
+def test_recharge_records_owner_isolation(client, tt_headers):
+    """其他普通用户不能读取他人账户的充值记录。"""
+    resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
+    aid = resp.get_json()["id"]
+    client.post("/api/tt/recharge/submit", headers=tt_headers, json={
+        "account_id": "1234567890123", "amount": "1000",
+    })
+    headers2 = _mk_tt_headers(client, "ttuser2")
+    resp = client.get(f"/api/tt/accounts/{aid}/recharge-records", headers=headers2)
+    assert resp.status_code == 403
+
+
+def test_recharge_batch_submit_skips_non_owned(client, tt_headers):
+    """批量充值应跳过非本人账户（owner 隔离），created 为 0 且无新增记录。"""
+    _mk_account(client, tt_headers, advertiser_id="1234567890123")
+    headers2 = _mk_tt_headers(client, "ttuser2")
+    resp = client.post("/api/tt/recharge/batch-submit", headers=headers2, json={
+        "items": [{"account_id": "1234567890123", "amount": "1000"}],
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["created"] == 0
+    db = database.get_db()
+    cnt = db.execute("SELECT COUNT(*) FROM tt_recharge_records").fetchone()[0]
+    db.close()
+    assert cnt == 0
+
+
+def test_recharge_batch_submit_skips_non_alive(client, tt_headers):
+    """批量充值应跳过非「存活」状态的账户。"""
+    _mk_account(client, tt_headers, advertiser_id="1234567890123", status="死亡")
+    resp = client.post("/api/tt/recharge/batch-submit", headers=tt_headers, json={
+        "items": [{"account_id": "1234567890123", "amount": "1000"}],
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["created"] == 0
+    db = database.get_db()
+    cnt = db.execute("SELECT COUNT(*) FROM tt_recharge_records").fetchone()[0]
+    db.close()
+    assert cnt == 0

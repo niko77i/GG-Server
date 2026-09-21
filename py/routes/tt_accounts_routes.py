@@ -659,9 +659,14 @@ def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
 @tt_required
 def recharge_records(aid):
     db = get_db()
-    ac = db.execute("SELECT advertiser_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+    uid = get_uid()
+    ac = db.execute("SELECT advertiser_id, owner_id FROM tt_accounts WHERE id=? AND deleted_at IS NULL",
+                    (aid,)).fetchone()
     if not ac:
         return err("账户不存在", 404)
+    role = _get_role(db, uid)
+    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+        return err("无权限", 403)
     rows = db.execute(
         "SELECT r.*, ag.name AS agent_name, u.display_name AS operator_name "
         "FROM tt_recharge_records r "
@@ -735,20 +740,25 @@ def recharge_batch_submit():
         return err("缺少 items")
     user = db.execute("SELECT display_name FROM users WHERE id=?", (uid,)).fetchone()
     operator = (user["display_name"] or "") if user else ""
+    role = _get_role(db, uid)
     rids, rows = [], []
     for it in items:
         account_id = (it.get("account_id") or "").strip()
         amount = str(it.get("amount") or "").strip()
         if not account_id or not amount:
             continue
-        ac = db.execute("SELECT agent_id, status_id FROM tt_accounts WHERE advertiser_id=? AND deleted_at IS NULL",
+        ac = db.execute("SELECT agent_id, status_id, owner_id FROM tt_accounts WHERE advertiser_id=? AND deleted_at IS NULL",
                         (account_id,)).fetchone()
         if not ac:
+            continue
+        if role not in ('developer', 'admin') and ac["owner_id"] != uid:
             continue
         agent_id = _resolve_agent_id(db, (it.get("agent") or "").strip(), it.get("agent_id"))
         agent_name = db.execute("SELECT name FROM agents WHERE id=?", (agent_id,)).fetchone()
         agent_name = agent_name["name"] if agent_name else ""
         st = db.execute("SELECT name FROM account_statuses WHERE id=?", (ac["status_id"],)).fetchone()
+        if st and st["name"] != "存活":
+            continue
         status = st["name"] if st else ""
         db.execute(
             "INSERT INTO tt_recharge_records(account_id, amount, agent_id, operator, status, created_by, sheets_synced) "
