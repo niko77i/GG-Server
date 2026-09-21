@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.23  
-> **日期**: 2026-07-31（v1.23 更新于 2026-09-18）  
+> **文档版本**: v1.24  
+> **日期**: 2026-07-31（v1.24 更新于 2026-09-22）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.24 变更**: TT 账户「我的看板」同步新增「是否回收」列驱动账户状态（对应 `py/routes/tt_accounts_routes.py` 的 `sync_from_sheet`）——① C 列「是否回收」推导状态：「是」→「死亡」、「可用」/空 →「存活」；② 新户直接导入并写 `status_id`（死亡户同时写 `death_date`）；③ 已存在账户做状态比对（C 列推导 vs 系统 `status_name`，NULL 视为「存活」），不一致时返回 `status_conflicts`（`{advertiser_id, sheet_status, system_status}`）由前端提示用户确认、不自动改；④ 确认模式新增 `status_resolutions`（`{advertiser_id: "存活"|"死亡"}`），更新 `status_id`/`status_changed_date`/`death_date`（死亡置当天、存活清空，与手动改状态一致）；⑤ 越权保护：`status_resolutions`/`resolutions` 仅允许改当前用户看板行内（A 列「运营」匹配 display_name）的 `advertiser_id`，非 admin/developer 带 `owner_id` 条件；⑥ 状态同步**不触发** `_trigger_recycle_if_dead`（回收户清单是上游，同步只反映状态、不写清单）。本次一并修复：看板同步跳过表头第一行（避免「运营」表头误触发门禁）+ 按列 `len(r)>N` 安全取值（Google Sheets 截断尾部空列，避免 IndexError）。迁移到 Spring Boot 时 TtAccountService.syncFromSheet 需保持上述状态比对/冲突确认契约与越权保护，且状态变更路径不得触发回收清单写入
 > **v1.23 变更**: TT 设置界面最终实现细化（对应 `py/routes/tt_routes.py` 的 `/api/tt/settings`、`/api/tt/data/export`、`/api/tt/data/import` 与 `main.py` 的 `sales_persons_delete`）——① TT 数据导出按 owner_id 隔离（`tt_bcs`/`tt_products` 过滤 owner，packages/runners/delist_checks 由所属产品/包推导，`sales_persons` 导出 `platform='tt'` 全量供导入映射）；② TT 数据导入按外键依赖顺序重建（sales_persons→bcs→products→packages→runners→delist_checks）并建 old_id→new_id 映射，`owner_id`/`runners.user_id` 全部重映射为当前导入用户，BC 优先复用本人否则按全局唯一 `bc_id` 复用，商务按 name 匹配/新建；③ 导入加 JSON 结构强校验（非 dict 元素/缺 id 跳过）+ 事务 rollback（失败返回 400 不落半截数据）+ 20MB 上传上限；④ 前端商务/地区复用端点显式传 `platform=tt`，修复 admin（非 developer）平台回退 gg 的问题
 > **v1.22 变更**: 补充 TT（TikTok Ads）平台完整迁移设计——此前文档仅覆盖 GG+FB。新增 6 张 TT 表 MySQL DDL（`tt_bcs`/`tt_products`/`tt_product_runners`/`tt_packages`/`tt_delist_checks`/`tt_product_assets`，详见 5.2）与 `TtController`（28 个接口，详见 6.3），并新增 TT 设置界面（`/api/tt/settings` GET/POST，存全局 tags `tt_sheet_id`/`tt_sheet_mappings`，供后续 TT 账户管理读取 Google 表格）与 TT 数据导出/导入（`/api/tt/data/export`/`/api/tt/data/import`）。另在 `sales_persons_delete` 补 `tt_products` 引用检查（原只查 GG `products` 与 FB `fb_products`，删除被 TT 产品引用的商务人员会悬空引用）
 > **v1.21 变更**: 做表数据与 MCC 管理三处前端修复/增强（均纯前端，后端无改动）——① 做表数据「包含广告系列ID」与「7列数据」两个勾选项此前互斥（`zbIncludeCampaignId` 被 `:disabled="zbSevenCols"` 禁用），现改为可同时勾选，`adsParser.js` 增加「7列 + 含广告系列ID = 8列」组合（step=8、指标列整体后移1位、第5列广告系列ID自动剔除）；② MCC 新增/编辑弹窗「等级」下拉框此前依赖设置页 `loadMccLevels()` 才填充、直接进 MCC 面板为空，改为 `MccModal.vue` `init()` 懒加载（`if (!store.options.mccLevels.length) await store.loadMccLevels()`），并将「上级 MCC」下拉框加 `filterable` 支持搜索；③ 做表数据日期 `zbSelectedDate` 此前仅在组件初始化时算一次「昨天」、跨天后不更新导致覆盖到错误日期，新增 `scheduleZbMidnightRefresh()` 定时器在 0 点后自动更新为新「昨天」并递归调度到下一 0 点
@@ -1858,6 +1859,14 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - **导入**（`POST /api/tt/data/import`，multipart `.json`）：按外键依赖顺序重建并建 `old_id→new_id` 映射——① sales_persons 按 name 匹配/新建（platform='tt'）；② tt_bcs 优先复用本人（`bc_id=? AND owner_id=?`），否则按全局唯一 `bc_id` 复用（bc_id 全局 UNIQUE，无法重复建）；③ tt_products `owner_id=当前用户`、映射 bc_id/sales_person_id；④ tt_packages 映射 product_id；⑤ tt_product_runners 映射 product_id、`user_id=当前用户`；⑥ tt_delist_checks 映射 package_id。**owner_id 全部重映射为当前导入用户**，杜绝横向越权。
 > - **健壮性**：JSON 结构强校验（各数据块强制为 dict 列表，非 dict 元素/缺 id 跳过）；事务失败 `rollback`（返回 400，不落半截数据）；上传限 20MB。SQLite 用 `PRAGMA foreign_keys=OFF/ON`，MySQL 侧对应 `SET foreign_key_checks=0/1`（建议在 `@Transactional` 内完成、异常自动回滚）。
 > - **范围取舍**：`tt_product_assets`（素材，关联 videos）不导出/导入；仅支持 `.json`（不支持 GG 的 `.db` 旧库导入）。
+>
+> **TT 账户同步状态驱动迁移要点（v1.24 补充）**：
+> - `TtAccountController` 新增 `POST /api/tt/accounts/sync-from-sheet`（对应 `py/routes/tt_accounts_routes.py` 的 `sync_from_sheet`）：读「我的看板」Sheet A:J 列，跳过表头第一行，按 D 列账户ID过滤，A 列「运营」匹配当前用户 display_name 门禁（不匹配则拒绝同步）。
+> - **状态推导**：C 列「是否回收」`是` → 死亡、`可用`/空 → 存活。dry_run 返回 `{dry_run, total, created[], updated[], conflicts[], status_conflicts[]}`，其中 `created` 条目含 `status`，`status_conflicts` 条目为 `{advertiser_id, sheet_status, system_status}`。
+> - **冲突确认契约**：confirm 请求 `{dry_run:false, resolutions:{}, status_resolutions:{advertiser_id:"存活"|"死亡"}}`；`status_resolutions` 只含用户选「以 Sheet 为准」的项，value 为目标状态名。
+> - **越权保护**：`status_resolutions`/`resolutions` 仅允许改当前用户看板行内的 `advertiser_id`（`valid_ids`），非 admin/developer 角色带 `owner_id` 条件。
+> - **death_date 维护**：改为「死亡」置当天、改为「存活」清空，与手动改状态（`updateAccount`）保持一致；新户为死亡时 INSERT 同步写 death_date。
+> - **不写回收清单**：状态同步路径不触发 `_trigger_recycle_if_dead`（回收户清单是上游数据源，同步只反映状态，Java 侧对应回收清单写入逻辑不得被调用）。
 
 ---
 
