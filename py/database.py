@@ -152,6 +152,7 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "sales_persons", "platform", "platform TEXT DEFAULT 'gg'")
     _add_column_if_missing(conn, "account_statuses", "platform", "platform TEXT DEFAULT 'gg'")
     _add_column_if_missing(conn, "regions", "platform", "platform TEXT DEFAULT 'gg'")
+    _add_column_if_missing(conn, "agents", "platform", "platform TEXT DEFAULT 'gg'")
 
 
 def _ensure_schema(conn: sqlite3.Connection):
@@ -745,6 +746,63 @@ def _ensure_schema(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_tt_product_assets_product ON tt_product_assets(product_id);
         CREATE INDEX IF NOT EXISTS idx_tt_product_assets_video ON tt_product_assets(video_id);
+
+        -- ==================== TT 广告账户表 ====================
+        CREATE TABLE IF NOT EXISTS tt_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT DEFAULT '',
+            advertiser_id TEXT NOT NULL UNIQUE,
+            bc_id INTEGER REFERENCES tt_bcs(id),
+            country TEXT DEFAULT '',
+            agent_id INTEGER REFERENCES agents(id),
+            timezone TEXT DEFAULT '',
+            consumption TEXT DEFAULT '',
+            status_id INTEGER REFERENCES account_statuses(id),
+            acquired_date TEXT DEFAULT (date('now','localtime')),
+            death_date TEXT DEFAULT '',
+            status_changed_date TEXT DEFAULT '',
+            remark TEXT DEFAULT '',
+            owner_id INTEGER REFERENCES users(id),
+            deleted_at TEXT DEFAULT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_accounts_owner ON tt_accounts(owner_id);
+        CREATE INDEX IF NOT EXISTS idx_tt_accounts_bc ON tt_accounts(bc_id);
+        CREATE INDEX IF NOT EXISTS idx_tt_accounts_list ON tt_accounts(owner_id, status_id, deleted_at);
+
+        CREATE TABLE IF NOT EXISTS tt_account_bc_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES tt_accounts(id) ON DELETE CASCADE,
+            old_bc_id INTEGER,
+            new_bc_id INTEGER,
+            changed_by INTEGER REFERENCES users(id),
+            change_type TEXT NOT NULL DEFAULT 'manual',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_acbh_account ON tt_account_bc_history(account_id);
+
+        CREATE TABLE IF NOT EXISTS tt_recharge_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            agent_id INTEGER REFERENCES agents(id),
+            operator TEXT DEFAULT '',
+            status TEXT DEFAULT '',
+            created_by INTEGER REFERENCES users(id),
+            sheets_synced INTEGER DEFAULT 0,
+            sheets_error TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_recharge_account ON tt_recharge_records(account_id);
+
+        CREATE TABLE IF NOT EXISTS tt_recycle_reasons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_id INTEGER REFERENCES users(id),
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(name, owner_id)
+        );
     """)
 
     # 列迁移已移至 _ensure_columns()（每次连接都执行）
@@ -1231,6 +1289,25 @@ def _copy_gg_options_to_tt(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _copy_gg_agents_to_tt(conn: sqlite3.Connection):
+    """一次性迁移：将 GG 代理复制一份到 TT 平台（owner_id 统一为 1，冲突跳过）。
+
+    注意：agents 保持 UNIQUE(name, owner_id) 不变，只加 platform 列做隔离标记；
+    INSERT OR IGNORE 在 (name, owner_id=1) 已存在时跳过，不报错。
+    """
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_copy_agents_to_tt'"
+    ).fetchone()
+    if migrated:
+        return
+    for s in conn.execute("SELECT DISTINCT name FROM agents WHERE platform='gg'").fetchall():
+        conn.execute(
+            "INSERT OR IGNORE INTO agents(name, owner_id, platform) VALUES(?,1,'tt')",
+            (s["name"],))
+    conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_copy_agents_to_tt','1')")
+    conn.commit()
+
+
 def _migrate_if_needed(conn: sqlite3.Connection):
     """首次启动时从旧格式导入数据。"""
     root = os.path.dirname(os.path.dirname(_db_path()))
@@ -1239,6 +1316,8 @@ def _migrate_if_needed(conn: sqlite3.Connection):
     _copy_gg_options_to_fb(conn)
     # 复制 GG 选项到 TT
     _copy_gg_options_to_tt(conn)
+    # 复制 GG 代理到 TT
+    _copy_gg_agents_to_tt(conn)
 
     # 1. 迁移 video_set/*.json → video_history
     migrated = conn.execute(
