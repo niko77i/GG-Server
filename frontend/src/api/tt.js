@@ -60,3 +60,41 @@ export const ttDataApi = {
     })
   },
 }
+
+/** TT 广告账户 */
+export const ttAccountsApi = {
+  list:   (params) => client.get('/tt/accounts/list', { params }),
+  lookup: (advertiserId) => client.get('/tt/accounts/lookup', { params: { advertiser_id: advertiserId } }),
+  batchLookup: (accountIds) => client.post('/tt/accounts/batch-lookup', { account_ids: accountIds }),
+  create: (body) => client.post('/tt/accounts/create', body),
+  batchCreate: (body) => client.post('/tt/accounts/batch-create', body),
+  update: (id, body) => client.put(`/tt/accounts/${id}`, body),
+  reassign: (id, body) => client.put(`/tt/accounts/${id}/reassign`, body || {}),
+  delete: (id) => client.delete(`/tt/accounts/${id}`),
+  batchDelete: (ids) => client.post('/tt/accounts/batch-delete', { ids }),
+  batchUpdate: (body) => client.post('/tt/accounts/batch-update', body),
+  restore: (id) => client.post(`/tt/accounts/${id}/restore`),
+  permanentDelete: (id) => client.delete(`/tt/accounts/${id}/permanent`),
+  listDeleted: () => client.get('/tt/accounts/deleted'),
+  bcHistory: (id) => client.get(`/tt/accounts/${id}/bc-history`),
+  deleteBcHistory: (id, hid) => client.delete(`/tt/accounts/${id}/bc-history/${hid}`),
+  syncFromSheet: (body) => client.post('/tt/accounts/sync-from-sheet', body),
+}
+
+/** TT 充值 */
+export const ttRechargeApi = {
+  records: (aid) => client.get(`/tt/accounts/${aid}/recharge-records`),
+  submit: (body) => client.post('/tt/recharge/submit', body),
+  batchSubmit: (body) => client.post('/tt/recharge/batch-submit', body),
+  update: (id, body) => client.put(`/tt/recharge/${id}`, body),
+  delete: (id) => client.delete(`/tt/recharge/${id}`),
+  retrySheets: (id) => client.post(`/tt/recharge/${id}/retry-sheets`),
+}
+
+/** TT 回收原因 */
+export const ttRecycleReasonApi = {
+  list: () => client.get('/tt/recycle-reasons/list'),
+  create: (name) => client.post('/tt/recycle-reasons/create', { name }),
+  rename: (id, name) => client.put(`/tt/recycle-reasons/${id}`, { name }),
+  delete: (id) => client.delete(`/tt/recycle-reasons/${id}`),
+}

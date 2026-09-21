@@ -142,6 +142,11 @@ const routes = [
     meta: { platform: 'tt', title: 'BC管理' }
   },
   {
+    path: '/tt/accounts',
+    component: () => import('../views/tt/TtAccountPanel.vue'),
+    meta: { platform: 'tt', title: 'TT广告账户' }
+  },
+  {
     path: '/tt/settings',
     component: () => import('../views/tt/TtSettingsPanel.vue'),
     meta: { platform: 'tt', title: 'TT设置' }
