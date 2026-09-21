@@ -71,14 +71,14 @@
 import os
 import sys
 
-_py_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_py_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _py_dir not in sys.path:
     sys.path.insert(0, _py_dir)
 
 import database  # noqa: E402
 
 
-def test_tt_accounts_tables_exist():
+def test_tt_accounts_tables_exist(app):
     db = database.get_db()
     for tbl in ("tt_accounts", "tt_account_bc_history",
                 "tt_recharge_records", "tt_recycle_reasons"):
@@ -89,20 +89,22 @@ def test_tt_accounts_tables_exist():
     db.close()
 
 
-def test_agents_has_platform_column():
+def test_agents_has_platform_column(app):
     db = database.get_db()
     cols = [r["name"] for r in db.execute("PRAGMA table_info(agents)").fetchall()]
     assert "platform" in cols
     db.close()
 
 
-def test_agents_copied_to_tt():
+def test_copy_gg_agents_to_tt(app):
     """GG 代理应复制到 platform='tt'（INSERT OR IGNORE，冲突跳过）。"""
     db = database.get_db()
-    # 先确保 GG 有一条代理
+    # 清掉迁移标记，插入 GG 代理，手动调用复制函数
+    db.execute("DELETE FROM config WHERE key='migrated_copy_agents_to_tt'")
     db.execute("INSERT OR IGNORE INTO agents(name, owner_id, platform) VALUES(?,?, 'gg')",
                ("卡尔", 1))
     db.commit()
+    database._copy_gg_agents_to_tt(db)
     cnt = db.execute(
         "SELECT COUNT(*) FROM agents WHERE name='卡尔' AND platform='tt'"
     ).fetchone()[0]
