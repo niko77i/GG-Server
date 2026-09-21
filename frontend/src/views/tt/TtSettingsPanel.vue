@@ -119,15 +119,16 @@
               </el-card>
             </el-col>
           </el-row>
+        </template>
 
           <el-card shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
             <template #header>
               <span style="font-weight:600;">📊 Google 表格配置</span>
-              <el-tag size="small" type="warning" style="margin-left:8px;">仅管理员</el-tag>
+              <el-tag v-if="isAdmin" size="small" type="warning" style="margin-left:8px;">仅管理员</el-tag>
             </template>
 
-            <!-- Google Sheets URL -->
-            <div style="margin-bottom:16px;">
+            <!-- Google Sheets URL（仅管理员） -->
+            <div v-if="isAdmin" style="margin-bottom:16px;">
               <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">Google Sheets（URL 或 ID）</div>
               <div style="display:flex;gap:8px;">
                 <el-input v-model="form.sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" style="flex:1;" />
@@ -139,8 +140,8 @@
             <div style="margin-bottom:16px;">
               <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">Sheet 映射</div>
               <div style="background:#f9fafb;border-radius:8px;padding:12px;">
-                <div v-for="key in Object.keys(form.sheet_mappings)" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                  <span style="white-space:nowrap;font-size:13px;min-width:80px;color:#374151;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}</span>
+                <div v-for="key in visibleSheetKeys" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                  <span style="white-space:nowrap;font-size:13px;min-width:80px;color:#374151;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}<el-tag v-if="SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].adminOnly" size="small" type="warning" style="margin-left:4px;">仅管理员</el-tag></span>
                   <el-select
                     v-model="form.sheet_mappings[key]"
                     filterable allow-create default-first-option
@@ -158,7 +159,6 @@
             <el-button type="primary" @click="save" :loading="saving">💾 保存配置</el-button>
             <span v-if="msg" style="margin-left:8px;font-size:12px;color:#059669;">{{ msg }}</span>
           </el-card>
-        </template>
       </el-tab-pane>
 
       <!-- Tab 2: 地区时区 -->
@@ -276,13 +276,14 @@ import api from '@/api/client'
 
 // Sheet 映射功能注册表 — 已知 key 的显示名（未知 key 直接显示 key 名）
 const SHEET_MAPPING_META = {
-  accounts: { label: '账户明细' },
-  recharge: { label: '充值表' },
-  my_dashboard: { label: '我的看板' },
-  recycle: { label: '回收户清单' },
+  accounts: { label: '账户明细', adminOnly: true },
+  recharge: { label: '充值表', adminOnly: true },
+  my_dashboard: { label: '我的看板', adminOnly: false },
+  recycle: { label: '回收户清单', adminOnly: true },
 }
 
 const authStore = useAuthStore()
+const isAdmin = computed(() => authStore.isAdmin || authStore.isDeveloper)
 const saving = ref(false)
 const msg = ref('')
 const activeTab = ref('account')
@@ -291,6 +292,10 @@ const form = reactive({
   sheet_id: '',
   sheet_mappings: { accounts: '账户明细', recharge: '充值表', my_dashboard: '我的看板', recycle: '回收户清单' },
 })
+// 当前用户可见的 sheet 映射 key：管理员看全部，投手只看「我的看板」
+const visibleSheetKeys = computed(() =>
+  Object.keys(form.sheet_mappings).filter(k => isAdmin.value || !(SHEET_MAPPING_META[k] && SHEET_MAPPING_META[k].adminOnly))
+)
 
 // 商务人员
 const salesPersons = ref([])

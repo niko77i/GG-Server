@@ -599,12 +599,27 @@ def test_settings_get_default(client, tt_headers):
     assert data["settings"]["sheet_mappings"]["accounts"] == "账户明细"
 
 
-def test_settings_save_requires_admin(client, tt_headers):
-    """普通 TT 用户保存配置 → 403。"""
+def test_settings_save_non_admin_saves_only_private(client, tt_headers):
+    """普通投手保存配置 → 200，只写自己的「我的看板」私有值，不写全局 sheet_id / 内置 key。"""
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    db.close()
+
     resp = client.post("/api/tt/settings", headers=tt_headers, json={
-        "sheet_id": "abc", "sheet_mappings": {"accounts": "账户"},
+        "sheet_id": "GLOBAL_SHEET",
+        "sheet_mappings": {"accounts": "全局账户", "recycle": "全局回收", "my_dashboard": "我的专属看板"},
     })
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+
+    db = database.get_db()
+    # 投手不应写入任何全局 tag
+    assert db.execute("SELECT value FROM tags WHERE key='tt_sheet_id'").fetchone() is None
+    assert db.execute("SELECT value FROM tags WHERE key='tt_sheet_mappings'").fetchone() is None
+    # 私有 config 只存 my_dashboard
+    row = db.execute("SELECT value FROM config WHERE key=?", (f"tt_sheet_mappings_{uid}",)).fetchone()
+    assert row is not None
+    assert json.loads(row["value"]) == {"my_dashboard": "我的专属看板"}
+    db.close()
 
 
 def test_settings_save_and_readback(client, tt_headers):

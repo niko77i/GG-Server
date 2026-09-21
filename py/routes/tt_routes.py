@@ -823,14 +823,40 @@ def list_tt_users():
 
 # ==================== 设置（Google 表格配置） ====================
 
-_TT_SHEET_MAPPING_DEFAULTS = {"accounts": "账户明细"}
+# 内置 key = 全局共享（仅 admin/developer 可改）；my_dashboard 为投手私有（各配各的看板）
+_TT_SHEET_MAPPING_KEYS = {"accounts", "recharge", "recycle"}
+_TT_SHEET_MAPPING_DEFAULTS = {
+    "accounts": "账户明细",
+    "recharge": "充值表",
+    "my_dashboard": "我的看板",
+    "recycle": "回收户清单",
+}
+
+
+def _get_tt_user_sheet_mappings(db, user_id):
+    """读取用户私有的 TT sheet 映射覆盖值（config 表，key=tt_sheet_mappings_<uid>）。"""
+    row = db.execute("SELECT value FROM config WHERE key=?", (f"tt_sheet_mappings_{user_id}",)).fetchone()
+    if row and row["value"]:
+        try:
+            loaded = json.loads(row["value"])
+            if isinstance(loaded, dict):
+                return loaded
+        except Exception:
+            pass
+    return {}
+
+
+def _save_tt_user_sheet_mappings(db, user_id, mappings):
+    """保存用户私有的 TT sheet 映射覆盖值（config 表）。"""
+    db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+               (f"tt_sheet_mappings_{user_id}", json.dumps(mappings, ensure_ascii=False)))
 
 
 @tt_bp.route('/api/tt/settings', methods=['GET'])
 @jwt_required()
 @tt_required
 def tt_settings_get():
-    """返回 TT 平台的 Google 表格配置（全局 tags，独立于 GG 的 recharge_sheet_id）。"""
+    """返回 TT 平台的 Google 表格配置（三层叠加：内置默认 → 全局 tags → 用户私有 config）。"""
     db = get_db()
     sheet_id = ""
     row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_id'").fetchone()
@@ -845,6 +871,8 @@ def tt_settings_get():
                 mappings.update(loaded)
         except Exception:
             pass
+    # 用户私有覆盖（投手各自配置的「我的看板」）
+    mappings.update(_get_tt_user_sheet_mappings(db, get_uid()))
     return ok({"settings": {"sheet_id": sheet_id, "sheet_mappings": mappings}})
 
 
@@ -852,22 +880,33 @@ def tt_settings_get():
 @jwt_required()
 @tt_required
 def tt_settings_save():
-    """保存 TT 平台的 Google 表格配置（仅 admin/developer 可写全局 tags）。"""
+    """保存 TT 平台的 Google 表格配置。
+
+    - sheet_id：仅 admin/developer 可写全局 tag
+    - accounts/recharge/recycle 三个内置 key：仅 admin 写全局 tag
+    - my_dashboard：投手私有，所有用户写各自 config
+    """
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
-    if role not in ('admin', 'developer'):
-        return err('权限不足，仅管理员可操作', 403)
+    is_admin = role in ('admin', 'developer')
     data = parse_body()
-    if 'sheet_id' in data:
+    if 'sheet_id' in data and is_admin:
         db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
                    ("tt_sheet_id", str(data['sheet_id'] or '')))
     if 'sheet_mappings' in data:
         mappings = data['sheet_mappings']
         if not isinstance(mappings, dict):
             mappings = {}
-        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
-                   ("tt_sheet_mappings", json.dumps(mappings, ensure_ascii=False)))
+        if is_admin:
+            global_mappings = {k: mappings[k] for k in _TT_SHEET_MAPPING_KEYS if k in mappings}
+            if global_mappings:
+                db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
+                           ("tt_sheet_mappings", json.dumps(global_mappings, ensure_ascii=False)))
+            _save_tt_user_sheet_mappings(db, uid, mappings)
+        else:
+            # 投手只保存自己的「我的看板」sheet 名
+            _save_tt_user_sheet_mappings(db, uid, {"my_dashboard": mappings.get("my_dashboard", "")})
     db.commit()
     return ok()
 

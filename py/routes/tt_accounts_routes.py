@@ -1008,6 +1008,15 @@ def sync_from_sheet():
     sheet_id = _get_tt_sheet_id(db)
     mappings = _get_tt_sheet_mappings(db)
     dashboard = (mappings.get("my_dashboard") or "").strip() or "我的看板"
+    # 用户私有覆盖：投手各自配置的看板 sheet 名（config 表）
+    priv_row = db.execute("SELECT value FROM config WHERE key=?", (f"tt_sheet_mappings_{uid}",)).fetchone()
+    if priv_row and priv_row["value"]:
+        try:
+            priv = json.loads(priv_row["value"])
+            if isinstance(priv, dict) and priv.get("my_dashboard"):
+                dashboard = priv["my_dashboard"]
+        except Exception:
+            pass
     if not sheet_id:
         return err("未配置 Google 表格")
 
