@@ -1303,6 +1303,11 @@ def _rebuild_agents_platform_unique(conn: sqlite3.Connection):
     ).fetchone()
     if migrated:
         return
+    # PRAGMA foreign_keys 无法在事务中切换：_ensure_columns 补列（ALTER TABLE）后会留下
+    # 隐式事务，此时直接 OFF 会被静默忽略，导致下方 DROP TABLE agents 因被
+    # accounts/recharge_records/tt_accounts 等外键引用而报 FOREIGN KEY constraint failed。
+    # 先提交，让 foreign_keys=OFF 生效。
+    conn.commit()
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.execute("DROP TABLE IF EXISTS agents_new")
     conn.execute("""
