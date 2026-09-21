@@ -93,7 +93,7 @@ import unittest.mock as mock  # noqa: E402
 
 
 def _mk_account(client, headers, advertiser_id="1234567890123", **kw):
-    body = {"advertiser_id": advertiser_id, **kw}
+    body = {"advertiser_id": advertiser_id, "name": advertiser_id, **kw}
     return client.post("/api/tt/accounts/create", headers=headers, json=body)
 
 
@@ -314,7 +314,7 @@ def test_ensure_bc_restores_soft_deleted(app):
     db.execute("UPDATE tt_bcs SET deleted_at=datetime('now','localtime') WHERE id=?", (bid,))
     db.commit()
 
-    got = _ensure_bc(db, "BC-X")
+    got = _ensure_bc(db, "BC-X", 1)
     assert got == bid
 
     row = db.execute("SELECT id, deleted_at FROM tt_bcs WHERE name='BC-X'").fetchone()
@@ -439,3 +439,188 @@ def test_region_timezone_strips_utc_prefix(app):
     db.commit()
     assert _region_timezone(db, "测试国") == "+8"
     db.close()
+
+
+# ==================== 修复验证（#1/#3/#5/#6/#7/#8/#10/#12/#17/#20） ====================
+
+def _mk_viewer_headers(client, username="ttviewer"):
+    """创建一个 TT 平台的 viewer（只读）用户并返回其 JWT 请求头。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET platform='tt', role='viewer' WHERE username=?", (username,))
+    db.commit()
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    token = resp.get_json().get("access_token", "")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_create_account_requires_name(client, tt_headers):
+    """#12 create_account 应拒绝空 name。"""
+    resp = client.post("/api/tt/accounts/create", headers=tt_headers,
+                       json={"advertiser_id": "1234567890123", "name": ""})
+    assert resp.status_code == 400
+
+
+def test_recharge_rejects_invalid_amount(client, tt_headers):
+    """#10 充值金额必须为正数。"""
+    _mk_account(client, tt_headers, advertiser_id="1112223334445")
+    resp = client.post("/api/tt/recharge/submit", headers=tt_headers, json={
+        "account_id": "1112223334445", "amount": "-5",
+    })
+    assert resp.status_code == 400
+    resp = client.post("/api/tt/recharge/submit", headers=tt_headers, json={
+        "account_id": "1112223334445", "amount": "abc",
+    })
+    assert resp.status_code == 400
+
+
+def test_recharge_retry_sheets_owner_guard(client, tt_headers):
+    """#7 retry-sheets 只能由记录创建者（或管理员）触发。"""
+    _mk_account(client, tt_headers, advertiser_id="1112223334445")
+    resp = client.post("/api/tt/recharge/submit", headers=tt_headers, json={
+        "account_id": "1112223334445", "amount": "100",
+    })
+    rid = resp.get_json()["id"]
+    headers2 = _mk_tt_headers(client, "ttuser2")
+    resp = client.post(f"/api/tt/recharge/{rid}/retry-sheets", headers=headers2)
+    assert resp.status_code == 403
+
+
+def test_viewer_cannot_write_accounts(client):
+    """#3 viewer 角色不能写账户（创建/修改/删除均 403）。"""
+    viewer = _mk_viewer_headers(client)
+    assert client.post("/api/tt/accounts/create", headers=viewer,
+                       json={"advertiser_id": "1234567890123", "name": "x"}).status_code == 403
+    assert client.post("/api/tt/recharge/submit", headers=viewer,
+                       json={"account_id": "1234567890123", "amount": "100"}).status_code == 403
+    assert client.post("/api/tt/recycle-reasons/create", headers=viewer,
+                       json={"name": "x"}).status_code == 403
+
+
+def test_agents_delete_tt_clears_recharge_agent(client, tt_headers):
+    """#8 删除 TT 代理应清空 tt_recharge_records 的 agent_id 引用。"""
+    resp = client.post("/api/agents/create", headers=tt_headers,
+                       json={"name": "清引用代理"}, query_string={"platform": "tt"})
+    aid = resp.get_json()["id"]
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    db.execute("INSERT INTO tt_recharge_records(account_id, amount, agent_id, created_by) "
+               "VALUES('111', '100', ?, ?)", (aid, uid))
+    db.commit()
+    db.close()
+
+    resp = client.delete(f"/api/agents/{aid}", headers=tt_headers,
+                         query_string={"platform": "tt"})
+    assert resp.status_code == 200
+
+    db = database.get_db()
+    row = db.execute("SELECT agent_id FROM tt_recharge_records WHERE account_id='111'").fetchone()
+    db.close()
+    assert row["agent_id"] is None
+
+
+def test_recharge_background_callback_updates_sheets_synced(client):
+    """#1 后台线程回调（无应用上下文）应能更新 sheets_synced（不依赖 flask.g）。"""
+    from routes.tt_accounts_routes import _append_recharge_background
+    import main as main_mod
+
+    client.post("/api/auth/register", json={"username": "rechargebg", "password": "test123"})
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='rechargebg'").fetchone()["id"]
+    db.execute("INSERT INTO tt_recharge_records(id, account_id, amount, created_by, sheets_synced) "
+               "VALUES(1, '111', '100', ?, 0)", (uid,))
+    db.commit()
+    db.close()
+
+    captured = {}
+    def fake_sync(sync_fn, on_fail_fn):
+        captured["on_fail"] = on_fail_fn
+
+    with mock.patch.object(main_mod, "_sync_sheets_background", side_effect=fake_sync):
+        _append_recharge_background(database.get_db(), uid, "sheet", "充值表", [], [1])
+
+    captured["on_fail"]("synced", "")
+
+    db = database.get_db()
+    row = db.execute("SELECT sheets_synced FROM tt_recharge_records WHERE id=1").fetchone()
+    db.close()
+    assert row["sheets_synced"] == 1
+
+
+def test_ensure_bc_uses_owner_uid(client, tt_headers):
+    """#6 同步新建 BC 时 owner_id 应为当前用户，而非写死 1。"""
+    from routes.tt_accounts_routes import _ensure_bc
+
+    # tt_headers 已注册 ttuser(id=1)；再注册一个用户，取 id != 1 验证未写死 1
+    _mk_tt_headers(client, "bcowner")
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='bcowner'").fetchone()["id"]
+    assert uid != 1
+    bid = _ensure_bc(db, "同步BC", uid)
+    row = db.execute("SELECT owner_id FROM tt_bcs WHERE id=?", (bid,)).fetchone()
+    assert row["owner_id"] == uid
+    db.close()
+
+
+def test_sync_resolution_owner_guard(client, tt_headers):
+    """#5 确认模式 resolutions 不能越权改他人账户的消耗。"""
+    from unittest.mock import patch as _patch
+
+    # 注册另一个用户并取其 id 作为「他人」账户 owner（当前用户 ttuser 不能改它）
+    _mk_tt_headers(client, "otheruser")
+    db = database.get_db()
+    other_uid = db.execute("SELECT id FROM users WHERE username='otheruser'").fetchone()["id"]
+    db.execute("UPDATE users SET display_name='ttuser' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    # 他人账户，advertiser_id 出现在当前用户看板行中
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, consumption, owner_id) "
+               "VALUES('他人户', '1111111111111', '200', ?)", (other_uid,))
+    db.commit()
+    db.close()
+
+    with _patch("google_sheets_service.build_service", return_value=object()), \
+         _patch("google_sheets_service.read_sheet_values", return_value=[
+             ["ttuser", "2026-09-20", "否", "1111111111111", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
+         ]):
+        resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                           json={"dry_run": False, "resolutions": {"1111111111111": "999"}})
+    assert resp.status_code == 200
+
+    db = database.get_db()
+    row = db.execute("SELECT consumption FROM tt_accounts WHERE advertiser_id='1111111111111'").fetchone()
+    db.close()
+    assert row["consumption"] == "200"  # 未越权改动
+
+
+def test_sync_recreates_soft_deleted_account(client, tt_headers):
+    """#5 看板里已软删的账户应被恢复，而非被当作"已存在"跳过。"""
+    from unittest.mock import patch as _patch
+
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='ttuser' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, owner_id, deleted_at) "
+               "VALUES('旧户', '1234567890123', ?, datetime('now','localtime'))", (uid,))
+    db.commit()
+    db.close()
+
+    with _patch("google_sheets_service.build_service", return_value=object()), \
+         _patch("google_sheets_service.read_sheet_values", return_value=[
+             ["ttuser", "2026-09-20", "否", "1234567890123", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
+         ]):
+        resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                           json={"dry_run": False})
+    assert resp.status_code == 200
+
+    db = database.get_db()
+    cnt = db.execute(
+        "SELECT COUNT(*) FROM tt_accounts WHERE advertiser_id='1234567890123' AND deleted_at IS NULL"
+    ).fetchone()[0]
+    db.close()
+    assert cnt == 1

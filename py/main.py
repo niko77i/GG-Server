@@ -5753,6 +5753,7 @@ def agents_delete(aid):
             db.close()
             return jsonify({"success": False, "error": f"无法删除：被 {ac} 个账户引用，请先为这些账户更换代理"}), 409
         db.execute("UPDATE tt_accounts SET agent_id=NULL WHERE agent_id=?", (aid,))
+        db.execute("UPDATE tt_recharge_records SET agent_id=NULL WHERE agent_id=?", (aid,))
     else:
         ac = db.execute("SELECT COUNT(*) FROM accounts WHERE agent_id=?", (aid,)).fetchone()[0]
         if ac > 0:

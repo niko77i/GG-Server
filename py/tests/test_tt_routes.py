@@ -721,3 +721,88 @@ def test_sales_persons_delete_clears_archived_tt_ref(client, tt_headers):
     row = db.execute("SELECT sales_person_id FROM tt_products WHERE id=?", (pid,)).fetchone()
     db.close()
     assert row["sales_person_id"] is None
+
+
+# ==================== 修复验证（#3/#4/#11/#17/#18） ====================
+
+def _make_viewer_headers(client, username="ttviewer"):
+    """创建 TT 平台 viewer（只读）用户并返回其 JWT 请求头。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET platform='tt', role='viewer' WHERE username=?", (username,))
+    db.commit()
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    token = resp.get_json().get("access_token", "")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_viewer_cannot_write_products(client):
+    """#3 viewer 角色不能写产品/BC（创建 BC/产品均 403）。"""
+    viewer = _make_viewer_headers(client)
+    assert client.post("/api/tt/bcs/create", headers=viewer,
+                       json={"name": "BC", "bc_id": "123"}).status_code == 403
+    assert client.post("/api/tt/products/create", headers=viewer,
+                       json={"product_name": "产品"}).status_code == 403
+
+
+def test_bc_options_owner_isolation(client, tt_headers):
+    """#4 bc_options 不应泄露他人 BC（普通用户只能看到自己的 BC）。"""
+    client.post("/api/tt/bcs/create", headers=tt_headers,
+                json={"name": "我的BC", "bc_id": "1111111111"})
+    other_headers = _make_tt_headers(client, "ttuser2")
+    client.post("/api/tt/bcs/create", headers=other_headers,
+                json={"name": "他人BC", "bc_id": "2222222222"})
+
+    resp = client.get("/api/tt/bcs/options", headers=tt_headers)
+    names = [it["name"] for it in resp.get_json()["data"]]
+    assert "我的BC" in names
+    assert "他人BC" not in names
+
+
+def test_create_bc_duplicate_friendly_error(client, tt_headers):
+    """#11 BCID 重复应返回友好错误而非原始 SQLite 报错。"""
+    client.post("/api/tt/bcs/create", headers=tt_headers,
+                json={"name": "BC1", "bc_id": "1234567890"})
+    resp = client.post("/api/tt/bcs/create", headers=tt_headers,
+                       json={"name": "BC2", "bc_id": "1234567890"})
+    assert resp.status_code == 409
+    assert "UNIQUE" not in resp.get_json()["error"]
+
+
+def test_soft_deleted_bc_hidden_in_product_list(client, tt_headers):
+    """#17 软删后的 BC 名称不应显示在产品列表里。"""
+    bc_id = _create_bc(client, tt_headers, name="将删BC", bc_id="3333333333")
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "挂BC产品", "bc_id": bc_id,
+    }).get_json()["id"]
+    # 软删 BC
+    client.delete(f"/api/tt/bcs/{bc_id}", headers=tt_headers)
+
+    items = client.get("/api/tt/products/list", headers=tt_headers).get_json()["items"]
+    product = next(it for it in items if it["id"] == pid)
+    assert product.get("bc") is None
+
+
+def test_import_runner_count_accurate(client, tt_headers):
+    """#18 导入时 runner 计数应反映实际入库数（INSERT OR IGNORE 折叠后不虚高）。"""
+    # 导出含 1 个产品、1 个在跑人员
+    _create_bc(client, tt_headers)
+    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+        "product_name": "导入计数产品",
+    }).get_json()["id"]
+    payload = {
+        "data": {
+            "products": [{"id": 100, "product_name": "导入计数产品"}],
+            "product_runners": [
+                {"id": 200, "product_id": 100},
+                {"id": 201, "product_id": 100},  # 同一产品重复 runner → 折叠为一条
+            ],
+        },
+    }
+    file_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    resp = client.post("/api/tt/data/import", headers=tt_headers,
+                       data={"file": (io.BytesIO(file_bytes), "export.json")},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 200
+    assert resp.get_json()["report"]["runners"] == 1

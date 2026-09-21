@@ -6,8 +6,10 @@ import sqlite3
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 
+import database
+
 from .helpers import ok, err, get_uid, get_db, parse_body
-from .decorators import tt_required
+from .decorators import tt_required, tt_write_required
 
 tt_accounts_bp = Blueprint('tt_accounts', __name__)
 
@@ -80,7 +82,7 @@ def _record_bc_change(db, account_row_id, new_bc_id, uid, change_type):
 
 @tt_accounts_bp.route('/api/tt/accounts/create', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def create_account():
     db = get_db()
     uid = get_uid()
@@ -90,6 +92,9 @@ def create_account():
         return err("请提供广告账户 ID")
     if not advertiser_id.isdigit():
         return err("广告账户 ID 必须是纯数字")
+    name = (data.get("name") or "").strip()
+    if not name:
+        return err("账户名称不能为空")
     # 唯一冲突检测
     ex = db.execute(
         "SELECT a.id, u.display_name, u.username FROM tt_accounts a "
@@ -112,12 +117,11 @@ def create_account():
             "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
             "consumption, status_id, acquired_date, remark, owner_id, created_at, updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ((data.get("name") or "").strip(), advertiser_id, bc_id,
+            (name, advertiser_id, bc_id,
              (data.get("country") or "").strip(), agent_id, (data.get("timezone") or "").strip(),
              (data.get("consumption") or "").strip(), status_id,
              (data.get("acquired_date") or None), (data.get("remark") or "").strip(),
              uid, now, now))
-        db.commit()
     except sqlite3.IntegrityError:
         return err("该广告账户已存在", 409)
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -230,7 +234,7 @@ def list_accounts():
         f"""SELECT a.*, b.name AS bc_name, ag.name AS agent_name, st.name AS status_name,
                    u.display_name AS owner_name
             FROM tt_accounts a
-            LEFT JOIN tt_bcs b ON a.bc_id = b.id
+            LEFT JOIN tt_bcs b ON a.bc_id = b.id AND b.deleted_at IS NULL
             LEFT JOIN agents ag ON a.agent_id = ag.id
             LEFT JOIN account_statuses st ON a.status_id = st.id
             LEFT JOIN users u ON a.owner_id = u.id
@@ -279,7 +283,7 @@ def list_accounts():
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>', methods=['PUT'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def update_account(aid):
     db = get_db()
     uid = get_uid()
@@ -294,7 +298,7 @@ def update_account(aid):
     if role not in ('developer', 'admin') and row["owner_id"] != uid:
         return err("无权限", 403)
 
-    editable = ["name", "country", "timezone", "consumption", "agent_id", "status_id",
+    editable = ["name", "country", "timezone", "consumption",
                 "acquired_date", "death_date", "remark"]
     for f in editable:
         if f in data and data[f] is not None:
@@ -347,7 +351,7 @@ def update_account(aid):
 
 @tt_accounts_bp.route('/api/tt/accounts/batch-create', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def batch_create_accounts():
     db = get_db()
     uid = get_uid()
@@ -394,11 +398,10 @@ def batch_create_accounts():
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (name, aid, bc_id, country, agent_id, timezone, status_id,
                  acquired_date, uid, now, now))
-            db.commit()
-            created.append(aid)
             new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             _record_bc_change(db, new_id, bc_id, uid, "import")
             db.commit()
+            created.append(aid)
         except sqlite3.IntegrityError:
             skipped.append({"advertiser_id": aid, "reason": "已存在"})
         except Exception as e:
@@ -412,7 +415,7 @@ def batch_create_accounts():
 
 @tt_accounts_bp.route('/api/tt/accounts/batch-update', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def batch_update_accounts():
     db = get_db()
     uid = get_uid()
@@ -492,7 +495,7 @@ def reassign_account(aid):
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def delete_account(aid):
     db = get_db()
     uid = get_uid()
@@ -510,7 +513,7 @@ def delete_account(aid):
 
 @tt_accounts_bp.route('/api/tt/accounts/batch-delete', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def batch_delete_accounts():
     db = get_db()
     uid = get_uid()
@@ -529,7 +532,7 @@ def batch_delete_accounts():
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>/restore', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def restore_account(aid):
     db = get_db()
     uid = get_uid()
@@ -546,7 +549,7 @@ def restore_account(aid):
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>/permanent', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def permanent_delete_account(aid):
     db = get_db()
     uid = get_uid()
@@ -628,7 +631,7 @@ def bc_history(aid):
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>/bc-history/<int:hid>', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def delete_bc_history(aid, hid):
     db = get_db()
     uid = get_uid()
@@ -647,6 +650,14 @@ def _recharge_sheet_name(db):
     return (mappings.get("recharge") or "").strip() or "充值表"
 
 
+def _is_valid_amount(amount):
+    """充值金额必须为正数（允许小数）。"""
+    try:
+        return float(amount) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
     """后台异步写充值表；成功置 sheets_synced=1，失败写 sheets_error。"""
     from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
@@ -657,7 +668,8 @@ def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
         gs.append_recharge(service, sheet_id, sheet_name, rows)
 
     def _on_fail(status, err_msg):
-        _db = get_db()
+        # 后台线程无应用上下文，必须用 database.get_db() 新建连接（不能碰 flask.g）
+        _db = database.get_db()
         if status == "synced":
             for rid in rids:
                 _db.execute("UPDATE tt_recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?", (rid,))
@@ -665,6 +677,7 @@ def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
             for rid in rids:
                 _db.execute("UPDATE tt_recharge_records SET sheets_error=? WHERE id=?", (err_msg, rid))
         _db.commit()
+        _db.close()
 
     _sync_sheets_background(_do_sync, _on_fail)
 
@@ -699,7 +712,7 @@ def recharge_records(aid):
 
 @tt_accounts_bp.route('/api/tt/recharge/submit', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def recharge_submit():
     db = get_db()
     uid = get_uid()
@@ -708,6 +721,8 @@ def recharge_submit():
     amount = str(data.get("amount") or "").strip()
     if not account_id or not amount:
         return err("缺少 account_id 或 amount")
+    if not _is_valid_amount(amount):
+        return err("充值金额必须为正数")
     # 校验账户存在且属于当前用户（或 admin）
     role = _get_role(db, uid)
     ac = db.execute("SELECT advertiser_id, status_id, agent_id, owner_id FROM tt_accounts WHERE advertiser_id=? AND deleted_at IS NULL",
@@ -745,7 +760,7 @@ def recharge_submit():
 
 @tt_accounts_bp.route('/api/tt/recharge/batch-submit', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def recharge_batch_submit():
     db = get_db()
     uid = get_uid()
@@ -761,6 +776,8 @@ def recharge_batch_submit():
         account_id = (it.get("account_id") or "").strip()
         amount = str(it.get("amount") or "").strip()
         if not account_id or not amount:
+            continue
+        if not _is_valid_amount(amount):
             continue
         ac = db.execute("SELECT agent_id, status_id, owner_id FROM tt_accounts WHERE advertiser_id=? AND deleted_at IS NULL",
                         (account_id,)).fetchone()
@@ -792,7 +809,7 @@ def recharge_batch_submit():
 
 @tt_accounts_bp.route('/api/tt/recharge/<int:rid>', methods=['PUT'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def recharge_update(rid):
     db = get_db()
     uid = get_uid()
@@ -813,7 +830,7 @@ def recharge_update(rid):
 
 @tt_accounts_bp.route('/api/tt/recharge/<int:rid>', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def recharge_delete(rid):
     db = get_db()
     uid = get_uid()
@@ -830,7 +847,7 @@ def recharge_delete(rid):
 
 @tt_accounts_bp.route('/api/tt/recharge/<int:rid>/retry-sheets', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def recharge_retry_sheets(rid):
     db = get_db()
     uid = get_uid()
@@ -839,6 +856,9 @@ def recharge_retry_sheets(rid):
         "LEFT JOIN agents ag ON r.agent_id = ag.id WHERE r.id=?", (rid,)).fetchone()
     if not row:
         return err("充值记录不存在", 404)
+    role = _get_role(db, uid)
+    if role not in ('developer', 'admin') and row["created_by"] != uid:
+        return err("无权限", 403)
     sheet_id = _get_tt_sheet_id(db)
     if not sheet_id:
         return err("未配置 Google 表格")
@@ -868,7 +888,7 @@ def recycle_reasons_list():
 
 @tt_accounts_bp.route('/api/tt/recycle-reasons/create', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def recycle_reason_create():
     db = get_db()
     uid = get_uid()
@@ -886,7 +906,7 @@ def recycle_reason_create():
 
 @tt_accounts_bp.route('/api/tt/recycle-reasons/<int:rid>', methods=['PUT'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def recycle_reason_rename(rid):
     db = get_db()
     uid = get_uid()
@@ -906,7 +926,7 @@ def recycle_reason_rename(rid):
 
 @tt_accounts_bp.route('/api/tt/recycle-reasons/<int:rid>', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def recycle_reason_delete(rid):
     db = get_db()
     uid = get_uid()
@@ -923,7 +943,7 @@ def recycle_reason_delete(rid):
 
 # ==================== 同步（我的看板） ====================
 
-def _ensure_bc(db, name):
+def _ensure_bc(db, name, uid):
     if not name:
         return None
     row = db.execute("SELECT id, deleted_at FROM tt_bcs WHERE name=?", (name,)).fetchone()
@@ -938,17 +958,17 @@ def _ensure_bc(db, name):
             db.execute("UPDATE tt_bcs SET deleted_at=NULL WHERE id=?", (row["id"],))
         return row["id"]
     db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES(?,?,?)",
-               (name, name, 1))
+               (name, name, uid))
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
-def _ensure_agent(db, name):
+def _ensure_agent(db, name, uid):
     if not name:
         return None
     row = db.execute("SELECT id FROM agents WHERE name=? AND platform='tt'", (name,)).fetchone()
     if row:
         return row["id"]
-    db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'tt')", (name, 1))
+    db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'tt')", (name, uid))
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
@@ -969,17 +989,21 @@ def _strip_utc_prefix(value):
 
 @tt_accounts_bp.route('/api/tt/accounts/sync-from-sheet', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def sync_from_sheet():
     from main import _GOOGLE_SHEETS_CONFIG
     import google_sheets_service as gs
 
     db = get_db()
     uid = get_uid()
+    role = _get_role(db, uid)
     data = parse_body()
     dry_run = bool(data.get("dry_run"))
-    user = db.execute("SELECT display_name FROM users WHERE id=?", (uid,)).fetchone()
-    display_name = (user["display_name"] or "") if user else ""
+    user = db.execute("SELECT display_name, username FROM users WHERE id=?", (uid,)).fetchone()
+    if user:
+        operator_name = (user["display_name"] or "").strip() or (user["username"] or "")
+    else:
+        operator_name = ""
 
     sheet_id = _get_tt_sheet_id(db)
     mappings = _get_tt_sheet_mappings(db)
@@ -991,8 +1015,8 @@ def sync_from_sheet():
     rows = gs.read_sheet_values(service, sheet_id, dashboard, "A:J")
     rows = [r for r in rows if len(r) > 3 and (r[3] or "").strip()]  # D 列账户ID非空
 
-    # 门禁：A 列运营匹配当前用户
-    if rows and any((r[0] or "").strip() != display_name for r in rows):
+    # 门禁：A 列运营匹配当前用户（display_name 为空时回退 username）
+    if rows and any((r[0] or "").strip() != operator_name for r in rows):
         return err("看板「运营」列与当前账号不匹配，仅可同步自己的账户")
 
     created, updated, conflicts = [], [], []
@@ -1009,8 +1033,8 @@ def sync_from_sheet():
 
         if not advertiser_id.isdigit():
             continue
-        bc_id = _ensure_bc(db, bc_name) if not dry_run else None
-        agent_id = _ensure_agent(db, agent_name) if not dry_run else None
+        bc_id = _ensure_bc(db, bc_name, uid) if not dry_run else None
+        agent_id = _ensure_agent(db, agent_name, uid) if not dry_run else None
 
         existing = db.execute("SELECT * FROM tt_accounts WHERE advertiser_id=?", (advertiser_id,)).fetchone()
         if not existing:
@@ -1029,6 +1053,16 @@ def sync_from_sheet():
                 _record_bc_change(db, new_id, bc_id, uid, "create")
                 db.commit()
                 created.append({"advertiser_id": advertiser_id})
+            continue
+
+        # 已软删的账户：恢复复用（仅限本人或管理员），避免被当作"已存在"跳过
+        if existing["deleted_at"]:
+            if existing["owner_id"] != uid and role not in ('developer', 'admin'):
+                continue
+            if not dry_run:
+                db.execute("UPDATE tt_accounts SET deleted_at=NULL WHERE id=?", (existing["id"],))
+                db.commit()
+            created.append({"advertiser_id": advertiser_id})
             continue
 
         # 消耗情况双向同步：Sheet 与系统不一致 → 冲突列表
@@ -1052,8 +1086,12 @@ def sync_from_sheet():
     for adv_id, value in resolutions.items():
         if adv_id not in valid_ids:
             continue
-        db.execute("UPDATE tt_accounts SET consumption=? WHERE advertiser_id=?",
-                   (value, adv_id))
+        if role in ('developer', 'admin'):
+            db.execute("UPDATE tt_accounts SET consumption=? WHERE advertiser_id=?",
+                       (value, adv_id))
+        else:
+            db.execute("UPDATE tt_accounts SET consumption=? WHERE advertiser_id=? AND owner_id=?",
+                       (value, adv_id, uid))
     db.commit()
     return ok({"created": len(created), "updated": len(updated), "conflicts": conflicts})
 

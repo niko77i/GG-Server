@@ -5,7 +5,7 @@ import re
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 from .helpers import ok, err, get_uid, get_db, parse_body
-from .decorators import tt_required
+from .decorators import tt_required, tt_write_required
 
 tt_bp = Blueprint('tt', __name__)
 
@@ -50,7 +50,7 @@ def list_bcs():
 
 @tt_bp.route('/api/tt/bcs/create', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def create_bc():
     db = get_db()
     data = parse_body()
@@ -64,6 +64,8 @@ def create_bc():
         return err('BCID必须是纯数字')
 
     uid = get_uid()
+    if db.execute("SELECT id FROM tt_bcs WHERE bc_id=?", (bc_id,)).fetchone():
+        return err(f"BCID「{bc_id}」已存在", 409)
     try:
         db.execute(
             "INSERT INTO tt_bcs (name, bc_id, note, owner_id) VALUES (?, ?, ?, ?)",
@@ -76,7 +78,7 @@ def create_bc():
 
 @tt_bp.route('/api/tt/bcs/<int:bid>', methods=['PUT'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def update_bc(bid):
     db = get_db()
     uid = get_uid()
@@ -101,7 +103,7 @@ def update_bc(bid):
 
 @tt_bp.route('/api/tt/bcs/<int:bid>', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def delete_bc(bid):
     db = get_db()
     uid = get_uid()
@@ -118,9 +120,18 @@ def delete_bc(bid):
 @tt_required
 def bc_options():
     db = get_db()
-    rows = db.execute(
-        "SELECT id, name, bc_id FROM tt_bcs WHERE status='normal' AND deleted_at IS NULL ORDER BY name"
-    ).fetchall()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    if role in ('developer', 'admin'):
+        rows = db.execute(
+            "SELECT id, name, bc_id FROM tt_bcs WHERE status='normal' AND deleted_at IS NULL ORDER BY name"
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, name, bc_id FROM tt_bcs "
+            "WHERE status='normal' AND deleted_at IS NULL AND owner_id=? ORDER BY name",
+            (uid,)
+        ).fetchall()
     return ok([dict(r) for r in rows])
 
 
@@ -178,7 +189,8 @@ def list_products():
             sp = db.execute("SELECT name FROM sales_persons WHERE id=?", (r['sales_person_id'],)).fetchone()
             item['sales_person_name'] = sp['name'] if sp else ''
         if r['bc_id']:
-            bc = db.execute("SELECT id, name, bc_id FROM tt_bcs WHERE id=?", (r['bc_id'],)).fetchone()
+            bc = db.execute("SELECT id, name, bc_id FROM tt_bcs WHERE id=? AND deleted_at IS NULL",
+                            (r['bc_id'],)).fetchone()
             item['bc'] = dict(bc) if bc else None
         item['runners'] = [dict(u) for u in db.execute(
             "SELECT u.id, u.username, u.display_name FROM users u "
@@ -212,7 +224,7 @@ def runner_products():
 
 @tt_bp.route('/api/tt/products/create', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def create_product():
     db = get_db()
     data = parse_body()
@@ -263,7 +275,7 @@ def create_product():
 
 @tt_bp.route('/api/tt/products/<int:pid>', methods=['PUT'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def update_product(pid):
     db = get_db()
     uid = get_uid()
@@ -328,7 +340,7 @@ def update_product(pid):
 
 @tt_bp.route('/api/tt/products/<int:pid>', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def delete_product(pid):
     db = get_db()
     uid = get_uid()
@@ -342,7 +354,7 @@ def delete_product(pid):
 
 @tt_bp.route('/api/tt/products/<int:pid>/restore', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def restore_product(pid):
     db = get_db()
     uid = get_uid()
@@ -386,7 +398,7 @@ def product_detail(pid):
 
 @tt_bp.route('/api/tt/products/<int:pid>/packages', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def add_package(pid):
     db = get_db()
     uid = get_uid()
@@ -417,7 +429,7 @@ def add_package(pid):
 
 @tt_bp.route('/api/tt/packages/<int:pkg_id>', methods=['PUT'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def update_package(pkg_id):
     db = get_db()
     uid = get_uid()
@@ -461,7 +473,7 @@ def update_package(pkg_id):
 
 @tt_bp.route('/api/tt/packages/<int:pkg_id>', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def delete_package(pkg_id):
     db = get_db()
     uid = get_uid()
@@ -479,7 +491,7 @@ def delete_package(pkg_id):
 
 @tt_bp.route('/api/tt/packages/batch-delete', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def batch_delete_packages():
     db = get_db()
     uid = get_uid()
@@ -506,7 +518,7 @@ def batch_delete_packages():
 
 @tt_bp.route('/api/tt/products/<int:pid>/check-delist', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def check_delist(pid):
     import delist_checker
     import datetime
@@ -574,7 +586,7 @@ def delist_status():
 
 @tt_bp.route('/api/tt/products/merge', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def products_merge():
     """合并多个产品到主产品（迁移投放对象 + 在跑人员，删除副产品）。"""
     db = get_db()
@@ -747,7 +759,7 @@ def list_assets(pid):
 
 @tt_bp.route('/api/tt/products/<int:pid>/assets', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def add_assets(pid):
     """从共享视频库选择已有视频建立关联。body: { video_ids: [...] }。"""
     db = get_db()
@@ -781,7 +793,7 @@ def add_assets(pid):
 
 @tt_bp.route('/api/tt/products/<int:pid>/assets/<video_id>', methods=['DELETE'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def delete_asset(pid, video_id):
     db = get_db()
     uid = get_uid()
@@ -916,7 +928,7 @@ def tt_data_export():
 
 @tt_bp.route('/api/tt/data/import', methods=['POST'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def tt_data_import():
     """导入 TT 导出的 JSON 文件到当前用户（按外键依赖顺序重建，外键重映射）。"""
     db = get_db()
@@ -1018,30 +1030,35 @@ def tt_data_import():
             pkg_map[pkg_id] = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         # 5. 在跑人员（user_id 固定为当前用户，同产品多 runner 折叠为一条）
+        runner_products = set()
         for pr in runners:
             old_pid = pr.get('product_id')
             if old_pid not in prod_map:
                 continue
             db.execute("INSERT OR IGNORE INTO tt_product_runners (product_id, user_id) VALUES (?,?)",
                        (prod_map[old_pid], uid))
-            runner_count += 1
+            runner_products.add(prod_map[old_pid])
+        runner_count = len(runner_products)
 
-        # 6. 掉包检测
+        # 6. 掉包检测（同包多条折叠为一条，按实际包去重计数）
+        delist_packages = set()
         for dc in delist_checks:
             old_pkg = dc.get('package_id')
             if old_pkg not in pkg_map:
                 continue
+            new_pkg = pkg_map[old_pkg]
             checked_at = dc.get('checked_at')
             if checked_at is not None:
                 db.execute(
                     "INSERT OR REPLACE INTO tt_delist_checks (package_id, is_delisted, checked_at) "
                     "VALUES (?,?,?)",
-                    (pkg_map[old_pkg], dc.get('is_delisted', 0), checked_at))
+                    (new_pkg, dc.get('is_delisted', 0), checked_at))
             else:
                 db.execute(
                     "INSERT OR REPLACE INTO tt_delist_checks (package_id, is_delisted) VALUES (?,?)",
-                    (pkg_map[old_pkg], dc.get('is_delisted', 0)))
-            delist_count += 1
+                    (new_pkg, dc.get('is_delisted', 0)))
+            delist_packages.add(new_pkg)
+        delist_count = len(delist_packages)
 
         db.commit()
     except Exception as e:

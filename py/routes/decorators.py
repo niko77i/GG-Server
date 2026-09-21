@@ -94,3 +94,17 @@ def tt_required(fn):
             return err_resp
         return fn(*args, **kwargs)
     return wrapper
+
+
+def tt_write_required(fn):
+    """要求 TT 平台用户（或 developer）且非 viewer，用于写接口。"""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        err_resp = require_platform('tt')
+        if err_resp:
+            return err_resp
+        err_resp = reject_viewer()
+        if err_resp:
+            return err_resp
+        return fn(*args, **kwargs)
+    return wrapper
