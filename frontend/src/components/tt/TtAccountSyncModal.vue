@@ -24,6 +24,11 @@
           <el-table-column prop="country" label="国家" width="80" />
           <el-table-column prop="agent" label="代理" width="90" show-overflow-tooltip />
           <el-table-column prop="timezone" label="时区" width="90" />
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag :type="statusTagType(row.status)" size="small">{{ row.status || '存活' }}</el-tag>
+            </template>
+          </el-table-column>
         </el-table>
       </div>
 
@@ -58,8 +63,34 @@
         </el-table>
       </div>
 
+      <!-- 状态冲突 -->
+      <div v-if="statusConflicts.length" style="margin-bottom:16px;">
+        <h4>⚠️ 状态冲突（{{ statusConflicts.length }} 条）— 请逐条选择处理方式</h4>
+        <el-table :data="statusConflicts" size="small" border stripe>
+          <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="180" show-overflow-tooltip />
+          <el-table-column label="Sheet 状态" min-width="110">
+            <template #default="{ row }">
+              <el-tag :type="statusTagType(row.sheet_status)" size="small">{{ row.sheet_status || '存活' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="系统状态" min-width="110">
+            <template #default="{ row }">
+              <el-tag :type="statusTagType(row.system_status)" size="small">{{ row.system_status || '存活' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="处理方式" min-width="210">
+            <template #default="{ row }">
+              <el-radio-group v-model="statusChoices[row.advertiser_id]" size="small">
+                <el-radio-button value="sheet">以 Sheet 为准</el-radio-button>
+                <el-radio-button value="system">以系统为准</el-radio-button>
+              </el-radio-group>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
       <!-- 无任何变化 -->
-      <div v-if="!created.length && !updated.length && !conflicts.length">
+      <div v-if="!created.length && !updated.length && !conflicts.length && !statusConflicts.length">
         <p style="color:#909399;">看板中没有需要同步的账户。</p>
       </div>
     </div>
@@ -91,8 +122,15 @@ const created = ref([])
 const updated = ref([])
 const conflicts = ref([])
 const conflictChoices = reactive({})
+const statusConflicts = ref([])
+const statusChoices = reactive({})
 
-const canSync = computed(() => created.value.length > 0 || conflicts.value.length > 0)
+const canSync = computed(() => created.value.length > 0 || conflicts.value.length > 0 || statusConflicts.value.length > 0)
+
+function statusTagType(status) {
+  const map = { '存活': 'success', '验证': 'warning', '死亡': 'danger', '封禁': 'danger' }
+  return map[status] || 'info'
+}
 
 async function startSync() {
   loading.value = true
@@ -102,15 +140,21 @@ async function startSync() {
   created.value = []
   updated.value = []
   conflicts.value = []
+  statusConflicts.value = []
   for (const k of Object.keys(conflictChoices)) delete conflictChoices[k]
+  for (const k of Object.keys(statusChoices)) delete statusChoices[k]
   try {
     const res = await ttAccountsApi.syncFromSheet({ dry_run: true })
     total.value = res.total || 0
     created.value = res.created || []
     updated.value = res.updated || []
     conflicts.value = res.conflicts || []
+    statusConflicts.value = res.status_conflicts || []
     for (const c of conflicts.value) {
       conflictChoices[c.advertiser_id] = 'sheet'
+    }
+    for (const c of statusConflicts.value) {
+      statusChoices[c.advertiser_id] = 'sheet'
     }
     done.value = true
   } catch (e) {
@@ -129,10 +173,19 @@ async function doSync() {
       const choice = conflictChoices[c.advertiser_id] || 'sheet'
       resolutions[c.advertiser_id] = choice === 'sheet' ? c.sheet_value : c.system_value
     }
-    const res = await ttAccountsApi.syncFromSheet({ dry_run: false, resolutions })
+    // status_resolutions：只含选「以 Sheet 为准」的状态冲突项
+    const statusResolutions = {}
+    for (const c of statusConflicts.value) {
+      const choice = statusChoices[c.advertiser_id] || 'sheet'
+      if (choice === 'sheet') {
+        statusResolutions[c.advertiser_id] = c.sheet_status
+      }
+    }
+    const res = await ttAccountsApi.syncFromSheet({ dry_run: false, resolutions, status_resolutions: statusResolutions })
     const createdCount = Array.isArray(res.created) ? res.created.length : (res.created || 0)
     const conflictCount = conflicts.value.length
-    ElMessage.success(`同步完成：新增 ${createdCount} 个账户${conflictCount ? '，处理冲突 ' + conflictCount + ' 条' : ''}`)
+    const statusCount = Object.keys(statusResolutions).length
+    ElMessage.success(`同步完成：新增 ${createdCount} 个账户${conflictCount ? '，处理消耗冲突 ' + conflictCount + ' 条' : ''}${statusCount ? '，变更状态 ' + statusCount + ' 个' : ''}`)
     emit('update:visible', false)
     emit('synced')
   } catch (e) {

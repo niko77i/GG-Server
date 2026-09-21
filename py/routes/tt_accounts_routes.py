@@ -665,7 +665,7 @@ def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
     def _do_sync():
         import google_sheets_service as gs
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        gs.append_recharge(service, sheet_id, sheet_name, rows)
+        gs.append_recharge_tt(service, sheet_id, sheet_name, rows)
 
     def _on_fail(status, err_msg):
         # 后台线程无应用上下文，必须用 database.get_db() 新建连接（不能碰 flask.g）
@@ -1022,23 +1022,29 @@ def sync_from_sheet():
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
     rows = gs.read_sheet_values(service, sheet_id, dashboard, "A:J")
+    if rows:
+        rows = rows[1:]  # 跳过表头第一行（列名），避免「运营」表头误触发门禁
     rows = [r for r in rows if len(r) > 3 and (r[3] or "").strip()]  # D 列账户ID非空
 
     # 门禁：A 列运营匹配当前用户（display_name 为空时回退 username）
     if rows and any((r[0] or "").strip() != operator_name for r in rows):
         return err("看板「运营」列与当前账号不匹配，仅可同步自己的账户")
 
-    created, updated, conflicts = [], [], []
+    created, updated, conflicts, status_conflicts = [], [], [], []
     for r in rows:
-        acquired_date = (r[1] or "").strip()
-        # r[2] 是否回收 — 仅读取，不触发状态变更
-        advertiser_id = (r[3] or "").strip()
-        bc_name = (r[4] or "").strip()
-        country = (r[5] or "").strip()
-        agent_name = (r[6] or "").strip()
-        timezone = (r[7] or "").strip() or _region_timezone(db, country)
-        consumption = (r[8] or "").strip()
-        remark = (r[9] or "").strip()
+        # Google Sheets 会截断尾部空列，逐列按 len 安全取值（对齐 GG 同步写法）
+        acquired_date = (r[1] or "").strip() if len(r) > 1 else ""
+        # r[2] 是否回收：是 → 死亡，可用/空 → 存活（用于状态比对）
+        recycle = (r[2] or "").strip() if len(r) > 2 else ""
+        sheet_status = "死亡" if recycle == "是" else "存活"
+        advertiser_id = (r[3] or "").strip() if len(r) > 3 else ""
+        bc_name = (r[4] or "").strip() if len(r) > 4 else ""
+        country = (r[5] or "").strip() if len(r) > 5 else ""
+        agent_name = (r[6] or "").strip() if len(r) > 6 else ""
+        timezone = (r[7] or "").strip() if len(r) > 7 else ""
+        timezone = timezone or _region_timezone(db, country)
+        consumption = (r[8] or "").strip() if len(r) > 8 else ""
+        remark = (r[9] or "").strip() if len(r) > 9 else ""
 
         if not advertiser_id.isdigit():
             continue
@@ -1050,13 +1056,17 @@ def sync_from_sheet():
             if dry_run:
                 created.append({"advertiser_id": advertiser_id, "bc": bc_name,
                                 "country": country, "agent": agent_name,
-                                "timezone": timezone, "consumption": consumption})
+                                "timezone": timezone, "consumption": consumption,
+                                "status": sheet_status})
             else:
+                status_id = _resolve_status_id(db, sheet_status, None)
+                # 死亡户同步写入死亡时间，与手动改状态保持一致
+                death_date = datetime.date.today().strftime("%Y-%m-%d") if sheet_status == "死亡" else ""
                 db.execute(
                     "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
-                    "consumption, acquired_date, remark, owner_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    "consumption, status_id, acquired_date, death_date, remark, owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (advertiser_id, advertiser_id, bc_id, country, agent_id, timezone,
-                     consumption, acquired_date or None, remark, uid))
+                     consumption, status_id, acquired_date or None, death_date, remark, uid))
                 db.commit()
                 new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
                 _record_bc_change(db, new_id, bc_id, uid, "create")
@@ -1074,6 +1084,18 @@ def sync_from_sheet():
             created.append({"advertiser_id": advertiser_id})
             continue
 
+        # 状态比对：C 列推导状态 vs 系统状态，不一致 → 状态冲突（用户确认后变更）
+        sys_status = "存活"
+        if existing["status_id"]:
+            st_row = db.execute("SELECT name FROM account_statuses WHERE id=?", (existing["status_id"],)).fetchone()
+            sys_status = st_row["name"] if st_row else "存活"
+        if sheet_status != sys_status:
+            status_conflicts.append({
+                "advertiser_id": advertiser_id,
+                "sheet_status": sheet_status,
+                "system_status": sys_status,
+            })
+
         # 消耗情况双向同步：Sheet 与系统不一致 → 冲突列表
         if consumption and consumption != (existing["consumption"] or ""):
             conflicts.append({
@@ -1086,7 +1108,8 @@ def sync_from_sheet():
 
     if dry_run:
         return ok({"dry_run": True, "total": len(rows), "created": created,
-                   "updated": updated, "conflicts": conflicts})
+                   "updated": updated, "conflicts": conflicts,
+                   "status_conflicts": status_conflicts})
 
     # 确认模式：处理消耗冲突 — 客户端传入 resolutions: [{advertiser_id, value}]
     resolutions = data.get("resolutions") or {}
@@ -1101,25 +1124,33 @@ def sync_from_sheet():
         else:
             db.execute("UPDATE tt_accounts SET consumption=? WHERE advertiser_id=? AND owner_id=?",
                        (value, adv_id, uid))
+    # 处理状态冲突：客户端传入 status_resolutions {advertiser_id: new_status}
+    status_resolutions = data.get("status_resolutions") or {}
+    for adv_id, new_status in status_resolutions.items():
+        if adv_id not in valid_ids or new_status not in ("存活", "死亡"):
+            continue
+        status_id = _resolve_status_id(db, new_status, None)
+        # 与手动改状态保持一致：改为「死亡」置当天死亡时间，改为「存活」清空
+        death_date = datetime.date.today().strftime("%Y-%m-%d") if new_status == "死亡" else ""
+        if role in ('developer', 'admin'):
+            db.execute("UPDATE tt_accounts SET status_id=?, status_changed_date=datetime('now','localtime'), death_date=? WHERE advertiser_id=?",
+                       (status_id, death_date, adv_id))
+        else:
+            db.execute("UPDATE tt_accounts SET status_id=?, status_changed_date=datetime('now','localtime'), death_date=? WHERE advertiser_id=? AND owner_id=?",
+                       (status_id, death_date, adv_id, uid))
     db.commit()
     return ok({"created": len(created), "updated": len(updated), "conflicts": conflicts})
 
 
-# ==================== 状态改「封禁/死亡」写回收清单 ====================
+# ==================== 状态改「非存活」写回收清单 ====================
 
-def _maybe_write_recycle(db, uid, advertiser_id, agent_name, country, timezone, reason, sheet_id, sheet_name):
-    """状态改为封禁/死亡时，后台异步写回收户清单。失败不阻塞状态变更。"""
+def _maybe_write_recycle(db, advertiser_id, reason, sheet_id, sheet_name):
+    """状态改为非存活时，后台异步写回收户清单（只写时间/账户ID/回收原因）。失败不阻塞状态变更。"""
     from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
 
-    user = db.execute("SELECT display_name FROM users WHERE id=?", (uid,)).fetchone()
-    operator = (user["display_name"] or "") if user else ""
     rows = [{
         "time": datetime.datetime.now().strftime("%Y-%m-%d"),
         "account_id": advertiser_id,
-        "agent": agent_name,
-        "operator": operator,
-        "country": country,
-        "timezone": timezone,
         "reason": reason,
     }]
 
@@ -1132,9 +1163,9 @@ def _maybe_write_recycle(db, uid, advertiser_id, agent_name, country, timezone, 
 
 
 def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason):
-    """status 为「封禁」或「死亡」时，异步写回收户清单。"""
+    """status 为非「存活」时，异步写回收户清单（只写时间/账户ID/回收原因，保护公式列）。"""
     st = db.execute("SELECT name FROM account_statuses WHERE id=?", (status_id,)).fetchone()
-    if not st or st["name"] not in ("封禁", "死亡"):
+    if not st or st["name"] == "存活":
         return
     sheet_id = _get_tt_sheet_id(db)
     mappings = _get_tt_sheet_mappings(db)
@@ -1146,10 +1177,4 @@ def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason):
         existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=?", (reason,)).fetchone()
         if not existing:
             db.execute("INSERT OR IGNORE INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (reason, uid))
-    ac = db.execute("SELECT a.country, a.timezone, ag.name AS agent_name FROM tt_accounts a "
-                    "LEFT JOIN agents ag ON a.agent_id = ag.id WHERE a.advertiser_id=?",
-                    (advertiser_id,)).fetchone()
-    agent_name = ac["agent_name"] if ac else ""
-    country = ac["country"] if ac else ""
-    timezone = ac["timezone"] if ac else ""
-    _maybe_write_recycle(db, uid, advertiser_id, agent_name, country, timezone, reason, sheet_id, sheet_name)
+    _maybe_write_recycle(db, advertiser_id, reason, sheet_id, sheet_name)

@@ -66,7 +66,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="150" show-overflow-tooltip />
-        <el-table-column label="所属 BC" min-width="140">
+        <el-table-column label="所属 BC" min-width="160">
           <template #default="{ row }">
             <div class="inline-edit-cell" v-if="editingBcId === row.id">
               <el-select v-model="editBcValue" size="small" class="inline-bc-select"
@@ -78,10 +78,13 @@
               </el-select>
             </div>
             <div class="inline-edit-cell" v-else>
-              <div class="bc-text-block" v-if="row.bc_name">
-                <div class="inline-cell-text" style="color:#0891b2;">{{ row.bc_name }}</div>
-                <div v-if="bcCode(row)" style="font-size:10px;color:#0891b2;white-space:nowrap;">{{ bcCode(row) }}</div>
-              </div>
+              <el-tooltip v-if="row.bc_name" placement="top" :show-after="300"
+                :content="row.bc_name + (bcCode(row) ? '（' + bcCode(row) + '）' : '')">
+                <div class="bc-text-block">
+                  <div class="inline-cell-text" style="color:#0891b2;">{{ row.bc_name }}</div>
+                  <div v-if="bcCode(row)" style="font-size:10px;color:#0891b2;white-space:nowrap;">{{ bcCode(row) }}</div>
+                </div>
+              </el-tooltip>
               <span v-else style="color:#888;white-space:nowrap;">未分配</span>
               <el-button link size="small" class="inline-edit-btn" @click.stop="startEditBc(row)">✏️</el-button>
             </div>
@@ -572,7 +575,7 @@ async function saveStatus(row) {
   const st = statusOptions.value.find(x => x.id === v)
   const stName = st ? st.name : ''
   cancelStatusEdit()
-  if (stName === '封禁' || stName === '死亡') {
+  if (stName !== '存活') {
     recycleTarget.value = { mode: 'single', account: row, accounts: [], statusId: v, statusName: stName }
     recycleVisible.value = true
     return
@@ -654,7 +657,7 @@ async function doBatchStatus(val) {
       '批量修改状态', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }
     )
   } catch { batchStatus.value = ''; return }
-  if (stName === '封禁' || stName === '死亡') {
+  if (stName !== '存活') {
     recycleTarget.value = { mode: 'batch', account: null, accounts: [...selected.value], statusId: val, statusName: stName }
     recycleVisible.value = true
     batchStatus.value = ''

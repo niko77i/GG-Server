@@ -254,6 +254,7 @@ def test_sync_from_sheet_dry_run(mock_read, mock_build, client, tt_headers):
     # 构造看板 10 列：A运营 B入库 C是否回收 D账户ID EBC F国家 G渠道 H时区 I消耗 J备注
     mock_build.return_value = object()
     mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
         ["ttuser", "2026-09-20", "否", "1234567890123", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
     ]
     db = database.get_db()
@@ -270,6 +271,59 @@ def test_sync_from_sheet_dry_run(mock_read, mock_build, client, tt_headers):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["total"] == 1
+
+
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_skips_header(mock_read, mock_build, client, tt_headers):
+    """看板带表头第一行时，应跳过表头、正常识别数据行运营，不误报「运营列不匹配」。"""
+    mock_build.return_value = object()
+    mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
+        ["黎明", "2026-09-20", "否", "1234567890123", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
+    ]
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='黎明' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板", "recharge": "充值表", "recycle": "回收户清单", "accounts": "账户明细"}',))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["success"] is True
+    assert data["total"] == 1
+
+
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_short_row_no_index_error(mock_read, mock_build, client, tt_headers):
+    """看板数据行只有几列（未填满 A:J）时，应安全取空值，不抛 IndexError。"""
+    mock_build.return_value = object()
+    mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
+        ["黎明", "2026-09-20", "否", "1234567890123"],  # 仅前 4 列，尾部列被 Sheets 截断
+    ]
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='黎明' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["success"] is True
+    assert data["total"] == 1
+    assert data["created"][0]["advertiser_id"] == "1234567890123"
+    assert data["created"][0]["bc"] == ""
+    assert data["created"][0]["consumption"] == ""
 
 
 @mock.patch("routes.tt_accounts_routes._trigger_recycle_if_dead")
@@ -406,6 +460,7 @@ def test_sync_from_sheet_confirm_resolutions_owner_guard(mock_read, mock_build, 
     mock_build.return_value = object()
     # 看板行只含 advertiser_id=1111111111111（当前用户自己的账户）
     mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
         ["ttuser", "2026-09-20", "否", "1111111111111", "BC-A", "US", "渠道X", "+8", "100", "备注1"],
     ]
     db = database.get_db()
@@ -583,6 +638,7 @@ def test_sync_resolution_owner_guard(client, tt_headers):
 
     with _patch("google_sheets_service.build_service", return_value=object()), \
          _patch("google_sheets_service.read_sheet_values", return_value=[
+             ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
              ["ttuser", "2026-09-20", "否", "1111111111111", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
          ]):
         resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
@@ -612,6 +668,7 @@ def test_sync_recreates_soft_deleted_account(client, tt_headers):
 
     with _patch("google_sheets_service.build_service", return_value=object()), \
          _patch("google_sheets_service.read_sheet_values", return_value=[
+             ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
              ["ttuser", "2026-09-20", "否", "1234567890123", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
          ]):
         resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
@@ -624,3 +681,217 @@ def test_sync_recreates_soft_deleted_account(client, tt_headers):
     ).fetchone()[0]
     db.close()
     assert cnt == 1
+
+
+def test_append_recharge_tt_writes_only_three_columns():
+    """TT 充值写表：只写 A:C 三列，时间月/日文本、账户ID文本、金额数字。"""
+    import re
+    from google_sheets_service import append_recharge_tt
+
+    fake = mock.MagicMock()
+    fake.spreadsheets.return_value.get.return_value.execute.return_value = {
+        "sheets": [{
+            "properties": {"title": "充值表", "sheetId": 123,
+                           "gridProperties": {"rowCount": 1000}}
+        }]
+    }
+    fake.spreadsheets.return_value.values.return_value.get.return_value.execute.return_value = {
+        "values": [["时间", "账户ID", "金额"]]
+    }
+
+    result = append_recharge_tt(fake, "sheet-1", "充值表", [
+        {"account_id": "1234567890123", "amount": "1000"},
+    ])
+    assert result == {"appended": 1}
+
+    update = fake.spreadsheets.return_value.values.return_value.update
+    args, kwargs = update.call_args
+    assert kwargs["range"] == "'充值表'!A2:C2"
+    written = kwargs["body"]["values"][0]
+    assert len(written) == 3
+    assert re.match(r"^'\d{1,2}/\d{1,2}$", written[0])  # 时间 月/日 文本
+    assert written[1] == "'1234567890123"  # 账户ID 文本
+    assert written[2] == 1000.0  # 金额数字
+
+
+def test_append_recharge_tt_appends_after_last_row():
+    """TT 充值写表：应在已有数据后追加，不覆盖已有行。"""
+    from google_sheets_service import append_recharge_tt
+
+    fake = mock.MagicMock()
+    fake.spreadsheets.return_value.get.return_value.execute.return_value = {
+        "sheets": [{
+            "properties": {"title": "充值表", "sheetId": 123,
+                           "gridProperties": {"rowCount": 1000}}
+        }]
+    }
+    fake.spreadsheets.return_value.values.return_value.get.return_value.execute.return_value = {
+        "values": [["时间", "账户ID", "金额"], ["9/21", "111", "500"]]
+    }
+
+    append_recharge_tt(fake, "sheet-1", "充值表", [
+        {"account_id": "222", "amount": "300"},
+    ])
+
+    update = fake.spreadsheets.return_value.values.return_value.update
+    assert update.call_args.kwargs["range"] == "'充值表'!A3:C3"
+
+
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_status_conflict_dry_run(mock_read, mock_build, client, tt_headers):
+    """C 列「是」（死亡）与系统「存活」不一致 → dry_run 返回 status_conflicts。"""
+    mock_build.return_value = object()
+    mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
+        ["ttuser", "2026-09-20", "是", "1234567890123", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
+    ]
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='ttuser' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    # 已存在账户，未设置 status_id（系统视为「存活」）
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, owner_id) VALUES(?,?,?)",
+               ("存量户", "1234567890123", uid))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    sc = data.get("status_conflicts", [])
+    assert len(sc) == 1
+    assert sc[0]["advertiser_id"] == "1234567890123"
+    assert sc[0]["sheet_status"] == "死亡"
+    assert sc[0]["system_status"] == "存活"
+
+
+@mock.patch("routes.tt_accounts_routes._trigger_recycle_if_dead")
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_confirm_status_resolutions(mock_read, mock_build, mock_trigger, client, tt_headers):
+    """确认模式传 status_resolutions → 更新账户状态为「死亡」（不写回收清单）。"""
+    mock_build.return_value = object()
+    mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
+        ["ttuser", "2026-09-20", "是", "1234567890123", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
+    ]
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='ttuser' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, owner_id) VALUES(?,?,?)",
+               ("存量户", "1234567890123", uid))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": False, "status_resolutions": {"1234567890123": "死亡"}})
+    assert resp.status_code == 200
+
+    db = database.get_db()
+    row = db.execute(
+        "SELECT s.name FROM tt_accounts a JOIN account_statuses s ON s.id=a.status_id "
+        "WHERE a.advertiser_id='1234567890123'"
+    ).fetchone()
+    db.close()
+    assert row is not None and row["name"] == "死亡"
+    mock_trigger.assert_not_called()
+
+
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_new_account_dead_status_import(mock_read, mock_build, client, tt_headers):
+    """新户 C 列「是」→ dry_run created 标死亡，confirm 导入后状态为「死亡」。"""
+    mock_build.return_value = object()
+    mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
+        ["ttuser", "2026-09-20", "是", "1234567890123", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
+    ]
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='ttuser' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["created"][0]["status"] == "死亡"
+
+    # 确认导入
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": False})
+    assert resp.status_code == 200
+
+    db = database.get_db()
+    row = db.execute(
+        "SELECT s.name FROM tt_accounts a JOIN account_statuses s ON s.id=a.status_id "
+        "WHERE a.advertiser_id='1234567890123'"
+    ).fetchone()
+    db.close()
+    assert row is not None and row["name"] == "死亡"
+
+
+def test_append_recycle_writes_only_three_columns():
+    """回收户清单：只写 A(时间)/B(账户ID)/H(回收原因)，不触碰 C-L 公式列。"""
+    from google_sheets_service import append_recycle
+
+    fake = mock.MagicMock()
+    fake.spreadsheets.return_value.get.return_value.execute.return_value = {
+        "sheets": [{
+            "properties": {"title": "回收户清单", "sheetId": 456,
+                           "gridProperties": {"rowCount": 1000}}
+        }]
+    }
+    fake.spreadsheets.return_value.values.return_value.get.return_value.execute.return_value = {
+        "values": [["时间", "账户ID"]]
+    }
+
+    result = append_recycle(fake, "sheet-1", "回收户清单", [
+        {"time": "2026-09-22", "account_id": "1234567890123", "reason": "跑量差"},
+    ])
+    assert result == {"appended": 1}
+
+    batch = fake.spreadsheets.return_value.values.return_value.batchUpdate
+    args, kwargs = batch.call_args
+    data = kwargs["body"]["data"]
+    assert len(data) == 3
+    assert [d["range"] for d in data] == [
+        "'回收户清单'!A2:A2", "'回收户清单'!B2:B2", "'回收户清单'!H2:H2"]
+    assert data[0]["values"] == [["2026-09-22"]]          # A 时间
+    assert data[1]["values"] == [["'1234567890123"]]      # B 账户ID（文本，前导 '）
+    assert data[2]["values"] == [["跑量差"]]              # H 回收原因
+
+
+def test_trigger_recycle_on_non_alive_status(app):
+    """非存活状态（验证/封禁/死亡）都应写回收清单；存活不写。"""
+    from routes.tt_accounts_routes import _trigger_recycle_if_dead
+
+    db = database.get_db()
+    db.execute("INSERT OR IGNORE INTO users(id, username, password, role) VALUES(1, 'dev', 'x', 'developer')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"recycle": "回收户清单"}',))
+    for name in ("存活", "验证", "封禁", "死亡"):
+        db.execute("INSERT OR IGNORE INTO account_statuses(name, platform) VALUES(?, 'tt')", (name,))
+    db.commit()
+    ids = {r["name"]: r["id"] for r in db.execute(
+        "SELECT id, name FROM account_statuses WHERE platform='tt'").fetchall()}
+
+    with mock.patch("routes.tt_accounts_routes._maybe_write_recycle") as writer:
+        for name in ("验证", "封禁", "死亡"):
+            _trigger_recycle_if_dead(db, 1, "1234567890123", ids[name], "跑量差")
+        # 存活不写回收清单
+        _trigger_recycle_if_dead(db, 1, "1234567890123", ids["存活"], None)
+
+    assert writer.call_count == 3
+    db.close()

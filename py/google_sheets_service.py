@@ -366,17 +366,96 @@ def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -
     return {"appended": len(new_rows)}
 
 
+def append_recharge_tt(service, spreadsheet_id: str, sheet_name: str, rows: list) -> dict:
+    """TT 充值表专用：只写前三列（时间/账户ID/金额），不覆盖 D~I 列公式。
+
+    sheet_name: 目标 sheet 名，为空时回退「充值表」
+    rows: [{"account_id": "1234567890123", "amount": "1000"}, ...]
+
+    A=时间(月/日,文本)  B=账户ID(文本)  C=金额(数字)；D~I 不动
+    """
+    import datetime
+
+    effective_name = sheet_name.strip() if sheet_name else "充值表"
+    ss = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    target_sheet = None
+    for s in ss.get("sheets", []):
+        props = s.get("properties", {})
+        if props.get("title", "") == effective_name:
+            target_sheet = {
+                "name": props["title"],
+                "gid": props["sheetId"],
+                "rowCount": props.get("gridProperties", {}).get("rowCount", 1000),
+            }
+            break
+    if not target_sheet:
+        raise GoogleSheetsServiceError(f"表格中未找到「{effective_name}」工作表")
+
+    sheet_name = target_sheet["name"]
+    sheet_id_int = target_sheet["gid"]
+    sheet_rows = target_sheet["rowCount"]
+
+    # 读现有 A:C 找最后一行
+    range_read = f"'{sheet_name}'!A:C"
+    result = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=range_read,
+    ).execute()
+    existing = result.get("values", [])
+    last_row = 0
+    for i in range(len(existing) - 1, -1, -1):
+        row = existing[i]
+        if any(row[j] for j in range(min(3, len(row))) if row[j]):
+            last_row = i + 1
+            break
+
+    now = datetime.datetime.now()
+    time_str = f"{now.month}/{now.day}"
+    new_rows = []
+    for r in rows:
+        try:
+            amount_val = float(str(r.get("amount", "")))
+        except (TypeError, ValueError):
+            amount_val = str(r.get("amount", ""))
+        new_rows.append([
+            "'" + time_str,                       # A 时间（文本）
+            "'" + str(r.get("account_id", "")),   # B 账户ID（文本）
+            amount_val,                           # C 金额（数字）
+        ])
+
+    start = last_row + 1
+    end = last_row + len(new_rows)
+    if end > sheet_rows:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{
+                "appendDimension": {
+                    "sheetId": sheet_id_int,
+                    "dimension": "ROWS",
+                    "length": end - sheet_rows
+                }
+            }]}
+        ).execute()
+
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{sheet_name}'!A{start}:C{end}",
+        valueInputOption="USER_ENTERED",
+        body={"values": new_rows},
+    ).execute()
+
+    log.info("TT 充值记录已追加到 Google Sheets: %d 行", len(new_rows))
+    return {"appended": len(new_rows)}
+
+
 def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) -> dict:
     """将回收记录追加到「回收户清单」sheet。
 
     sheet_name: 目标 sheet 名
-    rows: [{"time": "2026-09-21", "account_id": "...", "agent": "...",
-            "operator": "...", "country": "...", "timezone": "+8",
-            "reason": "跑量差"}, ...]
+    rows: [{"time": "2026-09-22", "account_id": "...", "reason": "跑量差"}, ...]
 
     12 列：A时间 B账户ID C渠道 D运营 E国家 F时区 G有无消耗 H回收原因
            I是否提交 J清零金额 K备注 L是否二次提交
-    （系统写入前 7 列 A-G，H 起留空）
+    只写 A(时间)/B(账户ID)/H(回收原因) 三列，其余列含公式，不写入以免清掉公式。
     """
     effective_name = sheet_name.strip() if sheet_name else "回收户清单"
     ss = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
@@ -397,7 +476,7 @@ def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) ->
     sheet_id_int = target_sheet["gid"]
     sheet_rows = target_sheet["rowCount"]
 
-    range_read = f"'{sheet_name}'!A:L"
+    range_read = f"'{sheet_name}'!A:B"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range_read,
     ).execute()
@@ -405,29 +484,12 @@ def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) ->
     last_row = 0
     for i in range(len(existing) - 1, -1, -1):
         row = existing[i]
-        if any(row[j] for j in range(min(7, len(row))) if row[j]):
+        if (len(row) > 0 and (row[0] or "").strip()) or (len(row) > 1 and (row[1] or "").strip()):
             last_row = i + 1
             break
 
-    new_rows = []
-    for r in rows:
-        new_rows.append([
-            r.get("time", ""),
-            r.get("account_id", ""),
-            r.get("agent", ""),
-            r.get("operator", ""),
-            r.get("country", ""),
-            r.get("timezone", ""),
-            "",  # G 有无消耗（留空）
-            r.get("reason", ""),  # H 回收原因
-            "",  # I 是否提交
-            "",  # J 清零金额
-            "",  # K 备注
-            "",  # L 是否二次提交
-        ])
-
     start = last_row + 1
-    end = last_row + len(new_rows)
+    end = last_row + len(rows)
     if end > sheet_rows:
         service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
@@ -440,15 +502,22 @@ def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) ->
             }]}
         ).execute()
 
-    service.spreadsheets().values().update(
+    # 只写 A(时间)/B(账户ID)/H(回收原因) 三列；账户ID 前置 ' 强制文本，避免长数字 ID 丢精度
+    # C-L 列含公式，不写入以免被清掉
+    service.spreadsheets().values().batchUpdate(
         spreadsheetId=spreadsheet_id,
-        range=f"'{sheet_name}'!A{start}:L{end}",
-        valueInputOption="USER_ENTERED",
-        body={"values": new_rows},
+        body={"valueInputOption": "USER_ENTERED", "data": [
+            {"range": f"'{sheet_name}'!A{start}:A{end}",
+             "values": [[r.get("time", "")] for r in rows]},
+            {"range": f"'{sheet_name}'!B{start}:B{end}",
+             "values": [["'" + str(r.get("account_id", ""))] for r in rows]},
+            {"range": f"'{sheet_name}'!H{start}:H{end}",
+             "values": [[r.get("reason", "")] for r in rows]},
+        ]},
     ).execute()
 
-    log.info("回收记录已追加到 Google Sheets: %d 行", len(new_rows))
-    return {"appended": len(new_rows)}
+    log.info("回收记录已追加到 Google Sheets: %d 行", len(rows))
+    return {"appended": len(rows)}
 
 
 def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: str) -> list[list]:
