@@ -65,6 +65,61 @@
 
         <!-- 管理员专属 Google 表格配置 -->
         <template v-if="authStore.isAdmin || authStore.isDeveloper">
+          <!-- 代理 / 状态 / 回收原因选项卡片 -->
+          <el-row :gutter="16">
+            <el-col :span="12" v-for="card in adminOptionCards" :key="card.key">
+              <el-card shadow="never" style="margin-bottom:16px;">
+                <template #header>
+                  <div style="display:flex;align-items:center;justify-content:space-between;">
+                    <span style="font-weight:600;font-size:14px;">{{ card.icon }} {{ card.label }}</span>
+                    <el-tag size="small" type="info" round>{{ adminLists[card.key].length }} 项</el-tag>
+                  </div>
+                </template>
+
+                <div style="display:flex;flex-wrap:wrap;gap:8px;min-height:32px;align-items:center;">
+                  <template v-if="adminLists[card.key].length">
+                    <el-tag
+                      v-for="item in adminLists[card.key]"
+                      :key="item.id"
+                      :type="card.tagType"
+                      closable
+                      size="default"
+                      @close="handleAdminDelete(card.key, item)"
+                      @dblclick="startAdminTagEdit(card.key, item)"
+                      style="cursor:pointer;user-select:none;"
+                    >
+                      <template v-if="adminEditingId[card.key] === item.id">
+                        <el-input
+                          v-model="item._editName"
+                          size="small"
+                          style="width:80px;"
+                          @blur="finishAdminTagEdit(card.key, item)"
+                          @keyup.enter="finishAdminTagEdit(card.key, item)"
+                          @click.stop
+                        />
+                      </template>
+                      <span v-else>{{ item.name }}</span>
+                    </el-tag>
+                  </template>
+                  <span v-else style="color:#c0c4cc;font-size:13px;">暂无选项</span>
+
+                  <template v-if="adminAdding[card.key]">
+                    <el-input
+                      v-model="adminNewNames[card.key]"
+                      size="small"
+                      :placeholder="card.addPlaceholder"
+                      style="width:100px;"
+                      @keyup.enter="addAdminOption(card.key)"
+                      @blur="cancelAdminAddOption(card.key)"
+                    />
+                    <el-button size="small" type="primary" @click="addAdminOption(card.key)" :loading="adminAddingLoading">确认</el-button>
+                  </template>
+                  <el-button v-else size="small" circle @click="showAdminAddInput(card.key)" style="width:24px;height:24px;font-size:14px;">+</el-button>
+                </div>
+              </el-card>
+            </el-col>
+          </el-row>
+
           <el-card shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
             <template #header>
               <span style="font-weight:600;">📊 Google 表格配置</span>
@@ -211,9 +266,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import { ttSettingsApi, ttDataApi } from '@/api/tt'
+import { ttSettingsApi, ttDataApi, ttRecycleReasonApi } from '@/api/tt'
 import { googleSheetsApi } from '@/api/google-sheets'
 import { UploadFilled, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -222,6 +277,9 @@ import api from '@/api/client'
 // Sheet 映射功能注册表 — 已知 key 的显示名（未知 key 直接显示 key 名）
 const SHEET_MAPPING_META = {
   accounts: { label: '账户明细' },
+  recharge: { label: '充值表' },
+  my_dashboard: { label: '我的看板' },
+  recycle: { label: '回收户清单' },
 }
 
 const authStore = useAuthStore()
@@ -231,7 +289,7 @@ const activeTab = ref('account')
 
 const form = reactive({
   sheet_id: '',
-  sheet_mappings: { accounts: '账户明细' },
+  sheet_mappings: { accounts: '账户明细', recharge: '充值表', my_dashboard: '我的看板', recycle: '回收户清单' },
 })
 
 // 商务人员
@@ -240,6 +298,26 @@ const editingTagId = ref(null)
 const addingOption = ref(false)
 const addingLoading = ref(false)
 const newOptionName = ref('')
+
+// ---- 管理员选项卡片（代理 / 状态 / 回收原因） ----
+const agents = ref([])
+const statuses = ref([])
+const recycleReasons = ref([])
+
+const adminOptionCards = [
+  { key: 'agents',         icon: '🏷', label: '代理名选项',   tagType: 'success', addPlaceholder: '新代理名' },
+  { key: 'statuses',       icon: '📊', label: '账户状态选项', tagType: '',        addPlaceholder: '新状态名' },
+  { key: 'recycleReasons', icon: '♻️', label: '回收原因选项', tagType: 'warning', addPlaceholder: '新回收原因' },
+]
+const adminLists = computed(() => ({
+  agents: agents.value,
+  statuses: statuses.value,
+  recycleReasons: recycleReasons.value,
+}))
+const adminEditingId = reactive({ agents: null, statuses: null, recycleReasons: null })
+const adminAdding = reactive({ agents: false, statuses: false, recycleReasons: false })
+const adminNewNames = reactive({ agents: '', statuses: '', recycleReasons: '' })
+const adminAddingLoading = ref(false)
 
 // Sheet 读取
 const readingSheets = ref(false)
@@ -270,6 +348,7 @@ onMounted(async () => {
   loadSalesPersons()
   loadSettings()
   loadRegions()
+  loadAdminOptions()
 })
 
 // ---- 商务人员 ----
@@ -345,12 +424,91 @@ async function handleDelete(item) {
   }
 }
 
+// ---- 管理员选项（代理 / 状态 / 回收原因） ----
+async function loadAdminOptions() {
+  try {
+    const res = await api.get('/agents/list', { params: { platform: 'tt' } })
+    agents.value = res.agents || []
+  } catch { agents.value = [] }
+  try {
+    const res = await api.get('/statuses/list', { params: { platform: 'tt' } })
+    statuses.value = res.statuses || []
+  } catch { statuses.value = [] }
+  try {
+    const res = await ttRecycleReasonApi.list()
+    recycleReasons.value = res.items || []
+  } catch { recycleReasons.value = [] }
+}
+
+function startAdminTagEdit(key, item) {
+  item._editName = item.name
+  adminEditingId[key] = item.id
+}
+
+async function finishAdminTagEdit(key, item) {
+  const newName = (item._editName || '').trim()
+  adminEditingId[key] = null
+  delete item._editName
+  if (!newName || newName === item.name) return
+  try {
+    if (key === 'recycleReasons') await ttRecycleReasonApi.rename(item.id, newName)
+    else if (key === 'agents') await api.put(`/agents/${item.id}`, { name: newName }, { params: { platform: 'tt' } })
+    else await api.put(`/statuses/${item.id}`, { name: newName }, { params: { platform: 'tt' } })
+    item.name = newName
+    ElMessage.success('已更新')
+  } catch (e) { ElMessage.error(e.response?.data?.error || '更新失败'); loadAdminOptions() }
+}
+
+function showAdminAddInput(key) {
+  adminAdding[key] = true
+  adminNewNames[key] = ''
+}
+
+function cancelAdminAddOption(key) {
+  if (adminNewNames[key].trim()) return
+  adminAdding[key] = false
+}
+
+async function addAdminOption(key) {
+  const name = (adminNewNames[key] || '').trim()
+  if (!name) { ElMessage.warning('请输入名称'); return }
+  adminAddingLoading.value = true
+  try {
+    if (key === 'recycleReasons') await ttRecycleReasonApi.create(name)
+    else if (key === 'agents') await api.post('/agents/create', { name }, { params: { platform: 'tt' } })
+    else await api.post('/statuses/create', { name }, { params: { platform: 'tt' } })
+    adminNewNames[key] = ''
+    adminAdding[key] = false
+    ElMessage.success('已添加')
+    loadAdminOptions()
+  } catch (e) { ElMessage.error(e.response?.data?.error || '添加失败') }
+  finally { adminAddingLoading.value = false }
+}
+
+async function handleAdminDelete(key, item) {
+  try {
+    await ElMessageBox.confirm(`确定删除「${item.name}」吗？`, '确认删除', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch { return }
+
+  try {
+    if (key === 'recycleReasons') await ttRecycleReasonApi.delete(item.id)
+    else if (key === 'agents') await api.delete(`/agents/${item.id}`, { params: { platform: 'tt' } })
+    else await api.delete(`/statuses/${item.id}`, { params: { platform: 'tt' } })
+    ElMessage.success('已删除')
+    loadAdminOptions()
+  } catch (e) { ElMessage.error(e.response?.data?.error || '无法删除') }
+}
+
 // ---- Google 表格配置 ----
 async function loadSettings() {
   try {
     const res = await ttSettingsApi.getSettings()
     form.sheet_id = res.settings?.sheet_id || ''
-    form.sheet_mappings = res.settings?.sheet_mappings || { accounts: '账户明细' }
+    form.sheet_mappings = res.settings?.sheet_mappings || form.sheet_mappings
   } catch (e) { /* 静默失败，保留默认值 */ }
 }
 
