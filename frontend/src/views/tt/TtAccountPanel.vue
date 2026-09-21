@@ -1,5 +1,9 @@
 <template>
   <div style="display:flex;flex-direction:column;height:100%;">
+    <!-- 页面标题 -->
+    <div style="flex-shrink:0;margin-bottom:12px;">
+      <h2 style="margin:0;font-size:18px;font-weight:600;">广告账户</h2>
+    </div>
     <!-- 工具栏 — 固定 -->
     <div style="flex-shrink:0;">
       <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">

@@ -106,8 +106,8 @@ const ttNavItems = [
   { key: 'tt-accounts', icon: '🏢', label: '产品管理', sections: [
     { title: '产品', items: [
       { icon:'📦',label:'产品管理',path:'/tt/products'},
-      { icon:'🏢',label:'BC管理',path:'/tt/bcs'},
       { icon:'👤',label:'广告账户',path:'/tt/accounts'},
+      { icon:'🏢',label:'BC管理',path:'/tt/bcs'},
     ]},
     { title: '系统', items: [
       { icon:'⚙',label:'TT设置',path:'/tt/settings'},

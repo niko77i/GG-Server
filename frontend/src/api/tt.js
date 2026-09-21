@@ -11,7 +11,6 @@ export const ttApi = {
 
   // 产品管理
   listProducts(params = {}) { return client.get('/tt/products/list', { params }) },
-  runnerProducts() { return client.get('/tt/products/runner-products') },
   createProduct(data) { return client.post('/tt/products/create', data) },
   updateProduct(id, data) { return client.put(`/tt/products/${id}`, data) },
   deleteProduct(id) { return client.delete(`/tt/products/${id}`) },
