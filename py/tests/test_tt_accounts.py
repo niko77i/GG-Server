@@ -159,3 +159,16 @@ def test_delete_bc_history_requires_admin(client, tt_headers):
     aid = resp.get_json()["id"]
     resp = client.delete(f"/api/tt/accounts/{aid}/bc-history/1", headers=tt_headers)
     assert resp.status_code == 403
+
+
+def test_recharge_submit_and_list(client, tt_headers):
+    resp = _mk_account(client, tt_headers, advertiser_id="1112223334445")
+    aid = resp.get_json()["id"]
+    resp = client.post("/api/tt/recharge/submit", headers=tt_headers, json={
+        "account_id": "1112223334445", "amount": "1000",
+    })
+    assert resp.status_code == 200
+    rid = resp.get_json()["id"]
+
+    resp = client.get(f"/api/tt/accounts/{aid}/recharge-records", headers=tt_headers)
+    assert resp.get_json()["items"][0]["amount"] == "1000"

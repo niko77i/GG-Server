@@ -623,3 +623,202 @@ def delete_bc_history(aid, hid):
     db.execute("DELETE FROM tt_account_bc_history WHERE id=? AND account_id=?", (hid, aid))
     db.commit()
     return ok()
+
+
+# ==================== 充值 ====================
+
+def _recharge_sheet_name(db):
+    mappings = _get_tt_sheet_mappings(db)
+    return (mappings.get("recharge") or "").strip() or "充值表"
+
+
+def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
+    """后台异步写充值表；成功置 sheets_synced=1，失败写 sheets_error。"""
+    from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
+
+    def _do_sync():
+        import google_sheets_service as gs
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        gs.append_recharge(service, sheet_id, sheet_name, rows)
+
+    def _on_fail(status, err_msg):
+        _db = get_db()
+        if status == "synced":
+            for rid in rids:
+                _db.execute("UPDATE tt_recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?", (rid,))
+        else:
+            for rid in rids:
+                _db.execute("UPDATE tt_recharge_records SET sheets_error=? WHERE id=?", (err_msg, rid))
+        _db.commit()
+
+    _sync_sheets_background(_do_sync, _on_fail)
+
+
+@tt_accounts_bp.route('/api/tt/accounts/<int:aid>/recharge-records', methods=['GET'])
+@jwt_required()
+@tt_required
+def recharge_records(aid):
+    db = get_db()
+    ac = db.execute("SELECT advertiser_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+    if not ac:
+        return err("账户不存在", 404)
+    rows = db.execute(
+        "SELECT r.*, ag.name AS agent_name, u.display_name AS operator_name "
+        "FROM tt_recharge_records r "
+        "LEFT JOIN agents ag ON r.agent_id = ag.id "
+        "LEFT JOIN users u ON r.created_by = u.id "
+        "WHERE r.account_id=? ORDER BY r.created_at DESC", (ac["advertiser_id"],)).fetchall()
+    items = []
+    for r in rows:
+        d = dict(r)
+        d["agent"] = d.get("agent_name") or ""
+        d["operator"] = d.get("operator_name") or d.get("operator") or ""
+        items.append(d)
+    return ok({"items": items})
+
+
+@tt_accounts_bp.route('/api/tt/recharge/submit', methods=['POST'])
+@jwt_required()
+@tt_required
+def recharge_submit():
+    db = get_db()
+    uid = get_uid()
+    data = parse_body()
+    account_id = (data.get("account_id") or "").strip()
+    amount = str(data.get("amount") or "").strip()
+    if not account_id or not amount:
+        return err("缺少 account_id 或 amount")
+    # 校验账户存在且属于当前用户（或 admin）
+    role = _get_role(db, uid)
+    ac = db.execute("SELECT advertiser_id, status_id, agent_id, owner_id FROM tt_accounts WHERE advertiser_id=? AND deleted_at IS NULL",
+                    (account_id,)).fetchone()
+    if not ac:
+        return err("账户不存在", 404)
+    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+        return err("无权限", 403)
+    # 仅「存活」状态可充值
+    st = db.execute("SELECT name FROM account_statuses WHERE id=?", (ac["status_id"],)).fetchone()
+    if st and st["name"] != "存活":
+        return err(f"仅「存活」状态可充值，当前状态：{st['name']}")
+
+    agent_id = _resolve_agent_id(db, (data.get("agent") or "").strip(), data.get("agent_id"))
+    agent_name = db.execute("SELECT name FROM agents WHERE id=?", (agent_id,)).fetchone()
+    agent_name = agent_name["name"] if agent_name else ""
+    user = db.execute("SELECT display_name FROM users WHERE id=?", (uid,)).fetchone()
+    operator = (user["display_name"] or "") if user else ""
+    status = st["name"] if st else ""
+    db.execute(
+        "INSERT INTO tt_recharge_records(account_id, amount, agent_id, operator, status, created_by, sheets_synced) "
+        "VALUES(?,?,?,?,?,?,0)",
+        (account_id, amount, agent_id, operator, status, uid))
+    db.commit()
+    rid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    sheet_id = _get_tt_sheet_id(db)
+    sheet_name = _recharge_sheet_name(db)
+    if sheet_id:
+        rows = [{"account_id": account_id, "amount": amount, "agent": agent_name,
+                 "operator": operator, "status": status}]
+        _append_recharge_background(db, uid, sheet_id, sheet_name, rows, [rid])
+    return ok({"id": rid})
+
+
+@tt_accounts_bp.route('/api/tt/recharge/batch-submit', methods=['POST'])
+@jwt_required()
+@tt_required
+def recharge_batch_submit():
+    db = get_db()
+    uid = get_uid()
+    data = parse_body()
+    items = data.get("items") or []
+    if not items:
+        return err("缺少 items")
+    user = db.execute("SELECT display_name FROM users WHERE id=?", (uid,)).fetchone()
+    operator = (user["display_name"] or "") if user else ""
+    rids, rows = [], []
+    for it in items:
+        account_id = (it.get("account_id") or "").strip()
+        amount = str(it.get("amount") or "").strip()
+        if not account_id or not amount:
+            continue
+        ac = db.execute("SELECT agent_id, status_id FROM tt_accounts WHERE advertiser_id=? AND deleted_at IS NULL",
+                        (account_id,)).fetchone()
+        if not ac:
+            continue
+        agent_id = _resolve_agent_id(db, (it.get("agent") or "").strip(), it.get("agent_id"))
+        agent_name = db.execute("SELECT name FROM agents WHERE id=?", (agent_id,)).fetchone()
+        agent_name = agent_name["name"] if agent_name else ""
+        st = db.execute("SELECT name FROM account_statuses WHERE id=?", (ac["status_id"],)).fetchone()
+        status = st["name"] if st else ""
+        db.execute(
+            "INSERT INTO tt_recharge_records(account_id, amount, agent_id, operator, status, created_by, sheets_synced) "
+            "VALUES(?,?,?,?,?,?,0)",
+            (account_id, amount, agent_id, operator, status, uid))
+        db.commit()
+        rid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        rids.append(rid)
+        rows.append({"account_id": account_id, "amount": amount, "agent": agent_name,
+                     "operator": operator, "status": status})
+    sheet_id = _get_tt_sheet_id(db)
+    if sheet_id and rows:
+        _append_recharge_background(db, uid, sheet_id, _recharge_sheet_name(db), rows, rids)
+    return ok({"created": len(rows)})
+
+
+@tt_accounts_bp.route('/api/tt/recharge/<int:rid>', methods=['PUT'])
+@jwt_required()
+@tt_required
+def recharge_update(rid):
+    db = get_db()
+    uid = get_uid()
+    data = parse_body()
+    row = db.execute("SELECT created_by FROM tt_recharge_records WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return err("充值记录不存在", 404)
+    role = _get_role(db, uid)
+    if role not in ('developer', 'admin') and row["created_by"] != uid:
+        return err("无权限", 403)
+    for f in ["amount", "operator", "status"]:
+        if f in data and data[f] is not None:
+            db.execute(f"UPDATE tt_recharge_records SET {f}=? WHERE id=?",
+                       (str(data[f]).strip() if isinstance(data[f], str) else data[f], rid))
+    db.commit()
+    return ok()
+
+
+@tt_accounts_bp.route('/api/tt/recharge/<int:rid>', methods=['DELETE'])
+@jwt_required()
+@tt_required
+def recharge_delete(rid):
+    db = get_db()
+    uid = get_uid()
+    row = db.execute("SELECT created_by FROM tt_recharge_records WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return err("充值记录不存在", 404)
+    role = _get_role(db, uid)
+    if role not in ('developer', 'admin') and row["created_by"] != uid:
+        return err("无权限", 403)
+    db.execute("DELETE FROM tt_recharge_records WHERE id=?", (rid,))
+    db.commit()
+    return ok()
+
+
+@tt_accounts_bp.route('/api/tt/recharge/<int:rid>/retry-sheets', methods=['POST'])
+@jwt_required()
+@tt_required
+def recharge_retry_sheets(rid):
+    db = get_db()
+    uid = get_uid()
+    row = db.execute(
+        "SELECT r.*, ag.name AS agent_name FROM tt_recharge_records r "
+        "LEFT JOIN agents ag ON r.agent_id = ag.id WHERE r.id=?", (rid,)).fetchone()
+    if not row:
+        return err("充值记录不存在", 404)
+    sheet_id = _get_tt_sheet_id(db)
+    if not sheet_id:
+        return err("未配置 Google 表格")
+    rows = [{"account_id": row["account_id"], "amount": row["amount"],
+             "agent": row["agent_name"] or "", "operator": row["operator"] or "",
+             "status": row["status"] or ""}]
+    _append_recharge_background(db, uid, sheet_id, _recharge_sheet_name(db), rows, [rid])
+    return ok()
