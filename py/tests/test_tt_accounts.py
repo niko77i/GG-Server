@@ -119,3 +119,43 @@ def test_account_create_duplicate_conflict(client, tt_headers):
     _mk_account(client, tt_headers, advertiser_id="1234567890123")
     resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
     assert resp.status_code == 409
+
+
+def _mk_tt_headers(client, username):
+    """注册一个 TT 平台用户并返回其 JWT 请求头。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET platform='tt' WHERE username=?", (username,))
+    db.commit()
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    token = resp.get_json().get("access_token", "")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_lookup_omits_sensitive_fields(client, tt_headers):
+    resp = _mk_account(client, tt_headers, advertiser_id="1234567890123",
+                       remark="内部备注", consumption="1000")
+    assert resp.status_code == 200
+    resp = client.get("/api/tt/accounts/lookup?advertiser_id=1234567890123",
+                      headers=tt_headers)
+    data = resp.get_json()
+    assert data["found"] is True
+    assert "remark" not in data
+    assert "consumption" not in data
+    assert "death_date" not in data
+
+
+def test_bc_history_owner_isolation(client, tt_headers):
+    resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
+    aid = resp.get_json()["id"]
+    headers2 = _mk_tt_headers(client, "ttuser2")
+    resp = client.get(f"/api/tt/accounts/{aid}/bc-history", headers=headers2)
+    assert resp.status_code == 403
+
+
+def test_delete_bc_history_requires_admin(client, tt_headers):
+    resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
+    aid = resp.get_json()["id"]
+    resp = client.delete(f"/api/tt/accounts/{aid}/bc-history/1", headers=tt_headers)
+    assert resp.status_code == 403

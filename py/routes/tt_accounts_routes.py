@@ -131,11 +131,15 @@ def lookup_account():
     if not advertiser_id:
         return err("缺少 advertiser_id")
     row = db.execute(
-        "SELECT a.*, u.username, u.display_name, st.name AS status_name, ag.name AS agent_name "
+        "SELECT a.id, a.name, a.advertiser_id, a.bc_id, a.agent_id, a.status_id, "
+        "a.timezone, a.acquired_date, a.owner_id, "
+        "b.name AS bc_name, st.name AS status_name, ag.name AS agent_name, "
+        "u.username, u.display_name "
         "FROM tt_accounts a "
-        "LEFT JOIN users u ON a.owner_id = u.id "
+        "LEFT JOIN tt_bcs b ON a.bc_id = b.id "
         "LEFT JOIN account_statuses st ON a.status_id = st.id "
         "LEFT JOIN agents ag ON a.agent_id = ag.id "
+        "LEFT JOIN users u ON a.owner_id = u.id "
         "WHERE a.advertiser_id = ?", (advertiser_id,)
     ).fetchone()
     if not row:
@@ -144,6 +148,8 @@ def lookup_account():
     d["found"] = True
     d["status"] = d.get("status_name") or ""
     d["agent"] = d.get("agent_name") or ""
+    d["bc_name"] = d.get("bc_name") or ""
+    d["owner_name"] = d.get("display_name") or d.get("username") or "未知"
     return ok(d)
 
 
@@ -579,6 +585,13 @@ def deleted_accounts_list():
 @tt_required
 def bc_history(aid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    ac = db.execute("SELECT owner_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+    if not ac:
+        return err("账户不存在", 404)
+    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+        return err("无权限", 403)
     rows = db.execute(
         "SELECT h.id, h.old_bc_id, h.new_bc_id, h.change_type, h.created_at, "
         "u.display_name AS changed_by_name, "
@@ -603,6 +616,10 @@ def bc_history(aid):
 @tt_required
 def delete_bc_history(aid, hid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    if role not in ('developer', 'admin'):
+        return err("权限不足", 403)
     db.execute("DELETE FROM tt_account_bc_history WHERE id=? AND account_id=?", (hid, aid))
     db.commit()
     return ok()
