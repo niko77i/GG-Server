@@ -1144,7 +1144,7 @@ def sync_from_sheet():
 
 # ==================== 状态改「非存活」写回收清单 ====================
 
-def _maybe_write_recycle(db, advertiser_id, reason, sheet_id, sheet_name):
+def _maybe_write_recycle(advertiser_id, reason, sheet_id, sheet_name):
     """状态改为非存活时，后台异步写回收户清单（只写时间/账户ID/回收原因）。失败不阻塞状态变更。"""
     from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
 
@@ -1167,14 +1167,15 @@ def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason):
     st = db.execute("SELECT name FROM account_statuses WHERE id=?", (status_id,)).fetchone()
     if not st or st["name"] == "存活":
         return
+    if not reason:
+        return
     sheet_id = _get_tt_sheet_id(db)
     mappings = _get_tt_sheet_mappings(db)
     sheet_name = (mappings.get("recycle") or "").strip() or "回收户清单"
     if not sheet_id:
         return
     # 自动新增回收原因
-    if reason:
-        existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=?", (reason,)).fetchone()
-        if not existing:
-            db.execute("INSERT OR IGNORE INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (reason, uid))
-    _maybe_write_recycle(db, advertiser_id, reason, sheet_id, sheet_name)
+    existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=?", (reason,)).fetchone()
+    if not existing:
+        db.execute("INSERT OR IGNORE INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (reason, uid))
+    _maybe_write_recycle(advertiser_id, reason, sheet_id, sheet_name)

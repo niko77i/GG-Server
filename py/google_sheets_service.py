@@ -395,7 +395,7 @@ def append_recharge_tt(service, spreadsheet_id: str, sheet_name: str, rows: list
     sheet_id_int = target_sheet["gid"]
     sheet_rows = target_sheet["rowCount"]
 
-    # 读现有 A:C 找最后一行
+    # 读现有 A:C，以「账户ID」列（B 列）有无数据判断最后一行（忽略时间/金额列残留）
     range_read = f"'{sheet_name}'!A:C"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range_read,
@@ -404,7 +404,7 @@ def append_recharge_tt(service, spreadsheet_id: str, sheet_name: str, rows: list
     last_row = 0
     for i in range(len(existing) - 1, -1, -1):
         row = existing[i]
-        if any(row[j] for j in range(min(3, len(row))) if row[j]):
+        if len(row) > 1 and row[1]:
             last_row = i + 1
             break
 
@@ -484,7 +484,8 @@ def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) ->
     last_row = 0
     for i in range(len(existing) - 1, -1, -1):
         row = existing[i]
-        if (len(row) > 0 and (row[0] or "").strip()) or (len(row) > 1 and (row[1] or "").strip()):
+        # 只以账户ID列(B)有无数据判断换行：时间列(A)有残留但账户ID为空的行会被忽略
+        if len(row) > 1 and (row[1] or "").strip():
             last_row = i + 1
             break
 
@@ -508,7 +509,7 @@ def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) ->
         spreadsheetId=spreadsheet_id,
         body={"valueInputOption": "USER_ENTERED", "data": [
             {"range": f"'{sheet_name}'!A{start}:A{end}",
-             "values": [[r.get("time", "")] for r in rows]},
+             "values": [["'" + str(r.get("time", ""))] for r in rows]},
             {"range": f"'{sheet_name}'!B{start}:B{end}",
              "values": [["'" + str(r.get("account_id", ""))] for r in rows]},
             {"range": f"'{sheet_name}'!H{start}:H{end}",

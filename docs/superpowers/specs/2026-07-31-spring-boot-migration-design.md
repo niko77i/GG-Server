@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.24  
-> **日期**: 2026-07-31（v1.24 更新于 2026-09-22）  
+> **文档版本**: v1.25  
+> **日期**: 2026-07-31（v1.25 更新于 2026-09-22）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.25 变更**: TT 账户充值写表适配（对应 `py/google_sheets_service.py` 的 `append_recharge_tt` 与 `py/routes/tt_accounts_routes.py` 的 `_append_recharge_background`）——TT 充值表表头为 9 列（时间/账户ID/金额/代理/运营/是否充值/账户ID/金额锁定/是否处理），系统**只写前 3 列**（时间/账户ID/金额），D~I 列（代理/运营/是否充值/账户ID/金额锁定/是否处理）在表格里已有公式、**不得覆盖**。写入规则：① A 列时间自动写当前日期、格式「月/日」（如 `9/22`），带前导 `'` 标记为文本（防止被解析为日期）；② B 列账户ID 带前导 `'` 标记为文本（防止 13 位纯数字变科学计数）；③ C 列金额写 `float` 数字（供 D~I 列公式计算）；④ **判断最后一行（换行）只看 B 列「账户ID」有无数据**，时间/金额列有残留但账户ID为空的行忽略。GG 的 `append_recharge` 保持不动（纯增量），TT 路由 `_append_recharge_background._do_sync` 改调 `append_recharge_tt`（submit/batch-submit/retry-sheets 三处共用）。迁移到 Spring Boot 时 `GoogleSheetsService`（或 `TtAccountService`）需提供 TT 专用充值写表方法：只写 A~C、保留 D~I 公式、以「账户ID」列判断追加行号
 > **v1.24 变更**: TT 账户「我的看板」同步新增「是否回收」列驱动账户状态（对应 `py/routes/tt_accounts_routes.py` 的 `sync_from_sheet`）——① C 列「是否回收」推导状态：「是」→「死亡」、「可用」/空 →「存活」；② 新户直接导入并写 `status_id`（死亡户同时写 `death_date`）；③ 已存在账户做状态比对（C 列推导 vs 系统 `status_name`，NULL 视为「存活」），不一致时返回 `status_conflicts`（`{advertiser_id, sheet_status, system_status}`）由前端提示用户确认、不自动改；④ 确认模式新增 `status_resolutions`（`{advertiser_id: "存活"|"死亡"}`），更新 `status_id`/`status_changed_date`/`death_date`（死亡置当天、存活清空，与手动改状态一致）；⑤ 越权保护：`status_resolutions`/`resolutions` 仅允许改当前用户看板行内（A 列「运营」匹配 display_name）的 `advertiser_id`，非 admin/developer 带 `owner_id` 条件；⑥ 状态同步**不触发** `_trigger_recycle_if_dead`（回收户清单是上游，同步只反映状态、不写清单）。本次一并修复：看板同步跳过表头第一行（避免「运营」表头误触发门禁）+ 按列 `len(r)>N` 安全取值（Google Sheets 截断尾部空列，避免 IndexError）。迁移到 Spring Boot 时 TtAccountService.syncFromSheet 需保持上述状态比对/冲突确认契约与越权保护，且状态变更路径不得触发回收清单写入
 > **v1.23 变更**: TT 设置界面最终实现细化（对应 `py/routes/tt_routes.py` 的 `/api/tt/settings`、`/api/tt/data/export`、`/api/tt/data/import` 与 `main.py` 的 `sales_persons_delete`）——① TT 数据导出按 owner_id 隔离（`tt_bcs`/`tt_products` 过滤 owner，packages/runners/delist_checks 由所属产品/包推导，`sales_persons` 导出 `platform='tt'` 全量供导入映射）；② TT 数据导入按外键依赖顺序重建（sales_persons→bcs→products→packages→runners→delist_checks）并建 old_id→new_id 映射，`owner_id`/`runners.user_id` 全部重映射为当前导入用户，BC 优先复用本人否则按全局唯一 `bc_id` 复用，商务按 name 匹配/新建；③ 导入加 JSON 结构强校验（非 dict 元素/缺 id 跳过）+ 事务 rollback（失败返回 400 不落半截数据）+ 20MB 上传上限；④ 前端商务/地区复用端点显式传 `platform=tt`，修复 admin（非 developer）平台回退 gg 的问题
 > **v1.22 变更**: 补充 TT（TikTok Ads）平台完整迁移设计——此前文档仅覆盖 GG+FB。新增 6 张 TT 表 MySQL DDL（`tt_bcs`/`tt_products`/`tt_product_runners`/`tt_packages`/`tt_delist_checks`/`tt_product_assets`，详见 5.2）与 `TtController`（28 个接口，详见 6.3），并新增 TT 设置界面（`/api/tt/settings` GET/POST，存全局 tags `tt_sheet_id`/`tt_sheet_mappings`，供后续 TT 账户管理读取 Google 表格）与 TT 数据导出/导入（`/api/tt/data/export`/`/api/tt/data/import`）。另在 `sales_persons_delete` 补 `tt_products` 引用检查（原只查 GG `products` 与 FB `fb_products`，删除被 TT 产品引用的商务人员会悬空引用）
@@ -1867,6 +1868,12 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - **越权保护**：`status_resolutions`/`resolutions` 仅允许改当前用户看板行内的 `advertiser_id`（`valid_ids`），非 admin/developer 角色带 `owner_id` 条件。
 > - **death_date 维护**：改为「死亡」置当天、改为「存活」清空，与手动改状态（`updateAccount`）保持一致；新户为死亡时 INSERT 同步写 death_date。
 > - **不写回收清单**：状态同步路径不触发 `_trigger_recycle_if_dead`（回收户清单是上游数据源，同步只反映状态，Java 侧对应回收清单写入逻辑不得被调用）。
+>
+> **TT 充值写表迁移要点（v1.25 补充）**：
+> - TT 充值表（Google Sheets）为 9 列表头：`时间 | 账户ID | 金额 | 代理 | 运营 | 是否充值 | 账户ID | 金额锁定 | 是否处理`。系统**只写前 3 列**（时间/账户ID/金额），第 4~9 列（代理/运营/是否充值/账户ID/金额锁定/是否处理）在表格里已有公式、写入时**不得覆盖**。
+> - 列映射（`append_recharge_tt` → Java `GoogleSheetsService.appendRechargeTt`）：A 列时间 = 当前日期「月/日」（如 `9/22`），前导 `'` 标记为文本（防止被解析为日期）；B 列账户ID = 文本（前导 `'`，防止 13 位纯数字变科学计数）；C 列金额 = `float` 数字（供 D~I 列公式数值计算）；写入范围 `A{start}:C{end}`、`valueInputOption=USER_ENTERED`。
+> - **判断最后一行（换行）只看「账户ID」列（B 列）有无数据**：从末行向上扫描，仅当 B 列非空才视为「已有数据行」，时间/金额列有残留但账户ID为空的行忽略。Java 侧读 `A:C` 后取 index 1 判断；注意 Google Sheets 会截断行尾空单元格，需 `len(row) > 1` 保护（`row[1]` 存在且非空）。
+> - GG 的 `append_recharge`（7 列映射）保持不动（纯增量）；TT 路由 `_append_recharge_background._do_sync` 改调 `append_recharge_tt`，submit / batch-submit / retry-sheets 三处共用同一后台同步逻辑。
 
 ---
 

@@ -737,6 +737,34 @@ def test_append_recharge_tt_appends_after_last_row():
     assert update.call_args.kwargs["range"] == "'充值表'!A3:C3"
 
 
+def test_append_recharge_tt_finds_last_row_by_account_id_only():
+    """TT 充值写表：判断最后一行只看「账户ID」列（B 列），忽略时间/金额列残留。"""
+    from google_sheets_service import append_recharge_tt
+
+    fake = mock.MagicMock()
+    fake.spreadsheets.return_value.get.return_value.execute.return_value = {
+        "sheets": [{
+            "properties": {"title": "充值表", "sheetId": 123,
+                           "gridProperties": {"rowCount": 1000}}
+        }]
+    }
+    # 第 2 行账户ID有数据；第 3 行仅时间列（A）有残留、账户ID（B）为空 → 应忽略
+    fake.spreadsheets.return_value.values.return_value.get.return_value.execute.return_value = {
+        "values": [
+            ["时间", "账户ID", "金额"],
+            ["9/21", "111", "500"],
+            ["9/22", "", ""],
+        ]
+    }
+
+    append_recharge_tt(fake, "sheet-1", "充值表", [
+        {"account_id": "222", "amount": "300"},
+    ])
+
+    update = fake.spreadsheets.return_value.values.return_value.update
+    assert update.call_args.kwargs["range"] == "'充值表'!A3:C3"
+
+
 @mock.patch("google_sheets_service.build_service")
 @mock.patch("google_sheets_service.read_sheet_values")
 def test_sync_from_sheet_status_conflict_dry_run(mock_read, mock_build, client, tt_headers):
@@ -867,9 +895,39 @@ def test_append_recycle_writes_only_three_columns():
     assert len(data) == 3
     assert [d["range"] for d in data] == [
         "'回收户清单'!A2:A2", "'回收户清单'!B2:B2", "'回收户清单'!H2:H2"]
-    assert data[0]["values"] == [["2026-09-22"]]          # A 时间
+    assert data[0]["values"] == [["'2026-09-22"]]         # A 时间（文本，前导 '）
     assert data[1]["values"] == [["'1234567890123"]]      # B 账户ID（文本，前导 '）
     assert data[2]["values"] == [["跑量差"]]              # H 回收原因
+
+
+def test_append_recycle_finds_last_row_by_account_id_only():
+    """回收户清单：判断最后一行只看「账户ID」列（B 列），忽略时间列（A）残留。"""
+    from google_sheets_service import append_recycle
+
+    fake = mock.MagicMock()
+    fake.spreadsheets.return_value.get.return_value.execute.return_value = {
+        "sheets": [{
+            "properties": {"title": "回收户清单", "sheetId": 456,
+                           "gridProperties": {"rowCount": 1000}}
+        }]
+    }
+    # 第 2 行账户ID有数据；第 3 行仅时间列（A）有残留、账户ID（B）为空 → 应忽略
+    fake.spreadsheets.return_value.values.return_value.get.return_value.execute.return_value = {
+        "values": [
+            ["时间", "账户ID"],
+            ["2026-09-21", "111"],
+            ["2026-09-22", ""],
+        ]
+    }
+
+    append_recycle(fake, "sheet-1", "回收户清单", [
+        {"time": "2026-09-22", "account_id": "222", "reason": "跑量差"},
+    ])
+
+    batch = fake.spreadsheets.return_value.values.return_value.batchUpdate
+    data = batch.call_args.kwargs["body"]["data"]
+    assert [d["range"] for d in data] == [
+        "'回收户清单'!A3:A3", "'回收户清单'!B3:B3", "'回收户清单'!H3:H3"]
 
 
 def test_trigger_recycle_on_non_alive_status(app):
@@ -892,6 +950,8 @@ def test_trigger_recycle_on_non_alive_status(app):
             _trigger_recycle_if_dead(db, 1, "1234567890123", ids[name], "跑量差")
         # 存活不写回收清单
         _trigger_recycle_if_dead(db, 1, "1234567890123", ids["存活"], None)
+        # 非存活但 reason 为空：后端兜底也不写
+        _trigger_recycle_if_dead(db, 1, "1234567890123", ids["验证"], None)
 
     assert writer.call_count == 3
     db.close()
