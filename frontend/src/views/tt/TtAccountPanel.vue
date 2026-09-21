@@ -4,10 +4,10 @@
     <div style="flex-shrink:0;">
       <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
         <el-button type="primary" @click="showModal()">➕ 新增账户</el-button>
-        <el-button @click="notImplemented('批量导入')">📥 批量导入</el-button>
-        <el-button @click="notImplemented('批量查户')">🔍 批量查户</el-button>
-        <el-button @click="notImplemented('批量充值')" :disabled="!selected.length">💰 批量充值</el-button>
-        <el-button @click="notImplemented('同步')">🔄 同步</el-button>
+        <el-button @click="importVisible = true">📥 批量导入</el-button>
+        <el-button @click="lookupVisible = true">🔍 批量查户</el-button>
+        <el-button @click="rechargeBatchVisible = true" :disabled="!selected.length">💰 批量充值</el-button>
+        <el-button @click="syncVisible = true">🔄 同步</el-button>
         <el-button @click="deletedVisible = true">🗑 回收站</el-button>
         <span style="color:#888;font-size:12px;">已选 {{ selected.length }} 条</span>
         <el-select v-model="batchStatus" @change="doBatchStatus" placeholder="批量修改状态..."
@@ -168,7 +168,7 @@
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showModal(row)">✏️</el-button>
             <el-button link type="success" size="small" @click="showDetail(row)">📋</el-button>
-            <el-button link type="warning" size="small" @click="notImplemented('充值')">💰</el-button>
+            <el-button link type="warning" size="small" @click="openRecharge(row)">💰</el-button>
             <el-button link type="danger" size="small" @click="del(row.id)"><el-icon :size="14"><Delete /></el-icon></el-button>
           </template>
         </el-table-column>
@@ -187,6 +187,12 @@
     <TtAccountModal v-model:visible="acModalVisible" :edit-account="acEditAccount" @saved="load" />
     <TtAccountDetailModal v-model:visible="detailVisible" :account="detailAccount" />
     <TtAccountDeletedModal v-model:visible="deletedVisible" @restored="load" />
+    <TtAccountBatchImportModal v-model:visible="importVisible" @saved="load" />
+    <TtAccountBatchLookupModal v-model:visible="lookupVisible" />
+    <TtRechargeModal v-model:visible="rechargeVisible" :default-account-id="rechargeDefaultAccountId" @saved="load" />
+    <TtRechargeBatchModal v-model:visible="rechargeBatchVisible" :accounts="selected" @saved="load" />
+    <TtAccountSyncModal v-model:visible="syncVisible" @synced="load" />
+    <TtRecycleReasonModal v-model:visible="recycleVisible" :mode="recycleTarget?.mode" :account="recycleTarget?.account" :accounts="recycleTarget?.accounts" :status-id="recycleTarget?.statusId" :status-name="recycleTarget?.statusName" @saved="onRecycleSaved" />
   </div>
 </template>
 
@@ -198,6 +204,12 @@ import { useAuthStore } from '@/stores/auth'
 import TtAccountModal from '@/components/tt/TtAccountModal.vue'
 import TtAccountDetailModal from '@/components/tt/TtAccountDetailModal.vue'
 import TtAccountDeletedModal from '@/components/tt/TtAccountDeletedModal.vue'
+import TtAccountBatchImportModal from '@/components/tt/TtAccountBatchImportModal.vue'
+import TtAccountBatchLookupModal from '@/components/tt/TtAccountBatchLookupModal.vue'
+import TtRechargeModal from '@/components/tt/TtRechargeModal.vue'
+import TtRechargeBatchModal from '@/components/tt/TtRechargeBatchModal.vue'
+import TtAccountSyncModal from '@/components/tt/TtAccountSyncModal.vue'
+import TtRecycleReasonModal from '@/components/tt/TtRecycleReasonModal.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
@@ -229,6 +241,14 @@ const acEditAccount = ref(null)
 const detailVisible = ref(false)
 const detailAccount = ref(null)
 const deletedVisible = ref(false)
+const importVisible = ref(false)
+const lookupVisible = ref(false)
+const rechargeVisible = ref(false)
+const rechargeDefaultAccountId = ref('')
+const rechargeBatchVisible = ref(false)
+const syncVisible = ref(false)
+const recycleVisible = ref(false)
+const recycleTarget = ref(null)
 
 const batchStatus = ref('')
 const batchBc = ref('')
@@ -367,6 +387,8 @@ function onSearch() {
 
 function showModal(account) { acEditAccount.value = account || null; acModalVisible.value = true }
 function showDetail(row) { detailAccount.value = row; detailVisible.value = true }
+function openRecharge(row) { rechargeDefaultAccountId.value = row.advertiser_id || ''; rechargeVisible.value = true }
+function onRecycleSaved() { load() }
 
 function notImplemented(feature) {
   ElMessage.info((feature || '该功能') + '将在后续任务接入')
@@ -543,13 +565,19 @@ async function saveStatus(row) {
   const v = editStatusValue.value ?? null
   const currentStatusId = statusOptions.value.find(s => s.name === row.status)?.id ?? null
   if (v === currentStatusId) { cancelStatusEdit(); return }
+  const st = statusOptions.value.find(x => x.id === v)
+  const stName = st ? st.name : ''
+  cancelStatusEdit()
+  if (stName === '封禁' || stName === '死亡') {
+    recycleTarget.value = { mode: 'single', account: row, accounts: [], statusId: v, statusName: stName }
+    recycleVisible.value = true
+    return
+  }
   statusPending = true
   try {
-    // TODO: Task 8 接入回收原因弹窗（状态改为封禁/死亡时收集 recycle_reason）
     await ttAccountsApi.update(row.id, { status_id: v })
-    const s = statusOptions.value.find(x => x.id === v)
-    row.status = s ? s.name : null
-    row.status_name = s ? s.name : null
+    row.status = stName
+    row.status_name = stName
     row.status_changed_date = new Date().toISOString().slice(0, 10)
     ElMessage.success('状态已更新')
   } catch (e) {
@@ -622,8 +650,13 @@ async function doBatchStatus(val) {
       '批量修改状态', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }
     )
   } catch { batchStatus.value = ''; return }
+  if (stName === '封禁' || stName === '死亡') {
+    recycleTarget.value = { mode: 'batch', account: null, accounts: [...selected.value], statusId: val, statusName: stName }
+    recycleVisible.value = true
+    batchStatus.value = ''
+    return
+  }
   try {
-    // TODO: Task 8 接入回收原因弹窗（批量改为封禁/死亡时收集 recycle_reason）
     await ttAccountsApi.batchUpdate({ ids: selected.value.map(s => s.id), field: 'status_id', value: val })
     ElMessage.success(`已将 ${selected.value.length} 个账户状态改为「${stName}」`)
     batchStatus.value = ''
