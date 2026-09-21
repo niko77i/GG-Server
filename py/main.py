@@ -356,6 +356,8 @@ app.register_blueprint(fb_bp)
 # TT 平台路由
 from routes.tt_routes import tt_bp
 app.register_blueprint(tt_bp)
+from routes.tt_accounts_routes import tt_accounts_bp
+app.register_blueprint(tt_accounts_bp)
 
 try:
     auth.init_developer(APP_CONFIG)

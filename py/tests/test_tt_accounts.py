@@ -87,3 +87,35 @@ def test_rebuild_agents_unique_upgrade(app):
     db.commit()
     assert db.execute("SELECT COUNT(*) FROM agents WHERE name='旧代理'").fetchone()[0] == 2
     db.close()
+
+
+import unittest.mock as mock  # noqa: E402
+
+
+def _mk_account(client, headers, advertiser_id="1234567890123", **kw):
+    body = {"advertiser_id": advertiser_id, **kw}
+    return client.post("/api/tt/accounts/create", headers=headers, json=body)
+
+
+def test_account_create_and_list(client, tt_headers):
+    resp = _mk_account(client, tt_headers, name="测试户")
+    assert resp.status_code == 200
+    aid = resp.get_json()["id"]
+    assert aid > 0
+
+    resp = client.get("/api/tt/accounts/list", headers=tt_headers)
+    data = resp.get_json()
+    assert data["total"] == 1
+    assert data["items"][0]["advertiser_id"] == "1234567890123"
+    assert "status_counts" in data
+
+
+def test_account_create_rejects_non_digit(client, tt_headers):
+    resp = _mk_account(client, tt_headers, advertiser_id="123-456-789")
+    assert resp.status_code == 400
+
+
+def test_account_create_duplicate_conflict(client, tt_headers):
+    _mk_account(client, tt_headers, advertiser_id="1234567890123")
+    resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
+    assert resp.status_code == 409
