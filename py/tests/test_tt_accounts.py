@@ -213,3 +213,39 @@ def test_recharge_batch_submit_skips_non_alive(client, tt_headers):
     cnt = db.execute("SELECT COUNT(*) FROM tt_recharge_records").fetchone()[0]
     db.close()
     assert cnt == 0
+
+
+def test_recycle_reason_crud(client, tt_headers):
+    resp = client.post("/api/tt/recycle-reasons/create", headers=tt_headers, json={"name": "跑量差"})
+    assert resp.status_code == 200
+    rid = resp.get_json()["id"]
+    resp = client.get("/api/tt/recycle-reasons/list", headers=tt_headers)
+    assert resp.get_json()["items"][0]["name"] == "跑量差"
+    resp = client.put(f"/api/tt/recycle-reasons/{rid}", headers=tt_headers, json={"name": "跑量差改"})
+    assert resp.status_code == 200
+    resp = client.delete(f"/api/tt/recycle-reasons/{rid}", headers=tt_headers)
+    assert resp.status_code == 200
+
+
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_dry_run(mock_read, mock_build, client, tt_headers):
+    # 构造看板 10 列：A运营 B入库 C是否回收 D账户ID EBC F国家 G渠道 H时区 I消耗 J备注
+    mock_build.return_value = object()
+    mock_read.return_value = [
+        ["ttuser", "2026-09-20", "否", "1234567890123", "BC-A", "US", "渠道X", "+8", "高", "备注1"],
+    ]
+    db = database.get_db()
+    # 同步门禁要求「运营」列匹配当前用户 display_name，fixture 仅注册未设 display_name，这里补齐
+    db.execute("UPDATE users SET display_name='ttuser' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板", "recharge": "充值表", "recycle": "回收户清单", "accounts": "账户明细"}',))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1

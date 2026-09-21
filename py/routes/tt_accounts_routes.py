@@ -317,6 +317,8 @@ def update_account(aid):
             elif (row["status_name"] or "") == "死亡":
                 db.execute("UPDATE tt_accounts SET death_date='' WHERE id=?", (aid,))
             db.execute("UPDATE tt_accounts SET status_id=? WHERE id=?", (status_id, aid))
+            _trigger_recycle_if_dead(db, uid, row["advertiser_id"], status_id,
+                                     (data.get("recycle_reason") or "").strip())
 
     # BC 变更（记录历史）
     if "bc_id" in data:
@@ -419,11 +421,11 @@ def batch_update_accounts():
     for aid in ids:
         # owner 权限校验
         if role not in ('developer', 'admin'):
-            r = db.execute("SELECT owner_id, bc_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+            r = db.execute("SELECT owner_id, bc_id, advertiser_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
             if not r or r["owner_id"] != uid:
                 continue
         else:
-            r = db.execute("SELECT owner_id, bc_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+            r = db.execute("SELECT owner_id, bc_id, advertiser_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
             if not r:
                 continue
         if field == "bc_id":
@@ -436,6 +438,8 @@ def batch_update_accounts():
             if st_name and st_name["name"] == "死亡":
                 db.execute("UPDATE tt_accounts SET death_date=date('now','localtime') WHERE id=?", (aid,))
             db.execute("UPDATE tt_accounts SET status_changed_date=datetime('now','localtime') WHERE id=?", (aid,))
+            _trigger_recycle_if_dead(db, uid, r["advertiser_id"], value,
+                                     (data.get("recycle_reason") or "").strip())
         db.execute(f"UPDATE tt_accounts SET {field}=?, updated_at=datetime('now','localtime') WHERE id=?",
                    (value, aid))
     db.commit()
@@ -832,3 +836,244 @@ def recharge_retry_sheets(rid):
              "status": row["status"] or ""}]
     _append_recharge_background(db, uid, sheet_id, _recharge_sheet_name(db), rows, [rid])
     return ok()
+
+
+# ==================== 回收原因 ====================
+
+@tt_accounts_bp.route('/api/tt/recycle-reasons/list', methods=['GET'])
+@jwt_required()
+@tt_required
+def recycle_reasons_list():
+    db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    if role in ('developer', 'admin'):
+        rows = db.execute("SELECT id, name FROM tt_recycle_reasons ORDER BY id").fetchall()
+    else:
+        rows = db.execute("SELECT id, name FROM tt_recycle_reasons WHERE owner_id=? ORDER BY id",
+                          (uid,)).fetchall()
+    return ok({"items": [dict(r) for r in rows]})
+
+
+@tt_accounts_bp.route('/api/tt/recycle-reasons/create', methods=['POST'])
+@jwt_required()
+@tt_required
+def recycle_reason_create():
+    db = get_db()
+    uid = get_uid()
+    name = (parse_body().get("name") or "").strip()
+    if not name:
+        return err("名称不能为空")
+    existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=? AND owner_id=?",
+                          (name, uid)).fetchone()
+    if existing:
+        return err(f"回收原因「{name}」已存在", 409)
+    db.execute("INSERT INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (name, uid))
+    db.commit()
+    return ok({"id": db.execute("SELECT last_insert_rowid()").fetchone()[0]})
+
+
+@tt_accounts_bp.route('/api/tt/recycle-reasons/<int:rid>', methods=['PUT'])
+@jwt_required()
+@tt_required
+def recycle_reason_rename(rid):
+    db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    name = (parse_body().get("name") or "").strip()
+    if not name:
+        return err("名称不能为空")
+    row = db.execute("SELECT owner_id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return err("回收原因不存在", 404)
+    if role not in ('developer', 'admin') and row["owner_id"] != uid:
+        return err("无权限", 403)
+    db.execute("UPDATE tt_recycle_reasons SET name=? WHERE id=?", (name, rid))
+    db.commit()
+    return ok()
+
+
+@tt_accounts_bp.route('/api/tt/recycle-reasons/<int:rid>', methods=['DELETE'])
+@jwt_required()
+@tt_required
+def recycle_reason_delete(rid):
+    db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    row = db.execute("SELECT owner_id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return err("回收原因不存在", 404)
+    if role not in ('developer', 'admin') and row["owner_id"] != uid:
+        return err("无权限", 403)
+    db.execute("DELETE FROM tt_recycle_reasons WHERE id=?", (rid,))
+    db.commit()
+    return ok()
+
+
+# ==================== 同步（我的看板） ====================
+
+def _ensure_bc(db, name):
+    if not name:
+        return None
+    row = db.execute("SELECT id FROM tt_bcs WHERE name=? AND deleted_at IS NULL", (name,)).fetchone()
+    if row:
+        return row["id"]
+    db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES(?,?,?)",
+               (name, name, 1))
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _ensure_agent(db, name):
+    if not name:
+        return None
+    row = db.execute("SELECT id FROM agents WHERE name=? AND platform='tt'", (name,)).fetchone()
+    if row:
+        return row["id"]
+    db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'tt')", (name, 1))
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _region_timezone(db, country):
+    """看板时区为空时，用 regions 的时区补。"""
+    row = db.execute("SELECT timezone FROM regions WHERE name=? AND platform='tt'", (country,)).fetchone()
+    if row:
+        return row["timezone"]
+    row = db.execute("SELECT timezone FROM regions WHERE platform='tt' ORDER BY id LIMIT 1").fetchone()
+    return (row["timezone"] if row else "")
+
+
+@tt_accounts_bp.route('/api/tt/accounts/sync-from-sheet', methods=['POST'])
+@jwt_required()
+@tt_required
+def sync_from_sheet():
+    from main import _GOOGLE_SHEETS_CONFIG
+    import google_sheets_service as gs
+
+    db = get_db()
+    uid = get_uid()
+    data = parse_body()
+    dry_run = bool(data.get("dry_run"))
+    user = db.execute("SELECT display_name FROM users WHERE id=?", (uid,)).fetchone()
+    display_name = (user["display_name"] or "") if user else ""
+
+    sheet_id = _get_tt_sheet_id(db)
+    mappings = _get_tt_sheet_mappings(db)
+    dashboard = (mappings.get("my_dashboard") or "").strip() or "我的看板"
+    if not sheet_id:
+        return err("未配置 Google 表格")
+
+    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+    rows = gs.read_sheet_values(service, sheet_id, dashboard, "A:J")
+    rows = [r for r in rows if len(r) > 3 and (r[3] or "").strip()]  # D 列账户ID非空
+
+    # 门禁：A 列运营匹配当前用户
+    if rows and any((r[0] or "").strip() != display_name for r in rows):
+        return err("看板「运营」列与当前账号不匹配，仅可同步自己的账户")
+
+    created, updated, conflicts = [], [], []
+    for r in rows:
+        acquired_date = (r[1] or "").strip()
+        # r[2] 是否回收 — 仅读取，不触发状态变更
+        advertiser_id = (r[3] or "").strip()
+        bc_name = (r[4] or "").strip()
+        country = (r[5] or "").strip()
+        agent_name = (r[6] or "").strip()
+        timezone = (r[7] or "").strip() or _region_timezone(db, country)
+        consumption = (r[8] or "").strip()
+        remark = (r[9] or "").strip()
+
+        if not advertiser_id.isdigit():
+            continue
+        bc_id = _ensure_bc(db, bc_name) if not dry_run else None
+        agent_id = _ensure_agent(db, agent_name) if not dry_run else None
+
+        existing = db.execute("SELECT * FROM tt_accounts WHERE advertiser_id=?", (advertiser_id,)).fetchone()
+        if not existing:
+            if dry_run:
+                created.append({"advertiser_id": advertiser_id, "bc": bc_name,
+                                "country": country, "agent": agent_name,
+                                "timezone": timezone, "consumption": consumption})
+            else:
+                db.execute(
+                    "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
+                    "consumption, acquired_date, remark, owner_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (advertiser_id, advertiser_id, bc_id, country, agent_id, timezone,
+                     consumption, acquired_date or None, remark, uid))
+                db.commit()
+                new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                _record_bc_change(db, new_id, bc_id, uid, "create")
+                db.commit()
+                created.append({"advertiser_id": advertiser_id})
+            continue
+
+        # 消耗情况双向同步：Sheet 与系统不一致 → 冲突列表
+        if consumption and consumption != (existing["consumption"] or ""):
+            conflicts.append({
+                "advertiser_id": advertiser_id,
+                "sheet_value": consumption,
+                "system_value": existing["consumption"] or "",
+            })
+        else:
+            updated.append({"advertiser_id": advertiser_id})
+
+    if dry_run:
+        return ok({"dry_run": True, "total": len(rows), "created": created,
+                   "updated": updated, "conflicts": conflicts})
+
+    # 确认模式：处理消耗冲突 — 客户端传入 resolutions: [{advertiser_id, value}]
+    resolutions = data.get("resolutions") or {}
+    for adv_id, value in resolutions.items():
+        db.execute("UPDATE tt_accounts SET consumption=? WHERE advertiser_id=?",
+                   (value, adv_id))
+    db.commit()
+    return ok({"created": len(created), "updated": len(updated), "conflicts": conflicts})
+
+
+# ==================== 状态改「封禁/死亡」写回收清单 ====================
+
+def _maybe_write_recycle(db, uid, advertiser_id, agent_name, country, timezone, reason, sheet_id, sheet_name):
+    """状态改为封禁/死亡时，后台异步写回收户清单。失败不阻塞状态变更。"""
+    from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
+
+    user = db.execute("SELECT display_name FROM users WHERE id=?", (uid,)).fetchone()
+    operator = (user["display_name"] or "") if user else ""
+    rows = [{
+        "time": datetime.datetime.now().strftime("%Y-%m-%d"),
+        "account_id": advertiser_id,
+        "agent": agent_name,
+        "operator": operator,
+        "country": country,
+        "timezone": timezone,
+        "reason": reason,
+    }]
+
+    def _do_sync():
+        import google_sheets_service as gs
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        gs.append_recycle(service, sheet_id, sheet_name, rows)
+
+    _sync_sheets_background(_do_sync, lambda s, e: None)
+
+
+def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason):
+    """status 为「封禁」或「死亡」时，异步写回收户清单。"""
+    st = db.execute("SELECT name FROM account_statuses WHERE id=?", (status_id,)).fetchone()
+    if not st or st["name"] not in ("封禁", "死亡"):
+        return
+    sheet_id = _get_tt_sheet_id(db)
+    mappings = _get_tt_sheet_mappings(db)
+    sheet_name = (mappings.get("recycle") or "").strip() or "回收户清单"
+    if not sheet_id:
+        return
+    # 自动新增回收原因
+    if reason:
+        existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=?", (reason,)).fetchone()
+        if not existing:
+            db.execute("INSERT OR IGNORE INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (reason, uid))
+    ac = db.execute("SELECT a.country, a.timezone, ag.name AS agent_name FROM tt_accounts a "
+                    "LEFT JOIN agents ag ON a.agent_id = ag.id WHERE a.advertiser_id=?",
+                    (advertiser_id,)).fetchone()
+    agent_name = ac["agent_name"] if ac else ""
+    country = ac["country"] if ac else ""
+    timezone = ac["timezone"] if ac else ""
+    _maybe_write_recycle(db, uid, advertiser_id, agent_name, country, timezone, reason, sheet_id, sheet_name)

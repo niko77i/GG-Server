@@ -366,6 +366,91 @@ def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -
     return {"appended": len(new_rows)}
 
 
+def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) -> dict:
+    """将回收记录追加到「回收户清单」sheet。
+
+    sheet_name: 目标 sheet 名
+    rows: [{"time": "2026-09-21", "account_id": "...", "agent": "...",
+            "operator": "...", "country": "...", "timezone": "+8",
+            "reason": "跑量差"}, ...]
+
+    12 列：A时间 B账户ID C渠道 D运营 E国家 F时区 G有无消耗 H回收原因
+           I是否提交 J清零金额 K备注 L是否二次提交
+    （系统写入前 7 列 A-G，H 起留空）
+    """
+    effective_name = sheet_name.strip() if sheet_name else "回收户清单"
+    ss = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    target_sheet = None
+    for s in ss.get("sheets", []):
+        props = s.get("properties", {})
+        if props.get("title", "") == effective_name:
+            target_sheet = {
+                "name": props["title"],
+                "gid": props["sheetId"],
+                "rowCount": props.get("gridProperties", {}).get("rowCount", 1000),
+            }
+            break
+    if not target_sheet:
+        raise GoogleSheetsServiceError(f"表格中未找到「{effective_name}」工作表")
+
+    sheet_name = target_sheet["name"]
+    sheet_id_int = target_sheet["gid"]
+    sheet_rows = target_sheet["rowCount"]
+
+    range_read = f"'{sheet_name}'!A:L"
+    result = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=range_read,
+    ).execute()
+    existing = result.get("values", [])
+    last_row = 0
+    for i in range(len(existing) - 1, -1, -1):
+        row = existing[i]
+        if any(row[j] for j in range(min(7, len(row))) if row[j]):
+            last_row = i + 1
+            break
+
+    new_rows = []
+    for r in rows:
+        new_rows.append([
+            r.get("time", ""),
+            r.get("account_id", ""),
+            r.get("agent", ""),
+            r.get("operator", ""),
+            r.get("country", ""),
+            r.get("timezone", ""),
+            "",  # G 有无消耗（留空）
+            r.get("reason", ""),  # H 回收原因
+            "",  # I 是否提交
+            "",  # J 清零金额
+            "",  # K 备注
+            "",  # L 是否二次提交
+        ])
+
+    start = last_row + 1
+    end = last_row + len(new_rows)
+    if end > sheet_rows:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{
+                "appendDimension": {
+                    "sheetId": sheet_id_int,
+                    "dimension": "ROWS",
+                    "length": end - sheet_rows
+                }
+            }]}
+        ).execute()
+
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{sheet_name}'!A{start}:L{end}",
+        valueInputOption="USER_ENTERED",
+        body={"values": new_rows},
+    ).execute()
+
+    log.info("回收记录已追加到 Google Sheets: %d 行", len(new_rows))
+    return {"appended": len(new_rows)}
+
+
 def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: str) -> list[list]:
     """通用读取 Google Sheet 指定范围的值。
 
