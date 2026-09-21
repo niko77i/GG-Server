@@ -128,28 +128,15 @@ const routes = [
   // ==================== TT 平台路由 ====================
   {
     path: '/tt',
+    component: () => import('../views/tt/TtView.vue'),
     redirect: '/tt/products',
-    meta: { platform: 'tt' }
-  },
-  {
-    path: '/tt/products',
-    component: () => import('../views/tt/TtProductPanel.vue'),
-    meta: { platform: 'tt', title: 'TT产品管理' }
-  },
-  {
-    path: '/tt/bcs',
-    component: () => import('../views/tt/TtBcPanel.vue'),
-    meta: { platform: 'tt', title: 'BC管理' }
-  },
-  {
-    path: '/tt/accounts',
-    component: () => import('../views/tt/TtAccountPanel.vue'),
-    meta: { platform: 'tt', title: 'TT广告账户' }
-  },
-  {
-    path: '/tt/settings',
-    component: () => import('../views/tt/TtSettingsPanel.vue'),
-    meta: { platform: 'tt', title: 'TT设置' }
+    meta: { platform: 'tt' },
+    children: [
+      { path: 'products', component: () => import('../views/tt/TtProductPanel.vue'), meta: { title: 'TT产品管理' } },
+      { path: 'bcs', component: () => import('../views/tt/TtBcPanel.vue'), meta: { title: 'BC管理' } },
+      { path: 'accounts', component: () => import('../views/tt/TtAccountPanel.vue'), meta: { title: 'TT广告账户' } },
+      { path: 'settings', component: () => import('../views/tt/TtSettingsPanel.vue'), meta: { title: 'TT设置' } },
+    ]
   },
 ]
 
