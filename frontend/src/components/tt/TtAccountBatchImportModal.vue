@@ -257,9 +257,9 @@ function buildTimezoneOptions() {
   const tzs = []
   for (let i = -12; i <= 12; i++) {
     const sign = i > 0 ? '+' : ''
-    tzs.push(`UTC${sign}${i}`)
+    tzs.push(`${sign}${i}`)
   }
-  tzs.push('UTC+5:30', 'UTC+8:45', 'UTC-3:30')
+  tzs.push('+5:30', '+8:45', '-3:30')
   return tzs
 }
 const timezoneOptions = buildTimezoneOptions()
