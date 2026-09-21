@@ -110,6 +110,27 @@ def test_account_create_and_list(client, tt_headers):
     assert "status_counts" in data
 
 
+def test_update_account_clear_agent(client, tt_headers):
+    """update_account 应支持 agent_id=null 显式清空代理（对齐 GG）。"""
+    resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
+    assert resp.status_code == 200
+    aid = resp.get_json()["id"]
+
+    # 设置代理
+    resp = client.put(f"/api/tt/accounts/{aid}", headers=tt_headers, json={"agent": "代理A"})
+    assert resp.status_code == 200
+    resp = client.get("/api/tt/accounts/list", headers=tt_headers)
+    assert resp.get_json()["items"][0]["agent_id"] is not None
+    assert resp.get_json()["items"][0]["agent"] == "代理A"
+
+    # 显式清空代理
+    resp = client.put(f"/api/tt/accounts/{aid}", headers=tt_headers, json={"agent_id": None})
+    assert resp.status_code == 200
+    resp = client.get("/api/tt/accounts/list", headers=tt_headers)
+    assert resp.get_json()["items"][0]["agent_id"] is None
+    assert resp.get_json()["items"][0]["agent"] == ""
+
+
 def test_account_create_rejects_non_digit(client, tt_headers):
     resp = _mk_account(client, tt_headers, advertiser_id="123-456-789")
     assert resp.status_code == 400

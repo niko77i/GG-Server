@@ -302,6 +302,9 @@ def update_account(aid):
         agent_id = _resolve_agent_id(db, (data.get("agent") or "").strip(), data.get("agent_id"))
         if agent_id is not None:
             db.execute("UPDATE tt_accounts SET agent_id=? WHERE id=?", (agent_id, aid))
+        elif "agent_id" in data and (data.get("agent_id") is None or data.get("agent_id") == ""):
+            # 显式清除代理（对齐 GG accounts_update 的 agent_id=NULL 语义）
+            db.execute("UPDATE tt_accounts SET agent_id=NULL WHERE id=?", (aid,))
     if "status" in data or "status_id" in data:
         status_id = _resolve_status_id(db, (data.get("status") or "").strip(), data.get("status_id"))
         if status_id is not None:
