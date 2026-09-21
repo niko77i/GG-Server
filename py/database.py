@@ -497,7 +497,8 @@ def _ensure_schema(conn: sqlite3.Connection):
             name TEXT NOT NULL,
             owner_id INTEGER REFERENCES users(id),
             created_at TEXT DEFAULT (datetime('now','localtime')),
-            UNIQUE(name, owner_id)
+            platform TEXT DEFAULT 'gg',
+            UNIQUE(name, owner_id, platform)
         )
     """)
     conn.execute("""
@@ -1289,11 +1290,49 @@ def _copy_gg_options_to_tt(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _rebuild_agents_platform_unique(conn: sqlite3.Connection):
+    """一次性迁移：将 agents 唯一约束重建为 UNIQUE(name, owner_id, platform)。
+
+    原 UNIQUE(name, owner_id) 无法让 GG/TT 同名同 owner 的代理共存，导致
+    _copy_gg_agents_to_tt 用 INSERT OR IGNORE 复制时被静默跳过（只复制出少数代理）。
+    重建为 (name, owner_id, platform) 后，platform 参与唯一性，GG/TT 隔离。
+    保留全部现有行与 id；同时重置复制标记，让 _copy_gg_agents_to_tt 重跑补全。
+    """
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_rebuild_agents_unique'"
+    ).fetchone()
+    if migrated:
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("""
+        CREATE TABLE agents_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_id INTEGER REFERENCES users(id),
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            platform TEXT DEFAULT 'gg',
+            UNIQUE(name, owner_id, platform)
+        )
+    """)
+    conn.execute("""
+        INSERT OR IGNORE INTO agents_new(id, name, owner_id, created_at, platform)
+        SELECT id, name, owner_id, created_at, platform FROM agents
+    """)
+    conn.execute("DROP TABLE agents")
+    conn.execute("ALTER TABLE agents_new RENAME TO agents")
+    conn.execute("PRAGMA foreign_keys=ON")
+    # 重置复制标记，让 _copy_gg_agents_to_tt 重跑补全遗漏的 GG 代理
+    conn.execute("DELETE FROM config WHERE key='migrated_copy_agents_to_tt'")
+    conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_rebuild_agents_unique','1')")
+    conn.commit()
+
+
 def _copy_gg_agents_to_tt(conn: sqlite3.Connection):
     """一次性迁移：将 GG 代理复制一份到 TT 平台（owner_id 统一为 1，冲突跳过）。
 
-    注意：agents 保持 UNIQUE(name, owner_id) 不变，只加 platform 列做隔离标记；
-    INSERT OR IGNORE 在 (name, owner_id=1) 已存在时跳过，不报错。
+    注意：agents 唯一约束已重建为 UNIQUE(name, owner_id, platform)，故
+    GG 的 (name, owner_id=1, 'gg') 与 TT 的 (name, owner_id=1, 'tt') 不冲突；
+    INSERT OR IGNORE 仅在 TT 已存在同名代理时跳过，不报错。
     """
     migrated = conn.execute(
         "SELECT value FROM config WHERE key='migrated_copy_agents_to_tt'"
@@ -1316,6 +1355,8 @@ def _migrate_if_needed(conn: sqlite3.Connection):
     _copy_gg_options_to_fb(conn)
     # 复制 GG 选项到 TT
     _copy_gg_options_to_tt(conn)
+    # 重建 agents UNIQUE（含 platform）+ 重置复制标记
+    _rebuild_agents_platform_unique(conn)
     # 复制 GG 代理到 TT
     _copy_gg_agents_to_tt(conn)
 
