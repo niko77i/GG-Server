@@ -16,7 +16,7 @@
 2. **语言**：代码/表名/字段名用英文，注释与报错文案用中文。回复用户用中文。
 3. **advertiser_id 校验**：TT 广告账户 ID 是**十多位纯数字、无 `-`**。创建/导入时去空格、拒绝非数字（校验失败返回 400）。
 4. **owner 隔离**：普通用户所有查询 `WHERE owner_id = 当前用户 AND deleted_at IS NULL`；`admin`/`developer` 角色可传 `owner_id` 参数查看任意投手的户。
-5. **agents 迁移只增不改**：`agents` 表加 `platform` 列（默认 `'gg'`），**不重建 UNIQUE 约束**（保持 `UNIQUE(name, owner_id)`），保证 GG/FB 行为不受影响。复制 GG 代理到 TT 用 `INSERT OR IGNORE`（冲突跳过，不报错）。
+5. **agents 迁移**：`agents` 表加 `platform` 列（默认 `'gg'`），并将唯一约束**重建为 `UNIQUE(name, owner_id, platform)`**（对齐 FB 对 `sales_persons`/`account_statuses` 已做的重建），使 GG/TT 同名同 owner 的代理可共存。GG/FB 现有数据不受影响（原 `UNIQUE(name, owner_id)` 是新约束的子集）。复制 GG 代理到 TT 用 `INSERT OR IGNORE`（owner_id 统一为 1，冲突跳过不报错）。
 6. **时区格式**：`timezone` 存文本，格式为 `+8`/`-3` 这类**数字+符号**，**不用 `UTC+8` 前缀**。读看板时区直接存原始值；看板时区为空时用 TT 设置页「地区时区」(regions) 补。
 7. **状态不靠看板自动改**：同步只读看板数据，不改系统状态；状态变更走系统手动（改状态为「封禁/死亡」时触发回收清单写入）。
 8. **`name` 字段可空**：`tt_accounts.name` 保留但可为空，显示时回退 `advertiser_id`。
@@ -97,9 +97,12 @@ def test_agents_has_platform_column(app):
 
 
 def test_copy_gg_agents_to_tt(app):
-    """GG 代理应复制到 platform='tt'（INSERT OR IGNORE，冲突跳过）。"""
+    """GG 代理应复制到 platform='tt'（UNIQUE 含 platform 后，同名同 owner 可共存）。"""
     db = database.get_db()
-    # 清掉迁移标记，插入 GG 代理，手动调用复制函数
+    # 确保外键引用的用户存在（agents.owner_id → users.id；临时库无用户）
+    db.execute("INSERT OR IGNORE INTO users(id, username, password, role) VALUES(1, 'dev', 'x', 'developer')")
+    db.execute("INSERT OR IGNORE INTO users(id, username, password, role) VALUES(2, 'user2', 'x', 'user')")
+    # 清掉迁移标记，插入 GG 代理（owner_id=1，正是重建 UNIQUE 前会被静默跳过的场景），手动调用复制函数
     db.execute("DELETE FROM config WHERE key='migrated_copy_agents_to_tt'")
     db.execute("INSERT OR IGNORE INTO agents(name, owner_id, platform) VALUES(?,?, 'gg')",
                ("卡尔", 1))
@@ -109,6 +112,18 @@ def test_copy_gg_agents_to_tt(app):
         "SELECT COUNT(*) FROM agents WHERE name='卡尔' AND platform='tt'"
     ).fetchone()[0]
     assert cnt == 1
+    db.close()
+
+
+def test_agents_unique_includes_platform(app):
+    """UNIQUE 应为 (name, owner_id, platform)：GG/TT 同名同 owner 可共存。"""
+    db = database.get_db()
+    db.execute("INSERT OR IGNORE INTO users(id, username, password, role) VALUES(1, 'dev', 'x', 'developer')")
+    db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'gg')", ("共存代理", 1))
+    db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'tt')", ("共存代理", 1))
+    db.commit()
+    cnt = db.execute("SELECT COUNT(*) FROM agents WHERE name='共存代理'").fetchone()[0]
+    assert cnt == 2
     db.close()
 ```
 
@@ -188,16 +203,56 @@ Expected: FAIL — `tt_accounts` 表不存在 / `platform` 列不存在。
     _add_column_if_missing(conn, "agents", "platform", "platform TEXT DEFAULT 'gg'")
 ```
 
-- [ ] **Step 4: 新增复制函数 + 挂载迁移**
+- [ ] **Step 4: 新增重建函数 + 复制函数 + 挂载迁移**
 
-在 `py/database.py` 的 `_copy_gg_options_to_tt` 函数（database.py:1200）**之后**，新增：
+先改 `_ensure_schema` 里 `agents` 建表语句（database.py:495-501）的唯一约束 `UNIQUE(name, owner_id)` → `UNIQUE(name, owner_id, platform)`（全新部署直接建对表；已有部署由下方 `_rebuild_agents_platform_unique` 处理升级）。
+
+在 `py/database.py` 的 `_copy_gg_options_to_tt` 函数（database.py:1200）**之后**，新增两个函数：
 
 ```python
+def _rebuild_agents_platform_unique(conn: sqlite3.Connection):
+    """一次性迁移：将 agents 唯一约束重建为 UNIQUE(name, owner_id, platform)。
+
+    原 UNIQUE(name, owner_id) 无法让 GG/TT 同名同 owner 的代理共存，导致
+    _copy_gg_agents_to_tt 用 INSERT OR IGNORE 复制时被静默跳过（只复制出少数代理）。
+    重建为 (name, owner_id, platform) 后，platform 参与唯一性，GG/TT 隔离。
+    保留全部现有行与 id；同时重置复制标记，让 _copy_gg_agents_to_tt 重跑补全。
+    """
+    migrated = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_rebuild_agents_unique'"
+    ).fetchone()
+    if migrated:
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("""
+        CREATE TABLE agents_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            owner_id INTEGER REFERENCES users(id),
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            platform TEXT DEFAULT 'gg',
+            UNIQUE(name, owner_id, platform)
+        )
+    """)
+    conn.execute("""
+        INSERT OR IGNORE INTO agents_new(id, name, owner_id, created_at, platform)
+        SELECT id, name, owner_id, created_at, platform FROM agents
+    """)
+    conn.execute("DROP TABLE agents")
+    conn.execute("ALTER TABLE agents_new RENAME TO agents")
+    conn.execute("PRAGMA foreign_keys=ON")
+    # 重置复制标记，让 _copy_gg_agents_to_tt 重跑补全遗漏的 GG 代理
+    conn.execute("DELETE FROM config WHERE key='migrated_copy_agents_to_tt'")
+    conn.execute("INSERT OR REPLACE INTO config(key,value) VALUES('migrated_rebuild_agents_unique','1')")
+    conn.commit()
+
+
 def _copy_gg_agents_to_tt(conn: sqlite3.Connection):
     """一次性迁移：将 GG 代理复制一份到 TT 平台（owner_id 统一为 1，冲突跳过）。
 
-    注意：agents 保持 UNIQUE(name, owner_id) 不变，只加 platform 列做隔离标记；
-    INSERT OR IGNORE 在 (name, owner_id=1) 已存在时跳过，不报错。
+    注意：agents 唯一约束已重建为 UNIQUE(name, owner_id, platform)，故
+    GG 的 (name, owner_id=1, 'gg') 与 TT 的 (name, owner_id=1, 'tt') 不冲突；
+    INSERT OR IGNORE 仅在 TT 已存在同名代理时跳过，不报错。
     """
     migrated = conn.execute(
         "SELECT value FROM config WHERE key='migrated_copy_agents_to_tt'"
@@ -212,9 +267,11 @@ def _copy_gg_agents_to_tt(conn: sqlite3.Connection):
     conn.commit()
 ```
 
-在 `_migrate_if_needed`（database.py:1234）中，`_copy_gg_options_to_tt(conn)` 之后追加调用：
+在 `_migrate_if_needed`（database.py:1234）中，`_copy_gg_options_to_tt(conn)` 之后追加调用（**顺序敏感**：先重建 UNIQUE 再复制）：
 
 ```python
+    # 重建 agents UNIQUE（含 platform）+ 重置复制标记
+    _rebuild_agents_platform_unique(conn)
     # 复制 GG 代理到 TT
     _copy_gg_agents_to_tt(conn)
 ```
