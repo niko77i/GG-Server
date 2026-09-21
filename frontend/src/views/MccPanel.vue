@@ -114,6 +114,16 @@ async function batchDelete() {
 </script>
 
 <style scoped>
+/* 固定表头：列表滚动时表头吸附在顶部（需同时覆盖 .el-table 默认 overflow:hidden） */
+:deep(.el-table) {
+  overflow: visible;
+}
+:deep(.el-table__header-wrapper) {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: var(--el-table-header-bg-color);
+}
 /* 层级颜色区分 — 行首彩色左边框，:deep() 穿透 el-table 内部渲染的 tr */
 :deep(.mcc-level-0 td:nth-child(2)) { border-left: 3px solid #409EFF; padding-left: 8px; }
 :deep(.mcc-level-1 td:nth-child(2)) { border-left: 3px solid #67C23A; padding-left: 8px; }

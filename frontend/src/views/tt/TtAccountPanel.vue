@@ -688,6 +688,16 @@ async function doBatchBc(val) {
 </script>
 
 <style scoped>
+/* 固定表头：列表滚动时表头吸附在顶部（需同时覆盖 .el-table 默认 overflow:hidden） */
+:deep(.el-table) {
+  overflow: visible;
+}
+:deep(.el-table__header-wrapper) {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: var(--el-table-header-bg-color);
+}
 /* 修复勾选框被 cell overflow 裁切的问题 */
 :deep(.el-table-column--selection .cell) {
   overflow: visible !important;
