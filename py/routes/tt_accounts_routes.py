@@ -317,8 +317,9 @@ def update_account(aid):
             elif (row["status_name"] or "") == "死亡":
                 db.execute("UPDATE tt_accounts SET death_date='' WHERE id=?", (aid,))
             db.execute("UPDATE tt_accounts SET status_id=? WHERE id=?", (status_id, aid))
-            _trigger_recycle_if_dead(db, uid, row["advertiser_id"], status_id,
-                                     (data.get("recycle_reason") or "").strip())
+            if new_status_name and new_status_name != (row["status_name"] or ""):
+                _trigger_recycle_if_dead(db, uid, row["advertiser_id"], status_id,
+                                         (data.get("recycle_reason") or "").strip())
 
     # BC 变更（记录历史）
     if "bc_id" in data:
@@ -421,11 +422,11 @@ def batch_update_accounts():
     for aid in ids:
         # owner 权限校验
         if role not in ('developer', 'admin'):
-            r = db.execute("SELECT owner_id, bc_id, advertiser_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+            r = db.execute("SELECT owner_id, bc_id, advertiser_id, status_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
             if not r or r["owner_id"] != uid:
                 continue
         else:
-            r = db.execute("SELECT owner_id, bc_id, advertiser_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+            r = db.execute("SELECT owner_id, bc_id, advertiser_id, status_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
             if not r:
                 continue
         if field == "bc_id":
@@ -438,8 +439,9 @@ def batch_update_accounts():
             if st_name and st_name["name"] == "死亡":
                 db.execute("UPDATE tt_accounts SET death_date=date('now','localtime') WHERE id=?", (aid,))
             db.execute("UPDATE tt_accounts SET status_changed_date=datetime('now','localtime') WHERE id=?", (aid,))
-            _trigger_recycle_if_dead(db, uid, r["advertiser_id"], value,
-                                     (data.get("recycle_reason") or "").strip())
+            if r["status_id"] is None or str(r["status_id"]) != str(value):
+                _trigger_recycle_if_dead(db, uid, r["advertiser_id"], value,
+                                         (data.get("recycle_reason") or "").strip())
         db.execute(f"UPDATE tt_accounts SET {field}=?, updated_at=datetime('now','localtime') WHERE id=?",
                    (value, aid))
     db.commit()
@@ -915,8 +917,16 @@ def recycle_reason_delete(rid):
 def _ensure_bc(db, name):
     if not name:
         return None
-    row = db.execute("SELECT id FROM tt_bcs WHERE name=? AND deleted_at IS NULL", (name,)).fetchone()
+    row = db.execute("SELECT id, deleted_at FROM tt_bcs WHERE name=?", (name,)).fetchone()
     if row:
+        if row["deleted_at"]:
+            db.execute("UPDATE tt_bcs SET deleted_at=NULL WHERE id=?", (row["id"],))
+        return row["id"]
+    # bc_id 唯一冲突兜底：同名软删后 name 可能仍在，但 bc_id 一定还占用
+    row = db.execute("SELECT id, deleted_at FROM tt_bcs WHERE bc_id=?", (name,)).fetchone()
+    if row:
+        if row["deleted_at"]:
+            db.execute("UPDATE tt_bcs SET deleted_at=NULL WHERE id=?", (row["id"],))
         return row["id"]
     db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES(?,?,?)",
                (name, name, 1))

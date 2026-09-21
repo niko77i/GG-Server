@@ -249,3 +249,55 @@ def test_sync_from_sheet_dry_run(mock_read, mock_build, client, tt_headers):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["total"] == 1
+
+
+@mock.patch("routes.tt_accounts_routes._trigger_recycle_if_dead")
+def test_update_same_status_does_not_rewrite_recycle(mock_trigger, client, tt_headers):
+    """对已是「死亡」的账户再次提交同状态，不应重复写回收清单。"""
+    resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
+    aid = resp.get_json()["id"]
+
+    db = database.get_db()
+    dead = db.execute(
+        "SELECT id FROM account_statuses WHERE name='死亡' AND platform='tt'"
+    ).fetchone()
+    if dead is None:
+        db.execute("INSERT INTO account_statuses(name, platform) VALUES('死亡', 'tt')")
+        db.commit()
+        dead_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    else:
+        dead_id = dead["id"]
+    db.close()
+
+    # 存活 → 死亡：应触发一次
+    resp = client.put(f"/api/tt/accounts/{aid}", headers=tt_headers,
+                      json={"status_id": dead_id, "recycle_reason": "测试"})
+    assert resp.status_code == 200
+    assert mock_trigger.call_count == 1
+
+    # 再次提交同一 status_id：不应新增触发
+    resp = client.put(f"/api/tt/accounts/{aid}", headers=tt_headers,
+                      json={"status_id": dead_id, "recycle_reason": "测试"})
+    assert resp.status_code == 200
+    assert mock_trigger.call_count == 1
+
+
+def test_ensure_bc_restores_soft_deleted(app):
+    """软删后的 tt_bcs 应被 _ensure_bc 恢复复用，避免 bc_id UNIQUE 冲突。"""
+    from routes.tt_accounts_routes import _ensure_bc
+
+    db = database.get_db()
+    db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES(?,?)", ("BC-X", "BC-X"))
+    db.commit()
+    bid = db.execute("SELECT id FROM tt_bcs WHERE name='BC-X'").fetchone()["id"]
+    db.execute("UPDATE tt_bcs SET deleted_at=datetime('now','localtime') WHERE id=?", (bid,))
+    db.commit()
+
+    got = _ensure_bc(db, "BC-X")
+    assert got == bid
+
+    row = db.execute("SELECT id, deleted_at FROM tt_bcs WHERE name='BC-X'").fetchone()
+    assert row["deleted_at"] is None
+    cnt = db.execute("SELECT COUNT(*) FROM tt_bcs WHERE name='BC-X'").fetchone()[0]
+    assert cnt == 1
+    db.close()
