@@ -5627,13 +5627,19 @@ def mcc_detail(mid):
 @app.route("/api/agents/list", methods=["GET"])
 @jwt_required()
 def agents_list():
-    """返回当前用户的代理名选项列表。"""
+    """返回代理名选项列表。platform=tt 时按平台隔离，否则按 owner 隔离。"""
     user_id = int(get_jwt_identity())
+    platform = request.args.get("platform", "")
     db = _yt_db()
-    rows = db.execute(
-        "SELECT id, name FROM agents WHERE owner_id=? ORDER BY id",
-        (user_id,)
-    ).fetchall()
+    if platform == "tt":
+        rows = db.execute(
+            "SELECT id, name FROM agents WHERE platform='tt' ORDER BY id"
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, name FROM agents WHERE owner_id=? AND platform='gg' ORDER BY id",
+            (user_id,)
+        ).fetchall()
     db.close()
     return jsonify({"success": True, "agents": [dict(r) for r in rows]})
 
@@ -5641,13 +5647,27 @@ def agents_list():
 @app.route("/api/agents/create", methods=["POST"])
 @jwt_required()
 def agents_create():
-    """新增代理名。"""
+    """新增代理名。platform=tt 时按平台共享插入，否则按 owner 隔离插入。"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"success": False, "error": "名称不能为空"}), 400
+    platform = request.args.get("platform", "")
     db = _yt_db()
+    if platform == "tt":
+        existing = db.execute(
+            "SELECT id FROM agents WHERE name=? AND platform='tt'", (name,)
+        ).fetchone()
+        if existing:
+            db.close()
+            return jsonify({"success": False, "error": f"代理「{name}」已存在"}), 409
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'tt')",
+                   (name, user_id))
+        db.commit()
+        new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.close()
+        return jsonify({"success": True, "id": new_id})
     existing = db.execute(
         "SELECT id FROM agents WHERE name=? AND owner_id=?", (name, user_id)
     ).fetchone()
@@ -5671,10 +5691,13 @@ def agents_rename(aid):
     if not name:
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
+    platform = request.args.get("platform", "")
     # 检查是否存在（developer 可操作任意）
     user = auth.get_user_by_id(user_id)
     is_dev = user and user.get("role") in ("developer", "admin")
-    if is_dev:
+    if platform == "tt":
+        row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
+    elif is_dev:
         row = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
     else:
         row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
@@ -5682,10 +5705,16 @@ def agents_rename(aid):
         db.close()
         return jsonify({"success": False, "error": "代理不存在或无权修改"}), 404
     # 检查重名
-    dup = db.execute(
-        "SELECT id FROM agents WHERE name=? AND owner_id=? AND id!=?",
-        (name, user_id, aid)
-    ).fetchone()
+    if platform == "tt":
+        dup = db.execute(
+            "SELECT id FROM agents WHERE name=? AND platform='tt' AND id!=?",
+            (name, aid)
+        ).fetchone()
+    else:
+        dup = db.execute(
+            "SELECT id FROM agents WHERE name=? AND owner_id=? AND id!=?",
+            (name, user_id, aid)
+        ).fetchone()
     if dup:
         db.close()
         return jsonify({"success": False, "error": f"代理「{name}」已存在"}), 409
@@ -5703,9 +5732,12 @@ def agents_delete(aid):
     """删除代理 — 账户引用阻止删除，充值记录自动清空关联。"""
     user_id = int(get_jwt_identity())
     db = _yt_db()
+    platform = request.args.get("platform", "")
     user = auth.get_user_by_id(user_id)
     is_dev = user and user.get("role") in ("developer", "admin")
-    if is_dev:
+    if platform == "tt":
+        row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
+    elif is_dev:
         row = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
     else:
         row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()

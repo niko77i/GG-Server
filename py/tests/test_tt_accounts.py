@@ -301,3 +301,42 @@ def test_ensure_bc_restores_soft_deleted(app):
     cnt = db.execute("SELECT COUNT(*) FROM tt_bcs WHERE name='BC-X'").fetchone()[0]
     assert cnt == 1
     db.close()
+
+
+def test_agents_platform_isolation(client, auth_headers, tt_headers):
+    # TT 用户 A 创建平台共享代理
+    resp = client.post("/api/agents/create", headers=tt_headers,
+                       json={"name": "TT代理A"}, query_string={"platform": "tt"})
+    assert resp.status_code == 200
+    # 另一个 TT 用户 B 也能看到（平台级共享，无 owner 限制）
+    tt_headers2 = _mk_tt_headers(client, "ttuser2")
+    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers2)
+    names = [a["name"] for a in resp.get_json()["agents"]]
+    assert "TT代理A" in names
+    # GG 列表（默认）看不到 TT 代理
+    resp = client.get("/api/agents/list", headers=auth_headers)
+    names = [a["name"] for a in resp.get_json()["agents"]]
+    assert "TT代理A" not in names
+
+
+def test_agents_platform_rename_delete(client, tt_headers):
+    # TT 用户 A 创建平台共享代理
+    resp = client.post("/api/agents/create", headers=tt_headers,
+                       json={"name": "TT代理B"}, query_string={"platform": "tt"})
+    assert resp.status_code == 200
+    aid = resp.get_json()["id"]
+    # 另一个 TT 用户 B 跨 owner 重命名（平台级共享，无 owner 限制）
+    tt_headers2 = _mk_tt_headers(client, "ttuser2")
+    resp = client.put(f"/api/agents/{aid}", headers=tt_headers2,
+                      json={"name": "TT代理B改"}, query_string={"platform": "tt"})
+    assert resp.status_code == 200
+    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers2)
+    names = [a["name"] for a in resp.get_json()["agents"]]
+    assert "TT代理B改" in names
+    # 跨 owner 删除（平台级共享）
+    resp = client.delete(f"/api/agents/{aid}", headers=tt_headers2,
+                         query_string={"platform": "tt"})
+    assert resp.status_code == 200
+    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers2)
+    names = [a["name"] for a in resp.get_json()["agents"]]
+    assert "TT代理B改" not in names
