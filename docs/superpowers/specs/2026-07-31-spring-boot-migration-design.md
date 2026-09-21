@@ -1,10 +1,12 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.21  
-> **日期**: 2026-07-31（v1.21 更新于 2026-09-11）  
+> **文档版本**: v1.23  
+> **日期**: 2026-07-31（v1.23 更新于 2026-09-18）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.23 变更**: TT 设置界面最终实现细化（对应 `py/routes/tt_routes.py` 的 `/api/tt/settings`、`/api/tt/data/export`、`/api/tt/data/import` 与 `main.py` 的 `sales_persons_delete`）——① TT 数据导出按 owner_id 隔离（`tt_bcs`/`tt_products` 过滤 owner，packages/runners/delist_checks 由所属产品/包推导，`sales_persons` 导出 `platform='tt'` 全量供导入映射）；② TT 数据导入按外键依赖顺序重建（sales_persons→bcs→products→packages→runners→delist_checks）并建 old_id→new_id 映射，`owner_id`/`runners.user_id` 全部重映射为当前导入用户，BC 优先复用本人否则按全局唯一 `bc_id` 复用，商务按 name 匹配/新建；③ 导入加 JSON 结构强校验（非 dict 元素/缺 id 跳过）+ 事务 rollback（失败返回 400 不落半截数据）+ 20MB 上传上限；④ 前端商务/地区复用端点显式传 `platform=tt`，修复 admin（非 developer）平台回退 gg 的问题
+> **v1.22 变更**: 补充 TT（TikTok Ads）平台完整迁移设计——此前文档仅覆盖 GG+FB。新增 6 张 TT 表 MySQL DDL（`tt_bcs`/`tt_products`/`tt_product_runners`/`tt_packages`/`tt_delist_checks`/`tt_product_assets`，详见 5.2）与 `TtController`（28 个接口，详见 6.3），并新增 TT 设置界面（`/api/tt/settings` GET/POST，存全局 tags `tt_sheet_id`/`tt_sheet_mappings`，供后续 TT 账户管理读取 Google 表格）与 TT 数据导出/导入（`/api/tt/data/export`/`/api/tt/data/import`）。另在 `sales_persons_delete` 补 `tt_products` 引用检查（原只查 GG `products` 与 FB `fb_products`，删除被 TT 产品引用的商务人员会悬空引用）
 > **v1.21 变更**: 做表数据与 MCC 管理三处前端修复/增强（均纯前端，后端无改动）——① 做表数据「包含广告系列ID」与「7列数据」两个勾选项此前互斥（`zbIncludeCampaignId` 被 `:disabled="zbSevenCols"` 禁用），现改为可同时勾选，`adsParser.js` 增加「7列 + 含广告系列ID = 8列」组合（step=8、指标列整体后移1位、第5列广告系列ID自动剔除）；② MCC 新增/编辑弹窗「等级」下拉框此前依赖设置页 `loadMccLevels()` 才填充、直接进 MCC 面板为空，改为 `MccModal.vue` `init()` 懒加载（`if (!store.options.mccLevels.length) await store.loadMccLevels()`），并将「上级 MCC」下拉框加 `filterable` 支持搜索；③ 做表数据日期 `zbSelectedDate` 此前仅在组件初始化时算一次「昨天」、跨天后不更新导致覆盖到错误日期，新增 `scheduleZbMidnightRefresh()` 定时器在 0 点后自动更新为新「昨天」并递归调度到下一 0 点
 > **v1.20 变更**: 做表数据「养户」与「7列」判定解耦——前端 `ToolkitView.vue` 做表数据 Tab 的 `is_yanghu` 此前由 `zbYanghu（勾选7列）|| 命中养户关键词` 决定，导致勾选「7列（无安装/应用指标）」时所有行被误判为养户（G列写「养户」、H列写「止戈」、L列写「0%」，且不入库）。现改为**仅按系列名（campaign）命中养户关键词判定**：变量 `zbYanghu`→`zbSevenCols`（表示7列数据格式）、`adsParser.js` 参数 `isYanghu`→`isSevenCols`、勾选项文案改为「7列数据（无安装/应用指标）」。副作用：7 列非养户行现在会入库 `ad_reports`，因 7 列解析不含 `installs/in_app_actions/cost_per_in_app` 三字段，入库时按 0 写入（覆盖旧值）。后端接口契约不变（`is_yanghu` 仍由前端传入，详见 6.2 说明）
 > **v1.19 变更**: 掉包检测改为走代理 IP 访问 Google Play 链接（不再用服务端自身 IP，避免被风控/限流）。新增 `py/proxy_pool.py` 代理池模块（随机取用 + 失败自动切换下一个代理 + `enabled` 开关 + `max_retries` 重试）；`config/config.json` 新增 `delist_proxy` 段；`check_url_delisted` / `check_product_packages` 增加可选 `proxy_pool` 参数（缺省直连，向后兼容）；定时任务与手动检测均接入。迁移到 Spring Boot 时 DelistChecker 需支持代理池访问（详见 6.3、8.5 说明）
@@ -34,8 +36,8 @@
 2. [系统架构对比](#2-系统架构对比)
 3. [项目结构设计](#3-项目结构设计)
 4. [技术栈与依赖](#4-技术栈与依赖)
-5. [数据库设计 — 40 张表 MySQL DDL](#5-数据库设计)
-6. [API Controller 设计 — 240 个接口](#6-api-controller-设计)
+5. [数据库设计 — 46 张表 MySQL DDL](#5-数据库设计)
+6. [API Controller 设计 — 268 个接口](#6-api-controller-设计)
 7. [认证与安全](#7-认证与安全)
 8. [业务服务层设计](#8-业务服务层设计)
 9. [外部集成](#9-外部集成)
@@ -51,13 +53,13 @@
 
 | 维度 | 数量 |
 |------|------|
-| 后端代码行数 | ~19,400 行 Python |
-| API 路由 | **240 个** |
-| 数据库表 | **40 张** |
-| 前端页面 | 25 个 Vue 组件 |
+| 后端代码行数 | ~20,000 行 Python |
+| API 路由 | **268 个** |
+| 数据库表 | **46 张** |
+| 前端页面 | 30 个 Vue 组件 |
 | 外部集成 | 10 个（Google Sheets/Ads/AI/FFmpeg/邮件/Telegram 等） |
 | 用户角色 | 5 级（developer / admin / viewer / user / hidden） |
-| 平台隔离 | 2 个（GG Google Ads / FB Facebook Ads） |
+| 平台隔离 | 3 个（GG Google Ads / FB Facebook Ads / TT TikTok Ads） |
 
 ### 1.2 功能模块清单
 
@@ -78,6 +80,10 @@
 | FB Pixel | 5 | Pixel CRUD、关联 |
 | FB 数据提取 | 3 | 解析、去重、保存（异步写 Sheet） |
 | FB 报告 | 9 | 报告 CRUD、统计、导出、Sheet 同步/重试 |
+| TT BC 管理 | 5 | BC CRUD、选项 |
+| TT 产品管理 | 18 | 产品 CRUD、包管理、在跑人员、掉包检测、合并、文本导入、素材 |
+| TT 设置 | 4 | Google 表格配置、数据导出/导入（商务/地区复用共享端点） |
+| TT 用户 | 1 | TT 平台用户列表（在跑人员下拉） |
 | 视频/音频 | 16 | AI 视频生成、FFmpeg 合成、音频替换、历史 |
 | 图片抓取 | 5 | Google Play 截图抓取、上传 |
 | 字体管理 | 7 | 字体导入/预览/上传 |
@@ -269,14 +275,14 @@ lm-server/
 │   │   │   │   ├── CopywritingRepository.java
 │   │   │   │   ├── AuditLogRepository.java
 │   │   │   │   ├── ConfigRepository.java
-│   │   │   │   └── ... (40个Repository)
+│   │   │   │   └── ... (46个Repository)
 │   │   │   │
-│   │   │   ├── entity/                            # JPA 实体 (40个)
+│   │   │   ├── entity/                            # JPA 实体 (46个)
 │   │   │   │   ├── User.java
 │   │   │   │   ├── Account.java
 │   │   │   │   ├── FbAccount.java
 │   │   │   │   ├── FbBm.java
-│   │   │   │   ├── ... (40个Entity)
+│   │   │   │   ├── ... (46个Entity)
 │   │   │   │
 │   │   │   ├── dto/                               # 数据传输对象
 │   │   │   │   ├── request/                       # 请求 DTO
@@ -543,7 +549,7 @@ Security:   com.lmserver.security
 
 ### 5.2 完整 MySQL DDL
 
-> **说明**: 以下为全部 40 张表的 MySQL 8.0 DDL。执行顺序应按分类依次执行。
+> **说明**: 以下为全部 46 张表的 MySQL 8.0 DDL。执行顺序应按分类依次执行。
 
 ```sql
 -- ============================================================
@@ -1199,7 +1205,101 @@ CREATE TABLE fb_ad_reports (
 ) ENGINE=InnoDB COMMENT='FB广告投放报告';
 
 -- ============================================================
--- 八、初始化数据
+-- 八、TT (TikTok) 平台 (6 张表)
+-- ============================================================
+
+-- tt_bcs — TT BC 表
+CREATE TABLE tt_bcs (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name        VARCHAR(255) NOT NULL COMMENT 'BC 名称',
+    bc_id       VARCHAR(255) NOT NULL UNIQUE COMMENT 'BC ID（唯一）',
+    note        TEXT         DEFAULT '' COMMENT '备注',
+    status      VARCHAR(20)  DEFAULT 'normal' COMMENT '状态: normal/banned',
+    owner_id    BIGINT       NULL COMMENT '所属用户ID',
+    deleted_at  DATETIME     NULL COMMENT '软删除时间',
+    created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_tt_bcs_owner (owner_id),
+    INDEX idx_tt_bcs_status (status),
+    CONSTRAINT fk_tt_bcs_owner FOREIGN KEY (owner_id) REFERENCES users(id)
+) ENGINE=InnoDB COMMENT='TT BC 表';
+
+-- tt_products — TT 产品表
+CREATE TABLE tt_products (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    product_name    VARCHAR(255) NOT NULL COMMENT '产品/群名',
+    kpi             VARCHAR(255) DEFAULT '' COMMENT 'KPI',
+    region          VARCHAR(100) DEFAULT '' COMMENT '地区',
+    status          VARCHAR(20)  DEFAULT 'active' COMMENT '状态: active/paused',
+    bc_id           BIGINT       NULL COMMENT '所属 BC',
+    sales_person_id BIGINT       NULL COMMENT '商务人员',
+    agency_ratio    DOUBLE       DEFAULT 0 COMMENT '代投比例',
+    customer        VARCHAR(255) DEFAULT '' COMMENT '客户',
+    owner_id        BIGINT       NULL COMMENT '所属用户ID',
+    is_archived     TINYINT      DEFAULT 0 COMMENT '是否归档',
+    created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at      DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_tt_products_owner (owner_id),
+    INDEX idx_tt_products_region (region),
+    INDEX idx_tt_products_bc (bc_id),
+    CONSTRAINT fk_tt_products_bc FOREIGN KEY (bc_id) REFERENCES tt_bcs(id),
+    CONSTRAINT fk_tt_products_sales FOREIGN KEY (sales_person_id) REFERENCES sales_persons(id),
+    CONSTRAINT fk_tt_products_owner FOREIGN KEY (owner_id) REFERENCES users(id)
+) ENGINE=InnoDB COMMENT='TT 产品表';
+
+-- tt_product_runners — TT 产品在跑人员关联表
+CREATE TABLE tt_product_runners (
+    product_id BIGINT NOT NULL COMMENT '产品ID',
+    user_id    BIGINT NOT NULL COMMENT '在跑人员用户ID',
+    PRIMARY KEY (product_id, user_id),
+    INDEX idx_tt_product_runners_user (user_id),
+    CONSTRAINT fk_tt_runners_product FOREIGN KEY (product_id) REFERENCES tt_products(id) ON DELETE CASCADE,
+    CONSTRAINT fk_tt_runners_user FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB COMMENT='TT 产品在跑人员关联表';
+
+-- tt_packages — TT 产品包表
+CREATE TABLE tt_packages (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    product_id   BIGINT NOT NULL COMMENT '所属产品',
+    type         VARCHAR(20)  DEFAULT 'package' COMMENT '类型: package/pwa',
+    series_name  VARCHAR(255) DEFAULT '' COMMENT '系列名',
+    package_name VARCHAR(255) DEFAULT '' COMMENT '包名',
+    url          VARCHAR(500) DEFAULT '' COMMENT '链接',
+    status       VARCHAR(20)  DEFAULT '' COMMENT '状态: normal/no_events/paused/dropped/rejected',
+    created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at   DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_tt_packages_product (product_id),
+    INDEX idx_tt_packages_type (type),
+    CONSTRAINT fk_tt_packages_product FOREIGN KEY (product_id) REFERENCES tt_products(id) ON DELETE CASCADE
+) ENGINE=InnoDB COMMENT='TT 产品包表';
+
+-- tt_delist_checks — TT 掉包检测结果表
+CREATE TABLE tt_delist_checks (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    package_id  BIGINT NOT NULL COMMENT '包ID',
+    is_delisted TINYINT DEFAULT 0 COMMENT '是否掉包',
+    checked_at  DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '检测时间',
+    UNIQUE KEY uk_tt_delist_package (package_id),
+    CONSTRAINT fk_tt_delist_package FOREIGN KEY (package_id) REFERENCES tt_packages(id) ON DELETE CASCADE
+) ENGINE=InnoDB COMMENT='TT 掉包检测结果表';
+
+-- tt_product_assets — TT 产品素材表
+CREATE TABLE tt_product_assets (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    product_id      BIGINT NOT NULL COMMENT '所属产品',
+    video_id        VARCHAR(255) NOT NULL COMMENT '素材视频ID',
+    video_owner_id  BIGINT NOT NULL DEFAULT 1 COMMENT '素材所属用户ID',
+    added_by        BIGINT NULL COMMENT '添加人用户ID',
+    added_at        DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '添加时间',
+    UNIQUE KEY uk_tt_asset (product_id, video_id),
+    INDEX idx_tt_assets_product (product_id),
+    INDEX idx_tt_assets_video (video_id),
+    CONSTRAINT fk_tt_assets_product FOREIGN KEY (product_id) REFERENCES tt_products(id),
+    CONSTRAINT fk_tt_assets_added_by FOREIGN KEY (added_by) REFERENCES users(id)
+) ENGINE=InnoDB COMMENT='TT 产品素材表';
+
+-- ============================================================
+-- 九、初始化数据
 -- ============================================================
 
 -- 默认 developer 账户（密码: admin123，BCrypt 编码）
@@ -1716,7 +1816,8 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 | `UtilityController` | `/api/browse-*`, `/api/translate` | 5 | 混合 |
 | `GoogleSheetsController` | `/api/google-sheets/*` | 4 | JWT |
 | `GoogleAdsController` | `/api/google-ads/*` | 2 | 无 |
-| **合计** | | **240** | |
+| `TtController` | `/api/tt/*` | 28 | JWT |
+| **合计** | | **268** | |
 
 > **说明（v1.10 新增）**：`DelistController` 的 `delist/pending` 返回**产品聚合**结构
 > （`{ product_id, product_name, series_names[], package_ids[], type, reminder_count }`），
@@ -1740,6 +1841,23 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - 代理池按 `(ip, port)` 去重，随机取一个；请求失败（连接失败/超时）时换下一个代理重试，最多 `max_retries` 次。
 > - **关键：区分「代理挂了」和「真掉包」**。代理全部失败时返回 `is_delisted=false` + 带「代理」标识的 error（如 `代理全部失败: ...`），**绝不误判为掉包**；仅当通过代理拿到明确 404 / 关键词时才判 `is_delisted=true`。
 > - Java 侧映射：`py/proxy_pool.py` → `delist/DelistProxyPool.java`（解析配置、去重、随机取用、生成代理参数）；`check_url_delisted(url, proxy_pool)` → `DelistChecker.checkUrlDelisted(url, proxyPool)`。**注意 `RestTemplate` 默认不支持按请求动态切换代理**（`SimpleClientHttpRequestFactory.setProxy()` 为全局单一代理），需用 Apache HttpClient（每请求 `RequestConfig`/`HttpClientContext` 指定 proxy）或 OkHttp（每请求 `newBuilder().proxy(...)`）实现逐请求换代理。
+>
+> **说明（v1.22 新增）**：TT 平台（`TtController`）共 28 个接口，端点分组如下：
+> - **BC**（5）：`GET/POST /api/tt/bcs/list|create`、`PUT/DELETE /api/tt/bcs/{id}`、`GET /api/tt/bcs/options`
+> - **产品**（9）：`GET /api/tt/products/list`、`GET /api/tt/products/runner-products`、`POST /api/tt/products/create`、`PUT/DELETE /api/tt/products/{id}`、`POST /api/tt/products/{id}/restore`、`GET /api/tt/products/{id}/detail`、`POST /api/tt/products/merge`、`POST /api/tt/products/import-text`
+> - **包**（4）：`POST /api/tt/products/{id}/packages`、`PUT/DELETE /api/tt/packages/{id}`、`POST /api/tt/packages/batch-delete`
+> - **掉包**（2）：`POST /api/tt/products/{id}/check-delist`、`GET /api/tt/products/delist-status`
+> - **素材**（3）：`GET/POST /api/tt/products/{id}/assets`、`DELETE /api/tt/products/{id}/assets/{videoId}`
+> - **用户**（1）：`GET /api/tt/users`
+> - **设置**（2，v1.22 新增）：`GET/POST /api/tt/settings`（存全局 tags `tt_sheet_id`/`tt_sheet_mappings`，供 TT 账户管理读取 Google 表格，仅 admin/developer 可写）
+> - **数据**（2，v1.22 新增）：`GET /api/tt/data/export`、`POST /api/tt/data/import`
+> - 商务人员/地区复用 `OptionController`（`/api/sales-persons/*`、`/api/regions/*`），通过 `platform=tt` 隔离；`sales_persons_delete` 需补 `tt_products` 引用检查与解除引用（原只查 GG `products`/FB `fb_products`），否则删除被 TT 产品引用的商务人员会悬空
+>
+> **TT 数据导出/导入迁移要点（v1.23 补充）**：
+> - **导出**（`GET /api/tt/data/export`）：`tt_bcs`（`owner_id=? AND deleted_at IS NULL`）与 `tt_products`（`owner_id=? AND is_archived=0`）按当前用户 owner 隔离；`tt_packages`/`tt_product_runners`/`tt_delist_checks` 由上述产品/包 id 推导（不跨 owner）；`sales_persons` 导出 `platform='tt'` 全量（商务人员为平台级共享选项，供导入映射）。返回 `{version, exported_at, source:"tt-server", data:{bcs,products,packages,product_runners,delist_checks,sales_persons}}` 附件下载。
+> - **导入**（`POST /api/tt/data/import`，multipart `.json`）：按外键依赖顺序重建并建 `old_id→new_id` 映射——① sales_persons 按 name 匹配/新建（platform='tt'）；② tt_bcs 优先复用本人（`bc_id=? AND owner_id=?`），否则按全局唯一 `bc_id` 复用（bc_id 全局 UNIQUE，无法重复建）；③ tt_products `owner_id=当前用户`、映射 bc_id/sales_person_id；④ tt_packages 映射 product_id；⑤ tt_product_runners 映射 product_id、`user_id=当前用户`；⑥ tt_delist_checks 映射 package_id。**owner_id 全部重映射为当前导入用户**，杜绝横向越权。
+> - **健壮性**：JSON 结构强校验（各数据块强制为 dict 列表，非 dict 元素/缺 id 跳过）；事务失败 `rollback`（返回 400，不落半截数据）；上传限 20MB。SQLite 用 `PRAGMA foreign_keys=OFF/ON`，MySQL 侧对应 `SET foreign_key_checks=0/1`（建议在 `@Transactional` 内完成、异常自动回滚）。
+> - **范围取舍**：`tt_product_assets`（素材，关联 videos）不导出/导入；仅支持 `.json`（不支持 GG 的 `.db` 旧库导入）。
 
 ---
 
@@ -3205,7 +3323,7 @@ server: {
 
 ### 12.3 向后兼容检查清单
 
-- [ ] 所有 236 个 API 路径不变
+- [ ] 所有 268 个 API 路径不变
 - [ ] JWT Token 格式保持 `Authorization: Bearer xxx`
 - [ ] 响应格式保持 `{success, data/error}`（去掉 Python 的 `success` 外层包裹? → 保留，前端依赖）
 - [ ] 分页格式保持 `{items, total, page, size}`
@@ -3310,9 +3428,10 @@ public class AuthService {
 |------------|----------|
 | `py/main.py` (9652行) | 拆分为 20+ Controller + 15+ Service |
 | `py/auth.py` | `security/` + `AuthService` + `UserRepository` |
-| `py/database.py` | JPA Entities + 40个 Repository + `schema.sql` |
+| `py/database.py` | JPA Entities + 46个 Repository + `schema.sql` |
 | `py/routes/auth_routes.py` | `AuthController` |
 | `py/routes/fb_routes.py` | 9个 FB Controller |
+| `py/routes/tt_routes.py` | `TtController`（28 接口） |
 | `py/routes/decorators.py` | `@FbPlatformRequired`, `@AdminRequired` AOP |
 | `py/routes/helpers.py` | `ApiResponse` / `PagedResponse` + `SecurityUtil` + `RepositoryUtil` |
 | `py/utils.py` | `util/` 包（`UrlUtil`, `NaturalSortUtil`, `ImageFormatUtil`） |
@@ -3334,7 +3453,7 @@ public class AuthService {
 
 | 决策点 | 选择 | 理由 |
 |--------|------|------|
-| ORM | Spring Data JPA | 40 张表，JPA 自动生成 CRUD |
+| ORM | Spring Data JPA | 46 张表，JPA 自动生成 CRUD |
 | 数据库 | MySQL 8.0 | 用户要求，功能完整 |
 | JSON 列 | MySQL JSON 类型 | runner_ids, settings 等字段原生 JSON 支持 |
 | 缓存 | Caffeine | 单机部署，无需 Redis |
@@ -3349,7 +3468,7 @@ public class AuthService {
 
 ---
 
-> **文档结束** — 本文档涵盖从 Flask+SQLite 到 Spring Boot+MySQL 的全部迁移设计，包含 236 个 API、40 张表、15 个业务服务的完整设计方案。前端不变，仅替换后端。
+> **文档结束** — 本文档涵盖从 Flask+SQLite 到 Spring Boot+MySQL 的全部迁移设计，包含 268 个 API、46 张表、15 个业务服务的完整设计方案。前端不变，仅替换后端。
 
 ---
 
