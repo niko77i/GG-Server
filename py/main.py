@@ -5317,8 +5317,21 @@ def mcc_list():
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
     uid_str = str(user_id)
-    perm_where = "(m.owner_id = ? OR m.shared_user_ids = ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ?)"
-    perm_params = [user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]"]
+    actor = auth.get_user_by_id(user_id)
+    actor_role = (actor or {}).get("role", "user")
+    cross_user = actor_role in CROSS_USER_ROLES
+    owner_filter = request.args.get("owner_id", "").strip()
+    if not cross_user:
+        owner_filter = ""
+    if owner_filter:
+        perm_where = "m.owner_id = ?"
+        perm_params = [owner_filter]
+    elif cross_user:
+        perm_where = "1=1"
+        perm_params = []
+    else:
+        perm_where = "(m.owner_id = ? OR m.shared_user_ids = ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ?)"
+        perm_params = [user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]"]
 
     has_filter = bool(search or level)
 

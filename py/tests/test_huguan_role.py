@@ -405,6 +405,9 @@ class TestPlatformUsersEndpoint:
         assert resp.status_code == 200
         names = {x["username"] for x in resp.get_json()["users"]}
         assert "_hgpu_leak" not in names
+        # 正向断言：调用者自己（platform='gg'）必须在结果里。否则若接口返回空列表，
+        # 上面那条负面断言也会通过 —— 那就成了空断言。
+        assert "_hgpu_plain" in names
 
 
 def _mk_account(db, owner_id, account_id, name="测试账户"):
@@ -489,3 +492,79 @@ class TestGgAccountListCrossUser:
         hdr, _ = _create_user(client, "_ggac_u4", role="user")
         resp = client.get("/api/accounts/list?size=50&agent=代理乙", headers=hdr)
         assert [a["account_id"] for a in resp.get_json()["accounts"]] == []
+
+
+def _mk_mcc(db, owner_id, mcc_code, name="测试MCC"):
+    db.execute("INSERT INTO mcc(name, mcc_id, owner_id) VALUES(?,?,?)", (name, mcc_code, owner_id))
+    db.commit()
+
+
+class TestGgMccListCrossUser:
+    def _setup(self, client):
+        hg, hg_id = _huguan(client, "_ggmcc_hg")
+        _, u1 = _create_user(client, "_ggmcc_u1", role="user")
+        _, u2 = _create_user(client, "_ggmcc_u2", role="user")
+        db = database.get_db()
+        _mk_mcc(db, u1, "MCC-1", "U1的MCC")
+        _mk_mcc(db, u2, "MCC-2", "U2的MCC")
+        db.close()
+        return hg, hg_id, u1, u2
+
+    def test_huguan_sees_all_mcc(self, client):
+        hg, _, _, _ = self._setup(client)
+        resp = client.get("/api/mcc/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        codes = {m["mcc_id"] for m in resp.get_json()["mcc_list"]}
+        assert codes == {"MCC-1", "MCC-2"}
+
+    def test_huguan_filters_by_owner(self, client):
+        hg, _, u1, _ = self._setup(client)
+        resp = client.get(f"/api/mcc/list?size=50&owner_id={u1}", headers=hg)
+        codes = {m["mcc_id"] for m in resp.get_json()["mcc_list"]}
+        assert codes == {"MCC-1"}
+
+    def test_regular_user_still_scoped(self, client):
+        """回归：普通用户看不到别人的 MCC，且 owner_id 参数无效。"""
+        _, _, u1, _ = self._setup(client)
+        hdr, _ = _create_user(client, "_ggmcc_u3", role="user")
+        resp = client.get(f"/api/mcc/list?size=50&owner_id={u1}", headers=hdr)
+        assert resp.get_json()["mcc_list"] == []
+
+
+class TestGgAccountListDropdownOwnerLeak:
+    """守护 /api/accounts/list 下拉数据的归属收放（Task 5 引入的
+    `if not cross_user: owner_filter = ""`）。
+
+    Task 5 的 test_regular_user_ignores_owner_id 只断言 accounts 数组为空，而该数组由
+    where 列表里恒为「自身 id」的归属分支兜底 —— 即使把那行守卫删掉，普通用户传
+    owner_id 也仍然拿不到别人的 accounts，所以它抓不到下拉数据的越权。本用例专盯
+    mcc_options / agents / timezone_options 三个下拉字段。
+    """
+
+    def test_regular_user_cannot_leak_dropdown_via_owner_id(self, client):
+        # _app_cache 是进程级全局缓存，pytest 不重置它，且缓存键只含 user_id + scope、
+        # 不含 agent 等筛选参数。若不清空，其它用例留下的同键空列表会让本用例变成空断言。
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        hdr_b, _ = _create_user(client, "_ggdd_b", role="user")  # 调用者 B：什么都不拥有
+        _, a_id = _create_user(client, "_ggdd_a", role="user")   # 数据所有者 A
+        db = database.get_db()
+        _mk_account(db, a_id, "GG-DD-1", "A的账户")
+        _mk_mcc(db, a_id, "MCC-DD", "A的MCC")
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('代理DD', ?, 'gg')", (a_id,))
+        ag_id = db.execute("SELECT id FROM agents WHERE name='代理DD'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=?, timezone='Asia/Shanghai' WHERE account_id='GG-DD-1'",
+                   (ag_id,))
+        db.commit()
+        db.close()
+
+        resp = client.get(f"/api/accounts/list?size=50&owner_id={a_id}&agent=代理DD", headers=hdr_b)
+        assert resp.status_code == 200
+        data = resp.get_json()
+        # accounts 本就被 where 的归属分支挡掉，不是本用例的重点
+        assert data["accounts"] == []
+        # 三个下拉字段才是守卫真正保护的地方
+        assert [m["name"] for m in data["mcc_options"]] == []
+        assert data["agents"] == []
+        assert data["timezone_options"] == []
