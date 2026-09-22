@@ -995,3 +995,128 @@ class TestFbCrossUser:
         names = {p["product_name"] for p in resp.get_json()["items"]}
         assert "户管在跑的产品" in names   # 正向对照：接口对户管确实有效
         assert "别人的FB产品" not in names  # 产品域不放行
+
+    # ------------------------------------------------------------------
+    # D1：`else` 分支（非跨用户角色只看自己）—— 四个此前无守卫的站点
+    # ------------------------------------------------------------------
+
+    def test_regular_fb_user_sees_only_own_bms(self, client):
+        """`else` 分支（非跨用户角色只看自己）—— `/api/fb/bms/list`。
+
+        审查员变异证据：把 `py/routes/fb_routes.py:37-39` 的 `else:` 分支改成 `pass`
+        （普通用户于是能看到**全部** BM），全量 333 条测试仍全绿 —— 本用例即那个豁口。
+        """
+        self._setup(client)
+        me, me_id = _create_user(client, "_fb_cs_ru1", role="user", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES('我的BM','BM-MINE',?)", (me_id,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/bms/list?size=50", headers=me)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-MINE"}
+
+    def test_regular_fb_user_sees_only_own_bms_unified(self, client):
+        """`else` 分支 —— `/api/fb/bms/unified`（UNION 两半边都要各自加 uid 条件）。"""
+        self._setup(client)
+        me, me_id = _create_user(client, "_fb_cs_ru2", role="user", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES('我的BM','BM-MINE',?)", (me_id,))
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('我的像素BM','PBM-MINE',?)", (me_id,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/bms/unified?size=50", headers=me)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-MINE", "PBM-MINE"}
+
+    def test_regular_fb_user_sees_only_own_deleted_accounts(self, client):
+        """`else` 分支 —— `/api/fb/accounts/deleted`（回收站）。
+
+        **负向对照是必需的**：`_setup` 造的 FB-AC-1/2 都没删，若只插「我的一条」，
+        则 `else:` 被改成 `pass`（丢掉 owner 条件）时结果依然是 `{FB-DEL-MINE}` ——
+        断言集合相等却恒真。实测变异 3 原样通过即此故。故额外插入 u1 的一条**已删除**账户
+        作为必须被挡住的对照行。
+        """
+        _, u1, _ = self._setup(client)
+        me, me_id = _create_user(client, "_fb_cs_ru3", role="user", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, deleted_at) "
+                   "VALUES('我的回收站账户','FB-DEL-MINE',?, datetime('now','localtime'))", (me_id,))
+        # 负向对照：别人的回收站账户不得出现
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, deleted_at) "
+                   "VALUES('别人的回收站账户','FB-DEL-THEIRS',?, datetime('now','localtime'))", (u1,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/accounts/deleted?size=50", headers=me)
+        assert resp.status_code == 200
+        assert {a["account_id"] for a in resp.get_json()["items"]} == {"FB-DEL-MINE"}
+
+    def test_regular_fb_user_sees_only_own_pixel_bms(self, client):
+        """`else` 分支 —— `/api/fb/pixel-bms/list`。
+
+        **负向对照是必需的**：`_setup` 不造任何 `fb_pixel_bms`，若只插「我的一条」，
+        则 `else:` 被改成 `pass` 时结果依然是 `{PBM-MINE}` —— 断言恒真（实测变异 4 原样通过）。
+        故额外插入 u1 的一条像素 BM 作为必须被挡住的对照行。
+        """
+        _, u1, _ = self._setup(client)
+        me, me_id = _create_user(client, "_fb_cs_ru4", role="user", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('我的像素BM','PBM-MINE',?)", (me_id,))
+        # 负向对照：别人的像素 BM 不得出现
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('别人的像素BM','PBM-THEIRS',?)", (u1,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/pixel-bms/list?size=50", headers=me)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"PBM-MINE"}
+
+    # ------------------------------------------------------------------
+    # D2：developer / admin 在 `/api/fb/bms/list` 的语义（代表性站点）
+    # ------------------------------------------------------------------
+
+    def test_developer_sees_all_bms_without_owner_id(self, client):
+        """纯增量守卫：developer 不传 owner_id 时看全部 —— 本任务改前改后都必须为真。
+
+        对应 `py/routes/fb_routes.py:33` 新增的 `if cross_user:` 闸门。审查员变异证据：
+        把该行改成 `if cross_user and role == "huguan":` 时全量 333 条测试仍全绿 ——
+        即本任务新写的这段代码让 developer 静默退化为「只看自己」也没人报警。
+        """
+        self._setup(client)
+        dev, _ = _create_user(client, "_fb_cs_dev", role="developer", platform="gg")
+        resp = client.get("/api/fb/bms/list?size=50", headers=dev)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1", "BM-2"}
+
+    def test_developer_narrows_when_owner_id_given(self, client):
+        """developer 带 owner_id 时**收窄** —— 这是本任务有意引入的语义变化。
+
+        改前 developer 不受 `owner_id` 影响（返回全部）；改后收窄到指定 owner。
+        该变化已由设计文档放行（developer 获得跨用户账户可见性），本用例把新语义钉住，
+        避免日后被当成回归误修回「忽略 owner_id」。
+        """
+        _, u1, _ = self._setup(client)
+        dev, _ = _create_user(client, "_fb_cs_dev2", role="developer", platform="gg")
+        resp = client.get(f"/api/fb/bms/list?size=50&owner_id={u1}", headers=dev)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1"}
+
+    def test_admin_sees_all_bms_without_owner_id(self, client):
+        """纯增量守卫：admin 不传 owner_id 时看全部。
+
+        注意 admin **不跨平台**（`PLATFORM_SWITCH_ROLES` 不含 admin），故 platform 必须为 'fb'。
+        与 `test_developer_sees_all_bms_without_owner_id` 成对：变异 `role == "huguan"` 会同时
+        静默打挂两者，只测一侧则另一侧仍无网。
+        """
+        self._setup(client)
+        adm, _ = _create_user(client, "_fb_cs_adm", role="admin", platform="fb")
+        resp = client.get("/api/fb/bms/list?size=50", headers=adm)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1", "BM-2"}
+
+    def test_admin_narrows_when_owner_id_given(self, client):
+        """admin 带 owner_id 时收窄 —— 与 developer 侧同一语义变化。"""
+        _, u1, _ = self._setup(client)
+        adm, _ = _create_user(client, "_fb_cs_adm2", role="admin", platform="fb")
+        resp = client.get(f"/api/fb/bms/list?size=50&owner_id={u1}", headers=adm)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1"}
