@@ -5,7 +5,7 @@ import re
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
-from .decorators import tt_required, tt_write_required, no_huguan
+from .decorators import tt_required, tt_write_required, no_huguan, reject_huguan
 
 tt_bp = Blueprint('tt', __name__)
 
@@ -1009,6 +1009,13 @@ def tt_data_import():
     runners = _as_dict_list(data.get('product_runners'))
     delist_checks = _as_dict_list(data.get('delist_checks'))
     sales_persons = _as_dict_list(data.get('sales_persons'))
+
+    # 户管无产品/包编辑权：导入载荷含产品/包时拒绝。
+    # runners / delist_checks 依赖 products / packages 的重映射，缺前者时本就惰性空转，无需单独拦。
+    if products or packages:
+        err_resp = reject_huguan()
+        if err_resp:
+            return err_resp
 
     db.execute("PRAGMA foreign_keys=OFF")
     runner_count = 0

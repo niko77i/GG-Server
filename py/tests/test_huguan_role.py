@@ -1,4 +1,7 @@
 """户管（huguan）角色权限测试。"""
+import io
+import json
+
 import database
 
 
@@ -1420,3 +1423,66 @@ class TestHuguanBlockedFromProductDomain:
         resp = client.post("/api/tt/products/create", json={"product_name": "开发者的产品"},
                            headers=dev)
         assert resp.status_code == 200
+
+
+def _import_payload(client, headers, payload):
+    """以 multipart 上传导出的 JSON 载荷到 /api/tt/data/import（写法照抄 test_tt_routes）。"""
+    file_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return client.post("/api/tt/data/import", headers=headers,
+                       data={"file": (io.BytesIO(file_bytes), "export.json")},
+                       content_type="multipart/form-data")
+
+
+class TestHuguanBlockedFromDataImport:
+    """@tt_write_required 会放行户管，导入载荷里的 products / packages 是残留写入通道。"""
+
+    PRODUCT_PAYLOAD = {"data": {"products": [{"id": 1, "product_name": "导入产品"}]}}
+
+    def test_huguan_cannot_import_products(self, client):
+        """户管导入含产品的载荷 → 403，且产品绝不能落库。"""
+        hg, hg_id = _huguan(client, "_hg_imp_products")
+        resp = _import_payload(client, hg, self.PRODUCT_PAYLOAD)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "户管无产品/素材权限"
+        db = database.get_db()
+        row = db.execute("SELECT COUNT(*) FROM tt_products WHERE owner_id=?", (hg_id,)).fetchone()
+        db.close()
+        assert row[0] == 0
+
+    def test_huguan_can_still_import_bcs(self, client):
+        """对照行：不得把户管整体拒绝——BC + 商务人员仍可导入并落库。"""
+        hg, hg_id = _huguan(client, "_hg_imp_bcs")
+        payload = {"data": {
+            "bcs": [{"id": 1, "bc_id": "123456789", "name": "导入BC"}],
+            "sales_persons": [{"id": 1, "name": "导入商务"}],
+        }}
+        resp = _import_payload(client, hg, payload)
+        assert resp.status_code == 200
+        db = database.get_db()
+        bc = db.execute("SELECT owner_id FROM tt_bcs WHERE bc_id=?", ("123456789",)).fetchone()
+        sp = db.execute("SELECT owner_id FROM sales_persons WHERE name=?", ("导入商务",)).fetchone()
+        db.close()
+        assert bc is not None and bc["owner_id"] == hg_id
+        assert sp is not None and sp["owner_id"] == hg_id
+
+    def test_developer_can_still_import_products(self, client):
+        """对照行：闸门只针对户管，developer 导入产品不受影响。"""
+        dev, dev_id = _create_user(client, "_hg_imp_dev", role="developer", platform="gg")
+        resp = _import_payload(client, dev, self.PRODUCT_PAYLOAD)
+        assert resp.status_code == 200
+        assert resp.get_json()["report"]["products"] == 1
+        db = database.get_db()
+        row = db.execute("SELECT COUNT(*) FROM tt_products WHERE owner_id=?", (dev_id,)).fetchone()
+        db.close()
+        assert row[0] == 1
+
+    def test_tt_user_can_still_import_products(self, client):
+        """纯增量对照：普通 TT 用户导入产品保持原状。"""
+        headers, uid = _create_user(client, "_hg_imp_ttuser", role="user", platform="tt")
+        resp = _import_payload(client, headers, self.PRODUCT_PAYLOAD)
+        assert resp.status_code == 200
+        assert resp.get_json()["report"]["products"] == 1
+        db = database.get_db()
+        row = db.execute("SELECT COUNT(*) FROM tt_products WHERE owner_id=?", (uid,)).fetchone()
+        db.close()
+        assert row[0] == 1
