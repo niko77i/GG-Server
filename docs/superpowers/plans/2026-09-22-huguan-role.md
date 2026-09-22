@@ -2353,6 +2353,159 @@ git commit -m "feat: GG 账户页 Tab 对户管开放，平台根路由按身份
 
 ---
 
+### Task 14A: 户管用户列表跨平台口径（后端）
+
+> **来源（2026-09-22，执行期新增）**：本任务**不在原始计划中**，是 Task 14 执行前预检发现缺口后经用户裁决
+> （D9 修订）新增的。原始计划只写了「需求 3.6.2 给户管列表加 `role_filter=huguan`」，**未提平台维度**。
+>
+> **缺口**：`py/auth.py:79-82` 对**任何非 developer 调用者（含户管）强制 `platform = 调用者自己的 users.platform`，
+> 且忽略请求传入的 `platform` 参数**。而 `/api/admin/users`（`py/main.py:7549-7561`）已对户管放行、强制
+> `role_filter="huguan"`，`client.js` 又对户管注入 `?platform=`（Task 11）。叠加 Task 14 Step 3 让户管创建的户管
+> 按 `effectivePlatform` 落库 ⇒ **户管在 FB 界面下创建一个户管，切到 GG 后就再也看不到、也管不了它**。
+> 「只能管理自己创建的户管」这条边界的另一半（看得见）断裂。
+>
+> **用户裁决（D9 修订）**：户管列表**跨平台**显示，且**保留「平台」列**（跨平台后该列才有意义——
+> 每行归属哪个平台影响该户管的默认落地页）。代价：需动 `py/auth.py`，故独立成任务。
+
+**Files:**
+- Modify: `py/auth.py:60-90`（`list_users` 的平台过滤分支）
+- Test: `py/tests/test_huguan_role.py`（追加）
+
+**Interfaces:**
+- Consumes: 无（纯后端）
+- Produces: `auth.list_users(current_user_id=<户管 id>)` 不再按 `platform` 过滤；户管调 `GET /api/admin/users`
+  可看到**全部平台**的 `huguan` 角色用户（含自己）。**其余一切调用者的平台隔离语义逐字不变。**
+
+- [ ] **Step 1: 写失败测试**
+
+在 `py/tests/test_huguan_role.py` 追加（复用文件顶部既有的 `_create_user(client, username, role, platform, created_by)`）：
+
+```python
+class TestHuguanUserListCrossPlatform:
+    """户管的用户列表跨平台（D9 修订）。
+
+    缺口源：`py/auth.py:79-82` 对非 developer 调用者强制 `platform = 自己平台` 并忽略传入的
+    `platform` 参数 ⇒ 户管在 FB 建出的户管，切到 GG 后看不见。本类既是修复的正向证明，
+    也是「其余角色平台隔离不得被放宽」的路障（第 3/4/5 条）。
+    """
+
+    def _setup(self, client):
+        """造出：户管自己(gg) + 其名下 gg/fb 两个户管 + 两个**必须被排除**的对照行。"""
+        hg, hg_id = _create_user(client, "_ulc_hg", role="huguan", platform="gg")
+        _create_user(client, "_ulc_h_gg", role="huguan", platform="gg", created_by=hg_id)
+        _create_user(client, "_ulc_h_fb", role="huguan", platform="fb", created_by=hg_id)
+        # 对照行 1：普通 user（role_filter=huguan 必须排除它）
+        _create_user(client, "_ulc_plain_fb", role="user", platform="fb")
+        # 对照行 2：developer（list_users 对非 developer 调用者的 role != 'developer' 必须排除它）
+        _create_user(client, "_ulc_dev", role="developer", platform="gg")
+        return hg, hg_id
+
+    def test_huguan_sees_huguans_across_all_platforms(self, client):
+        """集合**相等**：既证明看得到 fb 的户管，也证明两个对照行被排除。"""
+        hg, _ = self._setup(client)
+        resp = client.get("/api/admin/users?page_size=50", headers=hg)
+        assert resp.status_code == 200
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert names == {"_ulc_hg", "_ulc_h_gg", "_ulc_h_fb"}
+
+    def test_huguan_ignores_platform_param(self, client):
+        """`?platform=` 对户管必须被忽略——否则前端注入的 `?platform=` 会把跨平台收窄回单平台。"""
+        hg, _ = self._setup(client)
+        resp = client.get("/api/admin/users?page_size=50&platform=fb", headers=hg)
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert names == {"_ulc_hg", "_ulc_h_gg", "_ulc_h_fb"}
+
+    def test_admin_still_platform_isolated(self, client):
+        """回归路障：admin 不得被 `is_huguan` 分支吞掉（`test_user_platform_isolation.py:43` 同因同源）。"""
+        adm, _ = _create_user(client, "_ulc_adm", role="admin", platform="tt")
+        _create_user(client, "_ulc_tt_user", role="user", platform="tt")
+        _create_user(client, "_ulc_gg_user", role="user", platform="gg")
+        resp = client.get("/api/admin/users?platform=gg", headers=adm)
+        assert {u["platform"] for u in resp.get_json()["users"]} == {"tt"}
+
+    def test_regular_user_still_platform_isolated(self, client):
+        """回归路障：普通用户仍只看自己平台（直接调函数，因为 user 无权访问 /api/admin/users）。"""
+        from auth import list_users
+        _, ugg = _create_user(client, "_ulc_ru_gg", role="user", platform="gg")
+        _create_user(client, "_ulc_ru_tt", role="user", platform="tt")
+        res = list_users(current_user_id=ugg)
+        assert {u["platform"] for u in res["users"]} == {"gg"}
+
+    def test_developer_still_sees_all_platforms(self, client):
+        """回归路障：developer 行为不变（本任务不得改动 `is_dev` 分支）。"""
+        from auth import list_users
+        _, dev = _create_user(client, "_ulc_dev2", role="developer", platform="gg")
+        _create_user(client, "_ulc_d_gg", role="user", platform="gg")
+        _create_user(client, "_ulc_d_tt", role="user", platform="tt")
+        res = list_users(current_user_id=dev)
+        assert {"gg", "tt"} <= {u["platform"] for u in res["users"]}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k HuguanUserListCrossPlatform`
+Expected: **2 failed / 3 passed**。
+
+- 失败的 2 条是户管**正向**用例（`test_huguan_sees_huguans_across_all_platforms`、
+  `test_huguan_ignores_platform_param`）：改前户管被锁在 `platform='gg'`，`_ulc_h_fb` 看不到。
+- 通过的 3 条是**回归路障**（admin / user / developer 的平台隔离）。它们**必须一开始就是绿的** ——
+  若红了，说明改动范围出了问题，**停下来查，不要改测试**。
+
+- [ ] **Step 3: 修改 `list_users` 的平台过滤分支**
+
+`py/auth.py:67-86` 整段替换为：
+
+```python
+        # 判断当前用户是否是 developer / 户管
+        is_dev = False
+        is_huguan = False
+        my_platform = None
+        if current_user_id:
+            cur_user = conn.execute("SELECT role, platform FROM users WHERE id = ?", (current_user_id,)).fetchone()
+            is_dev = cur_user and cur_user["role"] == "developer"
+            is_huguan = cur_user and cur_user["role"] == "huguan"
+            my_platform = (cur_user["platform"] if cur_user else None) or "gg"
+
+        # 非 developer 用户看不到 developer 角色，且只能看自己平台（户管例外，见下）
+        filters = [""] if is_dev else ["role != 'developer'"]
+        params = []
+
+        if is_huguan:
+            # 户管跨平台：既不按自己平台过滤，也忽略传入的 platform 参数
+            pass
+        elif not is_dev and current_user_id:
+            # 非 developer 且有登录上下文：强制只看自己平台，忽略传入的筛选参数
+            filters.append("platform = ?")
+            params.append(my_platform)
+        elif platform:
+            # developer 或无登录上下文（内部调用）：按传入参数筛选
+            filters.append("platform = ?")
+            params.append(platform)
+```
+
+**纯增量核对（必须逐条确认）**：`is_huguan` 只在 `role == "huguan"` 时为真，因此
+developer 走 `elif platform`（与改前同）、admin/user/viewer/hidden 走 `elif not is_dev and current_user_id`（与改前同）、
+无 `current_user_id` 的内部调用走 `elif platform`（与改前同）。**唯一的行为变化是户管不再被平台过滤。**
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k HuguanUserListCrossPlatform`
+Expected: 5 passed
+
+- [ ] **Step 5: 跑全量后端测试**
+
+Run: `cd py && python -m pytest tests/ -v`
+Expected: 全部 passed。**重点是 `tests/test_user_platform_isolation.py`（5 条全绿）与 `tests/test_fb_platform.py:229`。**
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add py/auth.py py/tests/test_huguan_role.py
+git commit -m "feat: 户管用户列表跨平台，其余角色平台隔离不变"
+```
+
+---
+
 ### Task 14: 用户管理页对户管收窄
 
 **Files:**
