@@ -1620,6 +1620,35 @@ git commit -m "refactor: TT 账户与 BC 的角色判断收敛为 CROSS_USER_ROL
 
 ### Task 9: FB 列表跨用户可见 + 按用户筛选
 
+> **执行勘误（2026-09-22，派发前预检）**：
+>
+> **(1) 本任务的行号这次是对的**（罕见）：`:29`、`:64`、`:264`、`:387`、`:739` 与 `fb_routes.py` 实况逐行吻合，
+> import 确在 `:4`。仍建议按内容定位。
+>
+> **(2) 全文件角色闸门只有 6 处，已核实无遗漏。** `grep -n "developer" py/routes/fb_routes.py` 得
+> `:29`、`:64`、`:264`、`:387`、`:471`、`:739`，外加 `:1514`（`/api/fb/users` 的 SQL，与本任务无关）。
+> 前 5 处即本任务要改的 5 个列表；`:471` 是产品域，明确不改。
+>
+> **(3) ⚠️ 原 Step 1 只给 3 个被测端点配了测试，而本任务要改 5 处 —— `:64`（`/api/fb/bms/unified`）
+> 与 `:387`（`/api/fb/accounts/deleted`）**零覆盖**。**`base_params * 2` 的 UNION 结构尤其危险**：
+> 参数复制与两半边的 `owner_id` 条件是耦合的，只测 fb_bms 半边的话，第二半边漏加条件或参数错位全都不会变红。
+> 这正是 Task 8 审查 I1 的同类缺口（那里 `:569` 无守卫）。**已在下方 Step 1 补两条正向用例。**
+>
+> **(4) `:471`（FB 产品列表）也必须补一条回归守卫**（下已补）。`:471` 的形状是
+> `if runner and runner.isdigit(): ... elif role not in ('developer','admin'): ...` —— 按 **runner 归属**而非 owner 过滤。
+> 若被误改为 `CROSS_USER_ROLES`，户管会直接看到全部产品，违反全局约束「huguan 不获得产品/视频的编辑权」。
+> 与 Task 8 的 `:158`/`:569` 同因同源，**不留无守卫的「不改」站点**。
+>
+> **(5) 已知既有过度宽松（记录备查，本任务不动）**：`/api/fb/bms/options`（`:161`）、
+> `/api/fb/pixel-bms/options`（`:805`）、`/api/fb/pixel-bms/<bid>/pixels`（`:818`）、
+> `/api/fb/pixels/list`（`:876`）**对任何 FB 用户都不做归属过滤**（`bm_options` 直接返回全部 BM）。
+> 这是既有的过度宽松，不是本任务引入的，**也不构成本任务的户管可见性缺口**（户管在这些接口上早已能看到全部）。
+> **不要顺手给它们加归属过滤** —— 那是改变既有角色行为的独立安全修复，超出本需求范围。
+>
+> **(6) 测试无需 `?platform=fb`。** `require_platform('fb')` 对 `PLATFORM_SWITCH_ROLES`（含户管）直接放行。
+> `py/tests/conftest.py` 的 `app` 夹具是**函数级**且不播种任何数据（临时空库），故 `_setup` 的
+> 集合相等断言安全。
+
 **Files:**
 - Modify: `py/routes/fb_routes.py:29`（BM 列表）、`:64`（BM 统一列表）、`:264`（账户列表）、`:387`（账户回收站）、`:739`（像素 BM 列表）
 - Test: `py/tests/test_huguan_role.py`（追加）
@@ -1682,12 +1711,73 @@ class TestFbCrossUser:
         other, _ = _create_user(client, "_fb_cs_u3", role="user", platform="fb")
         resp = client.get(f"/api/fb/accounts/list?size=50&owner_id={u1}", headers=other)
         assert resp.get_json()["items"] == []
+
+    def test_huguan_sees_all_bms_unified_both_halves(self, client):
+        """`:64`（`/api/fb/bms/unified`）是 UNION 两表 + `base_params * 2` 复制参数。
+
+        只覆盖 `fb_bms` 半边的话，「第二半边漏加 owner 条件」或「参数复制错位」全都不会变红
+        （Task 8 审查 I1 的同类缺口）。故本用例**两半边都造数据**：`fb_bms` 两条来自 `_setup`，
+        像素 BM 一条在此就地插入。
+        """
+        hg, _, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('U2的像素BM','PBM-1',?)", (u2,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/bms/unified?size=50", headers=hg)
+        assert resp.status_code == 200
+        bm_ids = {b["bm_id"] for b in resp.get_json()["items"]}
+        assert {"BM-1", "BM-2", "PBM-1"} <= bm_ids
+
+    def test_huguan_sees_other_users_deleted_accounts(self, client):
+        """`:387`（`/api/fb/accounts/deleted`）的账户回收站。
+
+        断言用集合**相等**：既是「看得到别人回收站」的正向证明，也顺带守住
+        「未删除的账户不得出现在回收站」这条既有语义（`_setup` 造的 FB-AC-1/2 都没删）。
+        """
+        hg, _, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, deleted_at) "
+                   "VALUES('U2的回收站账户','FB-DEL-2',?, datetime('now','localtime'))", (u2,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/accounts/deleted?size=50", headers=hg)
+        assert resp.status_code == 200
+        assert {a["account_id"] for a in resp.get_json()["items"]} == {"FB-DEL-2"}
+
+    def test_huguan_cannot_see_other_users_fb_products(self, client):
+        """回归守卫：产品域**不**放行（`fb_routes.py:471`）。
+
+        `:471` 是 `elif role not in ('developer','admin')`，FB 产品列表按 **runner 归属**过滤
+        （不是 owner）。全局约束「huguan 不获得产品/视频的编辑权」要求它保持原样 ——
+        本用例是那条约束的路障：谁把 `:471` 换成 `CROSS_USER_ROLES`，断言立刻变红。
+        与 Task 8 为 `:158`/`:569` 补守卫同因同源。
+        """
+        hg, _, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_products(product_name, owner_id) VALUES('别人的FB产品',?)", (u2,))
+        db.commit()
+        pid = db.execute("SELECT id FROM fb_products WHERE product_name='别人的FB产品'").fetchone()["id"]
+        db.execute("INSERT INTO fb_product_runners(product_id, user_id) VALUES(?,?)", (pid, u2))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/products/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        names = {p["product_name"] for p in resp.get_json()["items"]}
+        assert "别人的FB产品" not in names
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k FbCrossUser`
-Expected: 4 条户管用例 FAIL；回归用例 PASS。
+Expected: **6 FAIL / 2 PASS**。
+
+- FAIL 的六条是户管**正向**用例（改前户管既非 developer 也非 admin，会被 `owner_id = 自己` 过滤掉，
+  集合为空或看不到目标行）：`test_huguan_sees_all_bms`、`test_huguan_filters_bms_by_owner`、
+  `test_huguan_sees_all_accounts`、`test_huguan_filters_accounts_by_owner`、
+  `test_huguan_sees_all_bms_unified_both_halves`、`test_huguan_sees_other_users_deleted_accounts`。
+- PASS 的两条是回归守卫：`test_regular_fb_user_ignores_owner_id`、`test_huguan_cannot_see_other_users_fb_products`。
+  它们**必须一开始就是绿的** —— 若红了，说明改动范围出了问题，**停下来查，不要改测试**。
 
 - [ ] **Step 3: 在 `py/routes/fb_routes.py` 顶部引入常量**
 
@@ -1766,7 +1856,7 @@ from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k FbCrossUser`
-Expected: 5 passed
+Expected: 8 passed
 
 - [ ] **Step 6: 跑全量后端测试**
 
