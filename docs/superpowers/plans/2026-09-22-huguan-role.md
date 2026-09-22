@@ -212,7 +212,7 @@ git commit -m "feat: 新增户管角色常量与跨平台后端放行"
 **Interfaces:**
 - Consumes: Task 1 的 `_create_user` / `_huguan` 测试辅助函数
 - Produces:
-  - `auth.toggle_user_status(user_id: int) -> dict | None`（`huguan` 启停后回到 `huguan`，不再降级为 `user`）
+  - `auth.toggle_user_status(user_id: int) -> dict | None`（启停户管后进入 `hidden`，不再被误降级为 `user`；取消隐藏回落 `user` 属既有单向行为，本需求不改）
   - `auth.update_user_role(user_id: int, new_role: str) -> bool`（新增白名单断言：`new_role in ("user","admin","viewer","hidden","huguan")`）
   - `auth.list_users(search="", page=1, page_size=20, current_user_id=None, platform=None, role_filter=None) -> dict`（新增第 6 个**可选**参数，默认 `None` 时行为与现状完全一致）
 
@@ -222,12 +222,25 @@ git commit -m "feat: 新增户管角色常量与跨平台后端放行"
 
 ```python
 class TestAuthRoleFixes:
-    def test_toggle_huguan_does_not_demote_to_user(self, client):
-        """停用户管再启用，角色必须回到 huguan，不能变成 user。"""
+    def test_toggle_huguan_hides_instead_of_demoting(self, client):
+        """启停户管应进入 hidden；修复前因元组缺 huguan 会直接被降级成 user。"""
         import auth
         _, uid = _huguan(client, "_hg_toggle")
         assert auth.toggle_user_status(uid)["role"] == "hidden"
-        assert auth.toggle_user_status(uid)["role"] == "huguan"
+
+    def test_unhide_falls_back_to_user_for_all_roles(self, client):
+        """锁定既有单向行为：取消隐藏一律回落 user，对任何角色都一样。
+
+        这不是本需求引入的缺陷，也不是户管独有 —— `toggle_user_status` 只在「隐藏」
+        方向查元组，因此 `hidden` 落到 else 分支的 `"user"`，admin / viewer 同样如此。
+        本用例存在的意义是把这个既有语义写下来，避免后人误以为「取消隐藏会恢复原角色」。
+        如需改成恢复隐藏前的角色，那是独立的产品决策（需记忆字段），不在本需求范围。
+        """
+        import auth
+        for idx, role in enumerate(("huguan", "admin", "viewer")):
+            _, uid = _create_user(client, f"_hg_unhide_{idx}", role=role)
+            assert auth.toggle_user_status(uid)["role"] == "hidden"
+            assert auth.toggle_user_status(uid)["role"] == "user"
 
     def test_update_user_role_rejects_unknown_role(self, client):
         """角色白名单：非法角色值一律拒绝。"""
@@ -262,7 +275,9 @@ class TestAuthRoleFixes:
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k AuthRoleFixes`
-Expected: `test_toggle_huguan_does_not_demote_to_user` FAIL（第二次 toggle 后得到 `user`）；`test_update_user_role_rejects_unknown_role` FAIL（写入了 `superuser`）；`test_list_users_role_filter_huguan_only` FAIL（`TypeError: list_users() got an unexpected keyword argument 'role_filter'`）。
+Expected: `test_toggle_huguan_hides_instead_of_demoting` FAIL（得到 `user` 而非 `hidden`）；`test_update_user_role_rejects_unknown_role` FAIL（写入了 `superuser`）；`test_list_users_role_filter_huguan_only` FAIL（`TypeError: list_users() got an unexpected keyword argument 'role_filter'`）。
+
+`test_unhide_falls_back_to_user_for_all_roles` 与 `test_list_users_role_filter_default_unchanged` 属**回归锁定**用例，改动前就应 PASS；若它们 FAIL，说明测试数据构造有误，先修测试再继续。
 
 - [ ] **Step 3: 修复 `toggle_user_status`**
 
@@ -2445,6 +2460,6 @@ git commit -m "feat: 产品域与素材域对户管收口（兑现户管无产�
 - [ ] **跑一次全量后端测试**：`cd py && python -m pytest tests/ -v` → 全部 passed
 - [ ] **跑一次前端构建**：`cd frontend && npm run build` → 成功
 - [ ] **按 CLAUDE.md 调用 `/code-review` 做代码审查**，修复发现的问题后再交付
-- [ ] **端到端验收**：用一个新建的户管账号走一遍——登录 → 三平台切换 → 看/改他人账户 → 用用户下拉筛选 → 改设置选项 → 创建一个户管 → 停用再启用该户管（确认角色仍是户管而非 user）→ 确认开发者账号能管到它
+- [ ] **端到端验收**：用一个新建的户管账号走一遍——登录 → 三平台切换 → 看/改他人账户 → 用用户下拉筛选 → 改设置选项 → 创建一个户管 → 停用该户管（确认进入**已禁用**，而不是被降级成「用户」）→ 再用角色下拉恢复为户管 → 确认开发者账号能管到它
 - [ ] **产品域负向验收**（Task 17）：用户管 token 直接调 `POST /api/fb/products/create`、`PUT /api/fb/products/<pid>`、`POST /api/tt/products/create`、`POST /api/tt/products/import-text` → 四者均须 403；再确认户管调 `POST /api/tt/bcs/create` 仍为 200（未误伤账户域）
 - [ ] **admin 不变量验收**（Task 1）：用 `platform='gg'` 的 admin token 调 `/api/tt/users?platform=tt` → 须 403（admin 不跨平台）

@@ -243,7 +243,13 @@ ALLOWED_CREATE_ROLES = {
 
 | 位置 | 现状 | 风险 | 改动 |
 |---|---|---|---|
-| `py/auth.py:177 toggle_user_status` | `new_role = "hidden" if row["role"] in ("user","admin","viewer") else "user"` | `huguan` 不在元组里 → 启停一个户管会把它**降级成 `user`**，再次启用也回不到户管 | 元组加入 `"huguan"` |
+| `py/auth.py:192 toggle_user_status` | `new_role = "hidden" if row["role"] in ("user","admin","viewer") else "user"` | `huguan` 不在元组里 → **一次启停就把户管降级成 `user`**（该函数只在「隐藏」方向查元组，不在元组里即落到 `else` 的 `"user"`） | 元组加入 `"huguan"` |
+
+> **勘误（2026-09-22，执行 Task 2 时发现）**：本表原先写「再次启用也回不到户管」，容易让人以为要在元组之外再做文章。实查该函数**没有任何「隐藏前的角色」记忆**，且 `users` 无空闲列可存（本需求禁止加列）。取消隐藏时**对所有角色一律回落到 `user`**——这是 `admin` / `viewer` 同样存在的既有单向行为，不是户管独有的缺陷。
+>
+> 因此**元组加入 `"huguan"` 就是户管的完整修复**：户管启停后进入 `hidden` 而不再被误降为 `user`。取消隐藏后落到 `user` 属既有行为，本需求不改（改它会影响 admin/viewer，违反纯增量原则）。要恢复户管身份走角色下拉 `POST /api/admin/users/<id>/role {"role":"huguan"}`，由 Task 3 覆盖。
+>
+> 同理，`py/tests/test_huguan_role.py` 中**不得**断言「隐藏后再启停回到 `huguan`」——该断言与既有实现矛盾。改为断言「户管 → `hidden`」，并另用一条显式命名的用例锁定「取消隐藏回落到 `user`」这一既有行为供后人查阅。
 | `py/auth.py:114 update_user_role` | 仅拦 `developer`，无角色白名单 | 若调用方漏校验，任何非 developer 都能把目标改成任意角色 | 白名单在 3.6.2 的调用方校验；**同时**在 `update_user_role` 内加一道 `new_role in ("user","admin","viewer","hidden","huguan")` 断言作为纵深防御 |
 
 #### 3.6.4 产品 / 视频域：**必须显式收口**（原判断有误，已勘误）
