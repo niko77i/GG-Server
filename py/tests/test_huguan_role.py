@@ -69,7 +69,7 @@ class TestPlatformSwitchRolesInvariant:
 
         admin 的 users.platform='gg'。若此调用返回 200，说明 admin 已被放行跨平台，
         等于回退 c4b3d56 的平台隔离；配合 tt_accounts_routes.py:209 对
-        role in ('developer','admin') 不加 owner 过滤，GG 管理员将看到全部用户的 TT 账户。
+        role in CROSS_USER_ROLES 不加 owner 过滤，GG 管理员将看到全部用户的 TT 账户。
         """
         admin, _ = _create_user(client, "_inv_admin_gg", role="admin", platform="gg")
         resp = client.get("/api/tt/users?platform=tt", headers=admin)
@@ -732,6 +732,10 @@ class TestTtCrossUser:
         db.close()
         resp = client.put(f"/api/tt/bcs/{bid}", json={"name": "BC改名"}, headers=hg)
         assert resp.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT name FROM tt_bcs WHERE id=?", (bid,)).fetchone()
+        db.close()
+        assert row["name"] == "BC改名"
 
     def test_huguan_sees_other_users_bc_in_list(self, client):
         """BC 列表可见性：户管能改他人 BC（上一条）也必须能**看到**它。
@@ -784,3 +788,31 @@ class TestTtCrossUser:
         assert resp.status_code == 403
         resp = client.get(f"/api/tt/products/{pid}/detail", headers=hg)
         assert resp.status_code == 403
+
+    def test_huguan_cannot_see_other_users_delisted_packages(self, client):
+        """回归守卫：产品域**不**放行（掉包检测）。
+
+        `tt_routes.py:569`（`delist_status`）与原计划表误标为「要改」的 `:158`（`list_products`）
+        同因同源。本用例是那条误标的路障：谁把 :569 换成 CROSS_USER_ROLES，第二条断言立刻变红。
+
+        第一条断言是反向对照——户管自己的掉包记录**必须**可见，否则「看不到别人的」可以靠
+        「整个接口对户管返回空」蒙混过关，这条守卫就成了假绿。
+        """
+        hg, hg_id = _huguan(client, "_tt_dl_hg")
+        _, u1 = _create_user(client, "_tt_dl_u1", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_products(product_name, owner_id) VALUES('户管的产品',?)", (hg_id,))
+        mine = db.execute("SELECT id FROM tt_products WHERE product_name='户管的产品'").fetchone()["id"]
+        db.execute("INSERT INTO tt_products(product_name, owner_id) VALUES('别人的产品',?)", (u1,))
+        theirs = db.execute("SELECT id FROM tt_products WHERE product_name='别人的产品'").fetchone()["id"]
+        for pid, pkg_name in ((mine, "户管的包"), (theirs, "别人的包")):
+            db.execute("INSERT INTO tt_packages(product_id, package_name) VALUES(?,?)", (pid, pkg_name))
+            pkid = db.execute("SELECT id FROM tt_packages WHERE package_name=?", (pkg_name,)).fetchone()["id"]
+            db.execute("INSERT INTO tt_delist_checks(package_id, is_delisted) VALUES(?,1)", (pkid,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/tt/products/delist-status", headers=hg)
+        assert resp.status_code == 200
+        names = {p["product_name"] for p in resp.get_json()["delisted_packages"]}
+        assert "户管的产品" in names       # 反向对照：接口对户管确实有效
+        assert "别人的产品" not in names   # 产品域不放行

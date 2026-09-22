@@ -723,7 +723,7 @@ def recharge_submit():
         return err("缺少 account_id 或 amount")
     if not _is_valid_amount(amount):
         return err("充值金额必须为正数")
-    # 校验账户存在且属于当前用户（或 admin）
+    # 校验账户存在且属于当前用户（跨用户角色可越权校验）
     role = _get_role(db, uid)
     ac = db.execute("SELECT advertiser_id, status_id, agent_id, owner_id FROM tt_accounts WHERE advertiser_id=? AND deleted_at IS NULL",
                     (account_id,)).fetchone()
