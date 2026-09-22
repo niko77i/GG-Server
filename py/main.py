@@ -36,6 +36,7 @@ import datetime
 import requests
 from functools import wraps
 from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform
+from routes.helpers import PLATFORM_SWITCH_ROLES
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 # google_ads_service 按需加载，不打包进 EXE
 
@@ -5773,12 +5774,12 @@ def agents_delete(aid):
 # ========== Account Statuses 选项 API ==========
 
 def _get_effective_platform():
-    """获取当前用户的有效平台。developer 可按请求参数跨平台（缺省 'gg'）；其他角色一律取自己的 platform。
+    """获取当前用户的有效平台。developer/户管 可按请求参数跨平台（缺省 'gg'）；其他角色一律取自己的 platform。
     注意：admin 不再视为跨平台 —— 管理员本身按平台隔离（见用户角色平台隔离设计）。
     """
     uid = int(get_jwt_identity())
     user = auth.get_user_by_id(uid)
-    if user and user.get("role") == "developer":
+    if user and user.get("role") in PLATFORM_SWITCH_ROLES:
         return request.args.get("platform", "gg")
     return (user or {}).get("platform", "gg")
 

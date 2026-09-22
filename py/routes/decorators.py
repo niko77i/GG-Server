@@ -2,7 +2,7 @@
 from functools import wraps
 from flask_jwt_extended import get_jwt_identity
 import auth
-from routes.helpers import err
+from routes.helpers import err, PLATFORM_SWITCH_ROLES
 
 
 def admin_required(fn):
@@ -48,7 +48,7 @@ def reject_viewer():
 
 
 def require_platform(platform):
-    """检查当前用户是否属于指定平台。developer 直接放行。返回错误响应或 None。"""
+    """检查当前用户是否属于指定平台。可切换平台的角色（developer/户管）直接放行。返回错误响应或 None。"""
     try:
         uid = int(get_jwt_identity())
     except Exception:
@@ -56,7 +56,7 @@ def require_platform(platform):
     user = auth.get_user_by_id(uid)
     if not user:
         return err("用户不存在", 401)
-    if user.get("role") == "developer":
+    if user.get("role") in PLATFORM_SWITCH_ROLES:
         return None
     if user.get("platform") != platform:
         return err(f"仅限 {platform.upper()} 平台用户访问", 403)

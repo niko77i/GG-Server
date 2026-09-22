@@ -1,4 +1,16 @@
 """路由层公共工具函数 — 减少 main.py 中的样板代码。"""
+HUGUAN_ROLE = "huguan"
+
+# 可跨用户查看/编辑账户类数据的角色（账户、MCC、BC、BM、像素）
+CROSS_USER_ROLES = ("developer", "admin", HUGUAN_ROLE)
+
+# 可编辑平台级下拉选项的角色（代理名、账户状态、MCC等级、地区时区、商务人员）
+GLOBAL_OPTION_ROLES = ("developer", "admin", HUGUAN_ROLE)
+
+# 可在 GG / FB / TT 之间切换平台的角色（跨平台路由放行 + 平台选项解析）
+# 注意：admin 不在其中 —— 管理员本身按平台隔离（见用户角色平台隔离设计）。
+PLATFORM_SWITCH_ROLES = ("developer", HUGUAN_ROLE)
+
 from flask import request, jsonify, g
 from flask_jwt_extended import get_jwt_identity
 import database
