@@ -816,3 +816,110 @@ class TestTtCrossUser:
         names = {p["product_name"] for p in resp.get_json()["delisted_packages"]}
         assert "户管的产品" in names       # 反向对照：接口对户管确实有效
         assert "别人的产品" not in names   # 产品域不放行
+
+
+def _mk_fb_bm(db, owner_id, bm_code, name="测试BM"):
+    db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES(?,?,?)", (name, bm_code, owner_id))
+    db.commit()
+
+
+def _mk_fb_account(db, owner_id, account_id, name="FB账户"):
+    db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES(?,?,?)",
+               (name, account_id, owner_id))
+    db.commit()
+
+
+class TestFbCrossUser:
+    def _setup(self, client):
+        hg, _ = _huguan(client, "_fb_cs_hg")
+        _, u1 = _create_user(client, "_fb_cs_u1", role="user", platform="fb")
+        _, u2 = _create_user(client, "_fb_cs_u2", role="user", platform="fb")
+        db = database.get_db()
+        _mk_fb_bm(db, u1, "BM-1", "U1的BM")
+        _mk_fb_bm(db, u2, "BM-2", "U2的BM")
+        _mk_fb_account(db, u1, "FB-AC-1")
+        _mk_fb_account(db, u2, "FB-AC-2")
+        db.close()
+        return hg, u1, u2
+
+    def test_huguan_sees_all_bms(self, client):
+        hg, _, _ = self._setup(client)
+        resp = client.get("/api/fb/bms/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1", "BM-2"}
+
+    def test_huguan_filters_bms_by_owner(self, client):
+        hg, u1, _ = self._setup(client)
+        resp = client.get(f"/api/fb/bms/list?size=50&owner_id={u1}", headers=hg)
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1"}
+
+    def test_huguan_sees_all_accounts(self, client):
+        hg, _, _ = self._setup(client)
+        resp = client.get("/api/fb/accounts/list?size=50", headers=hg)
+        assert {a["account_id"] for a in resp.get_json()["items"]} == {"FB-AC-1", "FB-AC-2"}
+
+    def test_huguan_filters_accounts_by_owner(self, client):
+        hg, _, u2 = self._setup(client)
+        resp = client.get(f"/api/fb/accounts/list?size=50&owner_id={u2}", headers=hg)
+        assert {a["account_id"] for a in resp.get_json()["items"]} == {"FB-AC-2"}
+
+    def test_regular_fb_user_ignores_owner_id(self, client):
+        """回归：普通 FB 用户传 owner_id 不能越权。"""
+        _, u1, _ = self._setup(client)
+        other, _ = _create_user(client, "_fb_cs_u3", role="user", platform="fb")
+        resp = client.get(f"/api/fb/accounts/list?size=50&owner_id={u1}", headers=other)
+        assert resp.get_json()["items"] == []
+
+    def test_huguan_sees_all_bms_unified_both_halves(self, client):
+        """`:64`（`/api/fb/bms/unified`）是 UNION 两表 + `base_params * 2` 复制参数。
+
+        只覆盖 `fb_bms` 半边的话，「第二半边漏加 owner 条件」或「参数复制错位」全都不会变红
+        （Task 8 审查 I1 的同类缺口）。故本用例**两半边都造数据**：`fb_bms` 两条来自 `_setup`，
+        像素 BM 一条在此就地插入。
+        """
+        hg, _, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('U2的像素BM','PBM-1',?)", (u2,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/bms/unified?size=50", headers=hg)
+        assert resp.status_code == 200
+        bm_ids = {b["bm_id"] for b in resp.get_json()["items"]}
+        assert {"BM-1", "BM-2", "PBM-1"} <= bm_ids
+
+    def test_huguan_sees_other_users_deleted_accounts(self, client):
+        """`:387`（`/api/fb/accounts/deleted`）的账户回收站。
+
+        断言用集合**相等**：既是「看得到别人回收站」的正向证明，也顺带守住
+        「未删除的账户不得出现在回收站」这条既有语义（`_setup` 造的 FB-AC-1/2 都没删）。
+        """
+        hg, _, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, deleted_at) "
+                   "VALUES('U2的回收站账户','FB-DEL-2',?, datetime('now','localtime'))", (u2,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/accounts/deleted?size=50", headers=hg)
+        assert resp.status_code == 200
+        assert {a["account_id"] for a in resp.get_json()["items"]} == {"FB-DEL-2"}
+
+    def test_huguan_cannot_see_other_users_fb_products(self, client):
+        """回归守卫：产品域**不**放行（`fb_routes.py:471`）。
+
+        `:471` 是 `elif role not in ('developer','admin')`，FB 产品列表按 **runner 归属**过滤
+        （不是 owner）。全局约束「huguan 不获得产品/视频的编辑权」要求它保持原样 ——
+        本用例是那条约束的路障：谁把 `:471` 换成 `CROSS_USER_ROLES`，断言立刻变红。
+        与 Task 8 为 `:158`/`:569` 补守卫同因同源。
+        """
+        hg, _, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_products(product_name, owner_id) VALUES('别人的FB产品',?)", (u2,))
+        db.commit()
+        pid = db.execute("SELECT id FROM fb_products WHERE product_name='别人的FB产品'").fetchone()["id"]
+        db.execute("INSERT INTO fb_product_runners(product_id, user_id) VALUES(?,?)", (pid, u2))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/products/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        names = {p["product_name"] for p in resp.get_json()["items"]}
+        assert "别人的FB产品" not in names

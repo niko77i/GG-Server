@@ -1,7 +1,7 @@
 """Facebook 平台 API 路由 — 产品管理 / 账户管理 / BM管理 / 像素BM管理 / 数据提取 / 数据管理"""
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from .helpers import ok, err, get_uid, get_db, parse_body
+from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import fb_required
 import re
 import threading
@@ -26,7 +26,15 @@ def list_bms():
     params = []
     # 普通用户只看自己的BM
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin'):
+    cross_user = role in CROSS_USER_ROLES
+    owner_filter = (request.args.get('owner_id') or '').strip()
+    if not cross_user:
+        owner_filter = ''
+    if cross_user:
+        if owner_filter:
+            where.append("owner_id = ?")
+            params.append(owner_filter)
+    else:
         where.append("owner_id = ?")
         params.append(uid)
     if status:
@@ -61,7 +69,15 @@ def list_bms_unified():
 
     base_where = ["deleted_at IS NULL"]
     base_params = []
-    if role not in ('developer', 'admin'):
+    cross_user = role in CROSS_USER_ROLES
+    owner_filter = (request.args.get('owner_id') or '').strip()
+    if not cross_user:
+        owner_filter = ''
+    if cross_user:
+        if owner_filter:
+            base_where.append("owner_id = ?")
+            base_params.append(owner_filter)
+    else:
         base_where.append("owner_id = ?")
         base_params.append(uid)
     if search:
@@ -261,7 +277,15 @@ def list_accounts():
     where = []
     params = []
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin'):
+    cross_user = role in CROSS_USER_ROLES
+    owner_filter = (request.args.get('owner_id') or '').strip()
+    if not cross_user:
+        owner_filter = ''
+    if cross_user:
+        if owner_filter:
+            where.append("a.owner_id = ?")
+            params.append(owner_filter)
+    else:
         where.append("a.owner_id = ?")
         params.append(uid)
     if deleted == '1':
@@ -384,7 +408,15 @@ def list_deleted_accounts():
     where = ["a.deleted_at IS NOT NULL"]
     params = []
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin'):
+    cross_user = role in CROSS_USER_ROLES
+    owner_filter = (request.args.get('owner_id') or '').strip()
+    if not cross_user:
+        owner_filter = ''
+    if cross_user:
+        if owner_filter:
+            where.append("a.owner_id = ?")
+            params.append(owner_filter)
+    else:
         where.append("a.owner_id = ?")
         params.append(uid)
 
@@ -736,7 +768,15 @@ def list_pixel_bms():
     where = ["deleted_at IS NULL"]
     params = []
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin'):
+    cross_user = role in CROSS_USER_ROLES
+    owner_filter = (request.args.get('owner_id') or '').strip()
+    if not cross_user:
+        owner_filter = ''
+    if cross_user:
+        if owner_filter:
+            where.append("owner_id = ?")
+            params.append(owner_filter)
+    else:
         where.append("owner_id = ?")
         params.append(uid)
 
