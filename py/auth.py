@@ -57,9 +57,10 @@ def get_user_by_username(username: str) -> dict | None:
         conn.close()
 
 
-def list_users(search: str = "", page: int = 1, page_size: int = 20, current_user_id: int = None, platform: str = None) -> dict:
+def list_users(search: str = "", page: int = 1, page_size: int = 20, current_user_id: int = None, platform: str = None, role_filter: str = None) -> dict:
     """列出用户。非 developer 只看自己平台且看不到 developer；developer 看全部（可选按 platform 筛）。
     platform: 可选筛选 ('gg' | 'fb' | 'tt')，仅 developer 生效，None 表示不过滤。
+    role_filter: 可选角色筛选，None 表示不过滤（默认行为与历史一致）。
     """
     conn = database.get_db()
     try:
@@ -83,6 +84,10 @@ def list_users(search: str = "", page: int = 1, page_size: int = 20, current_use
             # developer 或无登录上下文（内部调用）：按传入参数筛选
             filters.append("platform = ?")
             params.append(platform)
+
+        if role_filter:
+            filters.append("role = ?")
+            params.append(role_filter)
 
         base_where = " AND ".join(f for f in filters if f)
         where_clause = f" WHERE {base_where}" if base_where else ""
@@ -119,6 +124,9 @@ def list_users(search: str = "", page: int = 1, page_size: int = 20, current_use
 
 
 def update_user_role(user_id: int, new_role: str) -> bool:
+    # 纵深防御：即使调用方漏校验，也不允许写入未知角色
+    if new_role not in ("user", "admin", "viewer", "hidden", "huguan"):
+        return False
     conn = database.get_db()
     try:
         cur = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,))
@@ -188,7 +196,7 @@ def toggle_user_status(user_id: int) -> dict | None:
         row = cur.fetchone()
         if not row or row["role"] == "developer":
             return None
-        new_role = "hidden" if row["role"] in ("user", "admin", "viewer") else "user"
+        new_role = "hidden" if row["role"] in ("user", "admin", "viewer", "huguan") else "user"
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, user_id))
         conn.commit()
         return get_user_by_id(user_id)

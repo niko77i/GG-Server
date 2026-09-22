@@ -98,7 +98,7 @@ class TestPlatformSwitchRolesInvariant:
         assert resp.status_code == 200
 
 
-class TestEffectivePlatformFallback:
+class TestNoPlatformParamDefaultsToGG:
     """`_get_effective_platform` 的「不带 ?platform=」回退分支。
 
     与 `TestHuguanCrossPlatformAccess.test_huguan_effective_platform_follows_query_param`
@@ -128,3 +128,54 @@ class TestEffectivePlatformFallback:
         names = [s["name"] for s in resp.get_json()["statuses"]]
         assert "回退GG状态" in names       # 缺省 'gg'
         assert "回退TT状态" not in names   # 不回退到 users.platform='tt'
+
+
+class TestAuthRoleFixes:
+    def test_toggle_huguan_hides_instead_of_demoting(self, client):
+        """启停户管应进入 hidden；修复前因元组缺 huguan 会直接被降级成 user。"""
+        import auth
+        _, uid = _huguan(client, "_hg_toggle")
+        assert auth.toggle_user_status(uid)["role"] == "hidden"
+
+    def test_unhide_falls_back_to_user_for_all_roles(self, client):
+        """锁定既有单向行为：取消隐藏一律回落 user，对任何角色都一样。
+
+        这不是本需求引入的缺陷，也不是户管独有 —— `toggle_user_status` 只在「隐藏」
+        方向查元组，因此 `hidden` 落到 else 分支的 `"user"`，admin / viewer 同样如此。
+        本用例存在的意义是把这个既有语义写下来，避免后人误以为「取消隐藏会恢复原角色」。
+        如需改成恢复隐藏前的角色，那是独立的产品决策（需记忆字段），不在本需求范围。
+        """
+        import auth
+        for idx, role in enumerate(("huguan", "admin", "viewer")):
+            _, uid = _create_user(client, f"_hg_unhide_{idx}", role=role)
+            assert auth.toggle_user_status(uid)["role"] == "hidden"
+            assert auth.toggle_user_status(uid)["role"] == "user"
+
+    def test_update_user_role_rejects_unknown_role(self, client):
+        """角色白名单：非法角色值一律拒绝。"""
+        import auth
+        _, uid = _create_user(client, "_hg_badrole", role="user")
+        assert auth.update_user_role(uid, "superuser") is False
+        assert auth.update_user_role(uid, "huguan") is True
+
+    def test_list_users_role_filter_default_unchanged(self, client):
+        """不传 role_filter 时结果与改动前一致。
+
+        注意 developer 视角下 list_users 不加任何角色过滤（filters = [""]），
+        因此 developer 账号本身也会出现在结果里——这正是改动前的行为，必须保持。
+        """
+        import auth
+        _, dev_id = _create_user(client, "_hg_lf_dev", role="developer")
+        _create_user(client, "_hg_lf_admin", role="admin")
+        _create_user(client, "_hg_lf_user", role="user")
+        res = auth.list_users(current_user_id=dev_id)
+        roles = {u["role"] for u in res["users"]}
+        assert roles == {"developer", "admin", "user"}
+
+    def test_list_users_role_filter_huguan_only(self, client):
+        import auth
+        _, dev_id = _create_user(client, "_hg_lf2_dev", role="developer")
+        _create_user(client, "_hg_lf2_hg", role="huguan")
+        _create_user(client, "_hg_lf2_user", role="user")
+        res = auth.list_users(current_user_id=dev_id, role_filter="huguan")
+        assert {u["role"] for u in res["users"]} == {"huguan"}
