@@ -31,7 +31,7 @@
         <el-table-column label="操作" width="160">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showDetail(row.id)">📋</el-button>
-            <template v-if="row.is_owner">
+            <template v-if="row.is_owner || auth.canManageAccounts">
               <el-button link type="primary" size="small" @click="showModal(row.id)">✏️</el-button>
               <el-button link type="danger" size="small" @click="del(row.id)">🗑</el-button>
             </template>
@@ -58,12 +58,14 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
+import { useAuthStore } from '@/stores/auth'
 import MccModal from '@/components/MccModal.vue'
 import MccDetailModal from '@/components/MccDetailModal.vue'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 
 const store = useAccountStore()
+const auth = useAuthStore()
 const selected = ref([])
 const modalVisible = ref(false)
 const editId = ref(null)

@@ -1608,3 +1608,73 @@ class TestListOwnerFilterCrossUser:
                                  headers=u1_headers).get_json()["items"]}
         assert with_param == without
         assert without == {"BC-FP-1"}     # 非空且只含自己的 BC
+
+
+class TestGgWriteOpsCrossUser:
+    """GG 侧「硬编码 owner_id == 自己」的 8 处写校验对跨用户角色放行（Task 18）。"""
+
+    def _fixture(self, client):
+        hg, hg_id = _huguan(client, "_ggw_hg")
+        _, u1 = _create_user(client, "_ggw_u1", role="user")
+        db = database.get_db()
+        _mk_mcc(db, u1, "MCC-W1", "别人的MCC")
+        _mk_account(db, u1, "GG-W-1", "别人的账户")
+        mcc_id = db.execute("SELECT id FROM mcc WHERE mcc_id='MCC-W1'").fetchone()["id"]
+        acc_id = db.execute("SELECT id FROM accounts WHERE account_id='GG-W-1'").fetchone()["id"]
+        db.close()
+        return hg, u1, mcc_id, acc_id
+
+    def test_huguan_can_update_others_mcc(self, client):
+        hg, _, mcc_id, _ = self._fixture(client)
+        resp = client.put(f"/api/mcc/{mcc_id}", json={"name": "改过的名字"}, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        name = db.execute("SELECT name FROM mcc WHERE id=?", (mcc_id,)).fetchone()["name"]
+        db.close()
+        assert name == "改过的名字"
+
+    def test_huguan_can_delete_others_mcc(self, client):
+        hg, _, mcc_id, _ = self._fixture(client)
+        assert client.delete(f"/api/mcc/{mcc_id}", headers=hg).status_code == 200
+
+    def test_huguan_can_soft_delete_and_restore_others_account(self, client):
+        hg, _, _, acc_id = self._fixture(client)
+        assert client.delete(f"/api/accounts/{acc_id}", headers=hg).status_code == 200
+        assert client.post(f"/api/accounts/{acc_id}/restore", headers=hg).status_code == 200
+
+    def test_huguan_can_delete_others_mcc_history(self, client):
+        """跨用户角色的 MCC 历史删除白名单（该接口原本只认 developer / admin）。"""
+        hg, _, _, acc_id = self._fixture(client)
+        db = database.get_db()
+        db.execute("INSERT INTO account_mcc_history(account_id, old_mcc_id, new_mcc_id) VALUES(?,?,?)",
+                   (acc_id, 1, 2))
+        db.commit()
+        hid = db.execute("SELECT id FROM account_mcc_history WHERE account_id=?", (acc_id,)).fetchone()["id"]
+        db.close()
+        resp = client.delete(f"/api/accounts/{acc_id}/mcc-history/{hid}", headers=hg)
+        assert resp.status_code == 200
+        assert resp.get_json()["deleted"] == 1
+
+    def test_regular_user_still_blocked_from_others_mcc(self, client):
+        """回归：普通用户改别人 MCC 仍是 403，且文案逐字节不变。"""
+        _, _, mcc_id, _ = self._fixture(client)
+        hdr, _ = _create_user(client, "_ggw_u2", role="user")
+        resp = client.put(f"/api/mcc/{mcc_id}", json={"name": "越权"}, headers=hdr)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "只有创建者才能编辑此 MCC"
+
+    def test_regular_user_still_blocked_from_others_account(self, client):
+        """回归：普通用户删别人账户仍是 404，且账户**真的没被**软删除。"""
+        _, _, _, acc_id = self._fixture(client)
+        hdr, _ = _create_user(client, "_ggw_u3", role="user")
+        assert client.delete(f"/api/accounts/{acc_id}", headers=hdr).status_code == 404
+        db = database.get_db()
+        deleted = db.execute("SELECT deleted_at FROM accounts WHERE id=?", (acc_id,)).fetchone()["deleted_at"]
+        db.close()
+        assert deleted is None
+
+    def test_regular_user_still_blocked_from_others_mcc_history(self, client):
+        """回归：普通用户删别人的 MCC 历史仍是 403。"""
+        hdr, _ = _create_user(client, "_ggw_u4", role="user")
+        _, _, _, acc_id = self._fixture(client)
+        assert client.delete(f"/api/accounts/{acc_id}/mcc-history/1", headers=hdr).status_code == 403

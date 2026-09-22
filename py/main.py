@@ -3577,6 +3577,17 @@ def _guess_series(text, link):
 
 # ---------- 账户管理 API ----------
 
+def _cross_user_actor(user_id: int) -> bool:
+    """当前请求者是否为可跨用户操作账户类资源的角色（developer / admin / 户管）。
+
+    GG 侧原本硬编码「owner_id == 自己」的写校验统一改用本函数判定：
+    自己的资源照旧放行；别人的资源仅跨用户角色放行。
+    非跨用户角色（user / viewer / hidden）的判定结果与改动前**逐字节一致**。
+    """
+    actor = auth.get_user_by_id(user_id)
+    return bool(actor) and actor.get("role") in CROSS_USER_ROLES
+
+
 def _mcc_to_dict(r, db=None, current_user_id=None):
     d = dict(r)
     if db:
@@ -4313,10 +4324,10 @@ def accounts_delete(aid):
     db = _yt_db()
     try:
         ac = db.execute(
-            "SELECT account_id FROM accounts WHERE id=? AND owner_id=? AND deleted_at IS NULL",
-            (aid, user_id)
+            "SELECT account_id, owner_id FROM accounts WHERE id=? AND deleted_at IS NULL",
+            (aid,)
         ).fetchone()
-        if not ac:
+        if not ac or (ac["owner_id"] != user_id and not _cross_user_actor(user_id)):
             return jsonify({"success": False, "error": "账户不存在或已删除"}), 404
         db.execute(
             "UPDATE accounts SET deleted_at=datetime('now','localtime'), "
@@ -4327,7 +4338,7 @@ def accounts_delete(aid):
 
         # 后台同步 Sheet H 列"解绑"
         sheet_id = _get_sync_spreadsheet_id(db)
-        dashboard_name = _get_my_dashboard_name(db, user_id)
+        dashboard_name = _get_my_dashboard_name(db, ac["owner_id"])
         if sheet_id and dashboard_name:
             _sync_aid = ac["account_id"]
             _sid = sheet_id
@@ -4353,11 +4364,14 @@ def accounts_batch_delete():
         return jsonify({"success": False, "error": "未选择账户"}), 400
     db = _yt_db()
     try:
+        cross_user = _cross_user_actor(user_id)
+        owner_clause = "" if cross_user else " AND owner_id=?"
         for aid in ids:
             db.execute(
                 "UPDATE accounts SET deleted_at=datetime('now','localtime'), "
-                "updated_at=datetime('now','localtime') WHERE id=? AND owner_id=? AND deleted_at IS NULL",
-                (aid, user_id)
+                "updated_at=datetime('now','localtime') "
+                f"WHERE id=?{owner_clause} AND deleted_at IS NULL",
+                (aid,) if cross_user else (aid, user_id)
             )
         db.commit()
         return jsonify({"success": True, "deleted": len(ids)})
@@ -4373,10 +4387,10 @@ def accounts_restore(aid):
     db = _yt_db()
     try:
         ac = db.execute(
-            "SELECT account_id FROM accounts WHERE id=? AND owner_id=? AND deleted_at IS NOT NULL",
-            (aid, user_id)
+            "SELECT account_id, owner_id FROM accounts WHERE id=? AND deleted_at IS NOT NULL",
+            (aid,)
         ).fetchone()
-        if not ac:
+        if not ac or (ac["owner_id"] != user_id and not _cross_user_actor(user_id)):
             return jsonify({"success": False, "error": "账户不存在或未被删除"}), 404
         db.execute(
             "UPDATE accounts SET deleted_at=NULL, updated_at=datetime('now','localtime') WHERE id=?",
@@ -4386,7 +4400,7 @@ def accounts_restore(aid):
 
         # 后台清空 Sheet H 列"解绑"
         sheet_id = _get_sync_spreadsheet_id(db)
-        dashboard_name = _get_my_dashboard_name(db, user_id)
+        dashboard_name = _get_my_dashboard_name(db, ac["owner_id"])
         if sheet_id and dashboard_name:
             _sync_aid = ac["account_id"]
             _sid = sheet_id
@@ -4410,10 +4424,10 @@ def accounts_permanent_delete(aid):
     db = _yt_db()
     try:
         ac = db.execute(
-            "SELECT account_id FROM accounts WHERE id=? AND owner_id=? AND deleted_at IS NOT NULL",
-            (aid, user_id)
+            "SELECT account_id, owner_id FROM accounts WHERE id=? AND deleted_at IS NOT NULL",
+            (aid,)
         ).fetchone()
-        if not ac:
+        if not ac or (ac["owner_id"] != user_id and not _cross_user_actor(user_id)):
             return jsonify({"success": False, "error": "账户不存在或未被删除"}), 404
         db.execute("DELETE FROM recharge_records WHERE account_id=?", (ac["account_id"],))
         db.execute("DELETE FROM account_mcc_history WHERE account_id=?", (aid,))
@@ -5310,7 +5324,7 @@ def accounts_mcc_history_delete(aid, hid):
     """删除单条 MCC 历史记录（admin/developer）"""
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in CROSS_USER_ROLES:
         return jsonify({"success": False, "error": "权限不足"}), 403
     db = _yt_db()
     try:
@@ -5532,7 +5546,7 @@ def mcc_update(mid):
     if not mcc_row:
         db.close()
         return jsonify({"success": False, "error": "MCC 不存在"}), 404
-    if mcc_row["owner_id"] != user_id:
+    if mcc_row["owner_id"] != user_id and not _cross_user_actor(user_id):
         db.close()
         return jsonify({"success": False, "error": "只有创建者才能编辑此 MCC"}), 403
     # 循环引用检测：新 parent_mcc_id 不能是当前 MCC 的子孙
@@ -5569,7 +5583,7 @@ def mcc_delete(mid):
     if not mcc_row:
         db.close()
         return jsonify({"success": False, "error": "MCC 不存在"}), 404
-    if mcc_row["owner_id"] != user_id:
+    if mcc_row["owner_id"] != user_id and not _cross_user_actor(user_id):
         db.close()
         return jsonify({"success": False, "error": "只有创建者才能删除此 MCC"}), 403
     # 检查是否有子 MCC
@@ -5603,13 +5617,14 @@ def mcc_batch_delete():
     db = _yt_db()
     skipped = []
     deleted = 0
+    cross_user = _cross_user_actor(user_id)
     for mid in ids:
         # Owner 检查
         mcc_row = db.execute("SELECT owner_id FROM mcc WHERE id=?", (mid,)).fetchone()
         if not mcc_row:
             skipped.append({"id": mid, "reason": "MCC 不存在"})
             continue
-        if mcc_row["owner_id"] != user_id:
+        if mcc_row["owner_id"] != user_id and not cross_user:
             skipped.append({"id": mid, "reason": "非创建者，无法删除"})
             continue
         children = db.execute("SELECT COUNT(*) FROM mcc WHERE parent_mcc_id=?", (mid,)).fetchone()[0]
