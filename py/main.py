@@ -7411,7 +7411,7 @@ def users_names():
 def admin_create_user():
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
     data = request.get_json()
     username = data.get("username", "").strip()
@@ -7419,11 +7419,15 @@ def admin_create_user():
     display_name = data.get("display_name", "").strip()
     role = data.get("role", "user")
     platform = data.get("platform", "gg")
+    allowed = _huguan_allowed_roles(user["role"])
+    # 户管：忽略请求体传入的 role，强制为 huguan
+    if user["role"] == "huguan":
+        role = "huguan"
     if not username or len(username) < 4 or len(username) > 20:
         return jsonify(success=False, error="Username must be 4-20 characters"), 400
     if not password or len(password) < 6:
         return jsonify(success=False, error="Password must be at least 6 characters"), 400
-    if role not in ("user", "admin", "viewer"):
+    if role not in allowed:
         return jsonify(success=False, error="Invalid role"), 400
     if platform not in ("gg", "fb", "tt"):
         return jsonify(success=False, error="Invalid platform"), 400
@@ -7447,19 +7451,40 @@ def admin_create_user():
 def admin_list_users():
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
     search = request.args.get("search", "")
     page = int(request.args.get("page", 1))
     page_size = int(request.args.get("page_size", 20))
     platform = request.args.get("platform") or None  # 'gg' | 'fb' | None（全部）
-    result = auth.list_users(search, page, page_size, current_user_id=user_id, platform=platform)
+    role_filter = "huguan" if user["role"] == "huguan" else None
+    result = auth.list_users(search, page, page_size, current_user_id=user_id,
+                             platform=platform, role_filter=role_filter)
     return jsonify(success=True, **result)
+
+
+ALLOWED_CREATE_ROLES = {
+    "developer": ("user", "admin", "viewer", "huguan"),
+    "admin": ("user", "admin", "viewer"),
+    "huguan": ("huguan",),
+}
+
+
+def _huguan_allowed_roles(actor_role: str) -> tuple:
+    """该角色允许创建/切换到的角色集合。未收录角色返回空元组。"""
+    return ALLOWED_CREATE_ROLES.get(actor_role, ())
 
 
 def _check_modify_user(actor: dict, target: dict) -> str | None:
     """返回 None 表示可操作；否则返回具体的拒绝原因（供接口返回准确的错误消息）。"""
     if actor["role"] == "developer":
+        return None
+    if actor["role"] == "huguan":
+        # 户管只能操作「自己创建的户管」
+        if target["role"] != "huguan":
+            return "户管只能操作户管账号"
+        if target.get("created_by") != actor["id"]:
+            return "只能操作自己创建的户管"
         return None
     if target["role"] not in ("user", "viewer", "hidden"):
         return "不能操作同级管理员"
@@ -7485,7 +7510,7 @@ def _can_access_user_data(actor: dict | None, target: dict) -> bool:
 def admin_update_role(uid):
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
     if uid == user_id:
         return jsonify(success=False, error="不能修改自己的角色"), 403
@@ -7497,7 +7522,12 @@ def admin_update_role(uid):
         return jsonify(success=False, error=deny_reason), 403
     data = request.get_json()
     new_role = data.get("role", "")
-    if new_role not in ("user", "admin", "viewer", "hidden"):
+    # 改角色接口的白名单 = 创建白名单 ∪ {hidden}（沿用既有「可设为 hidden」的能力）
+    # 户管额外只能在自己的 huguan / hidden 之间切换
+    allowed = tuple(_huguan_allowed_roles(user["role"])) + ("hidden",)
+    if user["role"] == "huguan":
+        allowed = ("huguan", "hidden")
+    if new_role not in allowed:
         return jsonify(success=False, error="Invalid role"), 400
     if auth.update_user_role(uid, new_role):
         return jsonify(success=True)
@@ -7508,7 +7538,7 @@ def admin_update_role(uid):
 def admin_toggle_user(uid):
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
     if uid == user_id:
         return jsonify(success=False, error="不能禁用自己"), 403
@@ -7528,7 +7558,7 @@ def admin_toggle_user(uid):
 def admin_delete_user(uid):
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
     if uid == user_id:
         return jsonify(success=False, error="不能删除自己"), 403
@@ -7580,7 +7610,7 @@ def admin_update_user(uid):
     """编辑用户信息（用户名、显示名）。"""
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
 
     target = auth.get_user_by_id(uid)
@@ -7620,7 +7650,7 @@ def admin_reset_password(uid):
     """管理员重置用户密码。"""
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
 
     target = auth.get_user_by_id(uid)
@@ -7649,7 +7679,7 @@ def admin_set_telegram_username(uid):
     """管理员设置用户的 Telegram 用户名。"""
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    if not user or user["role"] not in ("developer", "admin"):
+    if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
 
     target = auth.get_user_by_id(uid)

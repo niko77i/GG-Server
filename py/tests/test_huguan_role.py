@@ -236,3 +236,117 @@ class TestAuthRoleFixes:
         # 若只筛 SELECT 而漏筛 COUNT，users 看着对、分页却会按未过滤的总数算页数。
         assert res["total"] == 1
 
+
+
+class TestHuguanUserManagement:
+    def test_create_ignores_requested_role(self, client):
+        """户管创建用户时传 role=admin，落库仍为 huguan。"""
+        hg, hg_id = _huguan(client, "_hgm_create")
+        resp = client.post("/api/admin/users/create", json={
+            "username": "_hgm_new1", "password": "test123", "role": "admin",
+        }, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT role, platform, created_by FROM users WHERE username='_hgm_new1'").fetchone()
+        db.close()
+        assert row["role"] == "huguan"
+        assert row["platform"] == "gg"
+        assert row["created_by"] == hg_id
+
+    def test_list_returns_only_huguan(self, client):
+        hg, _ = _huguan(client, "_hgm_list")
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgm_u','x','user','gg')")
+        db.commit()
+        db.close()
+        resp = client.get("/api/admin/users", headers=hg)
+        assert resp.status_code == 200
+        roles = {u["role"] for u in resp.get_json()["users"]}
+        assert roles == {"huguan"}
+
+    def test_huguan_cannot_promote_own_huguan(self, client):
+        hg, _ = _huguan(client, "_hgm_promote")
+        client.post("/api/admin/users/create", json={
+            "username": "_hgm_sub1", "password": "test123"}, headers=hg)
+        db = database.get_db()
+        sub_id = db.execute("SELECT id FROM users WHERE username='_hgm_sub1'").fetchone()["id"]
+        db.close()
+        resp = client.post(f"/api/admin/users/{sub_id}/role", json={"role": "admin"}, headers=hg)
+        assert resp.status_code == 400
+        resp = client.post(f"/api/admin/users/{sub_id}/role", json={"role": "hidden"}, headers=hg)
+        assert resp.status_code == 200
+
+    def test_huguan_cannot_touch_others_huguan(self, client):
+        hg_a, _ = _huguan(client, "_hgm_ownerA")
+        hg_b, _ = _huguan(client, "_hgm_ownerB")
+        client.post("/api/admin/users/create", json={
+            "username": "_hgm_subB", "password": "test123"}, headers=hg_b)
+        db = database.get_db()
+        sub_b = db.execute("SELECT id FROM users WHERE username='_hgm_subB'").fetchone()["id"]
+        db.close()
+        resp = client.delete(f"/api/admin/users/{sub_b}", headers=hg_a)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "只能操作自己创建的户管"
+
+    def test_huguan_cannot_touch_admin_or_user(self, client):
+        hg, _ = _huguan(client, "_hgm_touch")
+        _, user_id = _create_user(client, "_hgm_plain", role="user")
+        _, admin_id = _create_user(client, "_hgm_admin", role="admin")
+        for target in (user_id, admin_id):
+            resp = client.post(f"/api/admin/users/{target}/toggle", headers=hg)
+            assert resp.status_code == 403
+            assert resp.get_json()["error"] == "户管只能操作户管账号"
+
+    def test_huguan_cannot_toggle_self(self, client):
+        hg, hg_id = _huguan(client, "_hgm_self")
+        resp = client.post(f"/api/admin/users/{hg_id}/toggle", headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "不能禁用自己"
+
+    def test_admin_cannot_create_huguan(self, client):
+        admin, _ = _create_user(client, "_hgm_admin2", role="admin")
+        resp = client.post("/api/admin/users/create", json={
+            "username": "_hgm_byadmin", "password": "test123", "role": "huguan",
+        }, headers=admin)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Invalid role"
+
+    def test_developer_can_create_huguan(self, client):
+        dev, _ = _create_user(client, "_hgm_dev", role="developer")
+        resp = client.post("/api/admin/users/create", json={
+            "username": "_hgm_bydev", "password": "test123", "role": "huguan",
+        }, headers=dev)
+        assert resp.status_code == 200
+
+    def test_admin_platform_isolation_regression(self, client):
+        """回归：平台隔离的错误文案与行为不变。"""
+        _create_user(client, "_hgm_gg_user", role="user", platform="gg")
+        tt_admin, _ = _create_user(client, "_hgm_tt_admin", role="admin", platform="tt")
+        db = database.get_db()
+        gg_uid = db.execute("SELECT id FROM users WHERE username='_hgm_gg_user'").fetchone()["id"]
+        db.close()
+        resp = client.post(f"/api/admin/users/{gg_uid}/role", json={"role": "viewer"}, headers=tt_admin)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "不能操作其他平台的用户"
+
+    def test_huguan_cannot_trigger_scheduler(self, client):
+        """户管不得获得定时任务权限（该接口只认 developer）。"""
+        hg, _ = _huguan(client, "_hgm_sched")
+        resp = client.post("/api/admin/trigger-weekly-cleanup", headers=hg)
+        assert resp.status_code == 403
+
+    def test_developer_and_admin_can_still_set_hidden(self, client):
+        """回归：改角色接口对 developer / admin 仍能把用户设为 `hidden`。
+
+        改动前 `py/main.py:7500` 的白名单是 `("user","admin","viewer","hidden")`，本任务把它
+        换成「创建白名单 ∪ {hidden}」。若漏掉 `"hidden"` 的并集，developer / admin 会从 200 变 400 ——
+        既违反纯增量原则，又因全仓无 `role.*hidden` 断言而不会被任何红灯拦下。本用例即为此设的守卫。
+        """
+        dev, _ = _create_user(client, "_hgm_dev_h", role="developer")
+        admin, _ = _create_user(client, "_hgm_admin_h", role="admin")
+        _, u1 = _create_user(client, "_hgm_h1", role="user")
+        _, u2 = _create_user(client, "_hgm_h2", role="user")
+        assert client.post(f"/api/admin/users/{u1}/role",
+                           json={"role": "hidden"}, headers=dev).status_code == 200
+        assert client.post(f"/api/admin/users/{u2}/role",
+                           json={"role": "hidden"}, headers=admin).status_code == 200
