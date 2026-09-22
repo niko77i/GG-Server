@@ -138,6 +138,11 @@ const routes = [
       { path: 'settings', component: () => import('../views/tt/TtSettingsPanel.vue'), meta: { title: 'TT设置' } },
     ]
   },
+  {
+    path: '/tt/extract',
+    component: () => import('../views/tt/TtDataExtract.vue'),
+    meta: { platform: 'tt', title: 'TT数据提取' },
+  },
 ]
 
 const router = createRouter({

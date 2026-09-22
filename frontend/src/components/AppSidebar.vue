@@ -113,6 +113,7 @@ const ttNavItems = [
       { icon:'⚙',label:'TT设置',path:'/tt/settings'},
     ]}
   ]},
+  { key: 'tt-extract', icon: '📥', label: '数据提取', sections: [{ title: '提取', items: [{ icon:'📥',label:'TT数据提取',path:'/tt/extract' }] }]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
 ]
