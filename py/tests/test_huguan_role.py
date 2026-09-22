@@ -842,6 +842,18 @@ class TestFbCrossUser:
         db.close()
         return hg, u1, u2
 
+    def _mk_pixel_bms(self, u1, u2):
+        """给两个用户各造一条像素 BM（`_setup` 只造 `fb_bms`）。
+
+        让 `/api/fb/bms/unified` 的 UNION **两半边**都有数据 —— 只覆盖 `fb_bms` 半边的话，
+        第二半边漏加条件或参数错位都不会变红。
+        """
+        db = database.get_db()
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('U1的像素BM','PBM-U1',?)", (u1,))
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('U2的像素BM','PBM-U2',?)", (u2,))
+        db.commit()
+        db.close()
+
     def test_huguan_sees_all_bms(self, client):
         hg, _, _ = self._setup(client)
         resp = client.get("/api/fb/bms/list?size=50", headers=hg)
@@ -852,6 +864,33 @@ class TestFbCrossUser:
         hg, u1, _ = self._setup(client)
         resp = client.get(f"/api/fb/bms/list?size=50&owner_id={u1}", headers=hg)
         assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1"}
+
+    def test_huguan_sees_other_users_pixel_bms(self, client):
+        """`:771`（`/api/fb/pixel-bms/list`）—— 本任务五个改动站点中唯一此前全库零覆盖的一个。
+
+        审查员变异证据：把该处的 `cross_user = role in CROSS_USER_ROLES` 改成 `cross_user = False`
+        （户管静默退化为只看自己），83 条相关测试仍全绿。本用例即补那个豁口。
+        """
+        hg, _, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('U2的像素BM','PBM-2',?)", (u2,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/fb/pixel-bms/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"PBM-2"}
+
+    def test_huguan_filters_pixel_bms_by_owner(self, client):
+        """`:771` 的 `owner_id` 收窄分支 —— 与上一条互补（上一条只测「看全部」）。"""
+        hg, u1, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('U1的像素BM','PBM-A',?)", (u1,))
+        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('U2的像素BM','PBM-B',?)", (u2,))
+        db.commit()
+        db.close()
+        resp = client.get(f"/api/fb/pixel-bms/list?size=50&owner_id={u1}", headers=hg)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"PBM-A"}
 
     def test_huguan_sees_all_accounts(self, client):
         hg, _, _ = self._setup(client)
@@ -871,21 +910,31 @@ class TestFbCrossUser:
         assert resp.get_json()["items"] == []
 
     def test_huguan_sees_all_bms_unified_both_halves(self, client):
-        """`:64`（`/api/fb/bms/unified`）是 UNION 两表 + `base_params * 2` 复制参数。
+        """`:72`（`/api/fb/bms/unified`）是 UNION 两表，户管在**两半边**都必须放行。
 
-        只覆盖 `fb_bms` 半边的话，「第二半边漏加 owner 条件」或「参数复制错位」全都不会变红
-        （Task 8 审查 I1 的同类缺口）。故本用例**两半边都造数据**：`fb_bms` 两条来自 `_setup`，
-        像素 BM 一条在此就地插入。
+        注意本用例**不带 `owner_id`**，故 `base_params` 为空，`base_params * 2` 退化为恒等操作 ——
+        那一层耦合由下一条 `test_bms_unified_owner_filter_binds_both_halves` 负责，两条缺一不可。
         """
-        hg, _, u2 = self._setup(client)
-        db = database.get_db()
-        db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES('U2的像素BM','PBM-1',?)", (u2,))
-        db.commit()
-        db.close()
+        hg, u1, u2 = self._setup(client)
+        self._mk_pixel_bms(u1, u2)
         resp = client.get("/api/fb/bms/unified?size=50", headers=hg)
         assert resp.status_code == 200
         bm_ids = {b["bm_id"] for b in resp.get_json()["items"]}
-        assert {"BM-1", "BM-2", "PBM-1"} <= bm_ids
+        assert bm_ids == {"BM-1", "BM-2", "PBM-U1", "PBM-U2"}
+
+    def test_bms_unified_owner_filter_binds_both_halves(self, client):
+        """UNION 两半边的参数复制（`wrapped_params = base_params * 2`）。
+
+        审查员变异证据：把 `py/routes/fb_routes.py:107` 的 `base_params * 2` 改成 `base_params`
+        时套件全绿，而真实请求 `?owner_id=` 会抛 `sqlite3.ProgrammingError: Incorrect number of bindings`
+        → HTTP 500。本用例通过传入 `owner_id` 让 `base_params` **非空**，从而锁住这个耦合：
+        两半边各自拿到自己的那份参数，且各自收窄到该 owner。
+        """
+        hg, u1, u2 = self._setup(client)
+        self._mk_pixel_bms(u1, u2)
+        resp = client.get(f"/api/fb/bms/unified?size=50&owner_id={u1}", headers=hg)
+        assert resp.status_code == 200
+        assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1", "PBM-U1"}
 
     def test_huguan_sees_other_users_deleted_accounts(self, client):
         """`:387`（`/api/fb/accounts/deleted`）的账户回收站。
@@ -903,6 +952,20 @@ class TestFbCrossUser:
         assert resp.status_code == 200
         assert {a["account_id"] for a in resp.get_json()["items"]} == {"FB-DEL-2"}
 
+    def test_huguan_filters_deleted_accounts_by_owner(self, client):
+        """`:411`（`/api/fb/accounts/deleted`）的 `owner_id` 收窄分支 —— 与上一条互补。"""
+        hg, u1, u2 = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, deleted_at) "
+                   "VALUES('U1的回收站账户','FB-DEL-1',?, datetime('now','localtime'))", (u1,))
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, deleted_at) "
+                   "VALUES('U2的回收站账户','FB-DEL-2',?, datetime('now','localtime'))", (u2,))
+        db.commit()
+        db.close()
+        resp = client.get(f"/api/fb/accounts/deleted?size=50&owner_id={u1}", headers=hg)
+        assert resp.status_code == 200
+        assert {a["account_id"] for a in resp.get_json()["items"]} == {"FB-DEL-1"}
+
     def test_huguan_cannot_see_other_users_fb_products(self, client):
         """回归守卫：产品域**不**放行（`fb_routes.py:471`）。
 
@@ -913,6 +976,14 @@ class TestFbCrossUser:
         """
         hg, _, u2 = self._setup(client)
         db = database.get_db()
+        hg_id = db.execute("SELECT id FROM users WHERE username='_fb_cs_hg'").fetchone()["id"]
+        # 正向对照：户管**在跑**的产品必须在结果里，否则「看不到别人的」可以靠
+        # 「接口恒返回空」蒙混过关，这条守卫就成了假绿
+        db.execute("INSERT INTO fb_products(product_name, owner_id) VALUES('户管在跑的产品',?)", (u2,))
+        db.commit()
+        mine = db.execute("SELECT id FROM fb_products WHERE product_name='户管在跑的产品'").fetchone()["id"]
+        db.execute("INSERT INTO fb_product_runners(product_id, user_id) VALUES(?,?)", (mine, hg_id))
+        # 负向目标：u2 拥有并在跑的产品不得出现
         db.execute("INSERT INTO fb_products(product_name, owner_id) VALUES('别人的FB产品',?)", (u2,))
         db.commit()
         pid = db.execute("SELECT id FROM fb_products WHERE product_name='别人的FB产品'").fetchone()["id"]
@@ -922,4 +993,5 @@ class TestFbCrossUser:
         resp = client.get("/api/fb/products/list?size=50", headers=hg)
         assert resp.status_code == 200
         names = {p["product_name"] for p in resp.get_json()["items"]}
-        assert "别人的FB产品" not in names
+        assert "户管在跑的产品" in names   # 正向对照：接口对户管确实有效
+        assert "别人的FB产品" not in names  # 产品域不放行
