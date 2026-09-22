@@ -18,8 +18,8 @@ const routes = [
       const token = localStorage.getItem('token')
       if (!token) return '/login'
       const user = JSON.parse(localStorage.getItem('user') || '{}')
-      if (user.role === 'developer' || user.role === 'huguan') {
-        // 跨平台角色以 GG 为默认落地，随后可在侧边栏切换
+      if (user.role === 'huguan') {
+        // 户管跨平台，以 GG 账户页为默认落地，随后可在侧边栏切换平台
         return '/accounts/ads'
       }
       if (user.platform === 'fb') return '/fb/products'

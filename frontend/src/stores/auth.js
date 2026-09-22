@@ -24,11 +24,13 @@ export const useAuthStore = defineStore('auth', {
       return state.user?.platform || 'gg'
     },
     homePath: (state) => {
-      const p = state.effectivePlatform
-      if (state.canSwitchPlatform) {
-        // 户管与开发者可跨平台，落地账户页而非产品页
+      // 户管跨平台：落地账户页，平台取其当前切换到的平台
+      if (state.user?.role === 'huguan') {
+        const p = state.effectivePlatform
         return p === 'fb' ? '/fb/accounts' : p === 'tt' ? '/tt/accounts' : '/accounts/ads'
       }
+      // 其余角色沿用改动前的 user.platform 推断，落地页与弹回目标逐字不变
+      const p = state.user?.platform || 'gg'
       return p === 'fb' ? '/fb/products' : p === 'tt' ? '/tt/products' : '/accounts/products'
     },
     roleLabel: (state) => {
