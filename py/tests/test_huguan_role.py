@@ -1120,3 +1120,185 @@ class TestFbCrossUser:
         resp = client.get(f"/api/fb/bms/list?size=50&owner_id={u1}", headers=adm)
         assert resp.status_code == 200
         assert {b["bm_id"] for b in resp.get_json()["items"]} == {"BM-1"}
+
+
+class TestHuguanGlobalOptions:
+    """户管可改名/删除平台级下拉选项（代理名 / 账户状态 / MCC 等级 / 商务人员）。
+
+    本任务改 `py/main.py` 里 8 处 `is_dev` 的定义（4 类选项 × rename/delete），
+    令其等于 `GLOBAL_OPTION_ROLES`。**四个 `*_create` 端点本来就没有角色闸门**
+    （任何登录用户都能建，只是按 owner/platform 隔离），故不在本任务范围，
+    也不要为它们写「户管能建」的用例 —— 那种断言改前改后都成立，是无法失败的假绿。
+    """
+
+    def test_huguan_renames_other_users_agent(self, client):
+        """`:5777`（`agents_rename`）。原计划表把这组误写成 create，实为 rename。"""
+        hg, _ = _huguan(client, "_opt_hg")
+        _, u1 = _create_user(client, "_opt_u1", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id) VALUES('u1的代理',?)", (u1,))
+        db.commit()
+        aid = db.execute("SELECT id FROM agents WHERE name='u1的代理'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/agents/{aid}?platform=gg", json={"name": "户管改名后"}, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT name FROM agents WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert row["name"] == "户管改名后"
+
+    def test_huguan_deletes_other_users_agent(self, client):
+        """`:5817`（`agents_delete`）。读回确认真的删了，而不是「返回 200 但没删」。"""
+        hg, _ = _huguan(client, "_opt_hg")
+        _, u1 = _create_user(client, "_opt_u1b", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id) VALUES('u1的待删代理',?)", (u1,))
+        db.commit()
+        aid = db.execute("SELECT id FROM agents WHERE name='u1的待删代理'").fetchone()["id"]
+        db.close()
+        resp = client.delete(f"/api/agents/{aid}?platform=gg", headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        gone = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert gone is None
+
+    def test_huguan_renames_other_users_status(self, client):
+        """`:5935`（`statuses_rename`）。"""
+        hg, _ = _huguan(client, "_opt_hg2")
+        _, u1 = _create_user(client, "_opt_u2", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO account_statuses(name, platform, owner_id) "
+                   "VALUES('u1的状态','gg',?)", (u1,))
+        db.commit()
+        sid = db.execute("SELECT id FROM account_statuses WHERE name='u1的状态'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/statuses/{sid}?platform=gg", json={"name": "户管改的状态"}, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT name FROM account_statuses WHERE id=?", (sid,)).fetchone()
+        db.close()
+        assert row["name"] == "户管改的状态"
+
+    def test_huguan_deletes_other_users_status(self, client):
+        """`:5964`（`statuses_delete`）。"""
+        hg, _ = _huguan(client, "_opt_hg2b")
+        _, u1 = _create_user(client, "_opt_u2b", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO account_statuses(name, platform, owner_id) "
+                   "VALUES('u1的待删状态','gg',?)", (u1,))
+        db.commit()
+        sid = db.execute("SELECT id FROM account_statuses WHERE name='u1的待删状态'").fetchone()["id"]
+        db.close()
+        resp = client.delete(f"/api/statuses/{sid}?platform=gg", headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        gone = db.execute("SELECT id FROM account_statuses WHERE id=?", (sid,)).fetchone()
+        db.close()
+        assert gone is None
+
+    def test_huguan_renames_other_users_mcc_level(self, client):
+        """`:6036`（`mcc_levels_rename`）。"""
+        hg, _ = _huguan(client, "_opt_hg3")
+        _, u1 = _create_user(client, "_opt_u3", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO mcc_levels(name, owner_id) VALUES('u1的等级',?)", (u1,))
+        db.commit()
+        lid = db.execute("SELECT id FROM mcc_levels WHERE name='u1的等级'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/mcc-levels/{lid}?platform=gg", json={"name": "户管改的等级"}, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT name FROM mcc_levels WHERE id=?", (lid,)).fetchone()
+        db.close()
+        assert row["name"] == "户管改的等级"
+
+    def test_huguan_deletes_other_users_mcc_level(self, client):
+        """`:6063`（`mcc_levels_delete`）。"""
+        hg, _ = _huguan(client, "_opt_hg3b")
+        _, u1 = _create_user(client, "_opt_u3b", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO mcc_levels(name, owner_id) VALUES('u1的待删等级',?)", (u1,))
+        db.commit()
+        lid = db.execute("SELECT id FROM mcc_levels WHERE name='u1的待删等级'").fetchone()["id"]
+        db.close()
+        resp = client.delete(f"/api/mcc-levels/{lid}?platform=gg", headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        gone = db.execute("SELECT id FROM mcc_levels WHERE id=?", (lid,)).fetchone()
+        db.close()
+        assert gone is None
+
+    def test_huguan_renames_other_users_sales_person(self, client):
+        """`:6131`（`sales_persons_rename`）。
+
+        这一处最容易漏：同函数的 `:6142` 还有一个 `is_dev` 的**引用**（重名检查的三元表达式），
+        它与本处定义必须一起生效 —— 只改定义、不动 `:6142`。
+        """
+        hg, _ = _huguan(client, "_opt_hg4")
+        _, u1 = _create_user(client, "_opt_u4", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO sales_persons(name, platform, owner_id) "
+                   "VALUES('u1的商务','gg',?)", (u1,))
+        db.commit()
+        sid = db.execute("SELECT id FROM sales_persons WHERE name='u1的商务'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/sales-persons/{sid}?platform=gg", json={"name": "户管改的商务"}, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT name FROM sales_persons WHERE id=?", (sid,)).fetchone()
+        db.close()
+        assert row["name"] == "户管改的商务"
+
+    def test_huguan_deletes_other_users_sales_person(self, client):
+        """`:6161`（`sales_persons_delete`）。"""
+        hg, _ = _huguan(client, "_opt_hg4b")
+        _, u1 = _create_user(client, "_opt_u4b", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO sales_persons(name, platform, owner_id) "
+                   "VALUES('u1的待删商务','gg',?)", (u1,))
+        db.commit()
+        sid = db.execute("SELECT id FROM sales_persons WHERE name='u1的待删商务'").fetchone()["id"]
+        db.close()
+        resp = client.delete(f"/api/sales-persons/{sid}?platform=gg", headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        gone = db.execute("SELECT id FROM sales_persons WHERE id=?", (sid,)).fetchone()
+        db.close()
+        assert gone is None
+
+    def test_regular_user_cannot_rename_other_users_agent(self, client):
+        """回归守卫：普通用户改不动他人代理名 —— 改前改后都必须为真（纯增量）。
+
+        **含正向对照**：同一接口对 `me` *自己*的代理必须 200。没有这条对照，
+        上面的 404 可能来自「接口恒 404」，断言就是假绿。
+        """
+        _, u1 = _create_user(client, "_opt_u5", role="user", platform="gg")
+        me, me_id = _create_user(client, "_opt_u6", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id) VALUES('u1的代理',?)", (u1,))
+        db.execute("INSERT INTO agents(name, owner_id) VALUES('我自己的代理',?)", (me_id,))
+        db.commit()
+        theirs = db.execute("SELECT id FROM agents WHERE name='u1的代理'").fetchone()["id"]
+        mine = db.execute("SELECT id FROM agents WHERE name='我自己的代理'").fetchone()["id"]
+        db.close()
+        assert client.put(f"/api/agents/{theirs}?platform=gg",
+                          json={"name": "越权改名"}, headers=me).status_code == 404
+        assert client.put(f"/api/agents/{mine}?platform=gg",
+                          json={"name": "我改名"}, headers=me).status_code == 200
+
+    def test_regular_user_cannot_delete_other_users_status(self, client):
+        """回归守卫：普通用户删不掉他人的账户状态（`:5964`）。含正向对照。"""
+        _, u1 = _create_user(client, "_opt_u7", role="user", platform="gg")
+        me, me_id = _create_user(client, "_opt_u8", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO account_statuses(name, platform, owner_id) "
+                   "VALUES('u1的状态','gg',?)", (u1,))
+        db.execute("INSERT INTO account_statuses(name, platform, owner_id) "
+                   "VALUES('我的状态','gg',?)", (me_id,))
+        db.commit()
+        theirs = db.execute("SELECT id FROM account_statuses WHERE name='u1的状态'").fetchone()["id"]
+        mine = db.execute("SELECT id FROM account_statuses WHERE name='我的状态'").fetchone()["id"]
+        db.close()
+        assert client.delete(f"/api/statuses/{theirs}?platform=gg", headers=me).status_code == 404
+        assert client.delete(f"/api/statuses/{mine}?platform=gg", headers=me).status_code == 200

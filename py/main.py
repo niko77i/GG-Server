@@ -36,7 +36,7 @@ import datetime
 import requests
 from functools import wraps
 from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform
-from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES
+from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES, GLOBAL_OPTION_ROLES
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 # google_ads_service 按需加载，不打包进 EXE
 
@@ -5774,7 +5774,7 @@ def agents_rename(aid):
     platform = request.args.get("platform", "")
     # 检查是否存在（developer 可操作任意）
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") in ("developer", "admin")
+    is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if platform == "tt":
         row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
     elif is_dev:
@@ -5814,7 +5814,7 @@ def agents_delete(aid):
     db = _yt_db()
     platform = request.args.get("platform", "")
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") in ("developer", "admin")
+    is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if platform == "tt":
         row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
     elif is_dev:
@@ -5932,7 +5932,7 @@ def statuses_rename(sid):
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") in ("developer", "admin")
+    is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if is_dev:
         row = db.execute("SELECT id FROM account_statuses WHERE id=?", (sid,)).fetchone()
     else:
@@ -5961,7 +5961,7 @@ def statuses_delete(sid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") in ("developer", "admin")
+    is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if is_dev:
         row = db.execute("SELECT id FROM account_statuses WHERE id=?", (sid,)).fetchone()
     else:
@@ -6033,7 +6033,7 @@ def mcc_levels_rename(lid):
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") in ("developer", "admin")
+    is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if is_dev:
         row = db.execute("SELECT id FROM mcc_levels WHERE id=?", (lid,)).fetchone()
     else:
@@ -6060,7 +6060,7 @@ def mcc_levels_delete(lid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") in ("developer", "admin")
+    is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if is_dev:
         row = db.execute("SELECT id FROM mcc_levels WHERE id=?", (lid,)).fetchone()
     else:
@@ -6128,7 +6128,7 @@ def sales_persons_rename(sid):
         return jsonify({"success": False, "error": "名称不能为空"}), 400
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") in ("developer", "admin")
+    is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if is_dev:
         row = db.execute("SELECT id FROM sales_persons WHERE id=?", (sid,)).fetchone()
     else:
@@ -6158,7 +6158,7 @@ def sales_persons_delete(sid):
     user_id = int(get_jwt_identity())
     db = _yt_db()
     user = auth.get_user_by_id(user_id)
-    is_dev = user and user.get("role") in ("developer", "admin")
+    is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if is_dev:
         row = db.execute("SELECT id FROM sales_persons WHERE id=?", (sid,)).fetchone()
     else:
