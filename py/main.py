@@ -36,7 +36,7 @@ import datetime
 import requests
 from functools import wraps
 from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform
-from routes.helpers import PLATFORM_SWITCH_ROLES
+from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 # google_ads_service 按需加载，不打包进 EXE
 
@@ -3625,6 +3625,17 @@ def _mcc_get_descendant_ids(mid):
 @jwt_required()
 def accounts_list():
     user_id = int(get_jwt_identity())
+    actor = auth.get_user_by_id(user_id)
+    actor_role = (actor or {}).get("role", "user")
+    cross_user = actor_role in CROSS_USER_ROLES
+    owner_filter = request.args.get("owner_id", "").strip()
+    if not cross_user:
+        owner_filter = ""
+    # 子查询归属收放三态：非跨用户角色恒为自身 id（逐字节等于改动前）；
+    # 跨用户 + 有 owner_id 筛选 → 收窄到该 owner；跨用户 + 无筛选 → None 表示不加归属条件
+    sub_owner = None if cross_user else user_id
+    if cross_user and owner_filter:
+        sub_owner = owner_filter
     search = request.args.get("search", "").strip()
     mcc_id = request.args.get("mcc_id", "").strip()
     status = request.args.get("status", "").strip()
@@ -3633,18 +3644,32 @@ def accounts_list():
     page = int(request.args.get("page", 1) or 1)
     size = int(request.args.get("size", 20) or 20)
     db = _yt_db()
-    where = ["a.owner_id = ?", "a.deleted_at IS NULL"]; params = [user_id]
+    if cross_user:
+        where = ["a.deleted_at IS NULL"]; params = []
+        if owner_filter:
+            where.append("a.owner_id = ?"); params.append(owner_filter)
+    else:
+        # 非跨用户角色：与改动前逐字节相同
+        where = ["a.owner_id = ?", "a.deleted_at IS NULL"]; params = [user_id]
     if search:
         where.append("(a.name LIKE ? OR a.account_id LIKE ?)")
         params += [f"%{search}%", f"%{search}%"]
     if mcc_id:
         where.append("a.mcc_id = ?"); params.append(mcc_id)
     if status:
-        where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND owner_id=?)")
-        params += [status, user_id]
+        if sub_owner is None:
+            where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=?)")
+            params += [status]
+        else:
+            where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND owner_id=?)")
+            params += [status, sub_owner]
     if agent:
-        where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
-        params += [f"%{agent}%", user_id]
+        if sub_owner is None:
+            where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ?)")
+            params += [f"%{agent}%"]
+        else:
+            where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
+            params += [f"%{agent}%", sub_owner]
     if timezone:
         where.append("a.timezone = ?"); params.append(timezone)
     sql = """
@@ -3680,15 +3705,25 @@ def accounts_list():
         if a.get("status_name"):
             a["status"] = a["status_name"]
     # 各状态的计数 — 关联当前筛选条件（不含 status，因为需要展示所有状态的数量）
-    sc_where = ["a.owner_id = ?", "a.deleted_at IS NULL"]; sc_params = [user_id]
+    if cross_user:
+        sc_where = ["a.deleted_at IS NULL"]; sc_params = []
+        if owner_filter:
+            sc_where.append("a.owner_id = ?"); sc_params.append(owner_filter)
+    else:
+        # 非跨用户角色：与改动前逐字节相同
+        sc_where = ["a.owner_id = ?", "a.deleted_at IS NULL"]; sc_params = [user_id]
     if search:
         sc_where.append("(a.name LIKE ? OR a.account_id LIKE ?)")
         sc_params += [f"%{search}%", f"%{search}%"]
     if mcc_id:
         sc_where.append("a.mcc_id = ?"); sc_params.append(mcc_id)
     if agent:
-        sc_where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
-        sc_params += [f"%{agent}%", user_id]
+        if sub_owner is None:
+            sc_where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ?)")
+            sc_params += [f"%{agent}%"]
+        else:
+            sc_where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
+            sc_params += [f"%{agent}%", sub_owner]
     if timezone:
         sc_where.append("a.timezone = ?"); sc_params.append(timezone)
     status_counts = {}
@@ -3701,30 +3736,38 @@ def accounts_list():
     ).fetchall():
         s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
     # 筛选下拉数据（缓存低频查询结果）
+    # 缓存键带 owner 维度：_app_cache 是进程级全局缓存，不区分维度会串数据
+    scope = owner_filter or "all" if cross_user else str(user_id)
     uid_str = str(user_id)
-    mcc_cache_key = f"accounts:mcc_options:{user_id}"
+    mcc_cache_key = f"accounts:mcc_options:{user_id}:{scope}"
     mcc_options = _app_cache.get(mcc_cache_key)
     if mcc_options is None:
-        mcc_options = [dict(r) for r in db.execute(
-            "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids=? OR "
-            "shared_user_ids LIKE ? OR shared_user_ids LIKE ? OR shared_user_ids LIKE ?) ORDER BY name",
-            (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
-        ).fetchall()]
+        if owner_filter:
+            mcc_options = [dict(r) for r in db.execute(
+                "SELECT id, name, mcc_id FROM mcc WHERE owner_id = ? ORDER BY name",
+                (owner_filter,)
+            ).fetchall()]
+        else:
+            mcc_options = [dict(r) for r in db.execute(
+                "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids=? OR "
+                "shared_user_ids LIKE ? OR shared_user_ids LIKE ? OR shared_user_ids LIKE ?) ORDER BY name",
+                (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
+            ).fetchall()]
         _app_cache.set(mcc_cache_key, mcc_options, ttl=120)
-    agents_cache_key = f"accounts:agents:{user_id}"
+    agents_cache_key = f"accounts:agents:{user_id}:{scope}"
     agents = _app_cache.get(agents_cache_key)
     if agents is None:
         agents = [r["name"] for r in db.execute(
             "SELECT DISTINCT ag.name FROM agents ag "
             "INNER JOIN accounts a ON a.agent_id = ag.id "
             "WHERE a.owner_id=? "
-            "ORDER BY 1", (user_id,)
+            "ORDER BY 1", (owner_filter or user_id,)
         ).fetchall()]
         _app_cache.set(agents_cache_key, agents, ttl=120)
-    tz_cache_key = f"accounts:tz:{user_id}"
+    tz_cache_key = f"accounts:tz:{user_id}:{scope}"
     timezone_options = _app_cache.get(tz_cache_key)
     if timezone_options is None:
-        timezone_options = [r["timezone"] for r in db.execute("SELECT DISTINCT timezone FROM accounts WHERE timezone!='' AND owner_id=? ORDER BY timezone", (user_id,)).fetchall()]
+        timezone_options = [r["timezone"] for r in db.execute("SELECT DISTINCT timezone FROM accounts WHERE timezone!='' AND owner_id=? ORDER BY timezone", (owner_filter or user_id,)).fetchall()]
         _app_cache.set(tz_cache_key, timezone_options, ttl=120)
     db.close()
     return jsonify({"success": True, "accounts": accounts, "total": total, "mcc_options": mcc_options, "agents": agents, "timezone_options": timezone_options, "status_counts": status_counts})

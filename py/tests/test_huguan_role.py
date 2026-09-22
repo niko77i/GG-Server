@@ -405,3 +405,87 @@ class TestPlatformUsersEndpoint:
         assert resp.status_code == 200
         names = {x["username"] for x in resp.get_json()["users"]}
         assert "_hgpu_leak" not in names
+
+
+def _mk_account(db, owner_id, account_id, name="测试账户"):
+    db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES(?,?,?)",
+               (name, account_id, owner_id))
+    db.commit()
+
+
+class TestGgAccountListCrossUser:
+    def _setup(self, client):
+        hg, hg_id = _huguan(client, "_ggac_hg")
+        _, u1 = _create_user(client, "_ggac_u1", role="user")
+        _, u2 = _create_user(client, "_ggac_u2", role="user")
+        db = database.get_db()
+        _mk_account(db, u1, "GG-AC-1", "U1账户")
+        _mk_account(db, u2, "GG-AC-2", "U2账户")
+        db.close()
+        return hg, hg_id, u1, u2
+
+    def test_regular_user_sees_only_own(self, client):
+        _, _, u1, _ = self._setup(client)
+        hdr, _ = _create_user(client, "_ggac_u1b", role="user")
+        resp = client.get("/api/accounts/list?size=50", headers=hdr)
+        assert [a["account_id"] for a in resp.get_json()["accounts"]] == []
+
+    def test_huguan_sees_all_users(self, client):
+        hg, _, _, _ = self._setup(client)
+        resp = client.get("/api/accounts/list?size=50", headers=hg)
+        ids = {a["account_id"] for a in resp.get_json()["accounts"]}
+        assert ids == {"GG-AC-1", "GG-AC-2"}
+
+    def test_huguan_filters_by_owner_id(self, client):
+        hg, _, u1, _ = self._setup(client)
+        resp = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hg)
+        ids = {a["account_id"] for a in resp.get_json()["accounts"]}
+        assert ids == {"GG-AC-1"}
+
+    def test_status_counts_follow_owner_filter(self, client):
+        """状态计数必须与 owner_id 筛选同步，否则出现「列表1条、计数3条」。"""
+        hg, _, u1, _ = self._setup(client)
+        resp = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hg)
+        assert resp.get_json()["status_counts"].get("存活", 0) == 1
+
+    def test_regular_user_ignores_owner_id(self, client):
+        """回归：普通用户传 owner_id 不能越权看到别人的账户。"""
+        _, _, u1, _ = self._setup(client)
+        hdr, _ = _create_user(client, "_ggac_u3", role="user")
+        db = database.get_db()
+        _mk_account(db, _create_user(client, "_ggac_u3b", role="user")[1], "GG-AC-3")
+        db.close()
+        resp = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hdr)
+        assert [a["account_id"] for a in resp.get_json()["accounts"]] == []
+
+    def test_huguan_agent_filter_not_scoped_to_self(self, client):
+        """户管不带 owner_id 时按代理名筛选，必须匹配到别人账户上的代理。
+
+        回归点：若 agent / status 四处子查询写成 `owner_filter or user_id`，无筛选时
+        `"" or user_id` 退化为**户管自己的 id**，会把别人账户上的代理整片滤掉 ——
+        与「跨用户可见」的目的直接矛盾。上面 5 条用例都没有设 agent，抓不到这个 bug，
+        本用例即为此设的守卫。
+        """
+        hg, _, u1, _ = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('代理甲', ?, 'gg')", (u1,))
+        ag_id = db.execute("SELECT id FROM agents WHERE name='代理甲'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-AC-1'", (ag_id,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/accounts/list?size=50&agent=代理甲", headers=hg)
+        ids = {a["account_id"] for a in resp.get_json()["accounts"]}
+        assert ids == {"GG-AC-1"}
+
+    def test_regular_user_agent_filter_still_scoped_to_self(self, client):
+        """回归：普通用户按代理名筛选仍然是「只看自己的账户」，不得因本次改动放宽。"""
+        _, _, u1, _ = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('代理乙', ?, 'gg')", (u1,))
+        ag_id = db.execute("SELECT id FROM agents WHERE name='代理乙'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-AC-1'", (ag_id,))
+        db.commit()
+        db.close()
+        hdr, _ = _create_user(client, "_ggac_u4", role="user")
+        resp = client.get("/api/accounts/list?size=50&agent=代理乙", headers=hdr)
+        assert [a["account_id"] for a in resp.get_json()["accounts"]] == []
