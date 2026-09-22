@@ -658,6 +658,16 @@ git commit -m "feat: 用户管理接口放行户管并收窄到自己创建的�
 
 ### Task 4: 通用用户列表接口 `GET /api/platform/users`
 
+> **执行勘误（2026-09-22，评审后修订）**：Step 1 原稿的两条用例**验证不了自己命名的分支**，已加强如下，实现须按加强版落地。
+>
+> **(1) `test_includes_developer_excludes_hidden` 的 `OR role = 'developer'` 分支零覆盖。** 原稿把 `_hgpu_dev` 插成 `role='developer', platform='gg'`，而查询用的是 `?platform=gg` —— 该行**被 `platform = ?` 条件本身命中**，因此即使把 `OR role = 'developer'` 整段删掉，`assert "_hgpu_dev" in names` 依然通过。修法：把该行插成 `platform='tt'`，使其**只能**经 developer 分支命中（`role='developer'` 与 `platform='gg'` 两条路径互斥），断言才真正承载语义。缓存侧断言（`"_hgpu_hid" not in names`）原稿本来就可靠。
+>
+> **(2) `test_huguan_sees_only_current_platform` 未覆盖平台切换。** `_huguan` 默认 `platform='gg'`，而请求也是 `?platform=gg` —— 与调用者自身平台相同，因此即使 `_get_effective_platform()` 完全忽略查询参数，该用例照样通过。修法：改为请求 `?platform=tt` 并断言 `"_hgpu_gg" not in names`，使其真正验证「按 `?platform=` 切换」。
+>
+> **(3) 新增一条非切换角色的隔离用例。** 本接口是本计划中唯一**只挂 `@jwt_required()`、不挂平台装饰器**的新路由（`/api/tt/users` 挂 `@tt_required`、`/api/fb/users` 挂 `@fb_required`，见 `py/routes/tt_routes.py:812`、`py/routes/fb_routes.py:1508`）。因此「非切换角色传 `?platform=` 被忽略」这一访问控制属性只能靠本用例守护。
+>
+> 上述三条均为**加强**（不改变任何接口要求、不触碰生产代码），不削弱 Step 2 的「先红后绿」要求。
+
 **Files:**
 - Modify: `py/main.py`（在 `_get_effective_platform` 定义之后，约 `py/main.py:5782`，新增路由）
 - Test: `py/tests/test_huguan_role.py`（追加）
@@ -671,35 +681,63 @@ git commit -m "feat: 用户管理接口放行户管并收窄到自己创建的�
 ```python
 class TestPlatformUsersEndpoint:
     def test_huguan_sees_only_current_platform(self, client):
-        hg, _ = _huguan(client, "_hgpu_hg")
+        """户管切到 TT 时只应看到 TT + developer，不该看到 GG 行。
+
+        注意这里用 `?platform=tt` 而**不是**调用者自身的 gg —— 否则即使
+        `_get_effective_platform()` 完全忽略查询参数，本用例也会通过。
+        """
+        hg, _ = _huguan(client, "_hgpu_hg")  # users.platform == 'gg'
         db = database.get_db()
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_gg','x','user','gg')")
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_tt','x','user','tt')")
         db.commit()
         db.close()
-        resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        resp = client.get("/api/platform/users?platform=tt", headers=hg)
         assert resp.status_code == 200
         names = {u["username"] for u in resp.get_json()["users"]}
-        assert "_hgpu_gg" in names
-        assert "_hgpu_tt" not in names
+        assert "_hgpu_tt" in names
+        assert "_hgpu_gg" not in names
 
     def test_includes_developer_excludes_hidden(self, client):
+        """developer 行必须经 `OR role = 'developer'` 命中，hidden 行必须被排除。
+
+        `_hgpu_dev` 故意插成 platform='tt'：调用者只查 platform='gg'，因此该行
+        **只能**经 developer 分支出现。若把它插成 'gg'，它会被 `platform = ?`
+        命中，删掉 `OR role = 'developer'` 断言也不会红 —— 那就成了空断言。
+        """
         hg, _ = _huguan(client, "_hgpu_hg2")
         db = database.get_db()
-        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_dev','x','developer','gg')")
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_dev','x','developer','tt')")
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_hid','x','hidden','gg')")
         db.commit()
         db.close()
         resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        assert resp.status_code == 200
         names = {u["username"] for u in resp.get_json()["users"]}
         assert "_hgpu_dev" in names
         assert "_hgpu_hid" not in names
+
+    def test_non_switch_role_cannot_pick_platform(self, client):
+        """非切换角色传 ?platform= 必须被忽略，只能拿到自己平台的数据。
+
+        本接口只挂 @jwt_required()，不像 /api/tt/users、/api/fb/users 那样挂平台
+        装饰器，因此这条隔离属性只能靠本用例守护。
+        """
+        u, _ = _create_user(client, "_hgpu_plain", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_leak','x','user','tt')")
+        db.commit()
+        db.close()
+        resp = client.get("/api/platform/users?platform=tt", headers=u)
+        assert resp.status_code == 200
+        names = {x["username"] for x in resp.get_json()["users"]}
+        assert "_hgpu_leak" not in names
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k PlatformUsers`
-Expected: 两条 FAIL，`resp.status_code == 404`（路由不存在）。
+Expected: 三条 FAIL，`resp.status_code == 404`（路由不存在）。
 
 - [ ] **Step 3: 新增路由**
 
@@ -729,7 +767,7 @@ def platform_users():
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k PlatformUsers`
-Expected: 2 passed
+Expected: 3 passed
 
 - [ ] **Step 5: 提交**
 
