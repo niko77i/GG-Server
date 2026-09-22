@@ -5,7 +5,7 @@ import re
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
-from .decorators import tt_required, tt_write_required
+from .decorators import tt_required, tt_write_required, no_huguan
 
 tt_bp = Blueprint('tt', __name__)
 
@@ -225,6 +225,7 @@ def runner_products():
 @tt_bp.route('/api/tt/products/create', methods=['POST'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def create_product():
     db = get_db()
     data = parse_body()
@@ -276,6 +277,7 @@ def create_product():
 @tt_bp.route('/api/tt/products/<int:pid>', methods=['PUT'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def update_product(pid):
     db = get_db()
     uid = get_uid()
@@ -341,6 +343,7 @@ def update_product(pid):
 @tt_bp.route('/api/tt/products/<int:pid>', methods=['DELETE'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def delete_product(pid):
     db = get_db()
     uid = get_uid()
@@ -355,6 +358,7 @@ def delete_product(pid):
 @tt_bp.route('/api/tt/products/<int:pid>/restore', methods=['POST'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def restore_product(pid):
     db = get_db()
     uid = get_uid()
@@ -399,6 +403,7 @@ def product_detail(pid):
 @tt_bp.route('/api/tt/products/<int:pid>/packages', methods=['POST'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def add_package(pid):
     db = get_db()
     uid = get_uid()
@@ -430,6 +435,7 @@ def add_package(pid):
 @tt_bp.route('/api/tt/packages/<int:pkg_id>', methods=['PUT'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def update_package(pkg_id):
     db = get_db()
     uid = get_uid()
@@ -474,6 +480,7 @@ def update_package(pkg_id):
 @tt_bp.route('/api/tt/packages/<int:pkg_id>', methods=['DELETE'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def delete_package(pkg_id):
     db = get_db()
     uid = get_uid()
@@ -492,6 +499,7 @@ def delete_package(pkg_id):
 @tt_bp.route('/api/tt/packages/batch-delete', methods=['POST'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def batch_delete_packages():
     db = get_db()
     uid = get_uid()
@@ -519,6 +527,7 @@ def batch_delete_packages():
 @tt_bp.route('/api/tt/products/<int:pid>/check-delist', methods=['POST'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def check_delist(pid):
     import delist_checker
     import datetime
@@ -587,6 +596,7 @@ def delist_status():
 @tt_bp.route('/api/tt/products/merge', methods=['POST'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def products_merge():
     """合并多个产品到主产品（迁移投放对象 + 在跑人员，删除副产品）。"""
     db = get_db()
@@ -644,6 +654,7 @@ def products_merge():
 @tt_bp.route('/api/tt/products/import-text', methods=['POST'])
 @jwt_required()
 @tt_required
+@no_huguan
 def import_text():
     """粘贴文本解析成投放对象列表（第一阶段仅跑包 Google Play 链接）。"""
     data = parse_body()
@@ -760,6 +771,7 @@ def list_assets(pid):
 @tt_bp.route('/api/tt/products/<int:pid>/assets', methods=['POST'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def add_assets(pid):
     """从共享视频库选择已有视频建立关联。body: { video_ids: [...] }。"""
     db = get_db()
@@ -794,6 +806,7 @@ def add_assets(pid):
 @tt_bp.route('/api/tt/products/<int:pid>/assets/<video_id>', methods=['DELETE'])
 @jwt_required()
 @tt_write_required
+@no_huguan
 def delete_asset(pid, video_id):
     db = get_db()
     uid = get_uid()

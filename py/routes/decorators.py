@@ -2,7 +2,7 @@
 from functools import wraps
 from flask_jwt_extended import get_jwt_identity
 import auth
-from routes.helpers import err, PLATFORM_SWITCH_ROLES
+from routes.helpers import err, PLATFORM_SWITCH_ROLES, HUGUAN_ROLE
 
 
 def admin_required(fn):
@@ -45,6 +45,29 @@ def reject_viewer():
     if user and user.get("role") == "viewer":
         return err("权限不足：只读用户无法执行此操作", 403)
     return None
+
+
+def reject_huguan():
+    """户管不参与产品 / 包 / 素材域。返回错误响应或 None。"""
+    try:
+        uid = int(get_jwt_identity())
+    except Exception:
+        return None  # 未登录由 @jwt_required() 处理
+    user = auth.get_user_by_id(uid)
+    if user and user.get("role") == HUGUAN_ROLE:
+        return err("户管无产品/素材权限", 403)
+    return None
+
+
+def no_huguan(fn):
+    """产品 / 素材域专用装饰器：户管一律拒绝。叠加在平台装饰器之内层。"""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        err_resp = reject_huguan()
+        if err_resp:
+            return err_resp
+        return fn(*args, **kwargs)
+    return wrapper
 
 
 def require_platform(platform):

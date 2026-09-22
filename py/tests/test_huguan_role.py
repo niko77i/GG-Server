@@ -1362,3 +1362,61 @@ class TestHuguanUserListCrossPlatform:
         _create_user(client, "_ulc_d_tt", role="user", platform="tt")
         res = list_users(current_user_id=dev)
         assert {"gg", "tt"} <= {u["platform"] for u in res["users"]}
+
+
+class TestHuguanBlockedFromProductDomain:
+    """户管可跨平台，但不得写产品 / 包 / 素材（设计文档 §3.9）。"""
+
+    def _fb_product_by_developer(self, client):
+        """借开发者身份造一个 FB 产品，供户管越权尝试。"""
+        dev, _ = _create_user(client, "_hg_pd_dev", role="developer", platform="fb")
+        resp = client.post("/api/fb/products/create", json={"product_name": "户管越权靶子"},
+                           headers=dev)
+        assert resp.status_code == 200, resp.get_json()
+        return dev, resp.get_json()["id"]
+
+    def test_huguan_cannot_create_fb_product(self, client):
+        hg, _ = _huguan(client, "_hg_pd_fb_create")
+        resp = client.post("/api/fb/products/create", json={"product_name": "越权"},
+                           headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_cannot_update_fb_product(self, client):
+        _, pid = self._fb_product_by_developer(client)
+        hg, _ = _huguan(client, "_hg_pd_fb_update")
+        resp = client.put(f"/api/fb/products/{pid}", json={"product_name": "被篡改"},
+                          headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_cannot_delete_fb_product(self, client):
+        _, pid = self._fb_product_by_developer(client)
+        hg, _ = _huguan(client, "_hg_pd_fb_delete")
+        resp = client.delete(f"/api/fb/products/{pid}", headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_cannot_create_tt_product(self, client):
+        hg, _ = _huguan(client, "_hg_pd_tt_create")
+        resp = client.post("/api/tt/products/create", json={"product_name": "越权"},
+                           headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_cannot_import_tt_products(self, client):
+        """import-text 只挂 @tt_required，是易漏的写入面。"""
+        hg, _ = _huguan(client, "_hg_pd_tt_import")
+        resp = client.post("/api/tt/products/import-text", json={"text": "x"},
+                           headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_can_still_write_account_domain(self, client):
+        """回归：收口不得误伤账户域——户管仍可建 BC。"""
+        hg, _ = _huguan(client, "_hg_pd_bc", platform="tt")
+        resp = client.post("/api/tt/bcs/create",
+                           json={"name": "户管建的BC", "bc_id": "123456789"}, headers=hg)
+        assert resp.status_code == 200
+
+    def test_developer_can_still_write_products(self, client):
+        """回归：developer 的产品写权限不受影响。"""
+        dev, _ = _create_user(client, "_hg_pd_dev2", role="developer", platform="gg")
+        resp = client.post("/api/tt/products/create", json={"product_name": "开发者的产品"},
+                           headers=dev)
+        assert resp.status_code == 200

@@ -2,7 +2,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
-from .decorators import fb_required
+from .decorators import fb_required, no_huguan
 import re
 import threading
 
@@ -578,6 +578,7 @@ def runner_products():
 @fb_bp.route('/api/fb/products/create', methods=['POST'])
 @jwt_required()
 @fb_required
+@no_huguan
 def create_product():
     db = get_db()
     data = parse_body()
@@ -620,6 +621,7 @@ def create_product():
 @fb_bp.route('/api/fb/products/<int:pid>', methods=['PUT'])
 @jwt_required()
 @fb_required
+@no_huguan
 def update_product(pid):
     db = get_db()
     data = parse_body()
@@ -663,6 +665,7 @@ def update_product(pid):
 @fb_bp.route('/api/fb/products/<int:pid>', methods=['DELETE'])
 @jwt_required()
 @fb_required
+@no_huguan
 def delete_product(pid):
     db = get_db()
     db.execute("UPDATE fb_products SET is_archived=1, updated_at=datetime('now','localtime') WHERE id=?", (pid,))
@@ -673,6 +676,7 @@ def delete_product(pid):
 @fb_bp.route('/api/fb/products/<int:pid>/restore', methods=['POST'])
 @jwt_required()
 @fb_required
+@no_huguan
 def restore_product(pid):
     db = get_db()
     db.execute("UPDATE fb_products SET is_archived=0, updated_at=datetime('now','localtime') WHERE id=?", (pid,))
@@ -706,6 +710,7 @@ def product_detail(pid):
 @fb_bp.route('/api/fb/products/<int:pid>/lines', methods=['POST'])
 @jwt_required()
 @fb_required
+@no_huguan
 def add_line(pid):
     db = get_db()
     data = parse_body()
@@ -728,6 +733,7 @@ def add_line(pid):
 @fb_bp.route('/api/fb/lines/<int:lid>', methods=['PUT'])
 @jwt_required()
 @fb_required
+@no_huguan
 def update_line(lid):
     db = get_db()
     data = parse_body()
@@ -746,6 +752,7 @@ def update_line(lid):
 @fb_bp.route('/api/fb/lines/<int:lid>', methods=['DELETE'])
 @jwt_required()
 @fb_required
+@no_huguan
 def delete_line(lid):
     db = get_db()
     db.execute("DELETE FROM fb_lines WHERE id=?", (lid,))
