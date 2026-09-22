@@ -1,12 +1,16 @@
 <template>
   <div class="user-manage">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-      <h3 style="margin:0;font-size:18px;font-weight:600;color:#111827;">用户管理</h3>
+      <div>
+        <h3 style="margin:0;font-size:18px;font-weight:600;color:#111827;">用户管理</h3>
+        <!-- 户管专属说明行：承载「只能操作自己创建的」这条不可见规则（设计文档 §3.1） -->
+        <div v-if="authStore.isHuguan" style="font-size:13px;color:#6b7280;margin-top:4px;">仅可管理你创建的户管账号</div>
+      </div>
       <el-button @click="$router.push('/profile')">👤 个人信息</el-button>
     </div>
 
-    <!-- 平台切换 Tab — 非开发者只显示自己平台的 Tab -->
-    <el-tabs v-model="platformFilter" @tab-change="onPlatformChange" style="margin-bottom:8px;">
+    <!-- 平台切换 Tab — 非开发者只显示自己平台的 Tab；户管列表跨平台，无平台维度可筛，整体隐藏 -->
+    <el-tabs v-if="!authStore.isHuguan" v-model="platformFilter" @tab-change="onPlatformChange" style="margin-bottom:8px;">
       <el-tab-pane v-if="authStore.isDeveloper" label="全部" name="" />
       <el-tab-pane v-if="authStore.isDeveloper || authStore.effectivePlatform === 'gg'" label="GG" name="gg" />
       <el-tab-pane v-if="authStore.isDeveloper || authStore.effectivePlatform === 'fb'" label="FB" name="fb" />
@@ -23,10 +27,15 @@
       </el-row>
     </el-card>
     <div style="margin-bottom:12px;">
-      <el-button type="primary" @click="openCreateDialog">+ 创建用户</el-button>
+      <el-button type="primary" @click="openCreateDialog">{{ authStore.isHuguan ? '+ 创建户管' : '+ 创建用户' }}</el-button>
     </div>
 
     <el-table :data="users" stripe style="width:100%" v-loading="loading" height="calc(100vh - 220px)">
+      <!-- 户管空状态：替换默认「暂无数据」，给出其唯一职责的入口（设计文档 §3.1）；非户管不提供该插槽 -->
+      <template v-if="authStore.isHuguan" #empty>
+        <div style="padding:24px 0 12px;color:#6b7280;">你还没有创建任何户管账号</div>
+        <el-button type="primary" @click="openCreateDialog">创建户管</el-button>
+      </template>
       <el-table-column prop="id" label="ID" width="60" />
       <el-table-column prop="username" label="用户名" width="150" />
       <el-table-column prop="display_name" label="显示名" width="150" />
@@ -54,10 +63,17 @@
               <el-button size="small" link>切换角色</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="user" :disabled="row.role === 'user'">普通用户</el-dropdown-item>
-                  <el-dropdown-item command="viewer" :disabled="row.role === 'viewer'">观察者</el-dropdown-item>
-                  <el-dropdown-item command="admin" :disabled="row.role === 'admin'">管理员</el-dropdown-item>
-                  <el-dropdown-item command="hidden" :disabled="row.role === 'hidden'">禁用</el-dropdown-item>
+                  <template v-if="authStore.isHuguan">
+                    <el-dropdown-item command="huguan" :disabled="row.role === 'huguan'">户管</el-dropdown-item>
+                    <el-dropdown-item command="hidden" :disabled="row.role === 'hidden'">禁用</el-dropdown-item>
+                  </template>
+                  <template v-else>
+                    <el-dropdown-item command="user" :disabled="row.role === 'user'">普通用户</el-dropdown-item>
+                    <el-dropdown-item command="viewer" :disabled="row.role === 'viewer'">观察者</el-dropdown-item>
+                    <el-dropdown-item command="admin" :disabled="row.role === 'admin'">管理员</el-dropdown-item>
+                    <el-dropdown-item v-if="authStore.isDeveloper" command="huguan" :disabled="row.role === 'huguan'">户管</el-dropdown-item>
+                    <el-dropdown-item command="hidden" :disabled="row.role === 'hidden'">禁用</el-dropdown-item>
+                  </template>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -67,7 +83,7 @@
               </template>
             </el-popconfirm>
           </template>
-          <el-tooltip v-if="!canModify(row)" :content="'不能操作' + (row.role === 'developer' ? '开发者' : '同级管理员')" placement="top">
+          <el-tooltip v-if="!canModify(row)" :content="'不能操作' + (row.role === 'developer' ? '开发者' : (authStore.isHuguan ? '其他户管（只能操作自己创建的）' : '同级管理员'))" placement="top">
             <span style="color:#999;font-size:12px;margin-left:4px;">🔒</span>
           </el-tooltip>
         </template>
@@ -78,7 +94,7 @@
     </div>
 
     <!-- 创建用户弹窗 -->
-    <el-dialog v-model="showCreateDialog" title="创建用户" width="400px">
+    <el-dialog v-model="showCreateDialog" :title="authStore.isHuguan ? '创建户管' : '创建用户'" width="400px">
       <el-form :model="createForm" label-width="80px" size="small">
         <el-form-item label="用户名">
           <el-input v-model="createForm.username" placeholder="4-20个字符" />
@@ -90,10 +106,17 @@
           <el-input v-model="createForm.display_name" placeholder="可选" />
         </el-form-item>
         <el-form-item label="角色">
-          <el-select v-model="createForm.role" style="width:100%">
-            <el-option label="普通用户" value="user" />
-            <el-option label="观察者" value="viewer" />
-            <el-option label="管理员" value="admin" />
+          <el-select v-model="createForm.role" :disabled="authStore.isHuguan" style="width:100%">
+            <!-- 户管只能创建户管（后端 ALLOWED_CREATE_ROLES 同口径）：只给一个选项，不暗示还有其它可选范围 -->
+            <template v-if="authStore.isHuguan">
+              <el-option label="户管" value="huguan" />
+            </template>
+            <template v-else>
+              <el-option label="普通用户" value="user" />
+              <el-option label="观察者" value="viewer" />
+              <el-option label="管理员" value="admin" />
+              <el-option v-if="authStore.isDeveloper" label="户管" value="huguan" />
+            </template>
           </el-select>
         </el-form-item>
         <el-form-item v-if="authStore.isDeveloper" label="平台">
@@ -204,16 +227,20 @@ function isSelf(uid) {
 function canModify(row) {
   if (isSelf(row.id)) return false
   if (authStore.isDeveloper) return true
+  // 户管只能操作自己创建的户管（与后端 _check_modify_user 同口径）
+  if (authStore.isHuguan) {
+    return row.role === 'huguan' && row.created_by === authStore.user?.id
+  }
   // 管理员只能操作普通用户、观察者和已禁用用户，不能操作其他管理员
   return ['user', 'viewer', 'hidden'].includes(row.role)
 }
 
 function roleType(role) {
-  const m = { developer: 'danger', admin: 'warning', viewer: '', user: 'success', hidden: 'info' }
+  const m = { developer: 'danger', admin: 'warning', viewer: '', user: 'success', hidden: 'info', huguan: 'primary' }
   return m[role] || 'info'
 }
 function roleLabel(role) {
-  const m = { developer: '开发者', admin: '管理员', viewer: '观察者', user: '用户', hidden: '已禁用' }
+  const m = { developer: '开发者', admin: '管理员', viewer: '观察者', user: '用户', hidden: '已禁用', huguan: '户管' }
   return m[role] || role
 }
 
@@ -286,13 +313,16 @@ const createForm = ref({
   username: "",
   password: "",
   display_name: "",
-  role: "user",
-  platform: "gg"
+  role: authStore.isHuguan ? "huguan" : "user",
+  platform: authStore.isDeveloper ? (platformFilter.value || 'gg') : authStore.effectivePlatform
 })
 
-// 打开创建弹窗时按当前身份定默认平台：非开发者锁定自己平台；
-// developer 跟随当前 Tab（「全部」时默认 gg）
+// 打开创建弹窗时按当前身份重定默认角色与平台：户管只能建户管；非开发者锁定自己平台；
+// developer 跟随当前 Tab（「全部」时默认 gg）。
+// 必须在这里重算而不能只依赖 ref 初始值 —— 与上方 platformFilter 同理，本组件 setup 早于
+// App.vue 的 initFromStorage/fetchMe，此刻 user 可能仍为 null，会把户管误判成普通用户。
 function openCreateDialog() {
+  createForm.value.role = authStore.isHuguan ? 'huguan' : 'user'
   createForm.value.platform = authStore.isDeveloper
     ? (platformFilter.value || 'gg')
     : authStore.effectivePlatform
@@ -313,8 +343,12 @@ async function handleCreate() {
     await adminApi.createUser(createForm.value)
     ElMessage.success("用户创建成功")
     showCreateDialog.value = false
-    // platform 留待下次打开弹窗时由 openCreateDialog 按身份重算
-    createForm.value = { username: "", password: "", display_name: "", role: "user", platform: "gg" }
+    // role / platform 留待下次打开弹窗时由 openCreateDialog 按身份重算
+    createForm.value = {
+      username: "", password: "", display_name: "",
+      role: authStore.isHuguan ? "huguan" : "user",
+      platform: authStore.isDeveloper ? (platformFilter.value || 'gg') : authStore.effectivePlatform
+    }
     fetchUsers()
   } catch (e) {
     ElMessage.error(e.response?.data?.error || "创建失败")
