@@ -12,16 +12,27 @@ export const useAuthStore = defineStore('auth', {
     isAdmin: (state) => ['developer', 'admin'].includes(state.user?.role),
     isDeveloper: (state) => state.user?.role === 'developer',
     isViewer: (state) => state.user?.role === 'viewer',
+    isHuguan: (state) => state.user?.role === 'huguan',
+    canSwitchPlatform: (state) => ['developer', 'huguan'].includes(state.user?.role),
+    canManageAccounts: (state) => ['developer', 'admin', 'huguan'].includes(state.user?.role),
     canAccessProducts: (state) => ['developer', 'admin', 'viewer', 'user'].includes(state.user?.role),
     isFbUser: (state) => state.currentPlatform === 'fb',
     isGgUser: (state) => state.currentPlatform === 'gg',
     isTtUser: (state) => state.currentPlatform === 'tt',
     effectivePlatform: (state) => {
-      if (state.user?.role === 'developer') return state.currentPlatform
+      if (state.canSwitchPlatform) return state.currentPlatform
       return state.user?.platform || 'gg'
     },
+    homePath: (state) => {
+      const p = state.effectivePlatform
+      if (state.canSwitchPlatform) {
+        // 户管与开发者可跨平台，落地账户页而非产品页
+        return p === 'fb' ? '/fb/accounts' : p === 'tt' ? '/tt/accounts' : '/accounts/ads'
+      }
+      return p === 'fb' ? '/fb/products' : p === 'tt' ? '/tt/products' : '/accounts/products'
+    },
     roleLabel: (state) => {
-      const labels = { developer: '开发者', admin: '管理员', viewer: '观察者', user: '用户', hidden: '已禁用' }
+      const labels = { developer: '开发者', admin: '管理员', viewer: '观察者', user: '用户', hidden: '已禁用', huguan: '户管' }
       return labels[state.user?.role] || state.user?.role || ''
     }
   },
@@ -32,7 +43,7 @@ export const useAuthStore = defineStore('auth', {
       this.user = res.user
       this.isLoggedIn = true
       // 设置当前平台
-      if (this.isDeveloper) {
+      if (this.canSwitchPlatform) {
         this.currentPlatform = 'gg' // developer 默认进 GG
       } else {
         this.currentPlatform = res.user?.platform || 'gg'
@@ -57,7 +68,7 @@ export const useAuthStore = defineStore('auth', {
       }
     },
     setPlatform(platform) {
-      if (this.isDeveloper) {
+      if (this.canSwitchPlatform) {
         this.currentPlatform = platform
       }
     },

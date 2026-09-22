@@ -18,6 +18,10 @@ const routes = [
       const token = localStorage.getItem('token')
       if (!token) return '/login'
       const user = JSON.parse(localStorage.getItem('user') || '{}')
+      if (user.role === 'developer' || user.role === 'huguan') {
+        // 跨平台角色以 GG 为默认落地，随后可在侧边栏切换
+        return '/accounts/ads'
+      }
       if (user.platform === 'fb') return '/fb/products'
       if (user.platform === 'tt') return '/tt/products'
       return '/accounts/products'
@@ -160,20 +164,27 @@ router.beforeEach((to, from, next) => {
     next('/login?redirect=' + encodeURIComponent(to.fullPath))
     return
   }
-  // 根据用户平台获取首页
-  const userPlatform = auth.user?.platform || 'gg'
-  const platformHome = userPlatform === 'fb' ? '/fb/products'
-    : userPlatform === 'tt' ? '/tt/products'
-    : '/accounts/products'
+  // 当前身份与平台的默认落地页
+  const platformHome = auth.homePath
+
+  // 户管可进入的带 meta.admin 的账户区/用户管理路由
+  const HUGUAN_ROUTES = [
+    '/accounts/ads', '/accounts/mcc', '/accounts/settings',
+    '/fb/accounts', '/fb/bms', '/fb/pixels', '/fb/settings',
+    '/tt/accounts', '/tt/bcs', '/tt/settings',
+    '/admin/users',
+  ]
+  const isHuguanAllowedRoute = (p) =>
+    HUGUAN_ROUTES.some(r => p === r || p.startsWith(r + '/'))
 
   // 平台守卫
-  if (to.meta.platform && !auth.isDeveloper) {
-    if (to.meta.platform !== userPlatform) {
+  if (to.meta.platform && !auth.canSwitchPlatform) {
+    if (to.meta.platform !== auth.effectivePlatform) {
       next(platformHome)
       return
     }
   }
-  if (to.meta.admin && !auth.isAdmin) {
+  if (to.meta.admin && !auth.isAdmin && !(auth.isHuguan && isHuguanAllowedRoute(to.path))) {
     next(platformHome)
     return
   }

@@ -7,10 +7,10 @@ api.interceptors.request.use(config => {
   if (token) {
     config.headers.Authorization = 'Bearer ' + token
   }
-  // developer 跨平台时传递 platform 参数
+  // 跨平台角色（developer / 户管）请求时传递 platform 参数
   try {
     const user = JSON.parse(localStorage.getItem('user') || '{}')
-    if (user.role === 'developer') {
+    if (['developer', 'huguan'].includes(user.role)) {
       const path = window.location.hash.replace('#', '')
       // 用户管理页有自己的平台 Tab 显式控制平台，不由路由推断
       // （该页路由为 /admin/users，不以 /tt、/fb 开头，会被误判成 gg，导致「全部」看不到其他平台）
