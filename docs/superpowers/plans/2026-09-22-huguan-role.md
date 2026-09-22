@@ -1038,8 +1038,30 @@ git commit -m "feat: GG 账户列表支持跨用户可见与按用户筛选"
 
 ### Task 6: GG MCC 列表跨用户可见 + 按用户筛选
 
+> **执行勘误（2026-09-22，派发前预检）**：
+>
+> **(1) 行号一律按内容定位，勿信本节的数字。** `mcc_list` 实际在 `py/main.py:5311-5387`（非 5265-5410），
+> `perm_where` / `perm_params` 在 `:5319-5321`（非 5275-5277），下游 4 处使用在 `:5328-5329`、`:5345`、
+> `:5362-5363`、`:5370-5371`。
+>
+> **(2) Step 3 的替换块本身正确，且已核实 `"1=1"` 在 4 个使用点都拼得出合法 SQL**：
+> `WHERE 1=1 AND (m.name LIKE ? ...)`、`WHERE 1=1`、`WHERE m.id IN (...) AND 1=1`、
+> `FROM mcc m WHERE 1=1 ORDER BY ... LIMIT ? OFFSET ?` 全部合法；`uid_str` 在替换块中保留，下游无其它引用。
+>
+> **(3) Step 1 的 `test_regular_user_still_scoped` 确实咬得住 `if not cross_user: owner_filter = ""`，本任务不需要另加守卫用例。**
+> 理由：本函数的构造顺序是 `if owner_filter: ... elif cross_user: ... else: ...`，若删掉那行，
+> 非跨用户角色传 `owner_id` 会落进**第一个分支** `perm_where = "m.owner_id = ?"` 从而看到别人的 MCC，断言变红。
+> （Task 5 的 `accounts_list` 结构不同——它的归属条件在 `where` 列表里由 `else` 兜底，所以那里必须另加用例。）
+>
+> **(4) 已知局限（不在本任务修，记录备查）**：`/api/mcc/options`（`py/main.py:5390`，另一条路由）不改，
+> 因此不带 `owner_id` 的户管在 MCC 下拉里仍只看到自己可访问的 MCC。与 Task 5 勘误 (4) 同性质，
+> 一并留给 Task 16 的前端 owner 选择器定口径。**本任务不得擅自扩权到该路由。**
+>
+> **(5) 本任务只让户管「看得到」别人的 MCC，改不动。** 三个写接口（`mcc_update` / `mcc_delete` /
+> `mcc_batch_delete`）的硬编码归属校验与前端 `MccPanel.vue:33` 的 `is_owner` 按钮门控由 **Task 18** 处理。
+
 **Files:**
-- Modify: `py/main.py:5265-5410`（`mcc_list`）
+- Modify: `py/main.py:5311-5387`（`mcc_list`）
 - Test: `py/tests/test_huguan_role.py`（追加）
 
 **Interfaces:**
@@ -2609,6 +2631,298 @@ git commit -m "feat: 产品域与素材域对户管收口（兑现户管无产�
 
 ---
 
+### Task 18: GG 账户与 MCC 写操作对跨用户角色放行
+
+> **为什么有这个任务（2026-09-22 预检发现，用户已确认新增）**：
+> 需求是「户管对账户类对象有**全部编辑权限**」。查证三平台现状后发现**只有 GG 是漏的**：
+> - **TT**：写接口用 `role not in ('developer','admin')` 守卫（`routes/tt_accounts_routes.py:506,543,560,611,696,732,786`），
+>   Task 8 换成 `CROSS_USER_ROLES` 后户管自动获得写权限 ✅
+> - **FB**：写接口**没有归属校验**（设计文档 §2.5 已记录）✅
+> - **GG**：**8 处硬编码 `owner_id == 自己`**，一律拒绝 ❌ —— 本任务收口这 8 处
+>
+> 若不修，出现的是「看得见、点不动」：户管能列出别人的 MCC/账户，但编辑按钮不显示（前端 `is_owner` 门控）、
+> 绕过前端直接调 API 也一律 403/404。这与「全部编辑权限」直接矛盾。
+>
+> **本任务不在 Task 6 里做**，是为了让 Task 6 保持「只改读路径」的单一关注点——两者评审标准不同。
+
+**Files:**
+- Modify: `py/main.py`（新增模块级 `_cross_user_actor`；改写 8 处校验）
+- Modify: `frontend/src/views/MccPanel.vue`（编辑/删除按钮的显示条件）
+- Test: `py/tests/test_huguan_role.py`（追加）
+
+**Interfaces:**
+- Consumes: Task 1 的 `CROSS_USER_ROLES`（`py/main.py:39` 已 import）；Task 11 的 `useAuthStore().canManageAccounts`
+- Produces:
+  - `_cross_user_actor(user_id: int) -> bool` — 模块级函数，当前请求者是否为可跨用户操作账户类资源的角色
+  - 错误文案**全部保持原样**：`只有创建者才能编辑此 MCC`、`只有创建者才能删除此 MCC`、
+    `非创建者，无法删除`、`账户不存在或已删除`、`账户不存在或未被删除`、`权限不足`
+
+- [ ] **Step 1: 写失败测试**
+
+追加到 `py/tests/test_huguan_role.py` 末尾（`_mk_mcc` 来自 Task 6、`_mk_account` 来自 Task 5，均已存在，**不要重复定义**）：
+
+```python
+class TestGgWriteOpsCrossUser:
+    """GG 侧「硬编码 owner_id == 自己」的 8 处写校验对跨用户角色放行（Task 18）。"""
+
+    def _fixture(self, client):
+        hg, hg_id = _huguan(client, "_ggw_hg")
+        _, u1 = _create_user(client, "_ggw_u1", role="user")
+        db = database.get_db()
+        _mk_mcc(db, u1, "MCC-W1", "别人的MCC")
+        _mk_account(db, u1, "GG-W-1", "别人的账户")
+        mcc_id = db.execute("SELECT id FROM mcc WHERE mcc_id='MCC-W1'").fetchone()["id"]
+        acc_id = db.execute("SELECT id FROM accounts WHERE account_id='GG-W-1'").fetchone()["id"]
+        db.close()
+        return hg, u1, mcc_id, acc_id
+
+    def test_huguan_can_update_others_mcc(self, client):
+        hg, _, mcc_id, _ = self._fixture(client)
+        resp = client.put(f"/api/mcc/{mcc_id}", json={"name": "改过的名字"}, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        name = db.execute("SELECT name FROM mcc WHERE id=?", (mcc_id,)).fetchone()["name"]
+        db.close()
+        assert name == "改过的名字"
+
+    def test_huguan_can_delete_others_mcc(self, client):
+        hg, _, mcc_id, _ = self._fixture(client)
+        assert client.delete(f"/api/mcc/{mcc_id}", headers=hg).status_code == 200
+
+    def test_huguan_can_soft_delete_and_restore_others_account(self, client):
+        hg, _, _, acc_id = self._fixture(client)
+        assert client.delete(f"/api/accounts/{acc_id}", headers=hg).status_code == 200
+        assert client.post(f"/api/accounts/{acc_id}/restore", headers=hg).status_code == 200
+
+    def test_huguan_can_delete_others_mcc_history(self, client):
+        """跨用户角色的 MCC 历史删除白名单（该接口原本只认 developer / admin）。"""
+        hg, _, _, acc_id = self._fixture(client)
+        db = database.get_db()
+        db.execute("INSERT INTO account_mcc_history(account_id, old_mcc_id, new_mcc_id) VALUES(?,?,?)",
+                   (acc_id, 1, 2))
+        db.commit()
+        hid = db.execute("SELECT id FROM account_mcc_history WHERE account_id=?", (acc_id,)).fetchone()["id"]
+        db.close()
+        resp = client.delete(f"/api/accounts/{acc_id}/mcc-history/{hid}", headers=hg)
+        assert resp.status_code == 200
+        assert resp.get_json()["deleted"] == 1
+
+    def test_regular_user_still_blocked_from_others_mcc(self, client):
+        """回归：普通用户改别人 MCC 仍是 403，且文案逐字节不变。"""
+        _, _, mcc_id, _ = self._fixture(client)
+        hdr, _ = _create_user(client, "_ggw_u2", role="user")
+        resp = client.put(f"/api/mcc/{mcc_id}", json={"name": "越权"}, headers=hdr)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "只有创建者才能编辑此 MCC"
+
+    def test_regular_user_still_blocked_from_others_account(self, client):
+        """回归：普通用户删别人账户仍是 404，且账户**真的没被**软删除。"""
+        _, _, _, acc_id = self._fixture(client)
+        hdr, _ = _create_user(client, "_ggw_u3", role="user")
+        assert client.delete(f"/api/accounts/{acc_id}", headers=hdr).status_code == 404
+        db = database.get_db()
+        deleted = db.execute("SELECT deleted_at FROM accounts WHERE id=?", (acc_id,)).fetchone()["deleted_at"]
+        db.close()
+        assert deleted is None
+
+    def test_regular_user_still_blocked_from_others_mcc_history(self, client):
+        """回归：普通用户删别人的 MCC 历史仍是 403。"""
+        hdr, _ = _create_user(client, "_ggw_u4", role="user")
+        _, _, _, acc_id = self._fixture(client)
+        assert client.delete(f"/api/accounts/{acc_id}/mcc-history/1", headers=hdr).status_code == 403
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k GgWriteOpsCrossUser`
+Expected: 四条户管用例 FAIL（403/404），三条回归用例 PASS。
+
+- [ ] **Step 3: 新增模块级辅助函数**
+
+在 `py/main.py` 的 `_mcc_to_dict`（`py/main.py:3580`）**之前**插入：
+
+```python
+def _cross_user_actor(user_id: int) -> bool:
+    """当前请求者是否为可跨用户操作账户类资源的角色（developer / admin / 户管）。
+
+    GG 侧原本硬编码「owner_id == 自己」的写校验统一改用本函数判定：
+    自己的资源照旧放行；别人的资源仅跨用户角色放行。
+    非跨用户角色（user / viewer / hidden）的判定结果与改动前**逐字节一致**。
+    """
+    actor = auth.get_user_by_id(user_id)
+    return bool(actor) and actor.get("role") in CROSS_USER_ROLES
+```
+
+**注意**：一次请求内只调用一次，不要放进循环（`auth.get_user_by_id` 会新开一条数据库连接）。
+
+- [ ] **Step 4: 改写 MCC 三处写校验**
+
+三处都是同一个形状，只改 `if` 条件、**不动错误文案**。
+
+`mcc_update`（`py/main.py:5499`）：
+
+```python
+    if mcc_row["owner_id"] != user_id and not _cross_user_actor(user_id):
+```
+（原为 `if mcc_row["owner_id"] != user_id:`，错误文案 `只有创建者才能编辑此 MCC` 保持不变）
+
+`mcc_delete`（`py/main.py:5536`）：
+
+```python
+    if mcc_row["owner_id"] != user_id and not _cross_user_actor(user_id):
+```
+（错误文案 `只有创建者才能删除此 MCC` 保持不变）
+
+`mcc_batch_delete`（`py/main.py:5576`）：在 `for mid in ids:` **之前**加一行
+
+```python
+    cross_user = _cross_user_actor(user_id)
+```
+
+循环内 `py/main.py:5576` 改为：
+
+```python
+        if mcc_row["owner_id"] != user_id and not cross_user:
+            skipped.append({"id": mid, "reason": "非创建者，无法删除"})
+            continue
+```
+
+- [ ] **Step 5: 改写 GG 账户四处写校验**
+
+`accounts_delete`（`py/main.py:4292-4297`）把：
+
+```python
+        ac = db.execute(
+            "SELECT account_id FROM accounts WHERE id=? AND owner_id=? AND deleted_at IS NULL",
+            (aid, user_id)
+        ).fetchone()
+        if not ac:
+            return jsonify({"success": False, "error": "账户不存在或已删除"}), 404
+```
+
+改为：
+
+```python
+        ac = db.execute(
+            "SELECT account_id, owner_id FROM accounts WHERE id=? AND deleted_at IS NULL",
+            (aid,)
+        ).fetchone()
+        if not ac or (ac["owner_id"] != user_id and not _cross_user_actor(user_id)):
+            return jsonify({"success": False, "error": "账户不存在或已删除"}), 404
+```
+
+同一函数下方（`py/main.py:4310` 附近）的 `dashboard_name = _get_my_dashboard_name(db, user_id)`
+改为 `_get_my_dashboard_name(db, ac["owner_id"])`。**这是逐字节等价的**——原代码能走到这里就保证
+`ac["owner_id"] == user_id`；改为按行归属取，户管代删时才会落到 **owner 的**看板，而不是户管自己的。
+
+`accounts_restore`（`py/main.py:4352-4357`）同法：`SELECT account_id, owner_id FROM accounts WHERE id=? AND deleted_at IS NOT NULL`
++ `if not ac or (ac["owner_id"] != user_id and not _cross_user_actor(user_id)):`，错误文案
+`账户不存在或未被删除` 不变；其 `dashboard_name` 同样改用 `ac["owner_id"]`。
+
+`accounts_permanent_delete`（`py/main.py:4389-4394`）同法：`SELECT account_id, owner_id FROM accounts WHERE id=? AND deleted_at IS NOT NULL`
++ 同一个 `if` 条件，错误文案 `账户不存在或未被删除` 不变。
+
+`accounts_batch_delete`（`py/main.py:4336-4340`）把：
+
+```python
+        for aid in ids:
+            db.execute(
+                "UPDATE accounts SET deleted_at=datetime('now','localtime'), "
+                "updated_at=datetime('now','localtime') WHERE id=? AND owner_id=? AND deleted_at IS NULL",
+                (aid, user_id)
+            )
+```
+
+改为：
+
+```python
+        cross_user = _cross_user_actor(user_id)
+        owner_clause = "" if cross_user else " AND owner_id=?"
+        for aid in ids:
+            db.execute(
+                "UPDATE accounts SET deleted_at=datetime('now','localtime'), "
+                "updated_at=datetime('now','localtime') "
+                f"WHERE id=?{owner_clause} AND deleted_at IS NULL",
+                (aid,) if cross_user else (aid, user_id)
+            )
+```
+
+**等价性核对（必须逐条成立，实现后自查）**：
+- 非跨用户角色：`owner_clause == " AND owner_id=?"`、参数 `(aid, user_id)` —— SQL 文本与改动前**逐字节相同** ✅
+- 户管 / developer / admin：`owner_clause == ""`、参数 `(aid,)` ✅
+- **不改**该函数返回的 `deleted: len(ids)`（它本来就谎报条数，是既有缺陷，不在本需求范围）
+
+- [ ] **Step 6: 改写 MCC 历史删除的角色白名单**
+
+`accounts_mcc_history_delete`（`py/main.py:5289-5291`）把：
+
+```python
+    if not user or user["role"] not in ("developer", "admin"):
+        return jsonify({"success": False, "error": "权限不足"}), 403
+```
+
+改为：
+
+```python
+    if not user or user["role"] not in CROSS_USER_ROLES:
+        return jsonify({"success": False, "error": "权限不足"}), 403
+```
+
+（这是 GG 侧唯一一处用角色白名单而非归属校验的账户写操作；文案不变，仅把户管并入白名单。）
+
+- [ ] **Step 7: 运行测试确认通过**
+
+Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k GgWriteOpsCrossUser`
+Expected: 7 passed
+
+- [ ] **Step 8: 放开前端 MCC 面板的编辑/删除按钮**
+
+`frontend/src/views/MccPanel.vue:33` 把：
+
+```vue
+            <template v-if="row.is_owner">
+```
+
+改为：
+
+```vue
+            <template v-if="row.is_owner || auth.canManageAccounts">
+```
+
+在 `<script setup>` 中（`import { useAccountStore } from '@/stores/accounts'` 之后）加：
+
+```js
+import { useAuthStore } from '@/stores/auth'
+```
+
+并在 `const store = useAccountStore()` 之后加：
+
+```js
+const auth = useAuthStore()
+```
+
+**注意**：`row.is_owner` 是后端 `_mcc_to_dict` 按 `owner_id == 当前用户` 算出来的，**不要改后端去伪造 `is_owner`** ——
+那会把 developer/admin 看到的、本当显示「共享」的行也变成「自己的」，属改动现有角色行为。
+门槛放在前端：`is_owner`（自己的）**或** `canManageAccounts`（跨用户角色，Task 11 定义）。
+
+- [ ] **Step 9: 跑全量后端测试 + 前端构建**
+
+Run:
+```bash
+cd py && python -m pytest tests/ -v
+cd ../frontend && npm run build
+```
+Expected: 后端全部 passed；前端 build 成功。
+
+- [ ] **Step 10: 提交**
+
+```bash
+git add py/main.py py/tests/test_huguan_role.py frontend/src/views/MccPanel.vue
+git commit -m "feat: GG 账户与 MCC 写操作对跨用户角色放行"
+```
+
+---
+
 ## 收尾
 
 - [ ] **跑一次全量后端测试**：`cd py && python -m pytest tests/ -v` → 全部 passed
@@ -2617,3 +2931,4 @@ git commit -m "feat: 产品域与素材域对户管收口（兑现户管无产�
 - [ ] **端到端验收**：用一个新建的户管账号走一遍——登录 → 三平台切换 → 看/改他人账户 → 用用户下拉筛选 → 改设置选项 → 创建一个户管 → 停用该户管（确认进入**已禁用**，而不是被降级成「用户」）→ 再用角色下拉恢复为户管 → 确认开发者账号能管到它
 - [ ] **产品域负向验收**（Task 17）：用户管 token 直接调 `POST /api/fb/products/create`、`PUT /api/fb/products/<pid>`、`POST /api/tt/products/create`、`POST /api/tt/products/import-text` → 四者均须 403；再确认户管调 `POST /api/tt/bcs/create` 仍为 200（未误伤账户域）
 - [ ] **admin 不变量验收**（Task 1）：用 `platform='gg'` 的 admin token 调 `/api/tt/users?platform=tt` → 须 403（admin 不跨平台）
+- [ ] **GG 写操作验收**（Task 18）：户管 token 调 `PUT /api/mcc/<别人的id>`、`DELETE /api/mcc/<别人的id>`、`DELETE /api/accounts/<别人的id>` → 三者均 200；换普通 user token 重试 → 403 / 403 / 404，且文案不变
