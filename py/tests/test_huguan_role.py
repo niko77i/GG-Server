@@ -1302,3 +1302,63 @@ class TestHuguanGlobalOptions:
         db.close()
         assert client.delete(f"/api/statuses/{theirs}?platform=gg", headers=me).status_code == 404
         assert client.delete(f"/api/statuses/{mine}?platform=gg", headers=me).status_code == 200
+
+
+class TestHuguanUserListCrossPlatform:
+    """户管的用户列表跨平台（D9 修订）。
+
+    缺口源：`py/auth.py:79-82` 对非 developer 调用者强制 `platform = 自己平台` 并忽略传入的
+    `platform` 参数 ⇒ 户管在 FB 建出的户管，切到 GG 后看不见。本类既是修复的正向证明，
+    也是「其余角色平台隔离不得被放宽」的路障（第 3/4/5 条）。
+    """
+
+    def _setup(self, client):
+        """造出：户管自己(gg) + 其名下 gg/fb 两个户管 + 两个**必须被排除**的对照行。"""
+        hg, hg_id = _create_user(client, "_ulc_hg", role="huguan", platform="gg")
+        _create_user(client, "_ulc_h_gg", role="huguan", platform="gg", created_by=hg_id)
+        _create_user(client, "_ulc_h_fb", role="huguan", platform="fb", created_by=hg_id)
+        # 对照行 1：普通 user（role_filter=huguan 必须排除它）
+        _create_user(client, "_ulc_plain_fb", role="user", platform="fb")
+        # 对照行 2：developer（list_users 对非 developer 调用者的 role != 'developer' 必须排除它）
+        _create_user(client, "_ulc_dev", role="developer", platform="gg")
+        return hg, hg_id
+
+    def test_huguan_sees_huguans_across_all_platforms(self, client):
+        """集合**相等**：既证明看得到 fb 的户管，也证明两个对照行被排除。"""
+        hg, _ = self._setup(client)
+        resp = client.get("/api/admin/users?page_size=50", headers=hg)
+        assert resp.status_code == 200
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert names == {"_ulc_hg", "_ulc_h_gg", "_ulc_h_fb"}
+
+    def test_huguan_ignores_platform_param(self, client):
+        """`?platform=` 对户管必须被忽略——否则前端注入的 `?platform=` 会把跨平台收窄回单平台。"""
+        hg, _ = self._setup(client)
+        resp = client.get("/api/admin/users?page_size=50&platform=fb", headers=hg)
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert names == {"_ulc_hg", "_ulc_h_gg", "_ulc_h_fb"}
+
+    def test_admin_still_platform_isolated(self, client):
+        """回归路障：admin 不得被 `is_huguan` 分支吞掉（`test_user_platform_isolation.py:43` 同因同源）。"""
+        adm, _ = _create_user(client, "_ulc_adm", role="admin", platform="tt")
+        _create_user(client, "_ulc_tt_user", role="user", platform="tt")
+        _create_user(client, "_ulc_gg_user", role="user", platform="gg")
+        resp = client.get("/api/admin/users?platform=gg", headers=adm)
+        assert {u["platform"] for u in resp.get_json()["users"]} == {"tt"}
+
+    def test_regular_user_still_platform_isolated(self, client):
+        """回归路障：普通用户仍只看自己平台（直接调函数，因为 user 无权访问 /api/admin/users）。"""
+        from auth import list_users
+        _, ugg = _create_user(client, "_ulc_ru_gg", role="user", platform="gg")
+        _create_user(client, "_ulc_ru_tt", role="user", platform="tt")
+        res = list_users(current_user_id=ugg)
+        assert {u["platform"] for u in res["users"]} == {"gg"}
+
+    def test_developer_still_sees_all_platforms(self, client):
+        """回归路障：developer 行为不变（本任务不得改动 `is_dev` 分支）。"""
+        from auth import list_users
+        _, dev = _create_user(client, "_ulc_dev2", role="developer", platform="gg")
+        _create_user(client, "_ulc_d_gg", role="user", platform="gg")
+        _create_user(client, "_ulc_d_tt", role="user", platform="tt")
+        res = list_users(current_user_id=dev)
+        assert {"gg", "tt"} <= {u["platform"] for u in res["users"]}
