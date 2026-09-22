@@ -12,6 +12,7 @@
         <el-option label="正常" value="normal" />
         <el-option label="封禁" value="banned" />
       </el-select>
+      <OwnerFilterSelect v-model="ownerId" @change="loadData" />
     </div>
 
     <!-- 表格 + 分页 — 滚动区 -->
@@ -72,10 +73,11 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ttApi } from '../../api/tt'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 
 const items = ref([]); const loading = ref(false)
 const page = ref(1); const size = ref(20); const total = ref(0)
-const search = ref(''); const filterStatus = ref('')
+const search = ref(''); const filterStatus = ref(''); const ownerId = ref('')
 const dialogVisible = ref(false); const editingId = ref(null); const saving = ref(false)
 const form = reactive({ name: '', bc_id: '', note: '' })
 
@@ -88,6 +90,7 @@ async function loadData() {
     const p = { page: page.value, size: size.value }
     if (search.value) p.search = search.value
     if (filterStatus.value) p.status = filterStatus.value
+    if (ownerId.value) p.owner_id = ownerId.value
     const res = await ttApi.listBcs(p)
     items.value = res.items || []; total.value = res.total || 0
   } catch(e) { ElMessage.error(e.response?.data?.error || '加载失败') } finally { loading.value = false }

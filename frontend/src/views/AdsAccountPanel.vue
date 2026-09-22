@@ -38,6 +38,7 @@
         <el-select v-model="store.acFilters.timezone" @change="filterByTimezone" placeholder="全部时区" style="width:140px;" clearable filterable>
           <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
         </el-select>
+        <OwnerFilterSelect v-model="store.acFilters.owner_id" @change="searchAndLoad" />
       </div>
     </div>
 
@@ -177,6 +178,7 @@ import RechargeModal from '@/components/RechargeModal.vue'
 import RechargeBatchModal from '@/components/RechargeBatchModal.vue'
 import AccountSyncModal from '@/components/AccountSyncModal.vue'
 import AccountDeletedModal from '@/components/AccountDeletedModal.vue'
+import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 

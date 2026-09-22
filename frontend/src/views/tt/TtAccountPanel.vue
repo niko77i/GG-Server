@@ -42,9 +42,7 @@
         <el-select v-model="timezone" @change="filterAndLoad" placeholder="全部时区" style="width:140px;" clearable filterable>
           <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
         </el-select>
-        <el-select v-if="isAdmin" v-model="ownerId" @change="filterAndLoad" placeholder="全部投手" style="width:150px;" clearable filterable>
-          <el-option v-for="u in ttUsers" :key="u.id" :label="u.display_name || u.username" :value="u.id" />
-        </el-select>
+        <OwnerFilterSelect v-model="ownerId" @change="filterAndLoad" />
       </div>
     </div>
 
@@ -207,7 +205,6 @@
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { ttApi, ttAccountsApi } from '@/api/tt'
 import client from '@/api/client'
-import { useAuthStore } from '@/stores/auth'
 import TtAccountModal from '@/components/tt/TtAccountModal.vue'
 import TtAccountDetailModal from '@/components/tt/TtAccountDetailModal.vue'
 import TtAccountDeletedModal from '@/components/tt/TtAccountDeletedModal.vue'
@@ -217,11 +214,9 @@ import TtRechargeModal from '@/components/tt/TtRechargeModal.vue'
 import TtRechargeBatchModal from '@/components/tt/TtRechargeBatchModal.vue'
 import TtAccountSyncModal from '@/components/tt/TtAccountSyncModal.vue'
 import TtRecycleReasonModal from '@/components/tt/TtRecycleReasonModal.vue'
+import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
-
-const authStore = useAuthStore()
-const isAdmin = computed(() => authStore.isAdmin || authStore.isDeveloper)
 
 const items = ref([])
 const total = ref(0)
@@ -240,7 +235,6 @@ const bcOptions = ref([])
 const agentOptions = ref([])
 const statusOptions = ref([])
 const timezoneOptions = ref(buildTimezoneOptions())
-const ttUsers = ref([])
 const ownerId = ref('')
 
 const acModalVisible = ref(false)
@@ -312,12 +306,6 @@ async function loadOptions() {
   } catch (e) {
     ElMessage.error('加载选项失败: ' + (e.response?.data?.error || e.message))
   }
-  if (isAdmin.value) {
-    try {
-      const res = await ttApi.listTtUsers()
-      ttUsers.value = res.users || []
-    } catch { /* 投手下拉加载失败不阻塞主流程 */ }
-  }
 }
 
 async function load() {
@@ -327,7 +315,7 @@ async function load() {
   if (agentId.value) params.agent_id = agentId.value
   if (statusId.value) params.status_id = statusId.value
   if (timezone.value) params.timezone = timezone.value
-  if (isAdmin.value && ownerId.value) params.owner_id = ownerId.value
+  if (ownerId.value) params.owner_id = ownerId.value
   try {
     const res = await ttAccountsApi.list(params)
     items.value = res.items || []

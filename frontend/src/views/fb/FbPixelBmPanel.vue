@@ -50,6 +50,14 @@
       </el-col>
     </el-row>
 
+    <!-- 筛选栏 -->
+    <div class="filter-card">
+      <div class="filter-bar">
+        <OwnerFilterSelect v-model="ownerId" @change="loadData" />
+        <span class="total-badge">共 {{ total }} 个</span>
+      </div>
+    </div>
+
     <!-- 表格卡片 -->
     <el-card class="table-card" shadow="never">
       <el-table :data="items" stripe border v-loading="loading">
@@ -129,9 +137,11 @@
 import { ref, reactive, onMounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
+import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 
 const items = ref([]); const loading = ref(false)
 const page = ref(1); const size = ref(50); const total = ref(0)
+const ownerId = ref('')
 const dialogVisible = ref(false); const editingId = ref(null); const saving = ref(false)
 const form = reactive({ name: '', bm_id: '', note: '' })
 
@@ -142,7 +152,9 @@ const pixelForm = reactive({ pixel_name: '', pixel_id: '' })
 async function loadData() {
   loading.value = true
   try {
-    const res = await fbApi.listPixelBms({ page: page.value, size: size.value })
+    const params = { page: page.value, size: size.value }
+    if (ownerId.value) params.owner_id = ownerId.value
+    const res = await fbApi.listPixelBms(params)
     items.value = res.items; total.value = res.total
   } finally { loading.value = false }
 }
@@ -215,6 +227,11 @@ onMounted(loadData)
 .stat-row {
   margin-bottom: 20px;
 }
+
+/* ======== 筛选栏 ======== */
+.filter-card { background: #f8f9fa; border-radius: 12px; padding: 12px 16px; margin-bottom: 16px; }
+.filter-bar { display: flex; gap: 12px; align-items: center; }
+.total-badge { font-size: 13px; color: #6b7280; font-weight: 500; white-space: nowrap; padding: 4px 10px; background: #fff; border-radius: 6px; border: 1px solid #e5e7eb; }
 
 .stat-card {
   display: flex;

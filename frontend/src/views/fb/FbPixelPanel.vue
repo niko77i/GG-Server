@@ -32,6 +32,7 @@
     <div class="filter-card">
       <div class="filter-bar">
         <el-input v-model="search" placeholder="搜索像素名或像素 ID..." @input="onSearch" clearable size="small" style="width:260px" />
+        <OwnerFilterSelect v-model="ownerId" @change="loadData" />
         <span class="total-badge">共 {{ total }} 个</span>
       </div>
     </div>
@@ -98,10 +99,11 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
+import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 
 const items = ref([]); const loading = ref(false)
 const page = ref(1); const size = ref(50); const total = ref(0)
-const search = ref('')
+const search = ref(''); const ownerId = ref('')
 const pixelBmOptions = ref([])
 
 const dialogVisible = ref(false); const editingId = ref(null); const saving = ref(false)
@@ -120,6 +122,7 @@ async function loadData() {
   try {
     const params = { page: page.value, size: size.value }
     if (search.value) params.search = search.value
+    if (ownerId.value) params.owner_id = ownerId.value
     const res = await fbApi.listAllPixels(params)
     items.value = res.items; total.value = res.total
   } catch (e) { ElMessage.error('加载失败') }

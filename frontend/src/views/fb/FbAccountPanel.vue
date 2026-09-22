@@ -35,6 +35,7 @@
         <el-select v-model="filterBm" placeholder="全部BM" clearable style="width:180px" @change="loadData">
           <el-option v-for="b in bmOptions" :key="b.id" :label="b.name" :value="b.id" />
         </el-select>
+        <OwnerFilterSelect v-model="ownerId" @change="loadData" />
         <el-button @click="loadData">刷新</el-button>
         <el-button type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">
           批量删除({{ selectedIds.length }})
@@ -110,9 +111,10 @@ import { ref, reactive, onMounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
 import client from '../../api/client'
+import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
-const search = ref(''); const filterBm = ref(''); const selectedIds = ref([])
+const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selectedIds = ref([])
 const bmOptions = ref([]); const statusOptions = ref([]); const dialogVisible = ref(false)
 const editingId = ref(null); const saving = ref(false)
 const form = reactive({ name:'', account_id:'', bm_ids:[], timezone:'', acquired_date:'', status_id:null })
@@ -127,6 +129,7 @@ async function loadData() {
     const p = { page: page.value, size: size.value }
     if (search.value) p.search = search.value
     if (filterBm.value) p.bm_id = filterBm.value
+    if (ownerId.value) p.owner_id = ownerId.value
     const res = await fbApi.listAccounts(p)
     items.value = res.items; total.value = res.total
   } finally { loading.value = false }

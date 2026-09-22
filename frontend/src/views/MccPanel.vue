@@ -10,6 +10,7 @@
 
       <div style="display:flex;gap:8px;margin-bottom:8px;">
         <el-input v-model="store.mccFilters.search" placeholder="🔍 搜索名称/ID..." @input="onFilterChange" style="flex:1;" clearable />
+        <OwnerFilterSelect v-model="store.mccFilters.owner_id" @change="load" />
         <el-input v-model="store.mccFilters.level" placeholder="等级关键词..." @input="onFilterChange" style="width:150px;" clearable />
       </div>
     </div>
@@ -59,6 +60,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
 import MccModal from '@/components/MccModal.vue'
 import MccDetailModal from '@/components/MccDetailModal.vue'
+import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 
 const store = useAccountStore()
