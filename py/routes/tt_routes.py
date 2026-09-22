@@ -30,6 +30,12 @@ def list_bcs():
     if role not in CROSS_USER_ROLES:
         where.append("owner_id = ?")
         params.append(uid)
+    else:
+        # 跨用户角色可用 owner_id 收窄（补齐 Task 16 的「全部用户」下拉）
+        owner_filter = (request.args.get('owner_id') or '').strip()
+        if owner_filter:
+            where.append("owner_id = ?")
+            params.append(owner_filter)
     if status:
         where.append("status = ?")
         params.append(status)

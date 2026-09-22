@@ -1486,3 +1486,125 @@ class TestHuguanBlockedFromDataImport:
         row = db.execute("SELECT COUNT(*) FROM tt_products WHERE owner_id=?", (uid,)).fetchone()
         db.close()
         assert row[0] == 1
+
+
+def _mk_fb_pixel_bm(db, owner_id, bm_id, name="像素BM"):
+    """建一条像素BM（像素的归属由其父表 `fb_pixel_bms.owner_id` 决定），返回其 id。"""
+    db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES(?,?,?)", (name, bm_id, owner_id))
+    db.commit()
+    return db.execute("SELECT id FROM fb_pixel_bms WHERE bm_id=?", (bm_id,)).fetchone()["id"]
+
+
+def _mk_fb_pixel(db, pixel_bm_id, pixel_id, name="像素"):
+    """在指定像素BM下建一条像素（`fb_pixels.pixel_bm_id` 外键非空）。"""
+    db.execute("INSERT INTO fb_pixels(pixel_bm_id, pixel_name, pixel_id) VALUES(?,?,?)",
+               (pixel_bm_id, name, pixel_id))
+    db.commit()
+
+
+def _mk_tt_bc(db, owner_id, bc_id, name="BC"):
+    db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES(?,?,?)", (name, bc_id, owner_id))
+    db.commit()
+
+
+class TestListOwnerFilterCrossUser:
+    """Task 16b：`/api/fb/pixels/list` 与 `/api/tt/bcs/list` 补齐 `owner_id` 收窄。
+
+    这两个端点是 Task 16 的漏网点 —— 前端「全部用户」下拉会发出 `?owner_id=N`，
+    但后端此前完全不读该参数（FB 像素连普通用户的归属过滤都没有，TT BC 则只对
+    非跨用户角色写死 `owner_id=uid`）。本类同时钉住纯增量约束：非跨用户角色
+    即使显式传参也必须被忽略，其 SQL 条件与结果逐字不变。
+
+    注意 `fb_pixels` 表没有 `owner_id` 列，像素归属看父表 `fb_pixel_bms.owner_id`。
+    """
+
+    def _setup_fb(self, client):
+        hg, _ = _huguan(client, "_fp_hg")
+        u1_headers, u1 = _create_user(client, "_fp_u1", role="user", platform="fb")
+        _, u2 = _create_user(client, "_fp_u2", role="user", platform="fb")
+        db = database.get_db()
+        pbm1 = _mk_fb_pixel_bm(db, u1, "PBM-FP-1", "U1的像素BM")
+        pbm2 = _mk_fb_pixel_bm(db, u2, "PBM-FP-2", "U2的像素BM")
+        _mk_fb_pixel(db, pbm1, "PX-FP-1", "U1的像素")
+        _mk_fb_pixel(db, pbm2, "PX-FP-2", "U2的像素")
+        db.close()
+        return hg, u1_headers, u1, u2
+
+    def _setup_tt(self, client):
+        hg, _ = _huguan(client, "_bc_hg")
+        u1_headers, u1 = _create_user(client, "_bc_u1", role="user", platform="tt")
+        _, u2 = _create_user(client, "_bc_u2", role="user", platform="tt")
+        db = database.get_db()
+        _mk_tt_bc(db, u1, "BC-FP-1", "U1的BC")
+        _mk_tt_bc(db, u2, "BC-FP-2", "U2的BC")
+        db.close()
+        return hg, u1_headers, u1, u2
+
+    # ---------------- FB 像素 ----------------
+
+    def test_huguan_filters_fb_pixels_by_owner(self, client):
+        """户管带 `?owner_id=<B的uid>` → 只返回 B 名下的像素。"""
+        hg, _, _, u2 = self._setup_fb(client)
+        resp = client.get(f"/api/fb/pixels/list?size=50&owner_id={u2}", headers=hg)
+        assert resp.status_code == 200
+        pixel_ids = {p["pixel_id"] for p in resp.get_json()["items"]}
+        assert pixel_ids == {"PX-FP-2"}   # 只含 U2 名下像素（集合相等，非子集）
+        assert pixel_ids                  # 防「空列表也算通过」
+
+    def test_huguan_fb_pixels_contrast_without_owner(self, client):
+        """对照行：同一户管**不带**参数时必须看到多于 1 个 owner 的像素，
+        证明上一条的收窄来自参数本身，而不是数据里本来就只有一个 owner。"""
+        hg, _, _, _ = self._setup_fb(client)
+        resp = client.get("/api/fb/pixels/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        owner_of = {r["id"]: r["owner_id"]
+                    for r in db.execute("SELECT id, owner_id FROM fb_pixel_bms").fetchall()}
+        db.close()
+        owners = {owner_of[p["pixel_bm_id"]] for p in resp.get_json()["items"]}
+        assert len(owners) > 1
+
+    def test_fb_user_sees_same_rows_with_or_without_owner_param(self, client):
+        """纯增量对照（关键）：普通 `fb` 用户传**别人的 uid** 必须被完全忽略。
+
+        两次返回的 `pixel_id` 集合相等 —— 若实现漏了角色判断而对该参数无差别生效，
+        带参那次会退化成只有 U2 的行，本用例立即变红。
+        """
+        _, u1_headers, _, u2 = self._setup_fb(client)
+        without = client.get("/api/fb/pixels/list?size=50", headers=u1_headers).get_json()["items"]
+        with_param = client.get(f"/api/fb/pixels/list?size=50&owner_id={u2}",
+                                headers=u1_headers).get_json()["items"]
+        ids_without = {p["pixel_id"] for p in without}
+        ids_with = {p["pixel_id"] for p in with_param}
+        assert ids_with == ids_without
+        assert "PX-FP-1" in ids_without   # 非空：自己的像素必须在，防「两边都空也算相等」
+
+    # ---------------- TT BC ----------------
+
+    def test_huguan_filters_tt_bcs_by_owner(self, client):
+        """户管带 `?owner_id=<B的uid>` → 只返回 B 名下的 BC。"""
+        hg, _, _, u2 = self._setup_tt(client)
+        resp = client.get(f"/api/tt/bcs/list?size=50&owner_id={u2}", headers=hg)
+        assert resp.status_code == 200
+        bc_ids = {b["bc_id"] for b in resp.get_json()["items"]}
+        assert bc_ids == {"BC-FP-2"}
+        assert bc_ids                     # 防「空列表也算通过」
+
+    def test_huguan_tt_bcs_contrast_without_owner(self, client):
+        """对照行：不带参数时户管能看到多于 1 个 owner 的 BC。"""
+        hg, _, _, _ = self._setup_tt(client)
+        resp = client.get("/api/tt/bcs/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        owners = {b["owner_id"] for b in resp.get_json()["items"]}
+        assert len(owners) > 1
+
+    def test_tt_user_sees_same_rows_with_or_without_owner_param(self, client):
+        """纯增量对照：普通 `tt` 用户传**别人的 uid** 时两次集合完全相等，且只含自己的 BC。"""
+        _, u1_headers, _, u2 = self._setup_tt(client)
+        without = {b["bc_id"] for b in
+                   client.get("/api/tt/bcs/list?size=50", headers=u1_headers).get_json()["items"]}
+        with_param = {b["bc_id"] for b in
+                      client.get(f"/api/tt/bcs/list?size=50&owner_id={u2}",
+                                 headers=u1_headers).get_json()["items"]}
+        assert with_param == without
+        assert without == {"BC-FP-1"}     # 非空且只含自己的 BC
