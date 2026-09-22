@@ -203,7 +203,7 @@ import { ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { adminApi } from '../api/admin'
 import { adminDataApi } from '@/api/data'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
@@ -275,6 +275,18 @@ async function handleRoleChange(uid, role) {
   if (isSelf(uid)) {
     ElMessage.warning('不能修改自己的角色')
     return
+  }
+  // 户管：禁用后该账号会从户管列表消失且自己无法切回（只有开发者能恢复），切换前明确告知
+  if (authStore.isHuguan && role === 'hidden') {
+    try {
+      await ElMessageBox.confirm(
+        '禁用后该账号将从你的户管列表中消失，你无法再把它切回户管。如需恢复请联系开发者。确定禁用？',
+        '确认禁用户管',
+        { type: 'warning', confirmButtonText: '确定禁用', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
   }
   try {
     await adminApi.updateRole(uid, role)
