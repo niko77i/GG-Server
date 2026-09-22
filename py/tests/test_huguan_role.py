@@ -614,3 +614,76 @@ class TestGgAgentsDropdownCacheInvalidation:
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
         assert "改名后代理" in data["agents"]
         assert "改名前代理" not in data["agents"]
+
+
+class TestGgAccountOwnership:
+    def test_huguan_creates_for_other_user(self, client):
+        hg, hg_id = _huguan(client, "_ggown_hg")
+        _, u1 = _create_user(client, "_ggown_u1", role="user")
+        resp = client.post("/api/accounts/create", json={
+            "name": "代建账户", "account_id": "GG-OWN-1",
+            "owner_id": u1, "agent": "代建代理",
+        }, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        acc = db.execute("SELECT owner_id FROM accounts WHERE account_id='GG-OWN-1'").fetchone()
+        ag = db.execute("SELECT owner_id FROM agents WHERE name='代建代理'").fetchone()
+        db.close()
+        assert acc["owner_id"] == u1
+        assert ag["owner_id"] == u1
+
+    def test_huguan_creates_without_owner_defaults_to_self(self, client):
+        hg, hg_id = _huguan(client, "_ggown_hg2")
+        resp = client.post("/api/accounts/create", json={
+            "name": "自建账户", "account_id": "GG-OWN-2"}, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        acc = db.execute("SELECT owner_id FROM accounts WHERE account_id='GG-OWN-2'").fetchone()
+        db.close()
+        assert acc["owner_id"] == hg_id
+
+    def test_regular_user_owner_id_ignored_on_create(self, client):
+        """回归：普通用户传 owner_id 不能把账户建到别人名下。"""
+        _, u1 = _create_user(client, "_ggown_u2", role="user")
+        hdr, me = _create_user(client, "_ggown_u3", role="user")
+        resp = client.post("/api/accounts/create", json={
+            "name": "越权账户", "account_id": "GG-OWN-3", "owner_id": u1}, headers=hdr)
+        assert resp.status_code == 200
+        db = database.get_db()
+        acc = db.execute("SELECT owner_id FROM accounts WHERE account_id='GG-OWN-3'").fetchone()
+        db.close()
+        assert acc["owner_id"] == me
+
+    def test_huguan_reassigns_to_target_user(self, client):
+        hg, hg_id = _huguan(client, "_ggown_hg3")
+        _, u1 = _create_user(client, "_ggown_u4", role="user")
+        db = database.get_db()
+        _mk_account(db, hg_id, "GG-OWN-4", "待转移")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-OWN-4'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": u1}, headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        acc = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert acc["owner_id"] == u1
+
+    def test_regular_user_owner_id_ignored_on_reassign(self, client):
+        """回归：普通用户传 owner_id 不能把账户转给别人。
+
+        reassign 的 `owner_id` 分支与 create 的**互相独立**（两处 `target_owner` 计算），
+        只测 create 会让漏改这里的情况全绿。本用例即为此设的守卫：账户原属 u1，
+        普通用户 caller 传 `owner_id=u1` 时应转给 caller 自己，而不是留在 u1 名下。
+        """
+        _, u1 = _create_user(client, "_ggown_u5", role="user")
+        hdr, me = _create_user(client, "_ggown_u6", role="user")
+        db = database.get_db()
+        _mk_account(db, u1, "GG-OWN-5", "u1的账户")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-OWN-5'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": u1}, headers=hdr)
+        assert resp.status_code == 200
+        db = database.get_db()
+        owner = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()["owner_id"]
+        db.close()
+        assert owner == me

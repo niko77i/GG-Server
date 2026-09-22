@@ -3873,6 +3873,14 @@ def accounts_batch_lookup():
 def accounts_create():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
+    # 目标归属：跨用户角色可用 owner_id 代建到指定用户名下，其余角色恒为调用者自己
+    actor = auth.get_user_by_id(user_id)
+    actor_role = (actor or {}).get("role", "user")
+    target_owner = user_id
+    if actor_role in CROSS_USER_ROLES:
+        raw_owner = (data.get("owner_id") or "")
+        if str(raw_owner).strip().isdigit():
+            target_owner = int(str(raw_owner).strip())
     name = (data.get("name") or "").strip()
     account_id = (data.get("account_id") or "").strip()
     if not name or not account_id:
@@ -3887,12 +3895,12 @@ def accounts_create():
             agent_name = data.get("agent", "").strip()
             if agent_name:
                 existing_ag = db.execute(
-                    "SELECT id FROM agents WHERE name=? AND owner_id=?", (agent_name, user_id)
+                    "SELECT id FROM agents WHERE name=? AND owner_id=?", (agent_name, target_owner)
                 ).fetchone()
                 if existing_ag:
                     agent_id = existing_ag["id"]
                 else:
-                    db.execute("INSERT INTO agents(name, owner_id) VALUES(?,?)", (agent_name, user_id))
+                    db.execute("INSERT INTO agents(name, owner_id) VALUES(?,?)", (agent_name, target_owner))
                     agent_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         status_id = data.get("status_id")
@@ -3900,12 +3908,12 @@ def accounts_create():
             status_name = data.get("status", "").strip()
             if status_name:
                 existing_st = db.execute(
-                    "SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (status_name, user_id)
+                    "SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (status_name, target_owner)
                 ).fetchone()
                 if existing_st:
                     status_id = existing_st["id"]
                 else:
-                    db.execute("INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (status_name, user_id))
+                    db.execute("INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (status_name, target_owner))
                     status_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         db.execute(
@@ -3918,7 +3926,7 @@ def accounts_create():
              status_id,
              (data.get("acquired_date") or datetime.date.today().isoformat()),
              (data.get("death_date") or "").strip(),
-             now, now, user_id))
+             now, now, target_owner))
         db.commit()
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         # 记录 MCC 变更历史（首次分配 — 直接写入，因为 _record_mcc_change 检测的是变更）
@@ -4230,9 +4238,17 @@ def accounts_update(aid):
 @app.route("/api/accounts/<int:aid>/reassign", methods=["PUT"])
 @jwt_required()
 def accounts_reassign(aid):
-    """将已有账户归属权转移给当前用户，同时可选更新其他字段"""
+    """将已有账户归属权转移给指定用户（跨用户角色）或当前用户，同时可选更新其他字段"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
+    # 目标归属：跨用户角色可用 owner_id 转给指定用户，其余角色恒为调用者自己
+    actor = auth.get_user_by_id(user_id)
+    actor_role = (actor or {}).get("role", "user")
+    target_owner = user_id
+    if actor_role in CROSS_USER_ROLES:
+        raw_owner = (data.get("owner_id") or "")
+        if str(raw_owner).strip().isdigit():
+            target_owner = int(str(raw_owner).strip())
     db = _yt_db()
     try:
         # 检查账户是否存在
@@ -4244,7 +4260,7 @@ def accounts_reassign(aid):
         if not existing:
             db.close()
             return jsonify({"success": False, "error": "账户不存在"}), 404
-        if int(existing["owner_id"] or 0) == user_id:
+        if int(existing["owner_id"] or 0) == target_owner:
             db.close()
             return jsonify({"success": False, "error": "该账户已属于当前用户，无需转移"}), 409
 
@@ -4253,7 +4269,7 @@ def accounts_reassign(aid):
         # 转移归属权
         db.execute(
             "UPDATE accounts SET owner_id = ?, updated_at = datetime('now','localtime') WHERE id = ?",
-            (user_id, aid)
+            (target_owner, aid)
         )
 
         # 同时更新其他可编辑字段
@@ -4273,10 +4289,17 @@ def accounts_reassign(aid):
             db.execute("UPDATE accounts SET mcc_id = ? WHERE id = ?", (mcc_val, aid))
 
         db.commit()
+        # 返回文案：代转场景需指名目标用户；target_owner == user_id 时逐字节保持原句不变
+        if target_owner == user_id:
+            msg = f"账户「{existing['name']}」已从 {old_owner} 转移至当前用户"
+        else:
+            _t = db.execute("SELECT display_name, username FROM users WHERE id=?", (target_owner,)).fetchone()
+            _label = (_t["display_name"] or _t["username"]) if _t else str(target_owner)
+            msg = f"账户「{existing['name']}」已从 {old_owner} 转移至 {_label}"
         db.close()
         return jsonify({
             "success": True,
-            "message": f"账户「{existing['name']}」已从 {old_owner} 转移至当前用户"
+            "message": msg
         })
     except Exception as e:
         db.close()
