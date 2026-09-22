@@ -64,7 +64,7 @@
         </el-row>
 
         <!-- 管理员专属 Google 表格配置 -->
-        <template v-if="authStore.isAdmin || authStore.isDeveloper">
+        <template v-if="authStore.isAdmin || authStore.isDeveloper || authStore.isHuguan">
           <!-- 代理 / 状态 / 回收原因选项卡片 -->
           <el-row :gutter="16">
             <el-col :span="12" v-for="card in adminOptionCards" :key="card.key">
@@ -121,7 +121,7 @@
           </el-row>
         </template>
 
-          <el-card shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
+          <el-card v-if="!authStore.isHuguan" shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
             <template #header>
               <span style="font-weight:600;">📊 Google 表格配置</span>
               <el-tag v-if="isAdmin" size="small" type="warning" style="margin-left:8px;">仅管理员</el-tag>
