@@ -1373,18 +1373,61 @@ git commit -m "feat: GG 账户代建与归属转移支持指定目标用户"
 
 ### Task 8: TT 路由角色常量替换（账户域与 BC）
 
+> **执行勘误（2026-09-22，派发前预检）**：
+>
+> **(1) ⚠️ 原「范围界定」有两处方向性错误，已在下文就地修正，务必按修正版执行。**
+> 原表把 `tt_routes.py:30` 列为「不改」、`:158` 列为「要改」——**两处都反了**：
+> - `:30` **不是** `_get_role` 辅助（`_get_role` 实际定义在 `:1137`），而是 **`list_bcs()` 的 BC 列表可见性闸门**。
+>   若按原表不动它，户管能改他人 BC（`:1145` 已放行）却**在 BC 列表里看不到**，正是 D5 那类「点得动但看不见」的缺口。
+> - `:158` 是 **`list_products()` 的产品列表可见性闸门**，属**产品域**。按原表替换会让户管跨用户看到全部产品，
+>   直接违反全局约束「`huguan` 不获得产品/视频的编辑权」与 Task 17 的收口目标。
+> - `:569`（`delist_status`，掉包检测）虽被原表列为「要改」，但其查询与过滤全部基于
+>   `tt_products` / `tt_packages`（`prod.owner_id`），**同属产品域 → 不改**。
+>
+> **(2) `tt_accounts_routes.py` 是 23 处，不是 22 处。** 原表文字写「22 处」，但其后枚举的行号列表
+> （209、256、298、436、506、525、543、560、577、611、639、696、732、786、821、841、860、881、920、937、1079、1121、1135）
+> 恰好 23 个，且与实况逐行吻合。**以枚举列表为准，全部 23 处都要换。**
+> 已逐行核对：这 23 处全部落在账户域函数内（`list_accounts` / `batch_lookup_accounts` / `update_account` /
+> `batch_update_accounts` / `delete_account` / `batch_delete_accounts` / `restore_account` /
+> `permanent_delete_account` / `deleted_accounts_list` / `bc_history` / `delete_bc_history` / `recharge_*` /
+> `recycle_reason_*` / `sync_from_sheet`），该文件**确无**产品域端点，可整文件替换。
+> `:821`、`:841`、`:860` 比较的是充值记录的 `row["created_by"]`，一并替换（户管可操作他人创建的下级数据）。
+>
+> **(3) 行号一律按内容定位。** `tt_routes.py` 的 import 在 `:7`（非 `:11`）；
+> `tt_accounts_routes.py` 的 import 确在 `:11`。
+>
+> **(4) `tt_routes.py:1154`/`:1169` 是原表给出的「不改」行号，落点正确但表述偏移**：这两行是
+> `_check_product_owner` / `_check_product_view` 的 **docstring 行**，真正的 guard 在 `:1157` / `:1169`。
+> **结论不变：`_check_product_owner` 与 `_check_product_view` 两个函数整体一字不动。**
+>
+> **(5) 测试无需 `?platform=tt`。** `require_platform('tt')` 对 `PLATFORM_SWITCH_ROLES`（含户管）直接放行，
+> 与 `?platform=` 参数无关，故 Step 1 的测试片段按原样可用。普通用户则靠 `users.platform == 'tt'` 通过。
+>
+> **(6) 除常量替换外，追加两处（Step 1 已补）**：`:30` 的 BC 列表可见性需要一条户管正向用例；
+> `:158` 的产品列表需要一条**回归守卫用例**——它在原表里被标成「要改」，没有守卫的话，
+> 后来者照原表执行会静默给户管开产品可见性。另补一条 `_check_product_owner` 对户管仍 403 的守卫。
+>
+> **(7) `:818`（`/api/tt/users` 的 `WHERE (platform='tt' OR role='developer')`）按原表保持原样**，本任务不动。
+> 户管（`users.platform='gg'`）因此不出现在 TT 用户下拉里 —— 这是 Task 4 的 `platform_users` 端点要解决的
+> 另一件事，与本次常量替换无关，**不要顺手改**。
+
 **Files:**
-- Modify: `py/routes/tt_accounts_routes.py`（22 处角色元组）
-- Modify: `py/routes/tt_routes.py`（账户域与 BC 相关的角色元组）
+- Modify: `py/routes/tt_accounts_routes.py`（23 处角色元组）
+- Modify: `py/routes/tt_routes.py`（BC 域 3 处：`:30`、`:125`、`:1145`）
 - Test: `py/tests/test_huguan_role.py`（追加）
 
 **Interfaces:**
 - Consumes: Task 1 的 `CROSS_USER_ROLES`
-- Produces: 户管对任意用户的 TT 账户拥有编辑权；对 BC 拥有编辑权。**产品域不动**。
+- Produces: 户管对任意用户的 TT 账户拥有编辑权；对任意用户的 BC 拥有编辑权与可见性。**产品域一字不动。**
 
-**范围界定：**
-- **要改**：`tt_accounts_routes.py` 全部 22 处（该文件全是账户域）；`tt_routes.py:1145`（`_check_bc_owner`）；`tt_routes.py:125`、`:158`、`:569`（BC / 账户域）。
-- **不改**：`tt_routes.py:1154`（`_check_product_owner`）、`:1169`（`_check_product_view`）、`:892`（`sheet_id` 全局配置写入，属子项目 B）、`:818`（`/api/tt/users` 的查询口径，保持原样）、`:30`（`_get_role` 辅助，无判断语义）。
+**范围界定（已按勘误 (1) 修正）：**
+- **要改**：`tt_accounts_routes.py` 全部 **23** 处（该文件全是账户域）；
+  `tt_routes.py:30`（`list_bcs` 的 BC 列表可见性）、`:125`（`bc_options`）、`:1145`（`_check_bc_owner`）。
+  顺带把 `:1143`（`_check_bc_owner` 的 docstring）里的「非 developer/admin 用户」改为「非跨用户角色」。
+- **不改**：`tt_routes.py:158`（`list_products` 可见性）、`:569`（`delist_status`）、
+  `_check_product_owner`（`:1155-1163`）、`_check_product_view`（`:1166-1180`）、
+  `:818`（`/api/tt/users` 查询口径）、`:892`（`sheet_id` / `sheet_mappings` 全局配置写入，属子项目 B）、
+  `:1137`（`_get_role` 辅助，无判断语义）、`:826`/`:885`/`:1143` 之外的注释与 docstring。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1432,12 +1475,69 @@ class TestTtCrossUser:
         db.close()
         resp = client.put(f"/api/tt/bcs/{bid}", json={"name": "BC改名"}, headers=hg)
         assert resp.status_code == 200
+
+    def test_huguan_sees_other_users_bc_in_list(self, client):
+        """BC 列表可见性：户管能改他人 BC（上一条）也必须能**看到**它。
+
+        对应 `tt_routes.py:30`（`list_bcs`）。原计划表把这行标成「不改、无判断语义」是误标，
+        缺了它户管就会「点得动但看不见」。
+        """
+        hg, _ = _huguan(client, "_tt_bcl_hg")
+        _, u1 = _create_user(client, "_tt_bcl_u1", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES('别人BC','BC-L1',?)", (u1,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/tt/bcs/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        names = {b["name"] for b in resp.get_json()["items"]}
+        assert "别人BC" in names
+
+    def test_huguan_cannot_see_other_users_products(self, client):
+        """回归守卫：产品域**不**放行。
+
+        `tt_routes.py:158`（`list_products`）在原计划表里被误标为「要改」。若照原表替换，
+        户管将跨用户看到全部产品，直接违反全局约束「huguan 不获得产品/视频的编辑权」。
+        本用例是那条误标的路障：谁把 :158 换成 CROSS_USER_ROLES，这条立刻变红。
+        """
+        hg, _ = _huguan(client, "_tt_prd_hg")
+        _, u1 = _create_user(client, "_tt_prd_u1", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_products(product_name, owner_id) VALUES('别人的产品',?)", (u1,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/tt/products/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        names = {p["product_name"] for p in resp.get_json()["items"]}
+        assert "别人的产品" not in names
+
+    def test_huguan_cannot_edit_other_users_product(self, client):
+        """回归守卫：`_check_product_owner` / `_check_product_view` 一字不动。
+
+        与上一条成对——上一条守列表可见性（`:158`），本条守写接口归属闸门（`:1157`/`:1169`）。
+        """
+        hg, _ = _huguan(client, "_tt_prde_hg")
+        _, u1 = _create_user(client, "_tt_prde_u1", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_products(product_name, owner_id) VALUES('只读产品',?)", (u1,))
+        db.commit()
+        pid = db.execute("SELECT id FROM tt_products WHERE product_name='只读产品'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/tt/products/{pid}", json={"product_name": "越权改名"}, headers=hg)
+        assert resp.status_code == 403
+        resp = client.get(f"/api/tt/products/{pid}/detail", headers=hg)
+        assert resp.status_code == 403
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k TtCrossUser`
-Expected: 两条户管用例 FAIL（403）；回归用例 PASS。
+Expected: **3 FAIL / 3 PASS**。FAIL 的三条是户管的**正向**用例
+（`test_huguan_edits_other_users_tt_account`、`test_huguan_edits_other_users_bc`、`test_huguan_sees_other_users_bc_in_list`，
+均因 403/看不到而红）；PASS 的三条是回归守卫
+（`test_regular_user_cannot_edit_other_users_tt_account`、`test_huguan_cannot_see_other_users_products`、
+`test_huguan_cannot_edit_other_users_product`）—— 它们**必须一开始就是绿的**，
+若其中任何一条红了，说明替换范围出了问题，**停下来查，不要改测试**。
 
 - [ ] **Step 3: 机械替换两个文件中的角色元组**
 
@@ -1447,7 +1547,7 @@ Expected: 两条户管用例 FAIL（403）；回归用例 PASS。
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 ```
 
-然后对该文件**全部 22 处**执行替换（行号：209、256、298、436、506、525、543、560、577、611、639、696、732、786、821、841、860、881、920、937、1079、1121、1135 —— 以 `grep -n "developer" py/routes/tt_accounts_routes.py` 现查为准）：
+然后对该文件**全部 23 处**执行替换（行号：209、256、298、436、506、525、543、560、577、611、639、696、732、786、821、841、860、881、920、937、1079、1121、1135 —— 以 `grep -n "developer" py/routes/tt_accounts_routes.py` 现查为准；三条命令数应一致）：
 
 ```
 role in ('developer', 'admin')      →  role in CROSS_USER_ROLES
@@ -1456,21 +1556,53 @@ role not in ('developer', 'admin')  →  role not in CROSS_USER_ROLES
 
 注意 `:821`、`:841`、`:860` 三处比较的是 `row["created_by"]`，也一并按上面替换（户管可操作他人创建的下级数据）。
 
-对 `py/routes/tt_routes.py`：第 11 行的 import 同样追加 `CROSS_USER_ROLES`，然后**只**替换 `:125`、`:158`、`:569`、`:1145` 四处（BC 与账户域）；**`:1154`、`:1169` 保持不变**（产品域）。
+对 `py/routes/tt_routes.py`：第 **7** 行的 `from .helpers import ok, err, get_uid, get_db, parse_body` 追加 `CROSS_USER_ROLES`，
+然后**只**替换下面 **3 处**（全部是 BC 域）：
 
-替换后用下面两条命令自查替换范围：
+- `:30` —— `list_bcs()` 的可见性分支
+- `:125` —— `bc_options()` 的可见性分支
+- `:1145` —— `_check_bc_owner()` 的放行判断
+
+并把 `:1143` 的 docstring 由 `"""非 developer/admin 用户只能更新/删除自己的 BC。返回 None 或 403 错误响应。"""`
+改为 `"""非跨用户角色只能更新/删除自己的 BC。返回 None 或 403 错误响应。"""`。
+
+**产品域一字不动**：`:158`（`list_products`）、`:569`（`delist_status`）、`_check_product_owner`（`:1155-1163`）、
+`_check_product_view`（`:1166-1180`）。另 `:818`（`/api/tt/users`）、`:892`（sheet 配置）、`:1137`（`_get_role`）也不动。
+
+替换后用下面三条命令自查替换范围：
 
 ```bash
 grep -n "developer" py/routes/tt_accounts_routes.py
 grep -n "developer" py/routes/tt_routes.py
+grep -c "CROSS_USER_ROLES" py/routes/tt_accounts_routes.py   # 期望 24（23 处替换 + 1 处 import）
 ```
 
-Expected: `tt_accounts_routes.py` 无任何 `developer` 字面量残留；`tt_routes.py` 仅剩 `:818`、`:892`、`:1154`、`:1169` 四处（均为明确不改的站点）。
+Expected:
+- `tt_accounts_routes.py` 无任何 `developer` 残留，且 `grep -c` 得 24。
+- `tt_routes.py` 剩 **12 行**含 `developer`，逐行核对如下（`:` 后为不含行号的现状行号）：
+
+  | 行 | 现状 | 说明 |
+  |---|---|---|
+  | `:158` | `if role in ('developer', 'admin'):` | **产品域，保持原样** |
+  | `:159` | 注释 | 被 `:158` 的注释 |
+  | `:164` | 注释 | 被 `:158` else 分支的注释 |
+  | `:569` | `if role in ('developer', 'admin'):` | **产品域（`delist_status`），保持原样** |
+  | `:818` | SQL 内 `role = 'developer'` | `/api/tt/users`，保持原样 |
+  | `:826` | 注释 | — |
+  | `:885` | 注释 | — |
+  | `:892` | `is_admin = role in ('admin', 'developer')` | sheet 配置，子项目 B，保持原样 |
+  | `:1154` | `_check_product_owner` docstring | **产品域，保持原样** |
+  | `:1157` | `_check_product_owner` 的 guard | **产品域，保持原样** |
+  | `:1166` | `_check_product_view` docstring | **产品域，保持原样** |
+  | `:1169` | `_check_product_view` 的 guard | **产品域，保持原样** |
+
+  **应当消失的**：`:30`、`:125`、`:1145`（已替换）与 `:1143`（docstring 已改写）。
+  若 `:30`/`:125` 仍在输出里，说明漏改；若 `:158`/`:569` 已不在输出里，说明**改超范围了**，立即回退。
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k TtCrossUser`
-Expected: 3 passed
+Expected: 6 passed
 
 - [ ] **Step 5: 跑全量后端测试**
 
