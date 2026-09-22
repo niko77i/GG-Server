@@ -3,10 +3,10 @@
     <h1 style="flex-shrink:0;">账户管理</h1>
     <div class="sticky-tabs" style="flex-shrink:0;">
       <el-tabs :model-value="activeTab" @update:model-value="switchTab">
-        <el-tab-pane label="产品管理" name="products" />
-        <el-tab-pane v-if="auth.isAdmin" label="广告账户" name="ads" />
-        <el-tab-pane v-if="auth.isAdmin" label="MCC 管理" name="mcc" />
-        <el-tab-pane v-if="auth.isAdmin" label="设置" name="settings" />
+        <el-tab-pane v-if="!auth.isHuguan" label="产品管理" name="products" />
+        <el-tab-pane v-if="auth.canManageAccounts" label="广告账户" name="ads" />
+        <el-tab-pane v-if="auth.canManageAccounts" label="MCC 管理" name="mcc" />
+        <el-tab-pane v-if="auth.canManageAccounts" label="设置" name="settings" />
 
       </el-tabs>
     </div>

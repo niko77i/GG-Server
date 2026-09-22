@@ -30,7 +30,10 @@ const routes = [
   {
     path: '/accounts',
     component: () => import('../views/AccountsView.vue'),
-    redirect: '/accounts/products',
+    redirect: () => {
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      return (user.role === 'huguan') ? '/accounts/ads' : '/accounts/products'
+    },
     meta: { platform: 'gg' },
     children: [
       { path: 'products', component: () => import('../views/ProductPanel.vue'), meta: { title: '产品管理' } },
@@ -91,7 +94,10 @@ const routes = [
   // ==================== FB 平台路由 ====================
   {
     path: '/fb',
-    redirect: '/fb/products',
+    redirect: () => {
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      return (user.role === 'huguan') ? '/fb/accounts' : '/fb/products'
+    },
     meta: { platform: 'fb' }
   },
   {
@@ -133,7 +139,10 @@ const routes = [
   {
     path: '/tt',
     component: () => import('../views/tt/TtView.vue'),
-    redirect: '/tt/products',
+    redirect: () => {
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      return (user.role === 'huguan') ? '/tt/accounts' : '/tt/products'
+    },
     meta: { platform: 'tt' },
     children: [
       { path: 'products', component: () => import('../views/tt/TtProductPanel.vue'), meta: { title: 'TT产品管理' } },
@@ -195,6 +204,11 @@ router.beforeEach((to, from, next) => {
   // viewer 只能访问 /accounts/products，不能访问其他账户子页面
   if (auth.isViewer && to.path.startsWith('/accounts') && to.path !== '/accounts/products' && !to.path.startsWith('/accounts/products/')) {
     next('/accounts/products')
+    return
+  }
+  // 户管不进产品页：无对应 Tab，后端对产品域也 403
+  if (auth.isHuguan && (to.path === '/accounts/products' || to.path.startsWith('/accounts/products/'))) {
+    next('/accounts/ads')
     return
   }
   next()
