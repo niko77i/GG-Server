@@ -1159,9 +1159,52 @@ git commit -m "feat: GG MCC 列表支持跨用户可见与按用户筛选"
 
 ### Task 7: GG 账户创建与归属转移支持代建
 
+> **执行勘误（2026-09-22，派发前预检）**：
+>
+> **(1) 行号一律按内容定位，勿信本节的数字。** `accounts_create` 实际在 `py/main.py:3871-3979`（非 3827-3892），
+> `accounts_reassign` 实际在 `py/main.py:4230-4283`（非 4186-4240）。
+>
+> **(2) ⚠️ Step 3 的插入位置照字面执行会抛 `UnboundLocalError`。** 本节写「在 `user_id = int(get_jwt_identity())`
+> 之后插入」，但插入块第一句就用了 `data`，而 `data = request.get_json(silent=True) or {}` 在**它下一行**（`:3875`）。
+> **必须插在 `data = ...` 之后。** Step 4 写的位置（`data = ...` 之后）是对的 —— 两处不对称，注意区分。
+>
+> **(3) 逐处替换清单（按内容找，共 5 处，brief 的行号均已漂移）：**
+> - `accounts_create` 的 agent 查找：`"SELECT id FROM agents WHERE name=? AND owner_id=?", (agent_name, user_id)`
+> - `accounts_create` 的 agent 兜底插入：`"INSERT INTO agents(name, owner_id) VALUES(?,?)", (agent_name, user_id)`
+> - `accounts_create` 的 status 查找：`"SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (status_name, user_id)`
+> - `accounts_create` 的 status 兜底插入：`"INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (status_name, user_id)`
+> - `accounts_create` 的账户 INSERT 参数末位：`now, now, user_id))`
+>
+> **(4) `changed_by` 保持操作者，不要跟着改。** `accounts_create` 里 `account_mcc_history` 的
+> `changed_by` 传 `user_id`（`:3932`），`accounts_reassign` 里 `_record_mcc_change(db, aid, mcc_val, user_id, "reassign")`
+> 的第四参数同理（`:4272`）。这两处语义是「**谁做的这次改动**」，即户管本人，**不是** `target_owner`。
+>
+> **(5) `accounts_reassign` 的返回文案对代转场景是错的。** 原句
+> `f"账户「{existing['name']}」已从 {old_owner} 转移至当前用户"` 在「转给别人」时说反了。改为双分支，
+> **保证既有角色（`target_owner` 恒等于 `user_id`）拿到逐字节相同的那一句**：
+> ```python
+>         if target_owner == user_id:
+>             msg = f"账户「{existing['name']}」已从 {old_owner} 转移至当前用户"
+>         else:
+>             _t = db.execute("SELECT display_name, username FROM users WHERE id=?", (target_owner,)).fetchone()
+>             _label = (_t["display_name"] or _t["username"]) if _t else str(target_owner)
+>             msg = f"账户「{existing['name']}」已从 {old_owner} 转移至 {_label}"
+> ```
+> 并把 `return jsonify({"success": True, "message": ...})` 的 message 换成 `msg`。
+>
+> **(6) 新增一条 reassign 的回归用例（Step 1 已补）**：`test_regular_user_owner_id_ignored_on_reassign`。
+> 只测 create 是不够的 —— reassign 的 `owner_id` 分支是**独立的第二处**，漏改一样会全绿。
+>
+> **(7) 既有缺口（不在本任务修，记录备查）**：`accounts_reassign` **没有源账户归属校验** ——
+> 它只检查「目标是不是已经是自己的」，不检查「调用者是不是当前 owner」。因此任意登录用户都能把
+> **任意**账户转给自己。这是既有缺陷（与设计文档 §2.5 记录的 `accounts_update` / FB 侧同类缺口同性质），
+> 本任务不修，仅记录。副效应是「户管能转移别人的账户」这条需求本就已被该缺口满足。
+>
+> **(8) Step 1 的 `test_huguan_reassigns_to_target_user` 里 `aid = 0` 一行是冗余占位**，实现时去掉。
+
 **Files:**
-- Modify: `py/main.py:3827-3892`（`accounts_create`）
-- Modify: `py/main.py:4186-4240`（`accounts_reassign`）
+- Modify: `py/main.py:3871-3979`（`accounts_create`）
+- Modify: `py/main.py:4230-4283`（`accounts_reassign`）
 - Test: `py/tests/test_huguan_role.py`（追加）
 
 **Interfaces:**
@@ -1217,9 +1260,6 @@ class TestGgAccountOwnership:
         _, u1 = _create_user(client, "_ggown_u4", role="user")
         db = database.get_db()
         _mk_account(db, hg_id, "GG-OWN-4", "待转移")
-        db.close()
-        aid = 0
-        db = database.get_db()
         aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-OWN-4'").fetchone()["id"]
         db.close()
         resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": u1}, headers=hg)
@@ -1228,12 +1268,32 @@ class TestGgAccountOwnership:
         acc = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()
         db.close()
         assert acc["owner_id"] == u1
+
+    def test_regular_user_owner_id_ignored_on_reassign(self, client):
+        """回归：普通用户传 owner_id 不能把账户转给别人。
+
+        reassign 的 `owner_id` 分支与 create 的**互相独立**（两处 `target_owner` 计算），
+        只测 create 会让漏改这里的情况全绿。本用例即为此设的守卫：账户原属 u1，
+        普通用户 caller 传 `owner_id=u1` 时应转给 caller 自己，而不是留在 u1 名下。
+        """
+        _, u1 = _create_user(client, "_ggown_u5", role="user")
+        hdr, me = _create_user(client, "_ggown_u6", role="user")
+        db = database.get_db()
+        _mk_account(db, u1, "GG-OWN-5", "u1的账户")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-OWN-5'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": u1}, headers=hdr)
+        assert resp.status_code == 200
+        db = database.get_db()
+        owner = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()["owner_id"]
+        db.close()
+        assert owner == me
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k GgAccountOwnership`
-Expected: `test_huguan_creates_for_other_user` FAIL（owner 是户管自己、代理挂在户管名下）；`test_huguan_reassigns_to_target_user` FAIL（`owner_id` 仍是户管，或返回 409「该账户已属于当前用户」）；两条回归 PASS。
+Expected: `test_huguan_creates_for_other_user` FAIL（owner 是户管自己、代理挂在户管名下）；`test_huguan_reassigns_to_target_user` FAIL（`owner_id` 仍是户管，或返回 409「该账户已属于当前用户」）；三条回归（`test_huguan_creates_without_owner_defaults_to_self`、`test_regular_user_owner_id_ignored_on_create`、`test_regular_user_owner_id_ignored_on_reassign`）PASS。
 
 - [ ] **Step 3: 改写 `accounts_create` 的目标归属**
 
@@ -1295,7 +1355,7 @@ Expected: `test_huguan_creates_for_other_user` FAIL（owner 是户管自己、�
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k GgAccountOwnership`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 6: 跑全量后端测试**
 
