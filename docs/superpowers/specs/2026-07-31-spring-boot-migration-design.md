@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.27  
-> **日期**: 2026-07-31（v1.27 更新于 2026-09-22）  
+> **文档版本**: v1.28  
+> **日期**: 2026-07-31（v1.28 更新于 2026-09-22）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.28 变更**: **用户管理的平台隔离**——此前 `admin` 是**全局角色**：任何管理员都能看到并操作全部平台的用户，创建用户时非 developer 一律被强制写成 `platform='gg'`（把 TT/FB 管理员建的用户错误塞进 GG）。本次把 `admin` 从全局改为**按平台隔离**，`developer` 短路豁免。涉及：① `auth.list_users` 非 developer 强制 `platform = 自己的平台` 且不返回 developer 行（**忽略传入的 `platform` 参数**；无 `current_user_id` 的内部调用保持原行为不变）；② `admin_create_user` 非 developer 的 `platform` 锁定为创建者自己的平台（非法存量值兜底 `gg`），前端平台下拉框仅 developer 可见；③ 新增 `_check_modify_user(actor, target)` 返回**拒绝原因字符串**（`不能操作同级管理员` / `不能操作其他平台的用户`），替换原布尔 `_can_modify_user`，被 `role`/`toggle`/`delete`/`update`/`password`/`telegram` **六个**用户操作接口复用；④ 新增 `_can_access_user_data(actor, target)` 约束数据导入/导出（不限制目标角色，仅平台）；⑤ **`_get_effective_platform()` 语义修正**：原判断 `role in ('developer','admin')` 时取 `request.args.get('platform','gg')`，实际只有 developer 会被前端注入 platform，导致**非 developer 管理员落到 GG 命名空间**（TT 页面因显式传参侥幸正确，FB 页面不传参 → FB 管理员看到 GG 的商务人员/账户状态选项），现改为仅 `role == 'developer'` 跨平台；⑥ 前端 `UserManageView.vue` 平台 Tab 按身份条件渲染 + 创建弹窗平台字段仅 developer 可见 + 身份时序修正（见 7.7）。**迁移要点**：`@AdminRequired` 不再等价于跨平台权限，Spring 侧必须补平台维度的校验，详见 7.7
 > **v1.27 变更**: TT 设置「Google Sheets」区块权限展示修复（纯前端 `frontend/src/views/tt/TtSettingsPanel.vue`，后端无改动）——此前「Google Sheets URL 输入框 + 📋读取工作表 按钮」整块用 `v-if="isAdmin"` 包裹，投手（普通角色）看不到「读取工作表」按钮、无法加载 sheet 列表给「我的看板」选表。现改为：①「📋读取工作表」按钮对**所有登录用户**开放（投手可点，读的是管理员已配置的全局 `tt_sheet_id`，接口 `GET /api/google-sheets/sheets` 仅 `@jwt_required`、无角色限制）；② `sheet_id` 输入框内容**仅管理员可改**（投手侧 `:disabled` 只读显示管理员已配置的 ID，并加「仅管理员可改」标签）；③ 投手点「保存」提交的 `sheet_id` 被后端 `tt_settings_save` 忽略（`is_admin` 判断），仅写私有 `my_dashboard` 到 config 表 `tt_sheet_mappings_<uid>`。迁移到 Spring Boot 时前端需保持「读取开放、sheet_id 写仅管理员」的展示与后端权限边界一致
 > **v1.26 变更**: TT 账户「回收户清单」写表（对应 `py/google_sheets_service.py` 的 `append_recycle` 与 `py/routes/tt_accounts_routes.py` 的 `_trigger_recycle_if_dead`/`_maybe_write_recycle`）——账户状态更新为「非存活」（`!= 存活`，即 验证/封禁/死亡 等）且携带 `recycle_reason` 时，后台异步写「回收户清单」Sheet。该表 12 列表头（时间/账户ID/渠道/运营/国家/时区/有无消耗/回收原因/是否提交/清零金额/备注/是否二次提交），系统**只写 A(时间)/B(账户ID)/H(回收原因) 三列**，其余 C~L 列（渠道/运营/国家/时区/有无消耗/是否提交/清零金额/备注/是否二次提交）在表格里已有公式、**不得覆盖**。写入规则：① A 列时间自动写当天日期、格式「年-月-日」（如 `2026-09-22`），带前导 `'` 标记为文本；② B 列账户ID 带前导 `'` 标记为文本（防 13 位纯数字变科学计数）；③ H 列写回收原因；④ **判断最后一行（换行）只看 B 列「账户ID」有无数据**，时间列（A）有残留但账户ID为空的行忽略（与充值表 `append_recharge_tt` 一致）。回收原因由前端弹窗可搜索下拉选择（`recycle_reason` 字段），后端 `_trigger_recycle_if_dead` 若该原因不在 `tt_recycle_reasons` 表则自动 INSERT（owner_id=当前用户）；配套回收原因 CRUD 接口 `GET/POST/PUT/DELETE /api/tt/recycle-reasons/*`（owner 隔离，admin/developer 看全量）。迁移到 Spring Boot 时 `GoogleSheetsService` 需提供回收写表方法：只写 A/B/H、保留 C~L 公式、以「账户ID」列判断追加行号、时间「年-月-日」+前导 `'`、账户ID 前导 `'`
 > **v1.25 变更**: TT 账户充值写表适配（对应 `py/google_sheets_service.py` 的 `append_recharge_tt` 与 `py/routes/tt_accounts_routes.py` 的 `_append_recharge_background`）——TT 充值表表头为 9 列（时间/账户ID/金额/代理/运营/是否充值/账户ID/金额锁定/是否处理），系统**只写前 3 列**（时间/账户ID/金额），D~I 列（代理/运营/是否充值/账户ID/金额锁定/是否处理）在表格里已有公式、**不得覆盖**。写入规则：① A 列时间自动写当前日期、格式「月/日」（如 `9/22`），带前导 `'` 标记为文本（防止被解析为日期）；② B 列账户ID 带前导 `'` 标记为文本（防止 13 位纯数字变科学计数）；③ C 列金额写 `float` 数字（供 D~I 列公式计算）；④ **判断最后一行（换行）只看 B 列「账户ID」有无数据**，时间/金额列有残留但账户ID为空的行忽略。GG 的 `append_recharge` 保持不动（纯增量），TT 路由 `_append_recharge_background._do_sync` 改调 `append_recharge_tt`（submit/batch-submit/retry-sheets 三处共用）。迁移到 Spring Boot 时 `GoogleSheetsService`（或 `TtAccountService`）需提供 TT 专用充值写表方法：只写 A~C、保留 D~I 公式、以「账户ID」列判断追加行号
@@ -2214,6 +2215,108 @@ public class PlatformGuardFilter extends OncePerRequestFilter {
     }
 }
 ```
+
+### 7.7 用户管理的平台隔离（v1.28）
+
+**核心语义变更**：`admin` 由**全局角色**降为**平台内角色**。GG 管理员只看/只管 GG 用户，TT 管理员只看/只管 TT 用户；只有 `developer` 跨平台无限制。这与 7.6 的 `PlatformGuardFilter`（按路由前缀拦截 FB 用户访问 GG 专属接口）是**两条不同的链路**：7.6 管的是「FB 用户能不能调 GG 的业务接口」，本节管的是「管理员能看见/操作哪些**用户账号**」。二者都要保留。
+
+对应 Python 实现：`py/auth.py:list_users`、`py/main.py:admin_create_user`、`py/main.py:_check_modify_user`、`py/main.py:_can_access_user_data`、`py/main.py:_get_effective_platform`。
+
+#### 7.7.1 四条约束规则
+
+| 链路 | 规则 | developer |
+|------|------|-----------|
+| 用户列表 `GET /api/admin/users` | 非 developer 强制 `WHERE platform = 自己的 platform`，且 `WHERE role != 'developer'`（看不到开发者）；**忽略请求传入的 `platform` 参数** | 不过滤，可按 `platform` 参数筛，缺省返回全部 |
+| 创建用户 `POST /api/admin/users/create` | 非 developer 的 `platform` **锁定为创建者自己的平台**（请求体传什么都无效）；创建者 platform 为非法存量值时兜底 `gg` | 请求体 `platform` 生效 |
+| 用户操作（6 个接口） | 非 developer：目标角色必须是 `user`/`viewer`/`hidden`（不能动同级管理员）**且** `platform` 必须与自己相同 | 全部放行 |
+| 数据导入/导出 | 非 developer 仅限**自己平台**的用户（不限目标角色——搬运数据不改账号权限） | 全部放行 |
+
+「6 个接口」指 `POST /api/admin/users/<uid>/{role,toggle,delete,update,password,telegram}`，在 Python 侧共用一个 `_check_modify_user`，一处改动全局生效。
+
+#### 7.7.2 空值归一
+
+所有平台比较一律用 `(x.platform or 'gg')` 归一后再比，禁止直接字符串比较——存量数据存在 `platform` 为 `NULL` 或 `''` 的行，直接比较会让这类用户对任何管理员都不可见（或可被跨平台操作）。
+
+Java 侧建议在 `UserPrincipal` / `UserEntity` 上提供：
+
+```java
+/** 归一后的平台：NULL/空串一律视为 gg。所有平台比较必须走这里。 */
+public String effectivePlatform() {
+    return (platform == null || platform.isBlank()) ? "gg" : platform;
+}
+
+/** 是否跨平台角色（当前仅 developer；户管角色落地后扩展为角色集合，见 7.7.4）。 */
+public boolean isCrossPlatform() {
+    return "developer".equals(role);
+}
+```
+
+#### 7.7.3 拒绝原因要可区分
+
+Python 侧 `_check_modify_user` 返回的是**拒绝原因字符串**而非布尔值，接口据此返回不同的错误消息（`不能操作同级管理员` / `不能操作其他平台的用户`，均 HTTP 403）。这是刻意设计：前端与排障时需要区分「角色层级不够」和「跨平台越权」，布尔值会把两类拒绝混成同一个 403。
+
+Java 侧对应抛两个不同的异常/错误码，不要合并：
+
+```java
+public enum UserModifyDenyReason {
+    SAME_LEVEL_ADMIN("不能操作同级管理员"),
+    CROSS_PLATFORM("不能操作其他平台的用户");
+
+    private final String message;
+    UserModifyDenyReason(String message) { this.message = message; }
+    public String message() { return message; }
+}
+
+/** 返回 null 表示可操作；否则返回具体拒绝原因。 */
+public UserModifyDenyReason checkModifyUser(UserEntity actor, UserEntity target) {
+    if (actor.isCrossPlatform()) return null;
+    if (!Set.of("user", "viewer", "hidden").contains(target.getRole())) {
+        return UserModifyDenyReason.SAME_LEVEL_ADMIN;
+    }
+    if (!actor.effectivePlatform().equals(target.effectivePlatform())) {
+        return UserModifyDenyReason.CROSS_PLATFORM;
+    }
+    return null;
+}
+```
+
+**注意规则顺序**：先判角色层级、再判平台。反过来会让「跨平台的同级管理员」返回平台原因，与既有测试（`test_tt_admin_cannot_modify_same_platform_admin` 断言「不能操作同级管理员」）不符。同平台的两个 admin 之间依然不能互相操作——本次**没有**放开这一点。
+
+#### 7.7.4 `_get_effective_platform` 修正（易漏）
+
+Python 的 `_get_effective_platform()` 供「取平台相关选项」的接口使用（账户状态、商务人员、地区等列表）。原实现是：
+
+```python
+if user and user.get("role") in ("developer", "admin"):   # ← 错误
+    return request.args.get("platform", "gg")
+```
+
+问题在于：前端 `client.js` **只对 developer 注入 `platform` 参数**（按路由 hash 前缀推断），管理员拿不到注入。于是非 developer 管理员会被 `request.args.get` 的缺省值带进 **GG 命名空间**。表现为：TT 页面因前端显式传了 `platform=tt` 而侥幸正确，**FB 页面不传参 → FB 管理员看到的是 GG 的商务人员/账户状态选项**（静默错数据，不报错）。现改为仅 `role == 'developer'` 才跨平台，其他角色一律取自己的 `platform`：
+
+```python
+if user and user.get("role") == "developer":
+    return request.args.get("platform", "gg")
+return (user or {}).get("platform", "gg")
+```
+
+**迁移到 Spring Boot 时必须保持这个语义**：平台相关选项解析只认 developer 短路，不要想当然地把 admin 也算进去。
+
+**与户管角色的衔接点**：`2026-09-22-huguan-role-design.md` 计划把这里的 `role == 'developer'` 判断改为 `CROSS_USER_ROLES`（含 developer 与户管角色）。两处改动语义兼容（户管同为跨平台角色），**合并时把 7.7.2 的 `isCrossPlatform()` 一并扩展为角色集合判断即可**，不要在多处散写 `"developer".equals(role)`。
+
+#### 7.7.5 前端配套
+
+| 位置 | 改动 | 迁移注意 |
+|------|------|----------|
+| `frontend/src/views/UserManageView.vue` | 平台 Tab（全部/GG/FB/TT）按身份条件渲染：非 developer 只显示自己平台那一个 | 纯前端体验优化，**权限边界不在前端**——后端必须独立强制（可绕过前端直调接口） |
+| 同上，创建用户弹窗 | 「平台」字段 `v-if="authStore.isDeveloper"`，非 developer 看不到也传不出 | 后端仍要锁死（双保险） |
+| 同上，Tab 默认值 | **必须用 `watch(() => authStore.user?.id, ..., { immediate: true })`**，不可在 `ref` 初始值里读身份 | 见下方说明 |
+| `frontend/src/api/client.js` | developer 的 `platform` 自动注入需**排除 `/admin/users` 路径** | 见下方说明 |
+
+**前端两处坑（迁移重构前端时勿重犯）**：
+
+1. **身份时序**：`App.vue` 的 `initFromStorage()` / `fetchMe()` 在**父组件 `onMounted`** 才执行，而子组件的 `onMounted` 早于父组件、`setup` 更早。因此在 `UserManageView` 的 `setup` 阶段 `authStore.user` **必为 `null`**。若把身份算进 `ref` 初始值（只求值一次），Tab 选中态与筛选值会永久错位（被误判成「非开发者 / gg」）。必须改为 `watch` 身份变化后再定值并拉数据。
+
+2. **自动注入误伤**：`client.js` 对 developer 按 `window.location.hash` 前缀推断平台（`/tt`→tt、`/fb`→fb、其余→gg）。用户管理页路由是 `/admin/users`，不以 `/tt`、`/fb` 开头 → 被推断成 `gg` 注入，导致 developer 的「全部」Tab 实际只返回 GG。须对该路径排除自动注入，平台交由页面内 Tab 显式控制。
 
 ---
 
