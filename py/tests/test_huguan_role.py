@@ -581,19 +581,16 @@ class TestGgAgentsDropdownCacheInvalidation:
     `test_rename_invalidates_agents_dropdown_cache` 是为这次回归设的守卫：
     改回 `delete` 即变红。
 
-    本用例**故意不调用 `_app_cache.clear()`**（文件内其它用例靠它做隔离）：
-    要观察的正是第 3 步 GET 能否读到失效后的新名字；一旦在这里清缓存，
-    即使 bug 仍在（删除仍是空操作）用例也会绿，守卫就失去意义。
-    因此本用例对**自身缓存键的初始状态**是敏感的 —— 见测试体内注释。
+    缓存的清空只放在**开头**：第 1 步 GET 会立刻把该键重新写热，
+    因此开头清缓存不会掩盖 bug —— 若第 3 步仍读到旧名字，说明写接口的失效调用确实没生效。
+    放在开头是为了消除对**用例执行顺序**的依赖（`_app_cache` 是进程级全局缓存，
+    pytest 不重置，且各用例的临时库会把用户 id 从 1 重新分配，他测遗留的
+    `accounts:agents:1:1` 会与本用例的键撞车）。
     """
 
     def test_rename_invalidates_agents_dropdown_cache(self, client):
-        # 先占一个 id：本文件内 TestGgAccountListDropdownOwnerLeak 会 clear() 掉全部缓存，
-        # 但它自己随后会以「首个注册用户（id=1）」的身份调一次 /api/accounts/list，
-        # 从而把 `accounts:agents:1:1` = [] 留在进程级缓存里。若本用例的属主用户也拿到
-        # id=1，第 1 步就会命中这个他测遗留的空列表而误红（与本用例要验的失效逻辑无关）。
-        # 故先建一个哑用户把 id=1 占掉，让属主用户从 id=2 开始。
-        _create_user(client, "_gginv_dummy", role="user")
+        from cache import cache as _app_cache
+        _app_cache.clear()
 
         headers, uid = _create_user(client, "_gginv_u", role="user")
         db = database.get_db()
