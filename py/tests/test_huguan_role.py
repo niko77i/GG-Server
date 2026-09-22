@@ -354,26 +354,54 @@ class TestHuguanUserManagement:
 
 class TestPlatformUsersEndpoint:
     def test_huguan_sees_only_current_platform(self, client):
-        hg, _ = _huguan(client, "_hgpu_hg")
+        """户管切到 TT 时只应看到 TT + developer，不该看到 GG 行。
+
+        注意这里用 `?platform=tt` 而**不是**调用者自身的 gg —— 否则即使
+        `_get_effective_platform()` 完全忽略查询参数，本用例也会通过。
+        """
+        hg, _ = _huguan(client, "_hgpu_hg")  # users.platform == 'gg'
         db = database.get_db()
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_gg','x','user','gg')")
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_tt','x','user','tt')")
         db.commit()
         db.close()
-        resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        resp = client.get("/api/platform/users?platform=tt", headers=hg)
         assert resp.status_code == 200
         names = {u["username"] for u in resp.get_json()["users"]}
-        assert "_hgpu_gg" in names
-        assert "_hgpu_tt" not in names
+        assert "_hgpu_tt" in names
+        assert "_hgpu_gg" not in names
 
     def test_includes_developer_excludes_hidden(self, client):
+        """developer 行必须经 `OR role = 'developer'` 命中，hidden 行必须被排除。
+
+        `_hgpu_dev` 故意插成 platform='tt'：调用者只查 platform='gg'，因此该行
+        **只能**经 developer 分支出现。若把它插成 'gg'，它会被 `platform = ?`
+        命中，删掉 `OR role = 'developer'` 断言也不会红 —— 那就成了空断言。
+        """
         hg, _ = _huguan(client, "_hgpu_hg2")
         db = database.get_db()
-        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_dev','x','developer','gg')")
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_dev','x','developer','tt')")
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_hid','x','hidden','gg')")
         db.commit()
         db.close()
         resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        assert resp.status_code == 200
         names = {u["username"] for u in resp.get_json()["users"]}
         assert "_hgpu_dev" in names
         assert "_hgpu_hid" not in names
+
+    def test_non_switch_role_cannot_pick_platform(self, client):
+        """非切换角色传 ?platform= 必须被忽略，只能拿到自己平台的数据。
+
+        本接口只挂 @jwt_required()，不像 /api/tt/users、/api/fb/users 那样挂平台
+        装饰器，因此这条隔离属性只能靠本用例守护。
+        """
+        u, _ = _create_user(client, "_hgpu_plain", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_leak','x','user','tt')")
+        db.commit()
+        db.close()
+        resp = client.get("/api/platform/users?platform=tt", headers=u)
+        assert resp.status_code == 200
+        names = {x["username"] for x in resp.get_json()["users"]}
+        assert "_hgpu_leak" not in names
