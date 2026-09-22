@@ -10,7 +10,7 @@
 
       <div style="display:flex;gap:8px;margin-bottom:8px;">
         <el-input v-model="store.mccFilters.search" placeholder="🔍 搜索名称/ID..." @input="onFilterChange" style="flex:1;" clearable />
-        <OwnerFilterSelect v-model="store.mccFilters.owner_id" @change="load" />
+        <OwnerFilterSelect v-model="store.mccFilters.owner_id" @change="onOwnerChange" />
         <el-input v-model="store.mccFilters.level" placeholder="等级关键词..." @input="onFilterChange" style="width:150px;" clearable />
       </div>
     </div>
@@ -74,6 +74,12 @@ let searchTimer = null
 onMounted(async () => { await store.loadSettings(); load() })
 
 function load() { store.loadMccList() }
+
+// 切换用户筛选后回到第 1 页，避免当前页码超出新结果集导致列表空白且分页控件消失
+function onOwnerChange() {
+  store.mccPage = 1
+  load()
+}
 
 function onFilterChange() {
   clearTimeout(searchTimer)

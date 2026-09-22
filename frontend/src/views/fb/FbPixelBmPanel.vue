@@ -53,7 +53,7 @@
     <!-- 筛选栏 -->
     <div class="filter-card">
       <div class="filter-bar">
-        <OwnerFilterSelect v-model="ownerId" @change="loadData" />
+        <OwnerFilterSelect v-model="ownerId" @change="onOwnerChange" />
         <span class="total-badge">共 {{ total }} 个</span>
       </div>
     </div>
@@ -157,6 +157,12 @@ async function loadData() {
     const res = await fbApi.listPixelBms(params)
     items.value = res.items; total.value = res.total
   } finally { loading.value = false }
+}
+
+// 切换用户筛选后回到第 1 页，避免当前页码超出新结果集导致列表空白且分页控件消失
+function onOwnerChange() {
+  page.value = 1
+  loadData()
 }
 
 function openCreate() { editingId.value = null; form.name = ''; form.bm_id = ''; form.note = ''; dialogVisible.value = true }

@@ -32,7 +32,7 @@
     <div class="filter-card">
       <div class="filter-bar">
         <el-input v-model="search" placeholder="搜索像素名或像素 ID..." @input="onSearch" clearable size="small" style="width:260px" />
-        <OwnerFilterSelect v-model="ownerId" @change="loadData" />
+        <OwnerFilterSelect v-model="ownerId" @change="onOwnerChange" />
         <span class="total-badge">共 {{ total }} 个</span>
       </div>
     </div>
@@ -116,6 +116,12 @@ const bmCount = computed(() => {
 
 let searchTimer = null
 function onSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(() => { page.value = 1; loadData() }, 300) }
+
+// 切换用户筛选后回到第 1 页，避免当前页码超出新结果集导致列表空白且分页控件消失
+function onOwnerChange() {
+  page.value = 1
+  loadData()
+}
 
 async function loadData() {
   loading.value = true
