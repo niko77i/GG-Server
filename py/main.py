@@ -5784,6 +5784,25 @@ def _get_effective_platform():
     return (user or {}).get("platform", "gg")
 
 
+@app.route("/api/platform/users", methods=["GET"])
+@jwt_required()
+def platform_users():
+    """当前有效平台下的用户列表，供账户面板的「全部用户」筛选下拉使用。
+
+    口径与既有的 /api/tt/users、/api/fb/users 完全一致：
+        (platform = <有效平台> OR role = 'developer') AND role != 'hidden'
+    """
+    platform = _get_effective_platform()
+    db = _yt_db()
+    rows = db.execute(
+        "SELECT id, username, display_name, platform FROM users "
+        "WHERE (platform = ? OR role = 'developer') AND role != 'hidden' "
+        "ORDER BY display_name, username",
+        (platform,)
+    ).fetchall()
+    return jsonify({"success": True, "users": [dict(r) for r in rows]})
+
+
 @app.route("/api/statuses/list", methods=["GET"])
 @jwt_required()
 def statuses_list():

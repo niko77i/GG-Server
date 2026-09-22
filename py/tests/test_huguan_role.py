@@ -350,3 +350,30 @@ class TestHuguanUserManagement:
                            json={"role": "hidden"}, headers=dev).status_code == 200
         assert client.post(f"/api/admin/users/{u2}/role",
                            json={"role": "hidden"}, headers=admin).status_code == 200
+
+
+class TestPlatformUsersEndpoint:
+    def test_huguan_sees_only_current_platform(self, client):
+        hg, _ = _huguan(client, "_hgpu_hg")
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_gg','x','user','gg')")
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_tt','x','user','tt')")
+        db.commit()
+        db.close()
+        resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        assert resp.status_code == 200
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert "_hgpu_gg" in names
+        assert "_hgpu_tt" not in names
+
+    def test_includes_developer_excludes_hidden(self, client):
+        hg, _ = _huguan(client, "_hgpu_hg2")
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_dev','x','developer','gg')")
+        db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_hid','x','hidden','gg')")
+        db.commit()
+        db.close()
+        resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert "_hgpu_dev" in names
+        assert "_hgpu_hid" not in names
