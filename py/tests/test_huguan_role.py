@@ -568,3 +568,52 @@ class TestGgAccountListDropdownOwnerLeak:
         assert [m["name"] for m in data["mcc_options"]] == []
         assert data["agents"] == []
         assert data["timezone_options"] == []
+
+
+class TestGgAgentsDropdownCacheInvalidation:
+    """回归：改代理名后，账户面板「代理」下拉的缓存必须立刻失效。
+
+    `py/main.py:3757` 把 agents 下拉缓存键从 `accounts:agents:{uid}` 改成带 owner 维度的
+    `accounts:agents:{uid}:{scope}`，但两处写接口（PUT /api/agents/<aid> 改名、
+    DELETE /api/agents/<aid>）仍在删**旧键**。`SimpleCache.delete` 是精确匹配的
+    dict.pop（`py/cache.py:33-36`），旧键早已不存在 —— 两次删除退化为空操作，
+    改名后下拉框在 120s TTL 内仍返回旧代理名，违反纯增量原则（对既有角色而言是行为倒退）。
+    `test_rename_invalidates_agents_dropdown_cache` 是为这次回归设的守卫：
+    改回 `delete` 即变红。
+
+    本用例**故意不调用 `_app_cache.clear()`**（文件内其它用例靠它做隔离）：
+    要观察的正是第 3 步 GET 能否读到失效后的新名字；一旦在这里清缓存，
+    即使 bug 仍在（删除仍是空操作）用例也会绿，守卫就失去意义。
+    因此本用例对**自身缓存键的初始状态**是敏感的 —— 见测试体内注释。
+    """
+
+    def test_rename_invalidates_agents_dropdown_cache(self, client):
+        # 先占一个 id：本文件内 TestGgAccountListDropdownOwnerLeak 会 clear() 掉全部缓存，
+        # 但它自己随后会以「首个注册用户（id=1）」的身份调一次 /api/accounts/list，
+        # 从而把 `accounts:agents:1:1` = [] 留在进程级缓存里。若本用例的属主用户也拿到
+        # id=1，第 1 步就会命中这个他测遗留的空列表而误红（与本用例要验的失效逻辑无关）。
+        # 故先建一个哑用户把 id=1 占掉，让属主用户从 id=2 开始。
+        _create_user(client, "_gginv_dummy", role="user")
+
+        headers, uid = _create_user(client, "_gginv_u", role="user")
+        db = database.get_db()
+        _mk_account(db, uid, "GG-INV-1", "缓存账户")
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?,?)",
+                   ("改名前代理", uid, "gg"))
+        aid = db.execute("SELECT id FROM agents WHERE name='改名前代理'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-INV-1'", (aid,))
+        db.commit()
+        db.close()
+
+        # 第 1 步：读到改名前的下拉值，同时把该键的缓存写热
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "改名前代理" in data["agents"]
+
+        # 第 2 步：改名
+        resp = client.put(f"/api/agents/{aid}", json={"name": "改名后代理"}, headers=headers)
+        assert resp.status_code == 200
+
+        # 第 3 步：缓存必须已被失效 —— 否则这里仍是「改名前代理」
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "改名后代理" in data["agents"]
+        assert "改名前代理" not in data["agents"]

@@ -5778,7 +5778,7 @@ def agents_rename(aid):
     db.execute("UPDATE agents SET name=? WHERE id=?", (name, aid))
     db.commit()
     # 清除缓存
-    _app_cache.delete(f"accounts:agents:{user_id}")
+    _app_cache.clear_prefix(f"accounts:agents:{user_id}:")
     db.close()
     return jsonify({"success": True})
 
@@ -5822,7 +5822,7 @@ def agents_delete(aid):
     db.execute("DELETE FROM agents WHERE id=?", (aid,))
     db.execute("PRAGMA foreign_keys=ON")
     db.commit()
-    _app_cache.delete(f"accounts:agents:{user_id}")
+    _app_cache.clear_prefix(f"accounts:agents:{user_id}:")
     db.close()
     return jsonify({"success": True})
 
