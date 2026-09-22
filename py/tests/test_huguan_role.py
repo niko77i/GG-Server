@@ -138,12 +138,13 @@ class TestAuthRoleFixes:
         assert auth.toggle_user_status(uid)["role"] == "hidden"
 
     def test_unhide_falls_back_to_user_for_all_roles(self, client):
-        """锁定既有单向行为：取消隐藏一律回落 user，对任何角色都一样。
+        """前半锁定**本次新增**的户管隐藏行为（huguan → hidden，由 `py/auth.py:199` 元组修复带来）；
+        后半锁定**既有**语义：取消隐藏一律回落 user —— 该语义对 admin / viewer 在改动前即成立。
 
-        这不是本需求引入的缺陷，也不是户管独有 —— `toggle_user_status` 只在「隐藏」
-        方向查元组，因此 `hidden` 落到 else 分支的 `"user"`，admin / viewer 同样如此。
-        本用例存在的意义是把这个既有语义写下来，避免后人误以为「取消隐藏会恢复原角色」。
-        如需改成恢复隐藏前的角色，那是独立的产品决策（需记忆字段），不在本需求范围。
+        保护范围说明：循环第 0 腿是 huguan，其 `== "hidden"` 断言**依赖本次修复**，
+        因此本用例在修复前是失败的，不是纯回归锁定。户管隐藏方向的独立覆盖见
+        `test_toggle_huguan_hides_instead_of_demoting`。
+        如需改成「取消隐藏恢复原角色」，那是独立的产品决策（需记忆字段），不在本需求范围。
         """
         import auth
         for idx, role in enumerate(("huguan", "admin", "viewer")):
@@ -156,7 +157,28 @@ class TestAuthRoleFixes:
         import auth
         _, uid = _create_user(client, "_hg_badrole", role="user")
         assert auth.update_user_role(uid, "superuser") is False
+        # 拒绝必须是「什么都没发生」：只断言返回值会把「先写入再返回 False」漏掉
+        db = database.get_db()
+        row = db.execute("SELECT role FROM users WHERE id = ?", (uid,)).fetchone()
+        db.close()
+        assert row["role"] == "user", "被拒绝的写入不得改动数据库中的角色"
         assert auth.update_user_role(uid, "huguan") is True
+
+    def test_update_user_role_accepts_every_whitelisted_role(self, client):
+        """白名单的接受侧：`py/auth.py:128` 元组里的每个角色都必须仍可写入。
+
+        与 `test_update_user_role_rejects_unknown_role` 互补 —— 那条只覆盖拒绝侧，
+        接受侧仅验证了 `huguan` 一个值。若有人日后从元组中删掉 `"viewer"`（例如误以为
+        该角色已废弃），改角色功能会静默失效而原用例依旧全绿；本用例让这次删减立刻变红。
+        """
+        import auth
+        for idx, role in enumerate(("user", "admin", "viewer", "hidden", "huguan")):
+            _, uid = _create_user(client, f"_hg_wl_{idx}", role="user")
+            assert auth.update_user_role(uid, role) is True, f"{role} 应在白名单内"
+            db = database.get_db()
+            row = db.execute("SELECT role FROM users WHERE id = ?", (uid,)).fetchone()
+            db.close()
+            assert row["role"] == role, f"{role} 应已写入数据库"
 
     def test_list_users_role_filter_default_unchanged(self, client):
         """不传 role_filter 时结果与改动前一致。
@@ -179,3 +201,38 @@ class TestAuthRoleFixes:
         _create_user(client, "_hg_lf2_user", role="user")
         res = auth.list_users(current_user_id=dev_id, role_filter="huguan")
         assert {u["role"] for u in res["users"]} == {"huguan"}
+
+    def test_list_users_role_filter_combined_with_search(self, client):
+        """`role_filter` 与 `search` 的组合：search 非空时 list_users 走的是**另一条**
+        COUNT/SELECT 分支（`py/auth.py:97-110`），与空 search 分支（`:111-120`）分开拼 SQL，
+        而既有 role_filter 用例（上面两条）都只覆盖了空 search 分支。
+
+        构造：两个用户名都含特征子串 `zqx`（`_create_user` 不传 display_name，故这里靠
+        username LIKE 命中），其中只有一个是户管；dev 账号特意不含该子串，以免混进搜索集。
+        若 role_filter 在 search 分支中被丢弃或拼错位置，非户管的 `_hg_zqx_user` 会混进结果。
+        """
+        import auth
+        _, dev_id = _create_user(client, "_hg_dev9", role="developer")
+        _, hg_id = _create_user(client, "_hg_zqx_hg", role="huguan")
+        _, user_id = _create_user(client, "_hg_zqx_user", role="user")
+
+        # 前置校验：两个账号都该被 `zqx` 命中，否则下面的「排除」断言可能只是搜索没匹配上、
+        # 而非 role_filter 生效。这里直接查库验证 LIKE 命中集，**不**调
+        # `list_users(search=...)` 且不带 platform / role_filter —— 那条路径会撞上
+        # `py/auth.py:99-101` 的既有缺陷（base_where 为空时仍拼 " AND (...)"，SQL 语法错误），
+        # 与本次 role_filter 改动无关，见修复报告的「遗留发现」。
+        db = database.get_db()
+        matched = {r["id"] for r in db.execute(
+            "SELECT id FROM users WHERE username LIKE ? OR display_name LIKE ?",
+            ("%zqx%", "%zqx%")).fetchall()}
+        db.close()
+        assert matched == {hg_id, user_id}, "特征子串必须同时命中户管与非户管两个账号"
+
+        res = auth.list_users(current_user_id=dev_id, search="zqx", role_filter="huguan")
+        assert hg_id in {u["id"] for u in res["users"]}
+        assert user_id not in {u["id"] for u in res["users"]}
+        assert {u["role"] for u in res["users"]} == {"huguan"}
+        # total 来自独立的 COUNT 查询（`py/auth.py:102`），是前端分页契约；
+        # 若只筛 SELECT 而漏筛 COUNT，users 看着对、分页却会按未过滤的总数算页数。
+        assert res["total"] == 1
+
