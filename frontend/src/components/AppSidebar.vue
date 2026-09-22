@@ -1,15 +1,15 @@
 <template>
   <div class="sidebar-wrap">
     <nav class="icon-rail">
-      <div class="rail-brand" @click="selectTab(auth.effectivePlatform === 'fb' ? '/fb/products' : auth.effectivePlatform === 'tt' ? '/tt/products' : '/accounts')" title="首页">
+      <div class="rail-brand" @click="selectTab(currentNavItems[0].key)" title="首页">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
           <rect x="2" y="2" width="20" height="20" rx="4" stroke="#0891b2" stroke-width="1.5"/>
           <circle cx="12" cy="10" r="3" stroke="#0891b2" stroke-width="1.5"/>
           <path d="M7 18c0-2.8 2.2-5 5-5s5 2.2 5 5" stroke="#0891b2" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
       </div>
-      <!-- Developer 平台切换 -->
-      <div v-if="auth.isDeveloper" class="platform-switch">
+      <!-- Developer / 户管 平台切换 -->
+      <div v-if="auth.canSwitchPlatform" class="platform-switch">
         <button class="plat-btn" :class="{ active: auth.currentPlatform === 'gg' }" @click="switchPlatform('gg')">GG</button>
         <button class="plat-btn" :class="{ active: auth.currentPlatform === 'fb' }" @click="switchPlatform('fb')">FB</button>
         <button class="plat-btn" :class="{ active: auth.currentPlatform === 'tt' }" @click="switchPlatform('tt')">TT</button>
@@ -60,22 +60,16 @@ function handleLogout() {
 
 function switchPlatform(platform) {
   auth.setPlatform(platform)
-  // 跳转到该平台的默认页面
-  if (platform === 'fb') {
-    router.push('/fb/products')
-    activeSection.value = 'fb-accounts'
-  } else if (platform === 'tt') {
-    router.push('/tt/products')
-    activeSection.value = 'tt-accounts'
-  } else {
-    router.push('/accounts/products')
-    activeSection.value = 'accounts'
-  }
+  const accountPath = platform === 'fb' ? '/fb/accounts' : platform === 'tt' ? '/tt/accounts' : '/accounts/ads'
+  const productPath = platform === 'fb' ? '/fb/products' : platform === 'tt' ? '/tt/products' : '/accounts/products'
+  const target = auth.isHuguan ? accountPath : productPath
+  router.push(target)
+  activeSection.value = platform === 'fb' ? 'fb-accounts' : platform === 'tt' ? 'tt-accounts' : 'accounts'
 }
 
 const detailOpen = ref(true); const activeSection = ref('accounts')
 const ggNavItems = [
-  { key: 'accounts', icon: '🏢', label: '账户管理', admin: true, sections: [{ title: '账户', items: [{ icon:'📦',label:'产品管理',path:'/accounts/products'},{ icon:'👤',label:'广告账户',path:'/accounts/ads'},{ icon:'🏢',label:'MCC管理',path:'/accounts/mcc'}]},{ title:'系统', items:[{ icon:'⚙',label:'设置',path:'/accounts/settings'}]}]},
+  { key: 'accounts', icon: '🏢', label: '账户管理', requireProducts: true, admin: true, sections: [{ title: '账户', items: [{ icon:'📦',label:'产品管理',path:'/accounts/products'},{ icon:'👤',label:'广告账户',path:'/accounts/ads'},{ icon:'🏢',label:'MCC管理',path:'/accounts/mcc'}]},{ title:'系统', items:[{ icon:'⚙',label:'设置',path:'/accounts/settings'}]}]},
   { key: 'youtube', icon: '📺', label: '视频管理', sections: [{ title: '视频', items: [{ icon:'▶',label:'视频展示',path:'/youtube/view'},{ icon:'📝',label:'文案展示',path:'/youtube/copywriting'},{ icon:'➕',label:'导入视频或文案',path:'/youtube/import'},{ icon:'🏷',label:'标签配置',path:'/youtube/config'}]}]},
   { key: 'media', icon: '🎬', label: '媒体工具', sections: [{ title: '媒体', items: [{ icon:'🖼',label:'爬取&视频',path:'/media'}]}]},
   { key: 'toolkit', icon: '🧰', label: '工具集', sections: [{ title: '工具', items: [{ icon:'📊',label:'做表数据',path:'/toolkit/zuobiao'},{ icon:'🎵',label:'音频替换',path:'/toolkit/audio'},{ icon:'🌐',label:'翻译工具',path:'/toolkit/translate'}]}]},
@@ -85,7 +79,7 @@ const ggNavItems = [
 ]
 
 const fbNavItems = [
-  { key: 'fb-accounts', icon: '🏢', label: '账户管理', sections: [
+  { key: 'fb-accounts', icon: '🏢', label: '账户管理', requireProducts: true, sections: [
     { title: '账户', items: [
       { icon:'📦',label:'产品管理',path:'/fb/products'},
       { icon:'👤',label:'广告账户',path:'/fb/accounts'},
@@ -103,7 +97,7 @@ const fbNavItems = [
 ]
 
 const ttNavItems = [
-  { key: 'tt-accounts', icon: '🏢', label: '产品管理', sections: [
+  { key: 'tt-accounts', icon: '🏢', label: '产品管理', requireProducts: true, sections: [
     { title: '产品', items: [
       { icon:'📦',label:'产品管理',path:'/tt/products'},
       { icon:'👤',label:'广告账户',path:'/tt/accounts'},
@@ -118,14 +112,59 @@ const ttNavItems = [
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
 ]
 
-const currentNavItems = computed(() =>
-  auth.effectivePlatform === 'fb' ? fbNavItems
-  : auth.effectivePlatform === 'tt' ? ttNavItems
-  : ggNavItems)
+// 户管：只有账户区、设置、用户管理；不含产品 / 视频 / 媒体 / 工具集 / 数据分析 / 定时任务
+const huguanNavItems = [
+  { key: 'accounts', icon: '🏢', label: '账户管理', sections: [
+    { title: '账户', items: [
+      { icon:'👤',label:'广告账户',path:'/accounts/ads'},
+      { icon:'🏢',label:'MCC管理',path:'/accounts/mcc'},
+    ]},
+    { title: '系统', items: [{ icon:'⚙',label:'设置',path:'/accounts/settings' }]},
+  ]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [
+    { title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users' }]},
+  ]},
+]
+const huguanFbNavItems = [
+  { key: 'fb-accounts', icon: '🏢', label: '账户管理', sections: [
+    { title: '账户', items: [
+      { icon:'👤',label:'广告账户',path:'/fb/accounts'},
+      { icon:'🏢',label:'BM管理',path:'/fb/bms'},
+      { icon:'📊',label:'像素管理',path:'/fb/pixels'},
+    ]},
+    { title: '系统', items: [{ icon:'⚙',label:'FB设置',path:'/fb/settings' }]},
+  ]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [
+    { title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users' }]},
+  ]},
+]
+const huguanTtNavItems = [
+  { key: 'tt-accounts', icon: '🏢', label: '账户管理', sections: [
+    { title: '账户', items: [
+      { icon:'👤',label:'广告账户',path:'/tt/accounts'},
+      { icon:'🏢',label:'BC管理',path:'/tt/bcs'},
+    ]},
+    { title: '系统', items: [{ icon:'⚙',label:'TT设置',path:'/tt/settings' }]},
+  ]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [
+    { title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users' }]},
+  ]},
+]
+
+const currentNavItems = computed(() => {
+  if (auth.isHuguan) {
+    return auth.effectivePlatform === 'fb' ? huguanFbNavItems
+      : auth.effectivePlatform === 'tt' ? huguanTtNavItems
+      : huguanNavItems
+  }
+  return auth.effectivePlatform === 'fb' ? fbNavItems
+    : auth.effectivePlatform === 'tt' ? ttNavItems
+    : ggNavItems
+})
 
 const visibleNavItems = computed(() => currentNavItems.value.filter(n => {
-  if (n.key === 'accounts' || n.key === 'fb-accounts' || n.key === 'tt-accounts') return auth.canAccessProducts
-  if (n.admin) return auth.isAdmin
+  if (n.requireProducts) return auth.canAccessProducts
+  if (n.admin) return auth.isAdmin || auth.isHuguan
   return true
 }))
 const currentNav = computed(() => currentNavItems.value.find(n => n.key === activeSection.value))
