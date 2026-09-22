@@ -58,22 +58,29 @@ def get_user_by_username(username: str) -> dict | None:
 
 
 def list_users(search: str = "", page: int = 1, page_size: int = 20, current_user_id: int = None, platform: str = None) -> dict:
-    """列出用户。非 developer 用户看不到 developer 角色的用户。
-    platform: 可选筛选 ('gg' | 'fb')，None 表示不过滤。
+    """列出用户。非 developer 只看自己平台且看不到 developer；developer 看全部（可选按 platform 筛）。
+    platform: 可选筛选 ('gg' | 'fb' | 'tt')，仅 developer 生效，None 表示不过滤。
     """
     conn = database.get_db()
     try:
         # 判断当前用户是否是 developer
         is_dev = False
+        my_platform = None
         if current_user_id:
-            cur_user = conn.execute("SELECT role FROM users WHERE id = ?", (current_user_id,)).fetchone()
+            cur_user = conn.execute("SELECT role, platform FROM users WHERE id = ?", (current_user_id,)).fetchone()
             is_dev = cur_user and cur_user["role"] == "developer"
+            my_platform = (cur_user["platform"] if cur_user else None) or "gg"
 
-        # 非 developer 用户看不到 developer 角色
+        # 非 developer 用户看不到 developer 角色，且只能看自己平台
         filters = [""] if is_dev else ["role != 'developer'"]
         params = []
 
-        if platform:
+        if not is_dev and current_user_id:
+            # 非 developer 且有登录上下文：强制只看自己平台，忽略传入的筛选参数
+            filters.append("platform = ?")
+            params.append(my_platform)
+        elif platform:
+            # developer 或无登录上下文（内部调用）：按传入参数筛选
             filters.append("platform = ?")
             params.append(platform)
 

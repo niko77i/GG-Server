@@ -5,12 +5,12 @@
       <el-button @click="$router.push('/profile')">👤 个人信息</el-button>
     </div>
 
-    <!-- 平台切换 Tab -->
+    <!-- 平台切换 Tab — 非开发者只显示自己平台的 Tab -->
     <el-tabs v-model="platformFilter" @tab-change="onPlatformChange" style="margin-bottom:8px;">
-      <el-tab-pane label="全部" name="" />
-      <el-tab-pane label="GG" name="gg" />
-      <el-tab-pane label="FB" name="fb" />
-      <el-tab-pane label="TT" name="tt" />
+      <el-tab-pane v-if="authStore.isDeveloper" label="全部" name="" />
+      <el-tab-pane v-if="authStore.isDeveloper || authStore.effectivePlatform === 'gg'" label="GG" name="gg" />
+      <el-tab-pane v-if="authStore.isDeveloper || authStore.effectivePlatform === 'fb'" label="FB" name="fb" />
+      <el-tab-pane v-if="authStore.isDeveloper || authStore.effectivePlatform === 'tt'" label="TT" name="tt" />
     </el-tabs>
     <el-card shadow="never" style="margin-bottom:16px;">
       <el-row :gutter="12" align="middle">
@@ -23,7 +23,7 @@
       </el-row>
     </el-card>
     <div style="margin-bottom:12px;">
-      <el-button type="primary" @click="showCreateDialog = true">+ 创建用户</el-button>
+      <el-button type="primary" @click="openCreateDialog">+ 创建用户</el-button>
     </div>
 
     <el-table :data="users" stripe style="width:100%" v-loading="loading" height="calc(100vh - 220px)">
@@ -96,7 +96,7 @@
             <el-option label="管理员" value="admin" />
           </el-select>
         </el-form-item>
-        <el-form-item label="平台">
+        <el-form-item v-if="authStore.isDeveloper" label="平台">
           <el-select v-model="createForm.platform" style="width:100%">
             <el-option label="GG (Google Ads)" value="gg" />
             <el-option label="FB (Facebook)" value="fb" />
@@ -176,7 +176,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { adminApi } from '../api/admin'
 import { adminDataApi } from '@/api/data'
@@ -191,6 +191,10 @@ const loading = ref(false)
 const search = ref('')
 const currentPage = ref(1)
 const pageSize = ref(20)
+// 平台筛选：developer 默认「全部」(空)，非开发者锁定自己平台。
+// 注意：不能在 ref 初始值里读 authStore —— App.vue 的 initFromStorage/fetchMe 在
+// 父组件 onMounted 才执行（晚于本组件），此刻 user 必为 null，会把身份错判成「非开发者/gg」。
+// 故初始留空，等身份就绪后由下方 watch 同步。
 const platformFilter = ref('')
 
 function isSelf(uid) {
@@ -268,7 +272,12 @@ async function handleDelete(uid) {
   }
 }
 
-onMounted(() => fetchUsers())
+// 身份就绪后再定筛选值并拉数据（App.vue fetchMe 完成后 user 才有值）
+watch(() => authStore.user?.id, (uid) => {
+  if (!uid) return
+  platformFilter.value = authStore.isDeveloper ? '' : authStore.effectivePlatform
+  fetchUsers()
+}, { immediate: true })
 
 // ---- 创建用户 ----
 const showCreateDialog = ref(false)
@@ -280,6 +289,15 @@ const createForm = ref({
   role: "user",
   platform: "gg"
 })
+
+// 打开创建弹窗时按当前身份定默认平台：非开发者锁定自己平台；
+// developer 跟随当前 Tab（「全部」时默认 gg）
+function openCreateDialog() {
+  createForm.value.platform = authStore.isDeveloper
+    ? (platformFilter.value || 'gg')
+    : authStore.effectivePlatform
+  showCreateDialog.value = true
+}
 
 async function handleCreate() {
   if (!createForm.value.username || createForm.value.username.length < 4) {
@@ -295,6 +313,7 @@ async function handleCreate() {
     await adminApi.createUser(createForm.value)
     ElMessage.success("用户创建成功")
     showCreateDialog.value = false
+    // platform 留待下次打开弹窗时由 openCreateDialog 按身份重算
     createForm.value = { username: "", password: "", display_name: "", role: "user", platform: "gg" }
     fetchUsers()
   } catch (e) {

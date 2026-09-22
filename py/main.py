@@ -5773,10 +5773,12 @@ def agents_delete(aid):
 # ========== Account Statuses 选项 API ==========
 
 def _get_effective_platform():
-    """获取当前用户的有效平台。FB 用户返回 'fb'，GG 用户返回 'gg'，developer 按请求参数或默认 'gg'。"""
+    """获取当前用户的有效平台。developer 可按请求参数跨平台（缺省 'gg'）；其他角色一律取自己的 platform。
+    注意：admin 不再视为跨平台 —— 管理员本身按平台隔离（见用户角色平台隔离设计）。
+    """
     uid = int(get_jwt_identity())
     user = auth.get_user_by_id(uid)
-    if user and user.get("role") in ("developer", "admin"):
+    if user and user.get("role") == "developer":
         return request.args.get("platform", "gg")
     return (user or {}).get("platform", "gg")
 
@@ -7424,9 +7426,11 @@ def admin_create_user():
         return jsonify(success=False, error="Invalid role"), 400
     if platform not in ("gg", "fb", "tt"):
         return jsonify(success=False, error="Invalid platform"), 400
-    # 只有 developer 可以设置 platform
-    if user["role"] != "developer" and platform != "gg":
-        platform = "gg"
+    # 只有 developer 可以自由设置 platform；非 developer 锁定为自己的平台
+    if user["role"] != "developer":
+        my_platform = user.get("platform") or "gg"
+        # 兜底：创建者 platform 为存量非法值时按 gg 处理，避免把非法值写进新用户
+        platform = my_platform if my_platform in ("gg", "fb", "tt") else "gg"
     existing = auth.get_user_by_username(username)
     if existing:
         return jsonify(success=False, error="Username already exists"), 409
@@ -7452,11 +7456,27 @@ def admin_list_users():
     return jsonify(success=True, **result)
 
 
-def _can_modify_user(actor: dict, target: dict) -> bool:
-    """admin 只能操作 user/viewer/hidden，不能操作其他 admin。developer 不受限。"""
+def _check_modify_user(actor: dict, target: dict) -> str | None:
+    """返回 None 表示可操作；否则返回具体的拒绝原因（供接口返回准确的错误消息）。"""
+    if actor["role"] == "developer":
+        return None
+    if target["role"] not in ("user", "viewer", "hidden"):
+        return "不能操作同级管理员"
+    # 平台隔离：非 developer 只能操作自己平台的用户
+    if (actor.get("platform") or "gg") != (target.get("platform") or "gg"):
+        return "不能操作其他平台的用户"
+    return None
+
+
+def _can_access_user_data(actor: dict | None, target: dict) -> bool:
+    """数据导入/导出：developer 不受限；非 developer 仅限自己平台的用户。
+    与 _check_modify_user 不同，此处不限制目标角色（数据搬运不改变账号权限）。
+    """
+    if not actor:
+        return False
     if actor["role"] == "developer":
         return True
-    return target["role"] in ("user", "viewer", "hidden")
+    return (actor.get("platform") or "gg") == (target.get("platform") or "gg")
 
 
 @app.route("/api/admin/users/<int:uid>/role", methods=["POST"])
@@ -7471,8 +7491,9 @@ def admin_update_role(uid):
     target = auth.get_user_by_id(uid)
     if not target:
         return jsonify(success=False, error="User not found"), 404
-    if not _can_modify_user(user, target):
-        return jsonify(success=False, error="不能操作同级管理员"), 403
+    deny_reason = _check_modify_user(user, target)
+    if deny_reason:
+        return jsonify(success=False, error=deny_reason), 403
     data = request.get_json()
     new_role = data.get("role", "")
     if new_role not in ("user", "admin", "viewer", "hidden"):
@@ -7493,8 +7514,9 @@ def admin_toggle_user(uid):
     target = auth.get_user_by_id(uid)
     if not target:
         return jsonify(success=False, error="User not found"), 404
-    if not _can_modify_user(user, target):
-        return jsonify(success=False, error="不能操作同级管理员"), 403
+    deny_reason = _check_modify_user(user, target)
+    if deny_reason:
+        return jsonify(success=False, error=deny_reason), 403
     result = auth.toggle_user_status(uid)
     if result:
         return jsonify(success=True, user=result)
@@ -7512,8 +7534,9 @@ def admin_delete_user(uid):
     target = auth.get_user_by_id(uid)
     if not target:
         return jsonify(success=False, error="User not found"), 404
-    if not _can_modify_user(user, target):
-        return jsonify(success=False, error="不能操作同级管理员"), 403
+    deny_reason = _check_modify_user(user, target)
+    if deny_reason:
+        return jsonify(success=False, error=deny_reason), 403
     if target["role"] == "developer":
         return jsonify(success=False, error="Cannot delete developer account"), 400
     conn = database.get_db()
@@ -7565,8 +7588,9 @@ def admin_update_user(uid):
     # 非 developer 不能修改 developer 的信息
     if target["role"] == "developer" and user["role"] != "developer":
         return jsonify(success=False, error="Cannot modify developer account"), 400
-    if not _can_modify_user(user, target):
-        return jsonify(success=False, error="不能操作同级管理员"), 403
+    deny_reason = _check_modify_user(user, target)
+    if deny_reason:
+        return jsonify(success=False, error=deny_reason), 403
 
     data = request.get_json(silent=True) or {}
     username = data.get("username")
@@ -7604,8 +7628,9 @@ def admin_reset_password(uid):
     # 非 developer 不能修改 developer 的密码
     if target["role"] == "developer" and user["role"] != "developer":
         return jsonify(success=False, error="Cannot modify developer account"), 400
-    if not _can_modify_user(user, target):
-        return jsonify(success=False, error="不能操作同级管理员"), 403
+    deny_reason = _check_modify_user(user, target)
+    if deny_reason:
+        return jsonify(success=False, error=deny_reason), 403
 
     data = request.get_json(silent=True) or {}
     password = data.get("password", "")
@@ -7629,8 +7654,9 @@ def admin_set_telegram_username(uid):
     target = auth.get_user_by_id(uid)
     if not target:
         return jsonify(success=False, error="User not found"), 404
-    if not _can_modify_user(user, target):
-        return jsonify(success=False, error="不能操作同级管理员"), 403
+    deny_reason = _check_modify_user(user, target)
+    if deny_reason:
+        return jsonify(success=False, error=deny_reason), 403
 
     data = request.get_json(silent=True) or {}
     username = (data.get("telegram_username") or "").strip().lstrip("@")
@@ -7765,10 +7791,17 @@ def data_import_history():
 @app.route("/api/admin/data/import", methods=["POST"])
 @admin_required
 def admin_data_import():
-    """管理员为指定用户导入数据。"""
+    """管理员为指定用户导入数据。非 developer 仅限自己平台的用户。"""
     user_id = request.form.get("user_id", type=int)
     if not user_id:
         return jsonify({"success": False, "error": "请指定目标用户"}), 400
+
+    actor = auth.get_user_by_id(int(get_jwt_identity()))
+    target = auth.get_user_by_id(user_id)
+    if not target:
+        return jsonify({"success": False, "error": "用户不存在"}), 404
+    if not _can_access_user_data(actor, target):
+        return jsonify({"success": False, "error": "不能为其他平台用户导入数据"}), 403
 
     if "file" not in request.files:
         return jsonify({"success": False, "error": "请上传文件"}), 400
@@ -7798,17 +7831,20 @@ def admin_data_import():
 @app.route("/api/admin/data/export/<int:uid>", methods=["GET"])
 @admin_required
 def admin_data_export(uid):
-    """管理员导出指定用户的数据。"""
-    user = auth.get_user_by_id(uid)
-    if not user:
+    """管理员导出指定用户的数据。非 developer 仅限自己平台的用户。"""
+    actor = auth.get_user_by_id(int(get_jwt_identity()))
+    target = auth.get_user_by_id(uid)
+    if not target:
         return jsonify({"success": False, "error": "用户不存在"}), 404
+    if not _can_access_user_data(actor, target):
+        return jsonify({"success": False, "error": "不能导出其他平台用户的数据"}), 403
 
     export_data = data_service.export_user_data(uid)
 
     from flask import Response
     json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
     date_str = datetime.datetime.now().strftime("%Y%m%d")
-    filename = f"gg-server-export-{user['username']}-{date_str}.json"
+    filename = f"gg-server-export-{target['username']}-{date_str}.json"
 
     return Response(
         json_str,

@@ -12,9 +12,13 @@ api.interceptors.request.use(config => {
     const user = JSON.parse(localStorage.getItem('user') || '{}')
     if (user.role === 'developer') {
       const path = window.location.hash.replace('#', '')
-      const platform = path.startsWith('/tt') ? 'tt' : path.startsWith('/fb') ? 'fb' : 'gg'
-      if (!config.params) config.params = {}
-      if (!config.params.platform) config.params.platform = platform
+      // 用户管理页有自己的平台 Tab 显式控制平台，不由路由推断
+      // （该页路由为 /admin/users，不以 /tt、/fb 开头，会被误判成 gg，导致「全部」看不到其他平台）
+      if (!path.startsWith('/admin/users')) {
+        const platform = path.startsWith('/tt') ? 'tt' : path.startsWith('/fb') ? 'fb' : 'gg'
+        if (!config.params) config.params = {}
+        if (!config.params.platform) config.params.platform = platform
+      }
     }
   } catch(e) {}
   return config
