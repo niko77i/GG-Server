@@ -4,7 +4,7 @@ import re
 
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
-from .helpers import ok, err, get_uid, get_db, parse_body
+from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import tt_required, tt_write_required
 
 tt_bp = Blueprint('tt', __name__)
@@ -27,7 +27,7 @@ def list_bcs():
     where = ["deleted_at IS NULL"]
     params = []
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin'):
+    if role not in CROSS_USER_ROLES:
         where.append("owner_id = ?")
         params.append(uid)
     if status:
@@ -122,7 +122,7 @@ def bc_options():
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
-    if role in ('developer', 'admin'):
+    if role in CROSS_USER_ROLES:
         rows = db.execute(
             "SELECT id, name, bc_id FROM tt_bcs WHERE status='normal' AND deleted_at IS NULL ORDER BY name"
         ).fetchall()
@@ -1140,9 +1140,9 @@ def _get_role(db, uid):
 
 
 def _check_bc_owner(db, uid, bid):
-    """非 developer/admin 用户只能更新/删除自己的 BC。返回 None 或 403 错误响应。"""
+    """非跨用户角色只能更新/删除自己的 BC。返回 None 或 403 错误响应。"""
     role = _get_role(db, uid)
-    if role in ('developer', 'admin'):
+    if role in CROSS_USER_ROLES:
         return None
     row = db.execute("SELECT owner_id FROM tt_bcs WHERE id=?", (bid,)).fetchone()
     if not row or row['owner_id'] != uid:

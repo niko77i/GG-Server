@@ -687,3 +687,100 @@ class TestGgAccountOwnership:
         owner = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()["owner_id"]
         db.close()
         assert owner == me
+
+
+def _mk_tt_account(db, owner_id, adv_id, name="TT账户"):
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, owner_id) VALUES(?,?,?)",
+               (name, adv_id, owner_id))
+    db.commit()
+
+
+class TestTtCrossUser:
+    def test_huguan_edits_other_users_tt_account(self, client):
+        hg, _ = _huguan(client, "_tt_cs_hg")
+        _, u1 = _create_user(client, "_tt_cs_u1", role="user", platform="tt")
+        db = database.get_db()
+        _mk_tt_account(db, u1, "TT-ADV-1")
+        aid = db.execute("SELECT id FROM tt_accounts WHERE advertiser_id='TT-ADV-1'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}", json={"name": "改名后"},
+                          headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT name FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert row["name"] == "改名后"
+
+    def test_regular_user_cannot_edit_other_users_tt_account(self, client):
+        """回归：普通用户编辑他人 TT 账户仍 403。"""
+        _, u1 = _create_user(client, "_tt_cs_u2", role="user", platform="tt")
+        other, _ = _create_user(client, "_tt_cs_u3", role="user", platform="tt")
+        db = database.get_db()
+        _mk_tt_account(db, u1, "TT-ADV-2")
+        aid = db.execute("SELECT id FROM tt_accounts WHERE advertiser_id='TT-ADV-2'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}", json={"name": "越权改名"}, headers=other)
+        assert resp.status_code == 403
+
+    def test_huguan_edits_other_users_bc(self, client):
+        hg, _ = _huguan(client, "_tt_bc_hg")
+        _, u1 = _create_user(client, "_tt_bc_u1", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES('BC1','BC-1',?)", (u1,))
+        db.commit()
+        bid = db.execute("SELECT id FROM tt_bcs WHERE bc_id='BC-1'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/tt/bcs/{bid}", json={"name": "BC改名"}, headers=hg)
+        assert resp.status_code == 200
+
+    def test_huguan_sees_other_users_bc_in_list(self, client):
+        """BC 列表可见性：户管能改他人 BC（上一条）也必须能**看到**它。
+
+        对应 `tt_routes.py:30`（`list_bcs`）。原计划表把这行标成「不改、无判断语义」是误标，
+        缺了它户管就会「点得动但看不见」。
+        """
+        hg, _ = _huguan(client, "_tt_bcl_hg")
+        _, u1 = _create_user(client, "_tt_bcl_u1", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES('别人BC','BC-L1',?)", (u1,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/tt/bcs/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        names = {b["name"] for b in resp.get_json()["items"]}
+        assert "别人BC" in names
+
+    def test_huguan_cannot_see_other_users_products(self, client):
+        """回归守卫：产品域**不**放行。
+
+        `tt_routes.py:158`（`list_products`）在原计划表里被误标为「要改」。若照原表替换，
+        户管将跨用户看到全部产品，直接违反全局约束「huguan 不获得产品/视频的编辑权」。
+        本用例是那条误标的路障：谁把 :158 换成 CROSS_USER_ROLES，这条立刻变红。
+        """
+        hg, _ = _huguan(client, "_tt_prd_hg")
+        _, u1 = _create_user(client, "_tt_prd_u1", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_products(product_name, owner_id) VALUES('别人的产品',?)", (u1,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/tt/products/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        names = {p["product_name"] for p in resp.get_json()["items"]}
+        assert "别人的产品" not in names
+
+    def test_huguan_cannot_edit_other_users_product(self, client):
+        """回归守卫：`_check_product_owner` / `_check_product_view` 一字不动。
+
+        与上一条成对——上一条守列表可见性（`:158`），本条守写接口归属闸门（`:1157`/`:1169`）。
+        """
+        hg, _ = _huguan(client, "_tt_prde_hg")
+        _, u1 = _create_user(client, "_tt_prde_u1", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_products(product_name, owner_id) VALUES('只读产品',?)", (u1,))
+        db.commit()
+        pid = db.execute("SELECT id FROM tt_products WHERE product_name='只读产品'").fetchone()["id"]
+        db.close()
+        resp = client.put(f"/api/tt/products/{pid}", json={"product_name": "越权改名"}, headers=hg)
+        assert resp.status_code == 403
+        resp = client.get(f"/api/tt/products/{pid}/detail", headers=hg)
+        assert resp.status_code == 403

@@ -8,7 +8,7 @@ from flask_jwt_extended import jwt_required
 
 import database
 
-from .helpers import ok, err, get_uid, get_db, parse_body
+from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import tt_required, tt_write_required
 
 tt_accounts_bp = Blueprint('tt_accounts', __name__)
@@ -206,7 +206,7 @@ def list_accounts():
 
     where = ["a.deleted_at IS NULL"]
     params = []
-    if role in ('developer', 'admin'):
+    if role in CROSS_USER_ROLES:
         if owner_id:
             where.append("a.owner_id = ?")
             params.append(owner_id)
@@ -253,7 +253,7 @@ def list_accounts():
     # 各状态计数（不含 status 筛选，展示所有状态数量）
     sc_where2 = ["a.deleted_at IS NULL"]
     sc_params2 = []
-    if role in ('developer', 'admin'):
+    if role in CROSS_USER_ROLES:
         if owner_id:
             sc_where2.append("a.owner_id = ?"); sc_params2.append(owner_id)
     else:
@@ -295,7 +295,7 @@ def update_account(aid):
     ).fetchone()
     if not row:
         return err("账户不存在", 404)
-    if role not in ('developer', 'admin') and row["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and row["owner_id"] != uid:
         return err("无权限", 403)
 
     editable = ["name", "country", "timezone", "consumption",
@@ -433,7 +433,7 @@ def batch_update_accounts():
     role = _get_role(db, uid)
     for aid in ids:
         # owner 权限校验
-        if role not in ('developer', 'admin'):
+        if role not in CROSS_USER_ROLES:
             r = db.execute("SELECT owner_id, bc_id, advertiser_id, status_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
             if not r or r["owner_id"] != uid:
                 continue
@@ -503,7 +503,7 @@ def delete_account(aid):
     ac = db.execute("SELECT id, owner_id FROM tt_accounts WHERE id=? AND deleted_at IS NULL", (aid,)).fetchone()
     if not ac:
         return err("账户不存在或已删除", 404)
-    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and ac["owner_id"] != uid:
         return err("无权限", 403)
     db.execute("UPDATE tt_accounts SET deleted_at=datetime('now','localtime'), "
                "updated_at=datetime('now','localtime') WHERE id=?", (aid,))
@@ -522,7 +522,7 @@ def batch_delete_accounts():
     if not ids:
         return err("未选择账户")
     for aid in ids:
-        if role in ('developer', 'admin'):
+        if role in CROSS_USER_ROLES:
             db.execute("UPDATE tt_accounts SET deleted_at=datetime('now','localtime') WHERE id=? AND deleted_at IS NULL", (aid,))
         else:
             db.execute("UPDATE tt_accounts SET deleted_at=datetime('now','localtime') WHERE id=? AND owner_id=? AND deleted_at IS NULL", (aid, uid))
@@ -540,7 +540,7 @@ def restore_account(aid):
     ac = db.execute("SELECT owner_id FROM tt_accounts WHERE id=? AND deleted_at IS NOT NULL", (aid,)).fetchone()
     if not ac:
         return err("账户不存在或未被删除", 404)
-    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and ac["owner_id"] != uid:
         return err("无权限", 403)
     db.execute("UPDATE tt_accounts SET deleted_at=NULL, updated_at=datetime('now','localtime') WHERE id=?", (aid,))
     db.commit()
@@ -557,7 +557,7 @@ def permanent_delete_account(aid):
     ac = db.execute("SELECT owner_id FROM tt_accounts WHERE id=? AND deleted_at IS NOT NULL", (aid,)).fetchone()
     if not ac:
         return err("账户不存在或未被删除", 404)
-    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and ac["owner_id"] != uid:
         return err("无权限", 403)
     db.execute("DELETE FROM tt_recharge_records WHERE account_id IN "
                "(SELECT advertiser_id FROM tt_accounts WHERE id=?)", (aid,))
@@ -574,7 +574,7 @@ def deleted_accounts_list():
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
-    if role in ('developer', 'admin'):
+    if role in CROSS_USER_ROLES:
         rows = db.execute(
             "SELECT a.id, a.name, a.advertiser_id, a.deleted_at, "
             "ag.name AS agent_name, st.name AS status_name "
@@ -608,7 +608,7 @@ def bc_history(aid):
     ac = db.execute("SELECT owner_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
     if not ac:
         return err("账户不存在", 404)
-    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and ac["owner_id"] != uid:
         return err("无权限", 403)
     rows = db.execute(
         "SELECT h.id, h.old_bc_id, h.new_bc_id, h.change_type, h.created_at, "
@@ -636,7 +636,7 @@ def delete_bc_history(aid, hid):
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin'):
+    if role not in CROSS_USER_ROLES:
         return err("权限不足", 403)
     db.execute("DELETE FROM tt_account_bc_history WHERE id=? AND account_id=?", (hid, aid))
     db.commit()
@@ -693,7 +693,7 @@ def recharge_records(aid):
     if not ac:
         return err("账户不存在", 404)
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and ac["owner_id"] != uid:
         return err("无权限", 403)
     rows = db.execute(
         "SELECT r.*, ag.name AS agent_name, u.display_name AS operator_name "
@@ -729,7 +729,7 @@ def recharge_submit():
                     (account_id,)).fetchone()
     if not ac:
         return err("账户不存在", 404)
-    if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and ac["owner_id"] != uid:
         return err("无权限", 403)
     # 仅「存活」状态可充值
     st = db.execute("SELECT name FROM account_statuses WHERE id=?", (ac["status_id"],)).fetchone()
@@ -783,7 +783,7 @@ def recharge_batch_submit():
                         (account_id,)).fetchone()
         if not ac:
             continue
-        if role not in ('developer', 'admin') and ac["owner_id"] != uid:
+        if role not in CROSS_USER_ROLES and ac["owner_id"] != uid:
             continue
         agent_id = _resolve_agent_id(db, (it.get("agent") or "").strip(), it.get("agent_id"))
         agent_name = db.execute("SELECT name FROM agents WHERE id=?", (agent_id,)).fetchone()
@@ -818,7 +818,7 @@ def recharge_update(rid):
     if not row:
         return err("充值记录不存在", 404)
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin') and row["created_by"] != uid:
+    if role not in CROSS_USER_ROLES and row["created_by"] != uid:
         return err("无权限", 403)
     for f in ["amount", "operator", "status"]:
         if f in data and data[f] is not None:
@@ -838,7 +838,7 @@ def recharge_delete(rid):
     if not row:
         return err("充值记录不存在", 404)
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin') and row["created_by"] != uid:
+    if role not in CROSS_USER_ROLES and row["created_by"] != uid:
         return err("无权限", 403)
     db.execute("DELETE FROM tt_recharge_records WHERE id=?", (rid,))
     db.commit()
@@ -857,7 +857,7 @@ def recharge_retry_sheets(rid):
     if not row:
         return err("充值记录不存在", 404)
     role = _get_role(db, uid)
-    if role not in ('developer', 'admin') and row["created_by"] != uid:
+    if role not in CROSS_USER_ROLES and row["created_by"] != uid:
         return err("无权限", 403)
     sheet_id = _get_tt_sheet_id(db)
     if not sheet_id:
@@ -878,7 +878,7 @@ def recycle_reasons_list():
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
-    if role in ('developer', 'admin'):
+    if role in CROSS_USER_ROLES:
         rows = db.execute("SELECT id, name FROM tt_recycle_reasons ORDER BY id").fetchall()
     else:
         rows = db.execute("SELECT id, name FROM tt_recycle_reasons WHERE owner_id=? ORDER BY id",
@@ -917,7 +917,7 @@ def recycle_reason_rename(rid):
     row = db.execute("SELECT owner_id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
     if not row:
         return err("回收原因不存在", 404)
-    if role not in ('developer', 'admin') and row["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and row["owner_id"] != uid:
         return err("无权限", 403)
     db.execute("UPDATE tt_recycle_reasons SET name=? WHERE id=?", (name, rid))
     db.commit()
@@ -934,7 +934,7 @@ def recycle_reason_delete(rid):
     row = db.execute("SELECT owner_id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
     if not row:
         return err("回收原因不存在", 404)
-    if role not in ('developer', 'admin') and row["owner_id"] != uid:
+    if role not in CROSS_USER_ROLES and row["owner_id"] != uid:
         return err("无权限", 403)
     db.execute("DELETE FROM tt_recycle_reasons WHERE id=?", (rid,))
     db.commit()
@@ -1076,7 +1076,7 @@ def sync_from_sheet():
 
         # 已软删的账户：恢复复用（仅限本人或管理员），避免被当作"已存在"跳过
         if existing["deleted_at"]:
-            if existing["owner_id"] != uid and role not in ('developer', 'admin'):
+            if existing["owner_id"] != uid and role not in CROSS_USER_ROLES:
                 continue
             if not dry_run:
                 db.execute("UPDATE tt_accounts SET deleted_at=NULL WHERE id=?", (existing["id"],))
@@ -1118,7 +1118,7 @@ def sync_from_sheet():
     for adv_id, value in resolutions.items():
         if adv_id not in valid_ids:
             continue
-        if role in ('developer', 'admin'):
+        if role in CROSS_USER_ROLES:
             db.execute("UPDATE tt_accounts SET consumption=? WHERE advertiser_id=?",
                        (value, adv_id))
         else:
@@ -1132,7 +1132,7 @@ def sync_from_sheet():
         status_id = _resolve_status_id(db, new_status, None)
         # 与手动改状态保持一致：改为「死亡」置当天死亡时间，改为「存活」清空
         death_date = datetime.date.today().strftime("%Y-%m-%d") if new_status == "死亡" else ""
-        if role in ('developer', 'admin'):
+        if role in CROSS_USER_ROLES:
             db.execute("UPDATE tt_accounts SET status_id=?, status_changed_date=datetime('now','localtime'), death_date=? WHERE advertiser_id=?",
                        (status_id, death_date, adv_id))
         else:
