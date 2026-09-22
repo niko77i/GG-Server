@@ -322,7 +322,7 @@ const createForm = ref({
 // 必须在这里重算而不能只依赖 ref 初始值 —— 与上方 platformFilter 同理，本组件 setup 早于
 // App.vue 的 initFromStorage/fetchMe，此刻 user 可能仍为 null，会把户管误判成普通用户。
 function openCreateDialog() {
-  createForm.value.role = authStore.isHuguan ? 'huguan' : 'user'
+  if (authStore.isHuguan) createForm.value.role = 'huguan'
   createForm.value.platform = authStore.isDeveloper
     ? (platformFilter.value || 'gg')
     : authStore.effectivePlatform
