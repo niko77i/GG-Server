@@ -31,7 +31,18 @@
 |---|---|---|
 | 前端状态 | `frontend/src/stores/auth.js` | `currentPlatform` + `effectivePlatform`：developer 用 `currentPlatform`，其他人用 `user.platform` |
 | 请求注入 | `frontend/src/api/client.js:13` | `user.role === 'developer'` 时按当前路由前缀注入 `params.platform` |
-| 后端解析 | `py/main.py:5775 _get_effective_platform()` | `role in ('developer', 'admin')` 时取 `request.args['platform']`，否则取 `user.platform` |
+| 后端解析 | `py/main.py:5776 _get_effective_platform()` | `role in PLATFORM_SWITCH_ROLES` 时取 `request.args['platform']`，否则取 `user.platform` |
+
+> **勘误（2026-09-22，执行 Task 1 时发现）**：本节原先写的是 `role in ('developer','admin')`，那是**平台隔离改动之前的旧快照**。`c4b3d56`（用户管理按平台隔离）已**有意把 admin 移出**该判断——admin 自身按平台隔离，不再跨平台。同理 `require_platform` 自建立起只放行 `developer`。
+>
+> 因此户管接入时不能复用含 admin 的 `CROSS_USER_ROLES`，否则会（a）把 admin 的跨平台越权改回来、（b）打挂既有测试 `test_user_platform_isolation.py:115 test_tt_admin_sees_tt_statuses`。**两个平台切换闸门统一用 `PLATFORM_SWITCH_ROLES = ("developer", HUGUAN_ROLE)`。**
+>
+> 三个常量的分工（`py/routes/helpers.py`）：
+> - `PLATFORM_SWITCH_ROLES` — **跨平台切换**（`require_platform`、`_get_effective_platform`），仅 developer + 户管
+> - `CROSS_USER_ROLES` — **账户域跨用户可见性**（账户 / MCC / BC / BM / 像素），developer + admin + 户管
+> - `GLOBAL_OPTION_ROLES` — **平台级下拉选项编辑**（代理名、账户状态、MCC 等级、地区时区、商务人员），developer + admin + 户管
+>
+> 三者语义不同，**不可互换**。文档中其余提到让户管「跨平台」的地方，一律指 `PLATFORM_SWITCH_ROLES`。
 
 ### 2.3 跨用户可见性现状（**关键：三平台不一致**）
 
@@ -98,14 +109,14 @@ from routes.helpers import CROSS_USER_ROLES, GLOBAL_OPTION_ROLES
 | `py/routes/tt_routes.py` | ~12 | 按语义分派 |
 | `py/routes/tt_accounts_routes.py` | ~12 | 按语义分派 |
 | `py/routes/fb_routes.py` | ~5 | 按语义分派 |
-| `py/routes/decorators.py` | 1（`require_platform`） | `CROSS_USER_ROLES` |
+| `py/routes/decorators.py` | 1（`require_platform`） | `PLATFORM_SWITCH_ROLES`（**非** `CROSS_USER_ROLES`，见 2.2 勘误） |
 
 ### 3.2 平台切换（让户管生效）
 
 | 文件 | 改动 |
 |---|---|
-| `py/main.py:5775 _get_effective_platform()` | 判断从 `('developer','admin')` 改为 `CROSS_USER_ROLES` |
-| `py/routes/decorators.py:50 require_platform()` | `role == 'developer'` 放行改为 `role in CROSS_USER_ROLES`，使户管跨平台调用不被 403 |
+| `py/main.py:5776 _get_effective_platform()` | 判断从 `== 'developer'` 改为 `in PLATFORM_SWITCH_ROLES`（**不可**用含 admin 的 `CROSS_USER_ROLES`，见 2.2 勘误） |
+| `py/routes/decorators.py:50 require_platform()` | `role == 'developer'` 放行改为 `role in PLATFORM_SWITCH_ROLES`，使户管跨平台调用不被 403 |
 | `frontend/src/stores/auth.js` | 新增 `isHuguan`；新增 `canSwitchPlatform = isDeveloper \|\| isHuguan`；新增 `canManageAccounts = isAdmin \|\| isHuguan`；`effectivePlatform` 对 `canSwitchPlatform` 都用 `currentPlatform`；`setPlatform()` 放开给 `canSwitchPlatform` |
 | `frontend/src/api/client.js:13` | `user.role === 'developer'` 改为 `['developer','huguan'].includes(user.role)`（需同步 `auth.js` 的 getter 语义） |
 | `frontend/src/router/index.js:170` | 平台守卫 `!auth.isDeveloper` 改为 `!auth.canSwitchPlatform` |
@@ -235,13 +246,48 @@ ALLOWED_CREATE_ROLES = {
 | `py/auth.py:177 toggle_user_status` | `new_role = "hidden" if row["role"] in ("user","admin","viewer") else "user"` | `huguan` 不在元组里 → 启停一个户管会把它**降级成 `user`**，再次启用也回不到户管 | 元组加入 `"huguan"` |
 | `py/auth.py:114 update_user_role` | 仅拦 `developer`，无角色白名单 | 若调用方漏校验，任何非 developer 都能把目标改成任意角色 | 白名单在 3.6.2 的调用方校验；**同时**在 `update_user_role` 内加一道 `new_role in ("user","admin","viewer","hidden","huguan")` 断言作为纵深防御 |
 
-#### 3.6.4 明确不改的部分
+#### 3.6.4 产品 / 视频域：**必须显式收口**（原判断有误，已勘误）
 
-`py/routes/decorators.py:8 admin_required`、`py/routes/helpers.py:103 can_modify`、`py/routes/helpers.py:120 can_modify_user` 保持不动。
+> **勘误（2026-09-22，执行 Task 1 时发现）**：本节原先称「`can_modify` 保持不动 → 户管不会获得产品/视频的额外编辑权」。**这条防线不存在。**
+>
+> 实查：`py/routes/helpers.py` 的 `can_modify` / `can_modify_user` 在生产代码中**零调用**（仅 `py/tests/test_helpers.py` 引用）。真正生效的是 `py/main.py:1918 _can_modify`，且只用于 `videos`（`main.py:1990`）与 `copywritings`（`main.py:7288`）。TT / FB 产品域**根本不经过它**——它们的唯一关卡是 `require_platform`。
 
-> `can_modify`（`role in ("developer","admin")`）用于产品 / 视频等内容的编辑权。户管按需求只管账户，**此处不改**，因此户管不会获得产品 / 视频的额外编辑权。`helpers.can_modify_user` 是未被使用的重名函数，与 `main._check_modify_user` 不是同一个，注意别改错。
+因此放宽 `require_platform`（3.2）后，户管的实际可达面为：
 
-同理，下列**产品域**的角色判断也保持不动：`py/routes/tt_routes.py:1154 _check_product_owner`、`:1169 _check_product_view`、`py/routes/fb_routes.py:471`（FB 产品列表按 `fb_product_runners` 过滤）。户管不管理产品。而 `py/routes/tt_routes.py:1145 _check_bc_owner` **要改**（BC 属于账户域，BC 管理在户管菜单内）。
+| 端点 | 现有闸门 | 放宽后户管可做什么 |
+|---|---|---|
+| `py/routes/fb_routes.py:546/590/633`（FB 产品增 / 改 / 删） | 仅 `@fb_required`，**无 owner 校验** | 可改**任意人**的 FB 产品（存量敞口，一并收口） |
+| `py/routes/tt_routes.py:225`（TT 产品 create） | 仅 `@tt_write_required` | 可创建 TT 产品（创建后即 owner，进而可改它） |
+| `py/routes/tt_routes.py:276/341/399/760/794`（TT 产品改 / 删 / 加包 / 素材增删） | `+ _check_product_owner` | 只限自己的，改不了别人的 |
+
+结论：**「户管不获得产品/视频编辑权限」必须有后端机制落实，不能依赖 `can_modify`，也不能只靠前端菜单隐藏。** 收口方案见 3.9。
+
+下列判断确实保持不动：`py/routes/decorators.py:8 admin_required`、`py/routes/tt_routes.py:1154 _check_product_owner`、`:1169 _check_product_view`、`py/routes/fb_routes.py:471`（FB 产品列表按 `fb_product_runners` 过滤）。而 `py/routes/tt_routes.py:1145 _check_bc_owner` **要改**（BC 属于账户域，BC 管理在户管菜单内）。
+
+#### 3.9 产品域收口（新增 Task 17）
+
+**目标**：户管可以在三个平台间切换、可读写账户域（账户 / MCC / BC / BM / 像素），但**产品域与视频素材域一律拒绝**——无论从 UI 还是直接调 API。
+
+**方案**：在 `py/routes/decorators.py` 新增一个与 `reject_viewer` 同形状的守卫，并在产品域端点上叠加。
+
+```python
+def reject_huguan():
+    """户管不参与产品/视频域。返回错误响应或 None。"""
+    try:
+        uid = int(get_jwt_identity())
+    except Exception:
+        return None  # 未登录由 @jwt_required() 处理
+    user = auth.get_user_by_id(uid)
+    if user and user.get("role") == HUGUAN_ROLE:
+        return err("户管无产品/素材权限", 403)
+    return None
+```
+
+**改造点**：FB 产品 create / update / delete、TT 产品 create，在其 `@fb_required` / `@tt_write_required` 之下叠加 `reject_huguan()` 检查（与现有 `reject_viewer()` 写法一致，函数体首行）。TT 产品的 update / delete / assets 已有 `_check_product_owner` 兜底（户管不可能是 owner），但**仍须叠加**，使「户管被产品域拒绝」是一个显式、可读、与 owner 无关的规则，而不是依赖巧合。
+
+**注意**：`reject_huguan` 只用于产品 / 视频 / 素材域，**不得**加到账户域端点上。`tt_routes.py` 中账户域与产品域是同一蓝图，逐端点叠加而非整蓝图叠加。
+
+**验收**：新增测试断言户管的下列调用返回 403 —— `POST /api/fb/products/create`、`PUT /api/fb/products/<pid>`、`DELETE /api/fb/products/<pid>`、`POST /api/tt/products/create`、`PUT /api/tt/products/<pid>`；同时断言 `developer` 与平台内 `admin` 的同一调用**行为不变**。回归断言户管调账户域端点仍为 200。
 
 #### 3.6.5 提权路径自查
 
@@ -249,7 +295,7 @@ ALLOWED_CREATE_ROLES = {
 |---|---|---|
 | 户管把自己创建的户管改成 `admin` | **不可** | `admin_update_role` 对户管限定 `huguan` / `hidden` |
 | 户管创建时直接传 `role='admin'` | **不可** | `admin_create_user` 对户管强制 `role='huguan'` |
-| 户管编辑其他户管的账号 | **不可** | `_can_modify_user` 要求 `created_by == actor.id` |
+| 户管编辑其他户管的账号 | **不可** | `_check_modify_user`（`py/main.py:7561`）要求 `created_by == actor.id` |
 | 户管停用 / 删除开发者或其他户管 | **不可** | 同上；且 `developer` 不落入户管分支 |
 | 户管改自己的角色 | **不可** | 各接口既有的 `uid == user_id` 拦截 |
 
@@ -306,8 +352,8 @@ ALLOWED_CREATE_ROLES = {
 
 | 文件 | 改动类型 |
 |---|---|
-| `py/routes/helpers.py` | 新增 `HUGUAN_ROLE`、`CROSS_USER_ROLES`、`GLOBAL_OPTION_ROLES` |
-| `py/routes/decorators.py` | `require_platform` 放行户管 |
+| `py/routes/helpers.py` | 新增 `HUGUAN_ROLE`、`PLATFORM_SWITCH_ROLES`、`CROSS_USER_ROLES`、`GLOBAL_OPTION_ROLES` |
+| `py/routes/decorators.py` | `require_platform` 用 `PLATFORM_SWITCH_ROLES` 放行户管；新增 `reject_huguan`（产品域收口，3.9） |
 | `py/routes/tt_routes.py` | 角色元组 → 常量（:30, :125, :158, :569, :1145, :1157, :1169） |
 | `py/routes/tt_accounts_routes.py` | 角色元组 → 常量（约 24 处） |
 | `py/routes/fb_routes.py` | 角色元组 → 常量 + 列表补 `owner_id` 筛选 |

@@ -4,7 +4,7 @@
 
 **Goal:** 新增「户管」角色，使其可跨平台切换、跨用户查看/编辑 GG/FB/TT 的账户类数据（账户、MCC、BC、BM、像素），可编辑平台级下拉选项，并只能创建/管理自己创建的户管账号。
 
-**Architecture:** 不新建权限机制、不改表结构。把 `huguan` 加入两个现有的角色集合（跨用户数据权限、平台级选项权限），并按 TT 平台**已有的**「跨用户可见 + `owner_id` 筛选」模式复刻到 GG / FB。前端复用现有的三层平台切换链路（`effectivePlatform` → `client.js` 注入 `?platform=` → 后端 `_get_effective_platform`）。用户管理靠已有的 `users.created_by` 字段把户管的操作范围收窄到「自己创建的户管」。
+**Architecture:** 不改表结构。把 `huguan` 加入三个**语义不同**的角色集合（跨平台切换 / 跨用户账户可见性 / 平台级选项编辑），并按 TT 平台**已有的**「跨用户可见 + `owner_id` 筛选」模式复刻到 GG / FB。前端复用现有的三层平台切换链路（`effectivePlatform` → `client.js` 注入 `?platform=` → 后端 `_get_effective_platform`）。用户管理靠已有的 `users.created_by` 字段把户管的操作范围收窄到「自己创建的户管」。最后（Task 17）为产品 / 素材域补一个 `@no_huguan` 守卫，把「户管只管账户域」这条约束真正落到后端。
 
 **Tech Stack:** Flask + flask_jwt_extended + SQLite（后端 `py/`）；Vue 3 + Element Plus + Pinia + Vue Router hash history（前端 `frontend/`）；pytest（后端测试）。
 
@@ -15,15 +15,23 @@
 - **角色名恒为字符串 `"huguan"`**（后端）与 `'huguan'`（前端），全库统一，不出现 `huguan_role` / `account_manager` 等变体。
 - **纯增量原则**：不修改任何现有角色的行为。所有改动对 `developer` / `admin` / `user` / `viewer` / `hidden` 必须保持当前判定结果。唯一允许的行为变化是把 `huguan` 加入集合。
 - **不新增数据库表、不新增列**。`users.role` 是 `TEXT`，新枚举值无需迁移。
-- **常量单一事实来源**：`py/routes/helpers.py` 定义 `HUGUAN_ROLE` / `CROSS_USER_ROLES` / `GLOBAL_OPTION_ROLES`。`main.py` 通过 `from routes.helpers import CROSS_USER_ROLES, GLOBAL_OPTION_ROLES` 引入。禁止在各调用点重新写字面量元组。
+- **常量单一事实来源**：`py/routes/helpers.py` 定义四个常量，**语义不同、不可互换**：
+  - `HUGUAN_ROLE = "huguan"`
+  - `PLATFORM_SWITCH_ROLES = ("developer", HUGUAN_ROLE)` — **跨平台切换**（`require_platform`、`_get_effective_platform`）。**不含 admin**：admin 自身按平台隔离（`c4b3d56` 已落地，`test_user_platform_isolation.py:115` 锁定）。
+  - `CROSS_USER_ROLES = ("developer", "admin", HUGUAN_ROLE)` — **账户域跨用户可见性**（账户 / MCC / BC / BM / 像素）。
+  - `GLOBAL_OPTION_ROLES = ("developer", "admin", HUGUAN_ROLE)` — **平台级下拉选项编辑**。
+
+  禁止在各调用点重新写字面量元组。任何「让户管跨平台」的改动一律用 `PLATFORM_SWITCH_ROLES`；误用 `CROSS_USER_ROLES` 会把 admin 的跨平台越权改回来并打挂既有测试。
 - **保留既有错误文案**：`不能操作同级管理员`、`不能操作其他平台的用户` 两条字符串及其测试断言是已落地的「用户角色平台隔离」功能的一部分，**不得改动**。户管的拒绝原因用新字符串。
 - **前端无测试框架**（`frontend/package.json` 只有 `dev` / `build` / `preview`）。前端任务的验证门槛是 `npm run build` 成功 + 计划内逐条列出的手工核对清单。不为本需求引入测试框架。
 - **后端测试命令**：`cd py && python -m pytest tests/ -v`。测试依赖 `py/tests/conftest.py` 提供的 `app` / `client` 夹具（临时数据库 + JWT）。
-- **`huguan` 不获得产品/视频的编辑权**。`helpers.can_modify`、`tt_routes._check_product_owner`、`tt_routes._check_product_view`、`fb_routes.py:471` 的产品过滤一律不动。
+- **`huguan` 不获得产品/视频的编辑权**，且这一条**必须由后端机制落实**（Task 17）。`helpers.can_modify` 在生产代码中零调用，**不能作为防线**；TT / FB 产品域的唯一关卡是 `require_platform`，放宽后户管即可直达。`tt_routes._check_product_owner` / `_check_product_view` / `fb_routes.py:471` 的产品过滤保持不动。
 
 ---
 
 ### Task 1: 角色常量与跨平台后端放行
+
+> **执行勘误（2026-09-22）**：本任务已按 `fb7b755` 完成。执行时发现原计划 Step 4 / Step 5 引用的「before」代码是**平台隔离改动之前的旧快照**，照字面执行会让 `admin` 首次获得跨平台路由/写权限，并打挂既有测试 `test_user_platform_isolation.py:115`。实际执行改为：两个平台切换闸门统一使用新增的第 4 个常量 `PLATFORM_SWITCH_ROLES = ("developer", HUGUAN_ROLE)`。下方 Step 3 / 4 / 5 已按实际执行修订。后续任务（尤其 Task 8 的常量替换）**一律以本节的常量语义为准**。
 
 **Files:**
 - Modify: `py/routes/helpers.py`（在文件头部 docstring 之后新增常量）
@@ -112,6 +120,10 @@ CROSS_USER_ROLES = ("developer", "admin", HUGUAN_ROLE)
 
 # 可编辑平台级下拉选项的角色（代理名、账户状态、MCC等级、地区时区、商务人员）
 GLOBAL_OPTION_ROLES = ("developer", "admin", HUGUAN_ROLE)
+
+# 可跨平台切换的角色（require_platform / _get_effective_platform）。
+# 注意不含 admin —— admin 自身按平台隔离。
+PLATFORM_SWITCH_ROLES = ("developer", HUGUAN_ROLE)
 ```
 
 - [ ] **Step 4: 修改 `py/routes/decorators.py` 的 `require_platform`**
@@ -119,7 +131,7 @@ GLOBAL_OPTION_ROLES = ("developer", "admin", HUGUAN_ROLE)
 该文件第 5 行已是 `from routes.helpers import err`，改为：
 
 ```python
-from routes.helpers import err, CROSS_USER_ROLES
+from routes.helpers import err, PLATFORM_SWITCH_ROLES
 ```
 
 把第 59-60 行：
@@ -132,35 +144,43 @@ from routes.helpers import err, CROSS_USER_ROLES
 改为：
 
 ```python
-    if user.get("role") in CROSS_USER_ROLES:
+    if user.get("role") in PLATFORM_SWITCH_ROLES:
         return None
 ```
 
-并把函数 docstring 从 `"""检查当前用户是否属于指定平台。developer 直接放行。返回错误响应或 None。"""` 改为 `"""检查当前用户是否属于指定平台。跨用户角色（developer/admin/户管）直接放行。返回错误响应或 None。"""`
+并把函数 docstring 从 `"""检查当前用户是否属于指定平台。developer 直接放行。返回错误响应或 None。"""` 改为 `"""检查当前用户是否属于指定平台。可切换平台的角色（developer/户管）直接放行。返回错误响应或 None。"""`
 
 - [ ] **Step 5: 在 `py/main.py` 引入常量并修改 `_get_effective_platform`**
 
 在 `py/main.py:38`（`from routes.decorators import ...` 那行）之后新增一行：
 
 ```python
-from routes.helpers import CROSS_USER_ROLES, GLOBAL_OPTION_ROLES
+from routes.helpers import PLATFORM_SWITCH_ROLES
 ```
 
-把 `py/main.py:5779` 的：
+把 `py/main.py:5776`（`_get_effective_platform` 内）的：
 
 ```python
-    if user and user.get("role") in ("developer", "admin"):
+    if user and user.get("role") == "developer":
         return request.args.get("platform", "gg")
 ```
 
 改为：
 
 ```python
-    if user and user.get("role") in GLOBAL_OPTION_ROLES:
+    if user and user.get("role") in PLATFORM_SWITCH_ROLES:
         return request.args.get("platform", "gg")
 ```
 
-并把函数 docstring 里的 `developer 按请求参数或默认 'gg'` 改为 `developer/admin/户管 按请求参数或默认 'gg'`。
+并把函数 docstring 改为：
+
+```python
+    """获取当前用户的有效平台。developer/户管 可按请求参数跨平台（缺省 'gg'）；其他角色一律取自己的 platform。
+    注意：admin 不再视为跨平台 —— 管理员本身按平台隔离（见用户角色平台隔离设计）。
+    """
+```
+
+> 注意：**不要**用 `GLOBAL_OPTION_ROLES`（含 admin）—— 它用于「平台级下拉选项编辑」这一**不同**语义（Task 10），与平台切换闸门无关。两者混用会让 admin 重新跨平台。
 
 - [ ] **Step 6: 运行测试确认通过**
 
@@ -2228,9 +2248,203 @@ git commit -m "feat: 各账户面板新增全部用户筛选下拉"
 
 ---
 
+### Task 17: 产品域与素材域对户管收口
+
+> **为什么有这个任务**：Task 1 放宽 `require_platform` 后，户管可以跨平台调用 TT / FB 的**全部**路由。而 TT / FB 产品域的唯一关卡就是 `require_platform`（`helpers.can_modify` 在生产代码中零调用，设计文档 §3.6.4 原先误以为它是防线）。不收口则「户管不获得产品/视频编辑权限」这条约束无法兑现——前端菜单隐藏挡不住直接调 API。详见设计文档 §3.9。
+
+**Files:**
+- Modify: `py/routes/decorators.py`（新增 `reject_huguan()` 与装饰器 `no_huguan`；import 增加 `HUGUAN_ROLE`）
+- Modify: `py/routes/fb_routes.py`（产品域写端点叠加 `@no_huguan`）
+- Modify: `py/routes/tt_routes.py`（产品/包/素材域写端点叠加 `@no_huguan`）
+- Test: `py/tests/test_huguan_role.py`（追加）
+
+**Interfaces:**
+- Consumes: `HUGUAN_ROLE`（Task 1，`py/routes/helpers.py`）
+- Produces:
+  - `reject_huguan() -> flask.Response | None`（与既有 `reject_viewer()` 同形状：返回错误响应或 `None`）
+  - `no_huguan(fn)` 装饰器，叠加在 `@fb_required` / `@tt_write_required` 之内层
+
+**范围规则（本任务的核心，务必按规则判定而非按行号）：**
+
+| 归属 | 路由前缀 | 处理 |
+|---|---|---|
+| **产品域**（要收口） | `/api/fb/products/`、`/api/fb/lines/`、`/api/tt/products/`、`/api/tt/packages/` | 所有 POST / PUT / DELETE 端点叠加 `@no_huguan` |
+| **账户域**（**不得**收口） | `/api/fb/bms/`、`/api/fb/accounts/`、`/api/fb/pixels/`、`/api/tt/bcs/`、`/api/tt/accounts/` | 一律不动 |
+| **设置 / 数据域**（**不得**收口） | `/api/tt/settings`、`/api/tt/data/import`、`/api/fb/extract/`、`/api/fb/reports/` | 一律不动 |
+
+产品域的**读**端点（GET）保持不动——约束是「不获得**编辑**权」，且新增读权限不构成提权。
+
+- [ ] **Step 1: 清点待改端点**
+
+Run:
+```bash
+cd py && grep -nE "^@(fb|tt)_bp\.route\('/api/(fb|tt)/(products|lines|packages)" -A 3 routes/fb_routes.py routes/tt_routes.py | grep -E "@(fb|tt)_bp\.route|@(fb_required|tt_write_required|tt_required)|^[0-9]+-def "
+```
+把输出的每个 POST / PUT / DELETE 端点记下来（GET 端点跳过）。预期：FB 侧 `products/create`、`products/<pid>`(PUT)、`products/<pid>`(DELETE)、`products/<pid>/restore`、`products/<pid>/lines`、`lines/<lid>`(PUT) 等；TT 侧 `products/create`、`products/<pid>`(PUT)、`products/<pid>`(DELETE)、`products/<pid>/restore`、`products/<pid>/packages`、`packages/<pkg_id>`(PUT)、`packages/<pkg_id>`(DELETE)、`packages/batch-delete`、`products/<pid>/check-delist`、`products/merge`、`products/import-text`、`products/<pid>/assets`、`products/<pid>/assets/<video_id>`。
+
+**特别提醒**：`tt_routes.py` 的 `products/import-text` 只挂了 `@tt_required`（不是 `@tt_write_required`）——它是产品写入接口，同样必须收口，别因为它长得不一样就漏掉。
+
+- [ ] **Step 2: 写失败测试**
+
+追加到 `py/tests/test_huguan_role.py`：
+
+```python
+class TestHuguanBlockedFromProductDomain:
+    """户管可跨平台，但不得写产品 / 包 / 素材（设计文档 §3.9）。"""
+
+    def _fb_product_by_developer(self, client):
+        """借开发者身份造一个 FB 产品，供户管越权尝试。"""
+        dev, _ = _create_user(client, "_hg_pd_dev", role="developer", platform="fb")
+        resp = client.post("/api/fb/products/create", json={"product_name": "户管越权靶子"},
+                           headers=dev)
+        assert resp.status_code == 200, resp.get_json()
+        return dev, resp.get_json()["id"]
+
+    def test_huguan_cannot_create_fb_product(self, client):
+        hg, _ = _huguan(client, "_hg_pd_fb_create")
+        resp = client.post("/api/fb/products/create", json={"product_name": "越权"},
+                           headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_cannot_update_fb_product(self, client):
+        _, pid = self._fb_product_by_developer(client)
+        hg, _ = _huguan(client, "_hg_pd_fb_update")
+        resp = client.put(f"/api/fb/products/{pid}", json={"product_name": "被篡改"},
+                          headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_cannot_delete_fb_product(self, client):
+        _, pid = self._fb_product_by_developer(client)
+        hg, _ = _huguan(client, "_hg_pd_fb_delete")
+        resp = client.delete(f"/api/fb/products/{pid}", headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_cannot_create_tt_product(self, client):
+        hg, _ = _huguan(client, "_hg_pd_tt_create")
+        resp = client.post("/api/tt/products/create", json={"product_name": "越权"},
+                           headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_cannot_import_tt_products(self, client):
+        """import-text 只挂 @tt_required，是易漏的写入面。"""
+        hg, _ = _huguan(client, "_hg_pd_tt_import")
+        resp = client.post("/api/tt/products/import-text", json={"text": "x"},
+                           headers=hg)
+        assert resp.status_code == 403
+
+    def test_huguan_can_still_write_account_domain(self, client):
+        """回归：收口不得误伤账户域——户管仍可建 BC。"""
+        hg, _ = _huguan(client, "_hg_pd_bc", platform="tt")
+        resp = client.post("/api/tt/bcs/create", json={"name": "户管建的BC"}, headers=hg)
+        assert resp.status_code == 200
+
+    def test_developer_can_still_write_products(self, client):
+        """回归：developer 的产品写权限不受影响。"""
+        dev, _ = _create_user(client, "_hg_pd_dev2", role="developer", platform="gg")
+        resp = client.post("/api/tt/products/create", json={"product_name": "开发者的产品"},
+                           headers=dev)
+        assert resp.status_code == 200
+```
+
+> `resp.get_json()["id"]` 的键名以 FB 产品创建接口的实际返回为准；先跑一次确认，若是 `{'id': ...}` 之外的形状（如 `{'product': {'id': ...}}`），按实际调整。`/api/tt/bcs/create` 与 `/api/tt/products/import-text` 的请求体字段名同理，以实际接口为准；若字段不符导致 400 而非 403，修正请求体使请求合法后再断言 403。
+
+- [ ] **Step 3: 运行测试确认失败**
+
+Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k ProductDomain`
+Expected: 5 条越权用例 FAIL（得到 200 或 400 而非 403）；两条回归用例 PASS。若回归用例此时就 FAIL，说明测试数据构造有误，先修测试。
+
+- [ ] **Step 4: 在 `py/routes/decorators.py` 新增守卫**
+
+把第 5 行的 import 改为：
+
+```python
+from routes.helpers import err, PLATFORM_SWITCH_ROLES, HUGUAN_ROLE
+```
+
+在 `reject_viewer()` 之后新增：
+
+```python
+def reject_huguan():
+    """户管不参与产品 / 包 / 素材域。返回错误响应或 None。"""
+    try:
+        uid = int(get_jwt_identity())
+    except Exception:
+        return None  # 未登录由 @jwt_required() 处理
+    user = auth.get_user_by_id(uid)
+    if user and user.get("role") == HUGUAN_ROLE:
+        return err("户管无产品/素材权限", 403)
+    return None
+
+
+def no_huguan(fn):
+    """产品 / 素材域专用装饰器：户管一律拒绝。叠加在平台装饰器之内层。"""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        err_resp = reject_huguan()
+        if err_resp:
+            return err_resp
+        return fn(*args, **kwargs)
+    return wrapper
+```
+
+- [ ] **Step 5: 逐端点叠加 `@no_huguan`**
+
+对 Step 1 清点出的**每个**产品域 POST / PUT / DELETE 端点，在现有平台装饰器**之下一行**插入 `@no_huguan`。以 FB 产品创建为例（`py/routes/fb_routes.py`）：
+
+```python
+@fb_bp.route('/api/fb/products/create', methods=['POST'])
+@jwt_required()
+@fb_required
+@no_huguan
+def create_product():
+```
+
+TT 侧同理（`py/routes/tt_routes.py`）：
+
+```python
+@tt_bp.route('/api/tt/products/create', methods=['POST'])
+@jwt_required()
+@tt_write_required
+@no_huguan
+def create_product():
+```
+
+并在两个文件的 import 区把 `no_huguan` 加入既有的 `from routes.decorators import ...`。
+
+**不要**给 `/api/fb/bms/`、`/api/fb/accounts/`、`/api/fb/pixels/`、`/api/tt/bcs/`、`/api/tt/accounts/`、`/api/tt/settings`、`/api/tt/data/import`、`/api/fb/extract/`、`/api/fb/reports/` 下的任何端点加 `@no_huguan`——那些属于账户域 / 设置域 / 数据域。
+
+- [ ] **Step 6: 验证覆盖完整（防漏）**
+
+Run:
+```bash
+cd py && echo "--- 产品域写端点 ---" && grep -nE "^@(fb|tt)_bp\.route\('/api/(fb|tt)/(products|lines|packages)" -A 6 routes/fb_routes.py routes/tt_routes.py | grep -E "^[0-9]+-@(fb|tt)_bp\.route|^[0-9]+-@no_huguan"
+```
+Expected: 每个 `products/` / `lines/` / `packages/` 的 **POST / PUT / DELETE** 路由行下方都能看到配对的 `@no_huguan`；GET 路由行下方没有。逐条核对数量一致，若有落单的路由行，补上 `@no_huguan` 并重跑。
+
+- [ ] **Step 7: 运行测试确认通过**
+
+Run: `cd py && python -m pytest tests/test_huguan_role.py -v`
+Expected: 全部 passed
+
+- [ ] **Step 8: 跑全量后端测试**
+
+Run: `cd py && python -m pytest tests/ -v`
+Expected: 全部 passed。重点确认 `test_tt_products.py`（若存在）、`test_fb_platform.py`、`test_tt_platform.py` 无 FAILED——`@no_huguan` 不应影响任何现有角色。
+
+- [ ] **Step 9: 提交**
+
+```bash
+git add py/routes/decorators.py py/routes/fb_routes.py py/routes/tt_routes.py py/tests/test_huguan_role.py
+git commit -m "feat: 产品域与素材域对户管收口（兑现户管无产品编辑权）"
+```
+
+---
+
 ## 收尾
 
 - [ ] **跑一次全量后端测试**：`cd py && python -m pytest tests/ -v` → 全部 passed
 - [ ] **跑一次前端构建**：`cd frontend && npm run build` → 成功
 - [ ] **按 CLAUDE.md 调用 `/code-review` 做代码审查**，修复发现的问题后再交付
 - [ ] **端到端验收**：用一个新建的户管账号走一遍——登录 → 三平台切换 → 看/改他人账户 → 用用户下拉筛选 → 改设置选项 → 创建一个户管 → 停用再启用该户管（确认角色仍是户管而非 user）→ 确认开发者账号能管到它
+- [ ] **产品域负向验收**（Task 17）：用户管 token 直接调 `POST /api/fb/products/create`、`PUT /api/fb/products/<pid>`、`POST /api/tt/products/create`、`POST /api/tt/products/import-text` → 四者均须 403；再确认户管调 `POST /api/tt/bcs/create` 仍为 200（未误伤账户域）
+- [ ] **admin 不变量验收**（Task 1）：用 `platform='gg'` 的 admin token 调 `/api/tt/users?platform=tt` → 须 403（admin 不跨平台）
