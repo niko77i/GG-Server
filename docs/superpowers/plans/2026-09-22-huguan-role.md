@@ -229,12 +229,13 @@ class TestAuthRoleFixes:
         assert auth.toggle_user_status(uid)["role"] == "hidden"
 
     def test_unhide_falls_back_to_user_for_all_roles(self, client):
-        """锁定既有单向行为：取消隐藏一律回落 user，对任何角色都一样。
+        """前半锁定**本次新增**的户管隐藏行为（huguan → hidden，由 `py/auth.py:199` 元组修复带来）；
+        后半锁定**既有**语义：取消隐藏一律回落 user —— 该语义对 admin / viewer 在改动前即成立。
 
-        这不是本需求引入的缺陷，也不是户管独有 —— `toggle_user_status` 只在「隐藏」
-        方向查元组，因此 `hidden` 落到 else 分支的 `"user"`，admin / viewer 同样如此。
-        本用例存在的意义是把这个既有语义写下来，避免后人误以为「取消隐藏会恢复原角色」。
-        如需改成恢复隐藏前的角色，那是独立的产品决策（需记忆字段），不在本需求范围。
+        保护范围说明：循环第 0 腿是 huguan，其 `== "hidden"` 断言**依赖本次修复**，
+        因此本用例在修复前是失败的，不是纯回归锁定。户管隐藏方向的独立覆盖见
+        `test_toggle_huguan_hides_instead_of_demoting`。
+        如需改成「取消隐藏恢复原角色」，那是独立的产品决策（需记忆字段），不在本需求范围。
         """
         import auth
         for idx, role in enumerate(("huguan", "admin", "viewer")):
@@ -358,14 +359,24 @@ git commit -m "fix: 户管角色在启停与角色白名单中的缺失"
 
 ### Task 3: 用户管理接口放行户管并收窄范围
 
+> **执行勘误（2026-09-22，派发前预检）**：
+>
+> **(1) 行号一律按内容定位，勿信本节的数字。** 本节写入后仓库又落了 `c4b3d56`，全部行号已漂移：`_check_modify_user` 实际在 `py/main.py:7460-7469`（非 7455-7464），`admin_list_users` 在 `:7447`（非 7445），`admin_update_role` 在 `:7485`（非 7472），`admin_toggle_user` 在 `:7508`，`admin_delete_user` 在 `:7528`，`admin_update_user` 在 `:7579`，`admin_reset_password` 在 `:7619`，`admin_set_telegram_username` 在 `:7648`。**照数字替换会砸掉相邻函数**（例如 7455-7464 实际横跨 `admin_list_users` 尾部与 `_check_modify_user` 开头）。一律 grep 函数名后再改。
+>
+> **(2) Step 4 中 `admin_update_role` 的 `allowed` 计算会破坏纯增量原则，已修订。** 原写法 `allowed = _huguan_allowed_roles(user["role"])` 直接复用 `ALLOWED_CREATE_ROLES`，而该表的四个值里**都没有 `hidden`**；但现状 `py/main.py:7500` 是 `if new_role not in ("user", "admin", "viewer", "hidden")` —— 即 developer / admin **目前可以通过该接口把角色设为 `hidden`**。沿用原写法会让这一能力从 200 变 400，属「修改现有角色行为」，违反 Global Constraints，且既有测试零覆盖（全 `py/tests/` 无 `role.*hidden` 断言），不会被红灯拦下。修订为「创建白名单 ∪ {hidden}」。下方 Step 4 已改正。
+>
+> **(3) 确认 `_check_modify_user` 是唯一收口点。** 全仓 6 处调用（`py/main.py:7495,7518,7538,7592,7632,7658`）覆盖本任务涉及的全部接口，因此户管分支只需加在该函数内，**不需要**在每个接口里重复写角色判断。
+>
+> **(4) 已知设计后效（不在本任务修，记录备查）。** 户管把自己的下属户管设为 `hidden` 后，该账号 `role` 变为 `hidden`，此后 `_check_modify_user` 的 `target["role"] != "huguan"` 分支会拒绝户管对其再做任何操作（含取消隐藏、删除）；同时 `role_filter="huguan"` 使其不再出现在户管的列表里，户管无从点选。即：**户管一旦停用下属户管，就再也无法自行恢复**。是否允许户管操作「自己创建的、当前为 hidden 的账号」属独立产品决策，本任务按计划原样执行，不擅自扩权。
+
 **Files:**
 - Modify: `py/main.py:7411`（`admin_create_user` 入口 + 角色白名单）
-- Modify: `py/main.py:7445`、`:7451`（`admin_list_users` 入口 + `role_filter`）
-- Modify: `py/main.py:7455-7464`（`_check_modify_user` 增加户管分支）
-- Modify: `py/main.py:7472`、`:7484`（`admin_update_role` 入口 + 户管可选角色）
-- Modify: `py/main.py:7495`（`admin_toggle_user` 入口）
-- Modify: `py/main.py:7515`（`admin_delete_user` 入口）
-- Modify: `py/main.py:7567`（`admin_update_user` 入口）
+- Modify: `py/main.py:7447`（`admin_list_users` 入口 + `role_filter`）
+- Modify: `py/main.py:7460-7469`（`_check_modify_user` 增加户管分支，并在其上新增两个模块级定义）
+- Modify: `py/main.py:7485`、`:7500`（`admin_update_role` 入口 + 户管可选角色）
+- Modify: `py/main.py:7508`（`admin_toggle_user` 入口）
+- Modify: `py/main.py:7528`（`admin_delete_user` 入口）
+- Modify: `py/main.py:7579`（`admin_update_user` 入口）
 - Modify: `py/main.py:7607`（`admin_reset_password` 入口）
 - Modify: `py/main.py:7636`（`admin_set_telegram_username` 入口）
 - Test: `py/tests/test_huguan_role.py`（追加）
@@ -479,16 +490,34 @@ class TestHuguanUserManagement:
         hg, _ = _huguan(client, "_hgm_sched")
         resp = client.post("/api/admin/trigger-weekly-cleanup", headers=hg)
         assert resp.status_code == 403
+
+    def test_developer_and_admin_can_still_set_hidden(self, client):
+        """回归：改角色接口对 developer / admin 仍能把用户设为 `hidden`。
+
+        改动前 `py/main.py:7500` 的白名单是 `("user","admin","viewer","hidden")`，本任务把它
+        换成「创建白名单 ∪ {hidden}」。若漏掉 `"hidden"` 的并集，developer / admin 会从 200 变 400 ——
+        既违反纯增量原则，又因全仓无 `role.*hidden` 断言而不会被任何红灯拦下。本用例即为此设的守卫。
+        """
+        dev, _ = _create_user(client, "_hgm_dev_h", role="developer")
+        admin, _ = _create_user(client, "_hgm_admin_h", role="admin")
+        _, u1 = _create_user(client, "_hgm_h1", role="user")
+        _, u2 = _create_user(client, "_hgm_h2", role="user")
+        assert client.post(f"/api/admin/users/{u1}/role",
+                           json={"role": "hidden"}, headers=dev).status_code == 200
+        assert client.post(f"/api/admin/users/{u2}/role",
+                           json={"role": "hidden"}, headers=admin).status_code == 200
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k HuguanUserManagement`
-Expected: 新增用例全部 FAIL（户管调这些接口现在一律 403 `Permission denied`）。`test_admin_platform_isolation_regression` 应 PASS。
+Expected: 除两条**回归锁定**用例外全部 FAIL（户管调这些接口现在一律 403 `Permission denied`）。
+两条应 PASS 的回归锁定用例：`test_admin_platform_isolation_regression`、`test_developer_and_admin_can_still_set_hidden`。
+后者若在改动前就 FAIL，说明你改坏了 developer/admin 设 `hidden` 的能力，先修实现再继续。`test_admin_cannot_create_huguan` 改动前也应 PASS（admin 原本就无权建 huguan）。
 
 - [ ] **Step 3: 新增 `ALLOWED_CREATE_ROLES` 与改写 `_check_modify_user`**
 
-把 `py/main.py:7455-7464` 整段替换为：
+先在 `py/main.py:7460` 之前插入两个模块级定义（即 `admin_list_users` 与 `_check_modify_user` 之间），再整体替换 `py/main.py:7460-7469` 的 `_check_modify_user`。合并后的结果应为：
 
 ```python
 ALLOWED_CREATE_ROLES = {
@@ -571,17 +600,30 @@ def _check_modify_user(actor: dict, target: dict) -> str | None:
                              platform=platform, role_filter=role_filter)
 ```
 
-`admin_update_role`（`py/main.py:7472`）同法加上 `"huguan"`；并把 `py/main.py:7484` 改为：
+`admin_update_role`（`py/main.py:7485`）同法加上 `"huguan"`；并把 `py/main.py:7500` 的：
 
 ```python
-    allowed = _huguan_allowed_roles(user["role"])
+    if new_role not in ("user", "admin", "viewer", "hidden"):
+```
+
+改为（**注意必须并入 `"hidden"`**，理由见本节执行勘误 (2)）：
+
+```python
+    # 改角色接口的白名单 = 创建白名单 ∪ {hidden}（沿用既有「可设为 hidden」的能力）
+    # 户管额外只能在自己的 huguan / hidden 之间切换
+    allowed = tuple(_huguan_allowed_roles(user["role"])) + ("hidden",)
     if user["role"] == "huguan":
         allowed = ("huguan", "hidden")
     if new_role not in allowed:
         return jsonify(success=False, error="Invalid role"), 400
 ```
 
-`admin_toggle_user`（`py/main.py:7495`）、`admin_delete_user`（`py/main.py:7515`）、`admin_update_user`（`py/main.py:7567`）、`admin_reset_password`（`py/main.py:7607`）、`admin_set_telegram_username`（`py/main.py:7636`）五处，一律把：
+等价性核对（必须逐条成立，实现后自查）：
+- developer：`("user","admin","viewer","huguan","hidden")` ⊇ 现状 `("user","admin","viewer","hidden")` —— 只多出 `huguan`（本需求要的增量）。
+- admin：`("user","admin","viewer","hidden")` —— 与现状**逐位相同**。
+- huguan：`("huguan","hidden")` —— 既不能提权为 admin（`test_huguan_cannot_promote_own_huguan` 断言 400），又能把下属设为 hidden（同一用例断言 200）。
+
+`admin_toggle_user`（`py/main.py:7508`）、`admin_delete_user`（`py/main.py:7528`）、`admin_update_user`（`py/main.py:7579`）、`admin_reset_password`（`py/main.py:7619`）、`admin_set_telegram_username`（`py/main.py:7648`）五处，一律把：
 
 ```python
     if not user or user["role"] not in ("developer", "admin"):
@@ -593,12 +635,12 @@ def _check_modify_user(actor: dict, target: dict) -> str | None:
     if not user or user["role"] not in ("developer", "admin", "huguan"):
 ```
 
-`admin_delete_user` 内 `py/main.py:7525-7526` 的 `if target["role"] == "developer"` 兜底保持不动。
+`admin_delete_user` 内 `py/main.py:7541-7542` 的 `if target["role"] == "developer"` 兜底保持不动（户管已在上方 `_check_modify_user` 被拒，到不了这里）。
 
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k HuguanUserManagement`
-Expected: 10 passed
+Expected: 11 passed
 
 - [ ] **Step 6: 跑全量后端测试**
 
