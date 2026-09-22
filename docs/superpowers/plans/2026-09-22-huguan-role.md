@@ -780,6 +780,26 @@ git commit -m "feat: 新增通用用户列表接口 /api/platform/users"
 
 ### Task 5: GG 账户列表跨用户可见 + 按用户筛选
 
+> **执行勘误（2026-09-22，派发前预检）**：Step 3 正确，**Step 4 有两处会破坏纯增量原则、Step 5 有一处逻辑错误**，均已在下方改正。权威参照是 `py/routes/tt_accounts_routes.py:193-281`（TT 的同类实现）——请通读该函数后再动手，本任务是「按它的模式复刻」，不是自由发挥。
+>
+> **(1) 参照实现的真实形状。** TT 的 `list_accounts` 只在 `a.owner_id` 上做归属收放：
+> ```python
+>     if role in ('developer', 'admin'):
+>         if owner_id:
+>             where.append("a.owner_id = ?"); params.append(owner_id)
+>     else:
+>         where.append("a.owner_id = ?"); params.append(uid)
+> ```
+> 它**从不**对 agent / status 筛选加归属限制（TT 用的是 `agent_id` / `status_id` 直等，没有名称子查询）。本步骤把 GG 的归属条件改成同一形状（`CROSS_USER_ROLES` 取代 `('developer','admin')`），`sc_where` 同法 —— Step 3 已正确。
+>
+> **(2) Step 4 的 `owner_filter or user_id` 是错的。** 对**不带 `owner_id` 的户管**，`owner_filter` 为 `""`，`"" or user_id` 求值为**户管自己的 id**，于是 `AND ag.owner_id = <户管自己>` 会把别人账户上的代理全部过滤掉 —— 与本任务「跨用户可见」的目的直接矛盾（且因新增用例都没设 agent，测试不会发现）。正确形状是**三态**：非跨用户角色 ⟹ 原样 `user_id`（逐字节不变）；跨用户 + 有 `owner_filter` ⟹ 用 `owner_filter`；跨用户 + 无筛选 ⟹ **不加归属条件**（与参照实现一致）。
+>
+> **(3) Step 4 想无条件删除 status 子查询的 `AND owner_id=?`，会改动现有角色的行为。** 简报称「`account_statuses` 的归属列可能不是 `owner_id` 而是按 platform 隔离」—— 该说法**不成立**：`py/database.py:505-511` 的 `account_statuses` 表确有 `owner_id INTEGER REFERENCES users(id)` 且 `UNIQUE(name, owner_id)`，是**按 owner 隔离**的。因此无条件删除会让 `user` / `viewer` 按状态名筛选时匹配到**其他 owner** 的同名状态行，属修改现有角色行为。必须与 (2) 同法做三态处理。
+>
+> **(4) Step 5 的 `scope` 表达式本身正确**（`(owner_filter or "all") if cross_user else str(user_id)`；条件表达式优先级低于 `or`），缓存键加维度是必要的 —— `_app_cache` 是进程级全局缓存，不区分维度会串数据。**但 `mcc_options` / `agents` / `timezone_options` 这三个「下拉选项」查询保持简报的 `owner_filter or user_id` 不变**：对非跨用户角色它恒等于 `user_id`（与今天逐字节一致），对带筛选的户管收窄到该 owner。**已知局限（不在本任务修，记录备查）**：不带 `owner_id` 的户管，其三个下拉选项仍只覆盖自己名下的数据（对户管通常为空），即「能看全部账户但下拉里选不到别人的代理/时区/MCC」。这是下拉数据源的口径问题，需与前端 Task 11-13 的 owner 选择器一起定，本任务不擅自扩权、不改这三个查询的既有形状。
+>
+> **(5) 本路由结尾 `py/main.py:3729` 的 `db.close()` 是既有代码**（`db` 来自请求级共享连接 `_yt_db()`）。本任务**不要动它** —— 修它属于另一件事，不在本需求范围。
+
 **Files:**
 - Modify: `py/main.py:3623-3729`（`accounts_list`）
 - Test: `py/tests/test_huguan_role.py`（追加）
@@ -841,12 +861,44 @@ class TestGgAccountListCrossUser:
         db.close()
         resp = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hdr)
         assert [a["account_id"] for a in resp.get_json()["accounts"]] == []
+
+    def test_huguan_agent_filter_not_scoped_to_self(self, client):
+        """户管不带 owner_id 时按代理名筛选，必须匹配到别人账户上的代理。
+
+        回归点：若 agent / status 四处子查询写成 `owner_filter or user_id`，无筛选时
+        `"" or user_id` 退化为**户管自己的 id**，会把别人账户上的代理整片滤掉 ——
+        与「跨用户可见」的目的直接矛盾。上面 5 条用例都没有设 agent，抓不到这个 bug，
+        本用例即为此设的守卫。
+        """
+        hg, _, u1, _ = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('代理甲', ?, 'gg')", (u1,))
+        ag_id = db.execute("SELECT id FROM agents WHERE name='代理甲'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-AC-1'", (ag_id,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/accounts/list?size=50&agent=代理甲", headers=hg)
+        ids = {a["account_id"] for a in resp.get_json()["accounts"]}
+        assert ids == {"GG-AC-1"}
+
+    def test_regular_user_agent_filter_still_scoped_to_self(self, client):
+        """回归：普通用户按代理名筛选仍然是「只看自己的账户」，不得因本次改动放宽。"""
+        _, _, u1, _ = self._setup(client)
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('代理乙', ?, 'gg')", (u1,))
+        ag_id = db.execute("SELECT id FROM agents WHERE name='代理乙'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-AC-1'", (ag_id,))
+        db.commit()
+        db.close()
+        hdr, _ = _create_user(client, "_ggac_u4", role="user")
+        resp = client.get("/api/accounts/list?size=50&agent=代理乙", headers=hdr)
+        assert [a["account_id"] for a in resp.get_json()["accounts"]] == []
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k GgAccountListCrossUser`
-Expected: `test_huguan_sees_all_users`、`test_huguan_filters_by_owner_id`、`test_status_counts_follow_owner_filter` FAIL；两条回归 PASS。
+Expected: `test_huguan_sees_all_users`、`test_huguan_filters_by_owner_id`、`test_status_counts_follow_owner_filter`、`test_huguan_agent_filter_not_scoped_to_self` FAIL；三条回归（`test_regular_user_sees_only_own`、`test_regular_user_ignores_owner_id`、`test_regular_user_agent_filter_still_scoped_to_self`）PASS。
 
 - [ ] **Step 3: 改写 `accounts_list` 的归属条件**
 
@@ -895,39 +947,61 @@ Expected: `test_huguan_sees_all_users`、`test_huguan_filters_by_owner_id`、`te
         sc_where.append("a.owner_id = ?"); sc_params.append(user_id)
 ```
 
-- [ ] **Step 4: 让三处筛选下拉跟随归属筛选**
+- [ ] **Step 4: 让 agent / status 两个筛选条件的归属收放与列表一致**
 
-`agent` / `status` 的条件在 `py/main.py:3642-3646` 与 `:3689-3690` 用的是 `owner_id = user_id`（按当前用户查选项）。把这两处（共 4 个 SQL 片段）的选项子查询归属列统一改为 `owner_filter or user_id`：
+`agent` / `status` 的筛选条件在 `py/main.py:3642-3647`（主查询）与 `:3689-3691`（`sc_where` 状态计数）共 4 个 SQL 片段，用的是**名称子查询 + `owner_id = user_id`**。这 4 处必须与 Step 3 的归属收放保持**同一三态语义**，否则会出现「列表看全部、筛选只搜自己」。
 
-`py/main.py:3642-3643`：
-
-```python
-        where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND owner_id=?)")
-        params += [status, user_id]
-```
-
-改为：
+先在 Step 3 插入的归属块里补一个三态变量（紧跟在 `owner_filter` 之后、`db = _yt_db()` 之前或之后均可，只要在四处使用之前）：
 
 ```python
-        where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=?)")
-        params += [status]
+    # 子查询归属收放三态：非跨用户角色恒为自身 id（逐字节等于改动前）；
+    # 跨用户 + 有 owner_id 筛选 → 收窄到该 owner；跨用户 + 无筛选 → None 表示不加归属条件
+    sub_owner = None if cross_user else user_id
+    if cross_user and owner_filter:
+        sub_owner = owner_filter
 ```
 
-**注意**：`account_statuses` 的归属列可能不是 `owner_id` 而是按 `platform` 隔离（Task 10 会核实）。这是一个**行为变更点**，需按 Step 5 的实际测试结果决定最终写法；若状态是平台级共享，则直接删掉 `AND owner_id=?` 即可，与 `owner_id` 筛选无关。**先按上面改**，若 Step 5 中 `test_status_counts_follow_owner_filter` 通过且全量测试无回归，即采纳。
-
-`agent` 条件（`py/main.py:3645-3646` 与 `:3689-3690`）的归属列是 `agents.owner_id`（确实按 owner 隔离），改为：
+然后 4 处一律改为按 `sub_owner` 分支。`py/main.py:3642-3644`（status，主查询）：
 
 ```python
-        where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
-        params += [f"%{agent}%", owner_filter or user_id]
+    if status:
+        if sub_owner is None:
+            where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=?)")
+            params += [status]
+        else:
+            where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND owner_id=?)")
+            params += [status, sub_owner]
 ```
 
-`scc` 版本同理：
+`py/main.py:3645-3647`（agent，主查询）：
 
 ```python
-        sc_where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
-        sc_params += [f"%{agent}%", owner_filter or user_id]
+    if agent:
+        if sub_owner is None:
+            where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ?)")
+            params += [f"%{agent}%"]
+        else:
+            where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
+            params += [f"%{agent}%", sub_owner]
 ```
+
+`py/main.py:3689-3691`（agent，`sc_where`）与 status 在 `sc_where` 中的对应位置同法处理 —— 注意 `sc_where` **本来就没有** status 条件（它的用途正是「不含 status 以便展示各状态数量」），因此 `sc_where` 侧只需改 agent 这一处：
+
+```python
+    if agent:
+        if sub_owner is None:
+            sc_where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ?)")
+            sc_params += [f"%{agent}%"]
+        else:
+            sc_where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ? AND owner_id=?)")
+            sc_params += [f"%{agent}%", sub_owner]
+```
+
+**等价性核对（必须逐条成立，实现后自查）**：
+- 非跨用户角色（`user` / `viewer` / `admin` / `hidden`）：`sub_owner == user_id`，四处 SQL 文本与参数与改动前**逐字节相同** ✅
+- 户管带 `owner_id=U`：四处收窄到 `U`，与列表的 `a.owner_id = U` 一致 ✅
+- 户管不带 `owner_id`：四处不加归属条件，能看到全部账户对应的代理/状态名 ✅
+- 与参照实现 `py/routes/tt_accounts_routes.py:209-226` 的取向一致（TT 也只收放 `a.owner_id`，不对 agent/status 加归属限制）
 
 - [ ] **Step 5: 给四个缓存键加 `owner_id` 维度**
 
@@ -946,7 +1020,7 @@ Expected: `test_huguan_sees_all_users`、`test_huguan_filters_by_owner_id`、`te
 - [ ] **Step 6: 运行测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py -v -k GgAccountListCrossUser`
-Expected: 5 passed
+Expected: 7 passed
 
 - [ ] **Step 7: 跑全量后端测试**
 
