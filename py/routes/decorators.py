@@ -35,6 +35,21 @@ def developer_required(fn):
     return wrapper
 
 
+def huguan_required(fn):
+    """要求户管角色（户管看板专用）。"""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            uid = int(get_jwt_identity())
+        except Exception:
+            return err("未认证", 401)
+        user = auth.get_user_by_id(uid)
+        if not user or user["role"] != HUGUAN_ROLE:
+            return err("权限不足，仅户管可操作", 403)
+        return fn(*args, **kwargs)
+    return wrapper
+
+
 def reject_viewer():
     """如果当前用户是 viewer，返回 403 错误响应；否则返回 None。"""
     try:

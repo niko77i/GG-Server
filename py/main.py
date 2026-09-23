@@ -360,6 +360,10 @@ app.register_blueprint(tt_bp)
 from routes.tt_accounts_routes import tt_accounts_bp
 app.register_blueprint(tt_accounts_bp)
 
+# 户管看板路由
+from routes.huguan_dashboard_routes import huguan_dashboard_bp
+app.register_blueprint(huguan_dashboard_bp)
+
 try:
     auth.init_developer(APP_CONFIG)
 except Exception as e:

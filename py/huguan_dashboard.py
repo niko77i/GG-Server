@@ -137,3 +137,45 @@ def is_dead(parsed: dict) -> bool:
     if status:
         return status == DEAD_STATUS
     return (parsed.get("_dead_flag") or "").strip() == "是"
+
+
+# ---------- 每户管的看板配置 ----------
+
+CONFIG_KEY = "huguan_dashboard_{uid}"
+
+
+def load_config(db, user_id: int) -> dict:
+    """读取该户管的看板配置：{"gg": {...}, "tt": {...}}，未配置时为空 dict。"""
+    row = db.execute("SELECT value FROM config WHERE key=?",
+                     (CONFIG_KEY.format(uid=user_id),)).fetchone()
+    if row and row["value"]:
+        try:
+            loaded = json.loads(row["value"])
+            if isinstance(loaded, dict):
+                return loaded
+        except Exception:
+            pass
+    return {}
+
+
+def get_platform_config(db, user_id: int, platform: str) -> dict:
+    """取某平台的看板配置，永远返回两项（未配置时为空串，调用方无需判 None）。"""
+    entry = load_config(db, user_id).get(platform) or {}
+    return {
+        "spreadsheet_id": (entry.get("spreadsheet_id") or "").strip(),
+        "sheet_name": (entry.get("sheet_name") or "").strip(),
+    }
+
+
+def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name: str) -> None:
+    """写入某平台的看板配置，另一个平台的配置保持不变。"""
+    if platform not in PLATFORMS:
+        raise ValueError(f"不支持的平台: {platform}")
+    conf = load_config(db, user_id)
+    conf[platform] = {
+        "spreadsheet_id": (spreadsheet_id or "").strip(),
+        "sheet_name": (sheet_name or "").strip(),
+    }
+    db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+               (CONFIG_KEY.format(uid=user_id), json.dumps(conf, ensure_ascii=False)))
+    db.commit()

@@ -448,3 +448,75 @@ class TestUpdateRowsByAccountId:
         svc = _FakeService(_grid(["111"]))
         assert update_rows_by_account_id(svc, "SS", "看板", []) == {"updated": 0, "not_found": []}
         assert svc.recorder == []
+
+
+# ---------- Task 5: 配置读写 + 权限 ----------
+
+def _create_user(client, username, role="user", platform="gg"):
+    """注册用户 → 改写 role/platform → 登录。返回 (headers, user_id)。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role=?, platform=? WHERE username=?", (role, platform, username))
+    db.commit()
+    row = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    return {"Authorization": f"Bearer {resp.get_json()['access_token']}"}, row["id"]
+
+
+class TestDashboardConfig:
+    def test_save_then_get_roundtrip(self, client):
+        hg, _ = _create_user(client, "_hg_cfg1", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "gg", "spreadsheet_id": "SS-GG", "sheet_name": "户管看板",
+        })
+        assert resp.status_code == 200
+        got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert got["gg"] == {"spreadsheet_id": "SS-GG", "sheet_name": "户管看板"}
+
+    def test_platforms_are_isolated(self, client):
+        """GG 与 TT 各配各的，互不覆盖（需求原文：这个sheet在gg和tt配置的是不一样的）。"""
+        hg, _ = _create_user(client, "_hg_cfg2", role="huguan")
+        client.post("/api/huguan/dashboard", headers=hg,
+                    json={"platform": "gg", "spreadsheet_id": "SS-GG", "sheet_name": "G"})
+        client.post("/api/huguan/dashboard", headers=hg,
+                    json={"platform": "tt", "spreadsheet_id": "SS-TT", "sheet_name": "T"})
+        got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert got["gg"]["spreadsheet_id"] == "SS-GG"
+        assert got["tt"]["spreadsheet_id"] == "SS-TT"
+
+    def test_users_are_isolated(self, client):
+        hg1, _ = _create_user(client, "_hg_cfg_a", role="huguan")
+        hg2, _ = _create_user(client, "_hg_cfg_b", role="huguan")
+        client.post("/api/huguan/dashboard", headers=hg1,
+                    json={"platform": "gg", "spreadsheet_id": "SS-1", "sheet_name": "A"})
+        got2 = client.get("/api/huguan/dashboard", headers=hg2).get_json()["config"]
+        assert got2.get("gg", {}).get("spreadsheet_id", "") == ""
+
+    def test_url_is_parsed_to_id(self, client):
+        hg, _ = _create_user(client, "_hg_cfg3", role="huguan")
+        client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "gg",
+            "spreadsheet_id": "https://docs.google.com/spreadsheets/d/ABC-123_x/edit#gid=0",
+            "sheet_name": "S",
+        })
+        got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert got["gg"]["spreadsheet_id"] == "ABC-123_x"
+
+    def test_invalid_platform_rejected(self, client):
+        hg, _ = _create_user(client, "_hg_cfg4", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg,
+                           json={"platform": "fb", "spreadsheet_id": "S", "sheet_name": "N"})
+        assert resp.status_code == 400
+
+    def test_non_huguan_gets_403(self, client):
+        """规格：全部 /api/huguan/dashboard* 仅户管可达。"""
+        for role in ("user", "viewer", "admin", "developer"):
+            h, _ = _create_user(client, f"_nothg_{role}", role=role)
+            assert client.get("/api/huguan/dashboard", headers=h).status_code == 403
+            assert client.post("/api/huguan/dashboard", headers=h,
+                               json={"platform": "gg", "spreadsheet_id": "S",
+                                     "sheet_name": "N"}).status_code == 403
+
+    def test_requires_jwt(self, client):
+        assert client.get("/api/huguan/dashboard").status_code == 401
