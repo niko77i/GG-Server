@@ -143,6 +143,37 @@ def dashboard_sync():
     return ok({"result": result, "diff": diff})
 
 
+@huguan_dashboard_bp.route("/api/huguan/dashboard/push", methods=["POST"])
+@jwt_required()
+@huguan_required
+def dashboard_push():
+    """系统 → 表：全量刷新。同步执行，返回实际写入行数。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return err("请求体必须是 JSON 对象", 400)
+    platform = str(data.get("platform") or "").strip()
+    if platform not in hd.PLATFORMS:
+        return err("platform 必须是 gg 或 tt", 400)
+
+    uid = get_uid()
+    db = database.get_db()
+    try:
+        conf = hd.get_platform_config(db, uid, platform)
+        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+            return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
+        rows = hd.collect_rows_for_push(db, platform)
+    finally:
+        db.close()
+
+    import google_sheets_service as gs
+    from main import _GOOGLE_SHEETS_CONFIG
+    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+    res = gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
+                                       conf["sheet_name"], rows)
+    return ok({"result": {"rows": len(rows), "updated": res["updated"],
+                          "not_found": res["not_found"]}})
+
+
 def _write_background(service, conf, rows):
     """后台写表；失败只记日志，不影响同步接口的返回（对照 main.py:5006 的做法）。"""
     import logging

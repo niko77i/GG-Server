@@ -659,3 +659,99 @@ def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:
         db.execute(f"UPDATE {table} SET death_date='', "
                    "status_changed_date=datetime('now','localtime') WHERE id=?",
                    (account_pk,))
+
+
+# ---------- Task 8: 系统 → 表 全量刷新 ----------
+
+# 系统 → 表 的行查询语句。owner_name 取 display_name（回退 username）。
+#
+# 大MCC（J 列，parent_mcc_name）取自**该账户所属 MCC 的父级**：`mcc.parent_mcc_id`
+# 指向父 MCC 行。注意这条 join 的条件是 `m.parent_mcc_id = pm.id`，**不是**
+# `a.parent_mcc_id` —— `accounts` 表根本没有 parent_mcc_id 列（全仓只在 `mcc`
+# 上有，database.py:221），写成账户列名会让整条 SQL 直接 OperationalError。
+_GG_ROW_SQL = """
+SELECT a.account_id, a.acquired_date, a.death_date, a.timezone,
+       m.name AS mcc_name, pm.name AS parent_mcc_name,
+       ag.name AS agent_name, COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
+       s.name AS status_name
+FROM accounts a
+LEFT JOIN mcc m ON a.mcc_id = m.id
+LEFT JOIN mcc pm ON m.parent_mcc_id = pm.id
+LEFT JOIN agents ag ON a.agent_id = ag.id
+LEFT JOIN users u ON a.owner_id = u.id
+LEFT JOIN account_statuses s ON a.status_id = s.id
+"""
+
+_TT_ROW_SQL = """
+SELECT a.advertiser_id AS account_id, a.acquired_date, a.death_date, a.country,
+       a.timezone, a.consumption, a.remark,
+       b.name AS bc_name, ag.name AS agent_name,
+       COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
+       s.name AS status_name
+FROM tt_accounts a
+LEFT JOIN tt_bcs b ON a.bc_id = b.id
+LEFT JOIN agents ag ON a.agent_id = ag.id
+LEFT JOIN users u ON a.owner_id = u.id
+LEFT JOIN account_statuses s ON a.status_id = s.id
+"""
+
+
+def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
+    """系统 → 表：查出待写账户并转成 update_rows_by_account_id 的入参。
+
+    产出里刻意不含归属变更通道列（规格 §7.2 规则 2）。
+    account_ids=None 表示全部；给了具体 ID 时只取这些。
+    """
+    sql = _TT_ROW_SQL if platform == "tt" else _GG_ROW_SQL
+    params = ()
+    if account_ids is not None:
+        if not account_ids:
+            return []
+        marks = ",".join("?" for _ in account_ids)
+        sql += f" WHERE a.{ACCOUNT_KEY_FIELD[platform]} IN ({marks})"
+        params = tuple(account_ids)
+
+    out = []
+    for r in db.execute(sql, params).fetchall():
+        row = dict(r)
+        out.append({"account_id": str(row.get("account_id") or "").strip(),
+                    "cells": cells_for_row(row, platform)})
+    return [o for o in out if o["account_id"]]
+
+
+def push_rows(user_id: int, platform: str, account_ids=None) -> None:
+    """把账户当前值写进该户管自己的看板表。
+
+    未配置看板 → 静默返回（不是每个用户都是户管，这不是错误）。
+    后台线程写，失败只记日志，不影响调用方的接口返回。
+    """
+    import logging
+    log = logging.getLogger("gg-server")
+
+    db = _open_db()
+    try:
+        conf = get_platform_config(db, user_id, platform)
+        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+            return
+        rows = collect_rows_for_push(db, platform, account_ids)
+    finally:
+        db.close()
+
+    if not rows:
+        return
+
+    def _do():
+        import google_sheets_service as gs
+        from main import _GOOGLE_SHEETS_CONFIG
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
+                                     conf["sheet_name"], rows)
+
+    from main import _sync_sheets_background
+    _sync_sheets_background(_do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)
+
+
+def _open_db():
+    """惰性取库连接（避免本模块在 import 期依赖 database）。"""
+    import database
+    return database.get_db()

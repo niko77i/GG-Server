@@ -1756,3 +1756,165 @@ class TestApplyDiffUncoveredBranches:
         assert (row["status_changed_date"] or "").strip() != ""
         assert row["status_changed_date"] != "2026-01-01 00:00:00"
         db.close()
+
+
+# ---------- Task 8: 全量刷新 + GG 触发点 ----------
+
+class TestCollectRowsForPush:
+    def test_gg_rows_have_no_owner_channel(self, client):
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_u1", "张三")
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('MCC-P','9')")
+        db.execute("INSERT INTO agents(name, platform) VALUES('渠道P','gg')")
+        db.commit()
+        mcc = db.execute("SELECT id FROM mcc WHERE name='MCC-P'").fetchone()["id"]
+        ag = db.execute("SELECT id FROM agents WHERE name='渠道P'").fetchone()["id"]
+        _seed_account(db, "P-1", u1, mcc_id=mcc, agent_id=ag, timezone="UTC")
+        rows = collect_rows_for_push(db, "gg", ["P-1"])
+        assert len(rows) == 1
+        assert rows[0]["account_id"] == "P-1"
+        assert rows[0]["cells"]["D"] == "MCC-P"
+        assert rows[0]["cells"]["F"] == "渠道P"
+        assert rows[0]["cells"]["G"] == "张三"
+        assert "H" not in rows[0]["cells"]
+        db.close()
+
+    def test_missing_account_ids_skipped(self, client):
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        assert collect_rows_for_push(db, "gg", ["NOPE"]) == []
+        db.close()
+
+    def test_blank_display_name_falls_back_to_username(self, client):
+        """运营的 display_name 是空串时，运营列写 username 而不是留空。
+
+        仓库既有一致的写法是 Python 侧 `display_name or username`（main.py:4427/6738/6997）。
+        SQL 里 `COALESCE(display_name, username, '')` 只回退 NULL，**漏掉空串**这一支 ——
+        会把有归属的账户在表里写成「运营留空」。故两边都用 NULLIF 挡一层。
+        """
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_blankgg", "")
+        _seed_account(db, "P-BLANK", u1)
+        rows = collect_rows_for_push(db, "gg", ["P-BLANK"])
+        assert rows[0]["cells"]["G"] == "_push_blankgg"
+        db.close()
+
+    def test_tt_blank_display_name_falls_back_to_username(self, client):
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_blanktt", "")
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, owner_id) "
+                   "VALUES('TP-BLANK','TP-BLANK',?)", (u1,))
+        db.commit()
+        rows = collect_rows_for_push(db, "tt", ["TP-BLANK"])
+        assert rows[0]["cells"]["G"] == "_push_blanktt"
+        db.close()
+
+    def test_tt_rows(self, client):
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_u2", "李四")
+        db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('BC-P','BC-P')")
+        db.commit()
+        bc = db.execute("SELECT id FROM tt_bcs WHERE name='BC-P'").fetchone()["id"]
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, owner_id, bc_id, country, "
+                   "consumption, remark) VALUES('TP-1','TP-1',?,?,'US','9.9','备注Z')", (u1, bc))
+        db.commit()
+        rows = collect_rows_for_push(db, "tt", ["TP-1"])
+        assert rows[0]["cells"]["D"] == "BC-P"
+        assert rows[0]["cells"]["E"] == "US"
+        assert rows[0]["cells"]["G"] == "李四"
+        assert rows[0]["cells"]["J"] == "9.9"
+        assert rows[0]["cells"]["M"] == "备注Z"
+        assert "L" not in rows[0]["cells"]     # 换绑情况绝不自动回写
+        db.close()
+
+    def test_gg_parent_mcc_is_resolved_from_the_mcc_tree(self, client):
+        """J 列（大MCC）取该账户所属 MCC 的**父级**名称，不是 MCC 自身的名字。
+
+        这条 join 挂在 `mcc` 上（`m.parent_mcc_id = pm.id`）：`accounts` 根本没有
+        parent_mcc_id 列（全仓只在 mcc 上有，database.py:221），照抄成账户列名整条
+        SQL 直接 OperationalError。而写成 `m.parent_mcc_id = m.id` 则自连回自己 ——
+        J 列会被静默写成与 D 列相同的 MCC 名，一次全量刷新就把户管表里的「大MCC」
+        全部降成小MCC 名。简报的 `_GG_ROW_SQL` 正是前者，故这条断言是修正后的唯一钉子。
+        """
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_pm", "钱七")
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('大MCC-P','8')")
+        db.commit()
+        pid = db.execute("SELECT id FROM mcc WHERE name='大MCC-P'").fetchone()["id"]
+        db.execute("INSERT INTO mcc(name, mcc_id, parent_mcc_id) VALUES('小MCC-P','9',?)",
+                   (pid,))
+        db.commit()
+        mcc = db.execute("SELECT id FROM mcc WHERE name='小MCC-P'").fetchone()["id"]
+        _seed_account(db, "P-PM", u1, mcc_id=mcc)
+        cells = collect_rows_for_push(db, "gg", ["P-PM"])[0]["cells"]
+        assert cells["D"] == "小MCC-P"
+        assert cells["J"] == "大MCC-P"
+        db.close()
+
+
+class TestPushEndpoint:
+    def test_unconfigured_is_silent_noop(self, client, monkeypatch):
+        """不是每个用户都是户管；未配置就静默跳过，不能报错。"""
+        from huguan_dashboard import push_rows
+        import huguan_dashboard as hd_mod
+        called = []
+        monkeypatch.setattr(hd_mod, "get_platform_config",
+                            lambda db, uid, p: {"spreadsheet_id": "", "sheet_name": ""})
+        push_rows(99999, "gg")
+        assert called == []
+
+    def test_push_writes_all_visible_accounts(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_push_ep", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        _seed_account(db, "PE-1", uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "gg"})
+        assert resp.status_code == 200
+        assert resp.get_json()["result"]["rows"] == 1
+
+    def test_non_huguan_403(self, client):
+        h, _ = _create_user(client, "_push_user", role="user")
+        assert client.post("/api/huguan/dashboard/push", headers=h,
+                           json={"platform": "gg"}).status_code == 403
+
+    def test_push_rejects_bad_platform_and_unconfigured(self, client, monkeypatch):
+        """HTTP 边界的三种「不校验就会静默干错事」。
+
+        platform 不校验时 `collect_rows_for_push(db, "fb")` 会**静默落到 GG 分支**
+        （只有 "tt" 走 TT SQL），把 GG 账户写进一张来路不明的表；这条只有在 GG
+        **已配置**时才咬得住 —— 未配置的用户无论走哪个平台都会 400。
+        未配置档本身也要拦：否则会拿着空 spreadsheet_id 去打 Sheets API。
+        另与 `/sync` 同口径，非 dict body 是 400 而不是 500。
+        """
+        hg, uid = _create_user(client, "_push_bad", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        _seed_account(db, "BAD-1", uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        # GG 已配置、平台非法 ⇒ 必须 400（不校验就会按 GG 写出去）
+        assert client.post("/api/huguan/dashboard/push", headers=hg,
+                           json={"platform": "fb"}).status_code == 400
+        # GG 已配置、TT 未配置 ⇒ 400，且一行都不许写
+        assert client.post("/api/huguan/dashboard/push", headers=hg,
+                           json={"platform": "tt"}).status_code == 400
+        assert client.post("/api/huguan/dashboard/push", headers=hg,
+                           json=[1, 2]).status_code == 400
+        assert captured == []
