@@ -381,7 +381,7 @@ ALIVE_STATUS = "存活"
 # 列规格：每项 (列字母, 表头, 系统字段名, 可写, 可读)
 # 字段名为 None → 该列系统不映射，户管自己用公式维护，读写都不碰。
 #
-# 字段名里以 "_" 开头的三个是合成字段，不对应数据库列：
+# 字段名里以 "_" 开头的两个是合成字段，不对应数据库列：
 #   _dead_flag      ← death_date 是否非空，写"是"/空
 #   _owner_channel  ← 重新分配 / 换绑情况，归属变更通道（规格 §7）
 COLUMN_SPEC = {
@@ -2894,4 +2894,6 @@ git commit -m "fix: 代码审查收口"
 
 - Task 8 / Task 9 的 6 处触发点行号是**近似行号**，实现时必须按端点名定位，不能只认行号（本仓库有并行会话在改文件，行号会漂）。
 - 已核对属实的既有事实（勿再怀疑）：`routes/decorators.py:5` 已导入 `HUGUAN_ROLE`（新增装饰器无需改 import）；`GoogleSheetsServiceError` 定义在 `google_sheets_service.py:15`；`mcc.parent_mcc_id` 存在；`main.py:7` 有模块级 `log`。
+- **TT 行字典必须用 `account_id` 作键（Task 2 审查者指出的跨任务交接项）**：`cells_for_row` 一律读 `row["account_id"]`，而 TT 的数据库列名是 `advertiser_id`。Task 8 的 `_TT_ROW_SQL` 已经用 `a.advertiser_id AS account_id` 别名兜住了，**任何新增的 TT 行查询都必须照做** —— 否则 C 列（定位键）会被写成空串，而它正在写入区间 `A:J` 之内，会静默清掉表里的账户ID。
+- **`_dead_flag` 假定 `death_date` 是 str**：`cells_for_row` 对它直接 `.strip()`（未走 `str(...)` 兜底）。SQLite 里该列是 TEXT 且 Task 8 的查询原样取出，故当前无风险；但若将来有调用方传入 `datetime.date`，会抛 `AttributeError`。Task 2 审查者标记为 Minor，未修。
 - **命名遮蔽警告（Task 1 实现者与审查者共同确认）**：既有的 `update_cell_by_account_id` 内部有两个同名符号会遮蔽本计划新增的模块级函数 —— **`:581` 的形参 `col_index`**（遮蔽整个函数体）与 **`:602` 附近的局部变量 `col_letter`**。既有逻辑完全不受影响（该函数把它们当整数用，从不调用新函数），但**在那个函数体内调用新 `col_letter()` / `col_index()` 会静默拿到形参/局部值而非函数**。Task 4 新增的 `update_rows_by_account_id` 是独立函数、不在此列，无需处理；仅当后续需要在旧函数体内复用新工具时才要先改名。
