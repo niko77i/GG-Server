@@ -439,7 +439,7 @@ class TestPlatformUsersEndpoint:
         """新口径：非户管用户在该平台 0 户时，不出现在下拉里。"""
         hg, _ = _huguan(client, "_hgpu_hg3")
         _, with_acc = _create_user(client, "_hgpu_with", role="user", platform="gg")
-        _, without_acc = _create_user(client, "_hgpu_without", role="user", platform="gg")
+        _create_user(client, "_hgpu_without", role="user", platform="gg")  # 0 户夹具；建不出来会在 _create_user 内自行抛出
         db = database.get_db()
         db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES('有户','_hgpu_with_acc',?)", (with_acc,))
         db.commit()
@@ -449,7 +449,6 @@ class TestPlatformUsersEndpoint:
         names = {u["username"] for u in resp.get_json()["users"]}
         assert "_hgpu_with" in names
         assert "_hgpu_without" not in names
-        assert without_acc  # 夹具确实建出来了（避免上面那条负面断言因夹具不存在而恒真）
 
     def test_deleted_account_does_not_count(self, client):
         """新口径：「有账户」看的是**未删除**的户 —— 只剩软删除户的人同样被排除。

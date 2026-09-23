@@ -6032,7 +6032,8 @@ def platform_users():
     /api/accounts/list 等既有查询一致；软删除的户不算数。
     """
     platform = _get_effective_platform()
-    table = ACCOUNT_TABLE_BY_PLATFORM.get(platform, "accounts")  # 未知平台回退 gg，与 _get_effective_platform 的缺省一致
+    # 未知平台只回退**选表**（落到 GG 账户表）；`platform = ?` 用的仍是原样值
+    table = ACCOUNT_TABLE_BY_PLATFORM.get(platform, "accounts")
     db = _yt_db()
     rows = db.execute(
         "SELECT u.id, u.username, u.display_name, u.platform FROM users u "
