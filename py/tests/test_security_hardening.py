@@ -4,6 +4,28 @@ import shutil
 
 import pytest
 
+import database
+
+
+def _create_user(client, username, role="user", platform="gg", created_by=None):
+    """注册用户 → 直接改写 role/platform → 登录，返回 (headers, user_id)。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role=?, platform=?, created_by=? WHERE username=?",
+               (role, platform, created_by, username))
+    db.commit()
+    row = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    token = resp.get_json().get("access_token", "")
+    return {"Authorization": f"Bearer {token}"}, row["id"]
+
+
+def _mk_account(db, owner_id, account_id, name="测试账户"):
+    db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES(?,?,?)",
+               (name, account_id, owner_id))
+    db.commit()
+
 
 def _data_root():
     """复刻 py/main.py 的 _DATA_ROOT（非 frozen：os.path.dirname(_current_dir)，_current_dir = py/）。
@@ -169,3 +191,50 @@ class TestScrapeSaveDirNarrowed:
             "save_dir": evil,
         }, headers=auth_headers)
         assert resp.status_code == 400
+
+
+class TestB1GgWriteOwnership:
+    def _mk_owned_account(self, client, owner_uid, account_id):
+        db = database.get_db()
+        _mk_account(db, owner_uid, account_id, "账户")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id=?", (account_id,)).fetchone()["id"]
+        db.close()
+        return aid
+
+    def test_user_cannot_update_others_account(self, client):
+        _, owner_uid = _create_user(client, "_b1_owner", role="user")
+        att, _ = _create_user(client, "_b1_att", role="user")
+        aid = self._mk_owned_account(client, owner_uid, "GG-B1-1")
+        resp = client.put(f"/api/accounts/{aid}", json={"name": "被篡改"}, headers=att)
+        assert resp.status_code == 403
+        db = database.get_db()
+        name = db.execute("SELECT name FROM accounts WHERE id=?", (aid,)).fetchone()["name"]
+        db.close()
+        assert name == "账户"   # 数据未变
+
+    def test_user_can_update_own_account(self, client):
+        owner_hdr, owner_uid = _create_user(client, "_b1_owner2", role="user")
+        aid = self._mk_owned_account(client, owner_uid, "GG-B1-2")
+        resp = client.put(f"/api/accounts/{aid}", json={"name": "改名成功"}, headers=owner_hdr)
+        assert resp.status_code == 200
+
+    def test_developer_can_update_others_account(self, client):
+        _, owner_uid = _create_user(client, "_b1_owner3", role="user")
+        dev, _ = _create_user(client, "_b1_dev", role="developer")
+        aid = self._mk_owned_account(client, owner_uid, "GG-B1-3")
+        resp = client.put(f"/api/accounts/{aid}", json={"name": "代改"}, headers=dev)
+        assert resp.status_code == 200
+
+    def test_user_cannot_reassign_others_account(self, client):
+        _, owner_uid = _create_user(client, "_b1_owner4", role="user")
+        att, _ = _create_user(client, "_b1_att4", role="user")
+        aid = self._mk_owned_account(client, owner_uid, "GG-B1-4")
+        resp = client.put(f"/api/accounts/{aid}/reassign", json={}, headers=att)
+        assert resp.status_code == 403
+
+    def test_user_cannot_batch_update_others_account(self, client):
+        _, owner_uid = _create_user(client, "_b1_owner5", role="user")
+        att, _ = _create_user(client, "_b1_att5", role="user")
+        aid = self._mk_owned_account(client, owner_uid, "GG-B1-5")
+        resp = client.post("/api/accounts/batch-update", json={"ids": [aid], "field": "timezone", "value": "UTC+9"}, headers=att)
+        assert resp.status_code == 403

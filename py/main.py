@@ -4268,6 +4268,10 @@ def accounts_update(aid):
     db = _yt_db()
     try:
         user_id = int(get_jwt_identity())
+        # 归属校验：非跨用户角色只能操作自己的账户
+        ac = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()
+        if not ac or (ac["owner_id"] != user_id and not _cross_user_actor(user_id)):
+            return jsonify({"success": False, "error": "账户不存在或无权操作"}), 403
         old_status = db.execute(
             "SELECT a.account_id, a.status_changed_date, a.agent_id, a.status_id, "
             "ag.name AS agent_name, st.name AS status_name "
@@ -4420,6 +4424,10 @@ def accounts_reassign(aid):
         if not existing:
             db.close()
             return jsonify({"success": False, "error": "账户不存在"}), 404
+        # 归属校验：非跨用户角色不能转移他人账户
+        if int(existing["owner_id"] or 0) != user_id and not _cross_user_actor(user_id):
+            db.close()
+            return jsonify({"success": False, "error": "无权转移该账户"}), 403
         if int(existing["owner_id"] or 0) == target_owner:
             db.close()
             return jsonify({"success": False, "error": "该账户已属于当前用户，无需转移"}), 409
@@ -4633,6 +4641,15 @@ def accounts_batch_update():
         if field == "mcc_id" and (value is None or value == 0 or value == "0" or (isinstance(value, str) and not value.strip())):
             value = None
         user_id = int(get_jwt_identity())
+        # 归属校验：非跨用户角色批量改时，ids 必须全部属于自己（任一越权即整体拒绝）
+        if not _cross_user_actor(user_id) and ids:
+            placeholders = ",".join("?" for _ in ids)
+            owned = db.execute(
+                f"SELECT COUNT(*) FROM accounts WHERE id IN ({placeholders}) AND owner_id=?",
+                (*ids, user_id)
+            ).fetchone()[0]
+            if owned != len(ids):
+                return jsonify({"success": False, "error": "包含无权操作的账户"}), 403
         new_clear_rows = []
         dashboard_sync_rows = []  # 收集状态变更账户，供 my_dashboard 后台同步
 
