@@ -605,3 +605,218 @@ class TestDashboardConfig:
         got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
         assert got["gg"] == {"spreadsheet_id": "", "sheet_name": ""}
         assert got["tt"] == {"spreadsheet_id": "", "sheet_name": ""}
+
+
+# ---------- Task 6: 差异比对 ----------
+
+def _seed(db, username, display_name, role="user", platform="gg"):
+    db.execute("INSERT INTO users(username, password, role, display_name, platform) "
+               "VALUES(?,?,?,?,?)", (username, "x", role, display_name, platform))
+    db.commit()
+    return db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()["id"]
+
+
+def _seed_account(db, account_id, owner_id, **over):
+    cols = {"account_id": account_id, "name": account_id, "owner_id": owner_id,
+            "timezone": "", "death_date": "", "deleted_at": None}
+    cols.update(over)
+    keys = ", ".join(cols)
+    marks = ", ".join("?" for _ in cols)
+    db.execute(f"INSERT INTO accounts({keys}) VALUES({marks})", tuple(cols.values()))
+    db.commit()
+    return db.execute("SELECT id FROM accounts WHERE account_id=?", (account_id,)).fetchone()["id"]
+
+
+class TestResolvers:
+    def test_resolve_owner_by_display_name(self, client):
+        from huguan_dashboard import resolve_owner_id
+        db = database.get_db()
+        uid = _seed(db, "_r1", "张三")
+        assert resolve_owner_id(db, "张三") == uid
+        db.close()
+
+    def test_resolve_owner_falls_back_to_username(self, client):
+        from huguan_dashboard import resolve_owner_id
+        db = database.get_db()
+        uid = _seed(db, "_r2", "")
+        assert resolve_owner_id(db, "_r2") == uid
+        db.close()
+
+    def test_ambiguous_name_returns_none(self, client):
+        """名称命中 ≥2 条 → None（规格 §8.4：该列不落库）。"""
+        from huguan_dashboard import resolve_owner_id
+        db = database.get_db()
+        _seed(db, "_r3a", "重名")
+        _seed(db, "_r3b", "重名")
+        assert resolve_owner_id(db, "重名") is None
+        db.close()
+
+    def test_username_colliding_with_another_display_name_is_ambiguous(self, client):
+        """甲的 display_name 撞上乙的 username ⇒ 必须判为歧义，不得猜中甲。
+
+        拆成「先查 display_name，查不到再查 username」两条查询时，这里会静默返回
+        `_r5a`（display_name 那条先命中），把账户挂到错误的人名下。写表方向
+        （`COALESCE(NULLIF(display_name,''), username)`）产出的是一个合成名字空间，
+        反向解析必须对称。对照行 `_r5b` 是**必须被算进去的第二个命中**。
+        """
+        from huguan_dashboard import resolve_owner_id
+        db = database.get_db()
+        _seed(db, "_r5a", "撞名")   # display_name = "撞名"
+        _seed(db, "撞名", "")       # username     = "撞名"（display_name 空 → 回退后也叫"撞名"）
+        assert resolve_owner_id(db, "撞名") is None
+        db.close()
+
+    def test_unknown_name_returns_none(self, client):
+        from huguan_dashboard import resolve_owner_id
+        db = database.get_db()
+        assert resolve_owner_id(db, "查无此人") is None
+        assert resolve_owner_id(db, "") is None
+        db.close()
+
+    def test_resolve_status_creates_under_owner(self, client):
+        """按 owner + 平台双作用域：同名同 owner 但平台不同必须是两行。
+
+        account_statuses.platform 默认 'gg'（database.py:153），不显式写平台
+        会让 TT 的状态落进 gg 命名空间（状态下拉按平台过滤，main.py:6059）。
+        """
+        from huguan_dashboard import resolve_status_id
+        db = database.get_db()
+        uid = _seed(db, "_r4", "王五")
+        sid = resolve_status_id(db, "待优化", uid, "gg")
+        db.commit()
+        row = db.execute("SELECT owner_id, platform FROM account_statuses WHERE id=?",
+                         (sid,)).fetchone()
+        assert row["owner_id"] == uid
+        assert row["platform"] == "gg"
+        # 再解析同名同平台，应复用同一行而不是重复新建
+        assert resolve_status_id(db, "待优化", uid, "gg") == sid
+        # 同名同 owner 换平台 → 另一行，且平台正确
+        sid_tt = resolve_status_id(db, "待优化", uid, "tt")
+        db.commit()
+        assert sid_tt != sid
+        assert db.execute("SELECT platform FROM account_statuses WHERE id=?",
+                          (sid_tt,)).fetchone()["platform"] == "tt"
+        assert resolve_status_id(db, "待优化", uid, "tt") == sid_tt
+        db.close()
+
+
+class TestBuildDiff:
+    def _prepare(self, client):
+        db = database.get_db()
+        u1 = _seed(db, "_bd_zhang", "张三")
+        u2 = _seed(db, "_bd_li", "李四")
+        return db, u1, u2
+
+    def test_new_account_goes_to_create(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        parsed = [dict(parse_row(["", "", "NEW-1", "", "", "", "张三"], "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert len(diff["to_create"]) == 1
+        assert diff["to_create"][0]["account_id"] == "NEW-1"
+        assert diff["to_create"][0]["owner_id"] == u1
+        db.close()
+
+    def test_new_account_without_owner_leaves_null(self, client):
+        """规格 §7.4：运营列空着就空着，户管随时可以改。"""
+        from huguan_dashboard import build_diff, parse_row
+        db, _, _ = self._prepare(client)
+        parsed = [dict(parse_row(["", "", "NEW-2"], "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert diff["to_create"][0]["owner_id"] is None
+        db.close()
+
+    def test_existing_deleted_account_is_skipped(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "DEL-1", u1, deleted_at="2026-09-01 00:00:00")
+        parsed = [dict(parse_row(["", "", "DEL-1"], "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert len(diff["to_skip"]) == 1
+        assert diff["to_create"] == []
+        db.close()
+
+    def test_owner_channel_overrides_current_owner(self, client):
+        """规格 §7.1 + 规则 1：重新分配 压过 运营。"""
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, u2 = self._prepare(client)
+        _seed_account(db, "OWN-1", u1)
+        # G=张三（当前）、H=李四（重新分配）
+        parsed = [dict(parse_row(["", "", "OWN-1", "", "", "", "张三", "李四"], "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert len(diff["owner_changes"]) == 1
+        assert diff["owner_changes"][0]["to_owner_id"] == u2
+        assert diff["owner_changes"][0]["from"] == "张三"
+        assert diff["owner_changes"][0]["to"] == "李四"
+        db.close()
+
+    def test_matching_owner_produces_no_change(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "OWN-2", u1)
+        parsed = [dict(parse_row(["", "", "OWN-2", "", "", "", "张三"], "gg"), row=2)]
+        assert build_diff(db, parsed, "gg")["owner_changes"] == []
+        db.close()
+
+    def test_unknown_owner_is_warning_not_change(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "OWN-3", u1)
+        parsed = [dict(parse_row(["", "", "OWN-3", "", "", "", "查无此人"], "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert diff["owner_changes"] == []
+        assert any("查无此人" in w["message"] for w in diff["warnings"])
+        db.close()
+
+    def test_blank_owner_keeps_existing_owner(self, client):
+        """规格 §7.4：表里两列都空时，不得把系统里已有的归属清掉。"""
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "OWN-4", u1)
+        parsed = [dict(parse_row(["", "", "OWN-4"], "gg"), row=2)]
+        assert build_diff(db, parsed, "gg")["owner_changes"] == []
+        db.close()
+
+    def test_missing_account_id_is_warning(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, _, _ = self._prepare(client)
+        parsed = [dict(parse_row(["", "", "   "], "gg"), row=7)]
+        diff = build_diff(db, parsed, "gg")
+        assert diff["to_create"] == []
+        assert any(w["row"] == 7 for w in diff["warnings"])
+        db.close()
+
+    def test_ambiguous_mcc_name_is_warning(self, client):
+        """重名 MCC 不落库，但同一行的其他列照常更新。
+
+        ★ `to_update` 必须非空，否则下面那条断言是**空集上的恒真式**。
+        所以这里让 I 列（时区）与库里不同，先制造出一条真实更新。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "MCCACC", u1)
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('同名MCC','1')")
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('同名MCC','2')")
+        db.commit()
+        parsed = [dict(parse_row(["", "", "MCCACC", "同名MCC", "", "", "", "",
+                                  "Asia/Shanghai"], "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert len(diff["to_update"]) == 1          # 非空，下面的断言才有意义
+        assert diff["to_update"][0]["fields"] == {"timezone": "Asia/Shanghai"}
+        assert "mcc_id" not in diff["to_update"][0]["fields"]
+        assert any("同名MCC" in w["message"] for w in diff["warnings"])
+        db.close()
+
+    def test_summary_counts(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, u2 = self._prepare(client)
+        _seed_account(db, "S-1", u1)
+        parsed = [
+            dict(parse_row(["", "", "S-1", "", "", "", "张三", "李四"], "gg"), row=2),
+            dict(parse_row(["", "", "S-NEW", "", "", "", "张三"], "gg"), row=3),
+        ]
+        s = build_diff(db, parsed, "gg")["summary"]
+        assert s["total_in_sheet"] == 2
+        assert s["owner_changes"] == 1
+        assert s["new_accounts"] == 1
+        db.close()

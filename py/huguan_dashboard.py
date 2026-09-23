@@ -193,3 +193,241 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
     db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                (CONFIG_KEY.format(uid=user_id), json.dumps(conf, ensure_ascii=False)))
     db.commit()
+
+
+def resolve_named_id(db, sql: str, params: tuple = ()) -> int | None:
+    """按名称查唯一主键。命中 0 条或 ≥2 条都返回 None（规格 §8.4）。
+
+    重名时不猜 —— 猜错就是把账户挂到了错误的 MCC / BC / 渠道上。
+    """
+    rows = db.execute(sql, params).fetchall()
+    return rows[0]["id"] if len(rows) == 1 else None
+
+
+def resolve_owner_id(db, name: str):
+    """归属名 → users.id。空 display_name 回退 username，唯一命中才返回。
+
+    必须用**单条** COALESCE(NULLIF(display_name,''), username) 查询，不能拆成
+    「先查 display_name，查不到再查 username」两条：后者会在
+    「甲的 display_name 与乙的 username 同名」时静默返回甲 —— 而写表方向
+    （`_GG_ROW_SQL` / `_TT_ROW_SQL`）产出的正是这一个合成名字空间，两边不对称
+    就会把账户挂到错误的人名下。规格 §8.4 的统一口径是「唯一命中才落库」，
+    跨命名空间撞名属 ≥2 条命中，应出警告而不是猜。
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    return resolve_named_id(
+        db,
+        "SELECT id FROM users WHERE COALESCE(NULLIF(display_name, ''), username) = ?",
+        (name,))
+
+
+def resolve_status_id(db, name: str, owner_id, platform: str):
+    """状态名 → account_statuses.id，按「该账户的 owner + 平台」作用域。
+
+    **必须带 platform**：account_statuses.platform 默认 'gg'（database.py:153），
+    唯一约束是 (name, platform)（database.py:1225），而状态下拉按平台过滤
+    （main.py:6059 `/api/statuses/list`）。不写平台会让 TT 同步新建的状态落进
+    gg 命名空间 —— TT 下拉里看不见，反而出现在 GG 下拉里。
+    既有代码的两种写法可对照：GG 侧靠默认值吃 'gg'（main.py:4042/4184/4944/5068），
+    TT 侧显式写 'tt'（main.py:6085、tt_accounts_routes.py:69）。
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    # 查重也必须带 platform：唯一约束含 platform，同名不同平台可并存，
+    # 不带平台过滤会命中 2 行而 fetchone() 任取一条。
+    row = db.execute(
+        "SELECT id FROM account_statuses WHERE name=? AND owner_id IS ? AND platform=?",
+        (name, owner_id, platform)).fetchone()
+    if row:
+        return row["id"]
+    db.execute("INSERT INTO account_statuses(name, owner_id, platform) VALUES(?,?,?)",
+               (name, owner_id, platform))
+    return db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+# 各可读列 → (解析器种类, 查名 SQL 模板)
+_SQL_MCC = "SELECT id FROM mcc WHERE name=?"
+_SQL_AGENT_GG = "SELECT id FROM agents WHERE name=? AND (platform='gg' OR platform IS NULL)"
+_SQL_AGENT_TT = "SELECT id FROM agents WHERE name=? AND platform='tt'"
+_SQL_BC = "SELECT id FROM tt_bcs WHERE name=?"
+
+
+def _resolve_field(db, platform: str, field: str, value: str, owner_id):
+    """把表里的一个名称解析成系统主键；不认识的字段返回 (True, None) 表示无需解析。
+
+    返回 (ok, resolved)：ok=False 表示该列要记 warning 且不落库。
+    """
+    if field == "mcc_name":
+        return True, resolve_named_id(db, _SQL_MCC, (value,))
+    if field == "agent_name":
+        sql = _SQL_AGENT_TT if platform == "tt" else _SQL_AGENT_GG
+        return True, resolve_named_id(db, sql, (value,))
+    if field == "bc_name":
+        return True, resolve_named_id(db, _SQL_BC, (value,))
+    if field == "status_name":
+        return True, resolve_status_id(db, value, owner_id, platform)
+    return False, None
+
+
+# 可直接覆盖的文本列（不需要名称解析）
+_PLAIN_TEXT_FIELDS = {
+    "gg": ("acquired_date", "timezone"),
+    "tt": ("acquired_date", "country", "timezone", "consumption", "remark"),
+}
+
+
+def _parseable_fields(platform: str) -> tuple:
+    """该平台可读且需要名称解析的字段（值非空时才解析）。"""
+    return ("mcc_name", "agent_name", "bc_name", "status_name")
+
+
+def build_diff(db, parsed_rows: list, platform: str) -> dict:
+    """表 → 系统 的逐行比对，产出五类差异（规格 §8.3）。
+
+    parsed_rows: [{"row": 表里行号, **parse_row(...)}]
+    每个产出项都带 "row"，供前端回传确认。
+    """
+    key_field = ACCOUNT_KEY_FIELD[platform]
+    ids = [p.get("account_id") for p in parsed_rows if p.get("account_id")]
+
+    existing_map = {}
+    if ids:
+        marks = ",".join("?" for _ in ids)
+        table = "tt_accounts" if platform == "tt" else "accounts"
+        rows = db.execute(
+            f"""SELECT a.*, u.display_name AS owner_display, u.username AS owner_username
+                FROM {table} a LEFT JOIN users u ON a.owner_id = u.id
+                WHERE a.{key_field} IN ({marks})""",
+            ids,
+        ).fetchall()
+        for r in rows:
+            existing_map[r[key_field]] = dict(r)
+
+    to_create, to_update, owner_changes, to_skip, warnings = [], [], [], [], []
+
+    for p in parsed_rows:
+        row_no = p.get("row")
+        aid = p.get("account_id", "")
+        if not aid:
+            warnings.append({"row": row_no, "message": "账户ID为空，跳过"})
+            continue
+
+        want_owner_name = effective_owner_name(p)
+        want_owner_id = None
+        if want_owner_name:
+            want_owner_id = resolve_owner_id(db, want_owner_name)
+            if want_owner_id is None:
+                warnings.append({"row": row_no,
+                                 "message": f"运营「{want_owner_name}」无法识别，已跳过归属变更"})
+
+        existing = existing_map.get(aid)
+        if existing is None:
+            to_create.append({
+                "row": row_no,
+                "account_id": aid,
+                "owner_id": want_owner_id,
+                "owner_name": want_owner_name,
+                # 键名刻意不叫 "cells"：本模块里 "cells" 一律指「表列字母 → 单元格值」
+                # （Task 4 的 update_rows_by_account_id 契约），这里装的是
+                # 「数据库列名 → 值」，供 apply_diff 拼 INSERT。两者同名会被误用。
+                "db_values": _collect_updates(db, platform, p, want_owner_id, row_no, warnings),
+            })
+            continue
+
+        if existing.get("deleted_at"):
+            to_skip.append({"row": row_no, "account_id": aid,
+                            "reason": "系统中已逻辑删除，不动"})
+            continue
+
+        cur_owner = existing.get("owner_id")
+        if want_owner_id is not None and int(cur_owner or 0) != int(want_owner_id):
+            owner_changes.append({
+                "row": row_no,
+                "account_id": aid,
+                "existing_id": existing["id"],
+                "from": existing.get("owner_display") or existing.get("owner_username") or "",
+                "to": want_owner_name,
+                "to_owner_id": want_owner_id,
+            })
+
+        # 归属变更后，状态/渠道等要按新 owner 作用域解析
+        scope_owner = want_owner_id if want_owner_id is not None else cur_owner
+        fields = _collect_updates(db, platform, p, scope_owner, row_no, warnings)
+        changed = {k: v for k, v in fields.items()
+                   if not _same_as_existing(db, platform, existing, k, v)}
+        if changed:
+            to_update.append({"row": row_no, "account_id": aid,
+                              "existing_id": existing["id"], "fields": changed})
+
+    return {
+        "to_create": to_create,
+        "to_update": to_update,
+        "owner_changes": owner_changes,
+        "to_skip": to_skip,
+        "warnings": warnings,
+        "summary": {
+            "total_in_sheet": len(parsed_rows),
+            "new_accounts": len(to_create),
+            "updates": len(to_update),
+            "owner_changes": len(owner_changes),
+            "skipped": len(to_skip),
+            "warnings": len(warnings),
+        },
+    }
+
+
+def _collect_updates(db, platform, p, owner_id, row_no, warnings) -> dict:
+    """把一行解析结果里「要写进系统」的字段收集成 {字段名: 值}。
+
+    名称类字段先解析成主键，解析不唯一则记 warning 并丢弃该字段。
+    """
+    out = {}
+    for f in _PLAIN_TEXT_FIELDS[platform]:
+        # 表里空着 → 不动系统里已有的值（与下方名称类字段的 `if not value: continue`
+        # 同口径，也与规格 §7.4「空归属不清空已有 owner_id」同理）。
+        # 不能写成 `out[f] = p.get(f, "")`：acquired_date 等列在库里常有默认值
+        # （accounts.acquired_date 默认当天），空单元格会被算成一条「差异」，
+        # 从而把系统里真实的日期/备注静默清空。
+        # `_conf_text` 兜底是因为 p 未必全是 str（同 `_conf_text` 的既有理由）。
+        value = _conf_text(p.get(f))
+        if not value:
+            continue
+        out[f] = value
+    for f in _parseable_fields(platform):
+        value = (p.get(f) or "").strip()
+        if not value:
+            continue
+        _known, resolved = _resolve_field(db, platform, f, value, owner_id)
+        if not _known:
+            continue
+        if resolved is None:
+            warnings.append({"row": row_no,
+                             "message": f"{f}「{value}」无法唯一匹配，已跳过该列"})
+            continue
+        out[_target_column(platform, f)] = resolved
+    out["_is_dead"] = is_dead(p)
+    return out
+
+
+def _target_column(platform: str, field: str) -> str:
+    """解析后的字段名 → 真实数据库列名。"""
+    return {
+        "mcc_name": "mcc_id",
+        "agent_name": "agent_id",
+        "bc_name": "bc_id",
+        "status_name": "status_id",
+    }[field]
+
+
+def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
+    """比较待写值与库里当前值，决定是否真的需要更新（避免无意义写入）。"""
+    if key == "_is_dead":
+        cur_dead = bool((existing.get("death_date") or "").strip())
+        return cur_dead == bool(value)
+    cur = existing.get(key)
+    if cur is None and value in (None, ""):
+        return True
+    return str(cur if cur is not None else "") == str(value if value is not None else "")
