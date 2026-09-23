@@ -9,8 +9,9 @@
 import { ref, computed, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
+import { defaultOwnerScope } from '@/utils/ownerScope'
 
-defineProps({ modelValue: { type: [String, Number], default: '' } })
+const props = defineProps({ modelValue: { type: [String, Number], default: '' } })
 const emit = defineEmits(['update:modelValue', 'change'])
 
 const auth = useAuthStore()
@@ -23,10 +24,22 @@ let loaded = false
 watch(
   () => auth.user?.id,
   (uid) => {
-    if (uid && visible.value) fetchUsers()
+    if (uid && visible.value) {
+      fetchUsers()
+      applyDefaultScope()
+    }
   },
   { immediate: true }
 )
+
+// 首次进入面板时套用默认作用域（developer/admin → 自己；户管 → 全部）。
+// 只在父组件尚无值时生效：用户手动清空或另选后不会被打回（watch 只认 user.id 变化）。
+function applyDefaultScope() {
+  const v = props.modelValue
+  if (v !== '' && v !== null && v !== undefined) return
+  const def = defaultOwnerScope(auth.user, auth.effectivePlatform)
+  if (def !== '') onChange(def)
+}
 
 async function fetchUsers() {
   if (loaded) return
