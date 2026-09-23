@@ -7,6 +7,7 @@ from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 
 import database
+from cache import cache as _app_cache
 
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import tt_required, tt_write_required
@@ -49,6 +50,8 @@ def _resolve_agent_id(db, agent, agent_id):
     if existing:
         return existing["id"]
     db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'tt')", (agent, 1))
+    # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+    _app_cache.clear_prefix("accounts:agents:")
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
@@ -969,6 +972,8 @@ def _ensure_agent(db, name, uid):
     if row:
         return row["id"]
     db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'tt')", (name, uid))
+    # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+    _app_cache.clear_prefix("accounts:agents:")
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 

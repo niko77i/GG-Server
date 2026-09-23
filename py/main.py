@@ -4045,6 +4045,8 @@ def accounts_create():
             )
             db.commit()
         db.close()
+        # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+        _app_cache.clear_prefix("accounts:agents:")
         return jsonify({"success": True, "id": new_id})
     except _sqlite3.IntegrityError as e:
         err_msg = str(e).lower()
@@ -4197,6 +4199,8 @@ def accounts_batch_create():
                 skipped.append({"account_id": aid, "reason": str(e)})
 
     db.close()
+    # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+    _app_cache.clear_prefix("accounts:agents:")
     return jsonify({
         "success": True,
         "created": len(created),
@@ -4942,6 +4946,8 @@ def accounts_sync_from_sheet():
                 errors.append({"account_id": item.get("account_id", ""), "error": str(e)})
 
         db.commit()
+        # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+        _app_cache.clear_prefix("accounts:agents:")
 
         # 10c. 系统 → Sheet：将系统当前状态同步回「我的看板」备注列
         if sheet_id and dashboard_name:
@@ -5132,6 +5138,8 @@ def recharge_submit():
         sheet_id = _get_sync_spreadsheet_id(db)
         recharge_sheet_name = _get_recharge_sheet_name(db)
         db.close()
+        # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+        _app_cache.clear_prefix("accounts:agents:")
 
         if sheet_id:
             _sheet_name = recharge_sheet_name
@@ -5230,6 +5238,8 @@ def recharge_batch_submit():
         sheet_id = _get_sync_spreadsheet_id(db)
         recharge_sheet_name = _get_recharge_sheet_name(db)
         db.close()
+        # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+        _app_cache.clear_prefix("accounts:agents:")
 
         if sheet_id:
             _ids = list(inserted_ids)

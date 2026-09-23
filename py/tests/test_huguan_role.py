@@ -666,6 +666,249 @@ class TestGgAgentsDropdownCacheInvalidation:
         assert "新建代理" in data["agents"]
 
 
+def _agents_dropdown_key(uid):
+    """`/api/accounts/list` 为非跨用户角色写下的 agents 下拉缓存键。
+
+    `py/main.py` 的 `scope = owner_filter or "all" if cross_user else str(user_id)`，
+    普通角色恒走 `str(user_id)` 分支 ⇒ 键的 scope 段就是 uid 本身。
+    """
+    return f"accounts:agents:{uid}:{uid}"
+
+
+class TestAnyAgentsInsertInvalidatesDropdownCache:
+    """Task 21：把「任何写入 `agents` 表的路径都必须让代理名下拉缓存立即失效」
+    这条不变量在全仓 9 处 `INSERT INTO agents` 上钉死。
+
+    前一个提交 `710c0de` 只修了 `/api/agents/create` 的 TT/GG 两个分支；本次补齐
+    其余 7 处（`main.py` 5 处 + `routes/tt_accounts_routes.py` 2 处）。
+    失效形态统一为 `_app_cache.clear_prefix("accounts:agents:")`。
+
+    测试口径分两类，**分类依据见 py/cache.py 与 `/api/accounts/list` 的查询**：
+
+    * **行为断言**（A1 `accounts_create` / A2 `accounts_batch_create` /
+      A3 `_execute_sync_create`）：这三条路径插入 agents 行后**立刻把新代理挂到
+      账户上**，而 `accounts:agents:` 的唯一消费者 = `/api/accounts/list` 的
+      `agents` 字段，其 SQL 带 `INNER JOIN accounts ON a.agent_id = ag.id`
+      （只列被账户引用的代理）⇒ 新代理名真的会出现在下拉里，可做端到端断言。
+    * **白盒不变量断言**（A4 `recharge_submit` / A5 `recharge_batch_submit` /
+      B1 `_resolve_agent_id` / B2 `_ensure_agent`）：这四处**没有任何账户会引用**
+      新插入的代理（充值与 TT 助手都是纯 agents 行写入；TT 账户又落在独立的
+      `tt_accounts` 表、其下拉走无缓存的 `/api/agents/list?platform=tt`），
+      行为断言在此**不可能成立** —— 「新代理不在下拉里」本来就是正确行为。
+      故只能退化为白盒断言：调端点后直接断言该缓存键已从进程级缓存中消失。
+      这仍是**真断言**：把对应的 `clear_prefix` 那行删掉必然变红。
+    """
+
+    # ---------- A 组可观测的 3 处：行为断言 ----------
+
+    def test_accounts_create_invalidates_agents_dropdown_cache(self, client):
+        """A1 `py/main.py` `accounts_create`：`POST /api/accounts/create` 的 agent 文本回退分支。"""
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        headers, _ = _create_user(client, "_t21_a1_u", role="user")
+
+        # 第 1 步：加载面板 → 把 accounts:agents:{uid}:{uid} 写热（此时列表为空）
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "T21代建代理" not in data["agents"]
+
+        # 第 2 步：POST /api/accounts/create 传一个从未用过的代理名
+        #         → 走 INSERT INTO agents，并立刻把新账户挂到该代理上
+        resp = client.post("/api/accounts/create", json={
+            "name": "T21代建账户", "account_id": "T21-A1-1", "agent": "T21代建代理",
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        # 第 3 步：不手动清缓存 —— 若第 2 步没失效，这里仍是第 1 步的旧列表
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "T21代建代理" in data["agents"]
+
+    def test_accounts_batch_create_invalidates_agents_dropdown_cache(self, client):
+        """A2 `py/main.py` `accounts_batch_create`：逐账户 agent 文本回退分支。"""
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        headers, _ = _create_user(client, "_t21_a2_u", role="user")
+
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "T21批量代理" not in data["agents"]
+
+        resp = client.post("/api/accounts/batch-create", json={
+            "account_ids": ["T21-A2-1"], "agent": "T21批量代理",
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "T21批量代理" in data["agents"]
+
+    def test_sync_create_invalidates_agents_dropdown_cache(self, client, monkeypatch):
+        """A3 `_execute_sync_create`：`POST /api/accounts/sync-from-sheet` 的
+        `confirmed.create` 分支（真正的清缓存点在其调用方的 `db.commit()` 之后，
+        因为该助手自身不 commit；本用例走完整端点，覆盖的正是那个调用方位置）。
+        """
+        import unittest.mock as mock
+
+        import main
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        headers, uid = _create_user(client, "_t21_a3_u", role="user")
+        db = database.get_db()
+        # 门禁要求 A 列「运营」匹配当前登录用户的 display_name
+        db.execute("UPDATE users SET display_name='_t21_a3_u' WHERE id=?", (uid,))
+        # 同步入口的前置：表格 ID 未配置会 400 早退，到不了 confirmed.create 分支
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('recharge_sheet_id','sheet-t21')")
+        db.commit()
+        db.close()
+
+        # 凭据路径只被 os.path.isfile 做存在性判断，指向本测试文件即可
+        # （真正会发网络请求的 Sheets 调用全部被 mock 掉）
+        monkeypatch.setitem(main._GOOGLE_SHEETS_CONFIG, "credentials_path", __file__)
+        # 步骤 10c 的 Sheets 回写走后台线程；测试里替换成空实现，避免真实网络与线程竞态
+        monkeypatch.setattr(main, "_sync_sheets_background", lambda *a, **k: None)
+
+        # 第 1 步：把缓存写热
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "T21同步代理" not in data["agents"]
+
+        # 看板行格式（A:H）：A运营 B账户ID C代理 D- E时区 F备注 G是否封户 H解绑
+        rows = [
+            ["运营", "账户ID", "代理", "", "时区", "备注", "是否封户", "解绑"],
+            ["_t21_a3_u", "T21-A3-1", "T21同步代理", "", "Asia/Shanghai", "", "可用", ""],
+        ]
+
+        # 第 2 步：dry_run=False 走 confirmed.create → _execute_sync_create 插入 agents + accounts
+        with mock.patch("google_sheets_service.build_service", return_value=object()), \
+             mock.patch("google_sheets_service.read_sheet_values", return_value=rows):
+            resp = client.post("/api/accounts/sync-from-sheet", json={
+                "dry_run": False,
+                "confirmed": {"create": [{
+                    "account_id": "T21-A3-1", "agent": "T21同步代理",
+                    "timezone": "Asia/Shanghai",
+                }]},
+            }, headers=headers)
+        assert resp.status_code == 200
+        assert resp.get_json()["result"]["created"] == 1
+
+        # 第 3 步：缓存必须已被调用方的清缓存行失效
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "T21同步代理" in data["agents"]
+
+    # ---------- A 组不可观测的 2 处 + B 组 2 处：白盒不变量断言 ----------
+
+    def test_recharge_submit_invalidates_agents_dropdown_cache(self, client):
+        """A4 `py/main.py` `recharge_submit`。
+
+        白盒断言而非行为断言的原因见本类 docstring：充值只插入 agents 行，
+        没有任何账户引用它 ⇒ 它**本就不该**出现在 `INNER JOIN accounts` 的下拉里，
+        「下拉里没有它」恒为真，行为断言会退化成恒真式。
+        """
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        headers, uid = _create_user(client, "_t21_a4_u", role="user")
+        db = database.get_db()
+        _mk_account(db, uid, "T21-A4-1", "T21充值账户")
+        db.close()
+
+        key = _agents_dropdown_key(uid)
+        client.get("/api/accounts/list?size=50", headers=headers)
+        assert _app_cache.get(key) is not None, "前置失败：下拉缓存没被写热"
+
+        resp = client.post("/api/recharge/submit", json={
+            "account_id": "T21-A4-1", "amount": "100", "agent": "T21充值新代理",
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        assert _app_cache.get(key) is None, "写入 agents 表后 accounts:agents: 缓存未失效"
+
+    def test_recharge_batch_submit_invalidates_agents_dropdown_cache(self, client):
+        """A5 `py/main.py` `recharge_batch_submit`（INSERT 在 for 循环体内）。"""
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        headers, uid = _create_user(client, "_t21_a5_u", role="user")
+        db = database.get_db()
+        _mk_account(db, uid, "T21-A5-1", "T21批量充值账户")
+        db.close()
+
+        key = _agents_dropdown_key(uid)
+        client.get("/api/accounts/list?size=50", headers=headers)
+        assert _app_cache.get(key) is not None, "前置失败：下拉缓存没被写热"
+
+        resp = client.post("/api/recharge/batch-submit", json={
+            "records": [{"account_id": "T21-A5-1", "amount": "100", "agent": "T21批量充值新代理"}],
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        assert _app_cache.get(key) is None, "写入 agents 表后 accounts:agents: 缓存未失效"
+
+    def test_tt_create_account_invalidates_agents_dropdown_cache(self, client):
+        """B1 `py/routes/tt_accounts_routes.py` `_resolve_agent_id`（模块级助手，自身不 commit）。
+
+        白盒断言的原因：TT 代理落在独立命名空间，其下拉走**无缓存**的
+        `/api/agents/list?platform=tt`；`accounts:agents:` 缓存只服务 GG 面板。
+        """
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        headers, uid = _create_user(client, "_t21_b1_u", role="user", platform="tt")
+
+        key = _agents_dropdown_key(uid)
+        client.get("/api/accounts/list?size=50", headers=headers)
+        assert _app_cache.get(key) is not None, "前置失败：下拉缓存没被写热"
+
+        resp = client.post("/api/tt/accounts/create", json={
+            "advertiser_id": "999000111222", "name": "T21TT账户", "agent": "T21TT新代理",
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        assert _app_cache.get(key) is None, "写入 agents 表后 accounts:agents: 缓存未失效"
+
+    def test_tt_sync_from_sheet_invalidates_agents_dropdown_cache(self, client):
+        """B2 `py/routes/tt_accounts_routes.py` `_ensure_agent`（看板同步确认模式）。
+
+        白盒断言的原因同 B1。`_ensure_agent` 只从
+        `POST /api/tt/accounts/sync-from-sheet`（非 dry_run）到达，
+        故这里 mock 掉 Sheets 读接口把该流程走通。
+        """
+        import unittest.mock as mock
+
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        headers, uid = _create_user(client, "_t21_b2_u", role="user", platform="tt")
+        db = database.get_db()
+        # 门禁要求 A 列「运营」匹配当前登录用户的 display_name
+        db.execute("UPDATE users SET display_name='_t21_b2_u' WHERE id=?", (uid,))
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-t21-tt')")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+                   ('{"my_dashboard": "我的看板"}',))
+        db.commit()
+        db.close()
+
+        key = _agents_dropdown_key(uid)
+        client.get("/api/accounts/list?size=50", headers=headers)
+        assert _app_cache.get(key) is not None, "前置失败：下拉缓存没被写热"
+
+        # 看板行格式（A:J）：A运营 B入库 C是否回收 D账户ID EBC F国家 G渠道 H时区 I消耗 J备注
+        rows = [
+            ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
+            ["_t21_b2_u", "2026-09-20", "否", "999000333444", "BC-T21", "US",
+             "T21TT同步代理", "+8", "", ""],
+        ]
+
+        with mock.patch("google_sheets_service.build_service", return_value=object()), \
+             mock.patch("google_sheets_service.read_sheet_values", return_value=rows):
+            resp = client.post("/api/tt/accounts/sync-from-sheet",
+                               json={"dry_run": False}, headers=headers)
+        assert resp.status_code == 200
+        # 确认模式返回的是计数（dry_run 模式才返回明细列表）
+        assert resp.get_json()["created"] == 1
+
+        assert _app_cache.get(key) is None, "写入 agents 表后 accounts:agents: 缓存未失效"
+
+
 class TestGgAccountOwnership:
     def test_huguan_creates_for_other_user(self, client):
         hg, hg_id = _huguan(client, "_ggown_hg")
