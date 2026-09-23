@@ -438,6 +438,13 @@ def scrape():
         user = auth.get_user_by_id(user_id)
         dn = (user.get("display_name") or user.get("username") or f"user_{user_id}").strip()
         save_dir = os.path.join(_SCRAPE_DEFAULT_DIR, dn)
+    else:
+        # 收窄（2026-09-24 裁决）：自定义保存路径必须落在 _SCRAPE_DEFAULT_DIR 内，
+        # 与 scrape_download 的目录白名单自洽，堵「登录用户写任意目录」
+        real = os.path.realpath(save_dir)
+        scrape_real = os.path.realpath(_SCRAPE_DEFAULT_DIR)
+        if not (real == scrape_real or real.startswith(scrape_real + os.sep)):
+            return jsonify({"success": False, "error": "保存路径必须在默认目录内"}), 400
     # 新增参数：是否按 Google Ads 规格放大图片（默认 true，向后兼容）
     include_ads_images = data.get("include_ads_images", True)
 

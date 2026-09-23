@@ -8,13 +8,6 @@
         <el-input v-model="urls" type="textarea" :rows="6" placeholder="每行一个链接，或用逗号分隔" />
       </el-form-item>
 
-      <el-form-item label="保存路径">
-        <div style="display:flex;gap:6px;">
-          <el-input v-model="saveDir" :placeholder="isLocalhost() ? '例如：F:\\images\\google_ads\\' : '留空则使用服务器默认目录'" style="flex:1;" />
-          <el-button v-if="isLocalhost()" @click="browseFolder" style="width:44px;">📂</el-button>
-        </div>
-      </el-form-item>
-
       <el-checkbox v-model="includeAds" style="margin-bottom:16px;">按 Google Ads 规格放大图片</el-checkbox>
 
       <el-button type="primary" @click="startScrape" :loading="scraping" :disabled="!urls">
@@ -48,25 +41,14 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { scrapeApi } from '@/api/scrape'
-import { browseApi } from '@/api/browse'
-import { isLocalhost } from '@/utils/env'
 import { ElMessage } from 'element-plus'
 
 const router = useRouter()
 const urls = ref('')
-const saveDir = ref('')
 const includeAds = ref(true)
 const scraping = ref(false)
 const results = ref([])
 const summary = ref('')
-
-async function browseFolder() {
-  try {
-    const initial_dir = saveDir.value ? saveDir.value : null
-    const res = await browseApi.folder({ initial_dir })
-    if (res.path) saveDir.value = res.path
-  } catch(e) { ElMessage.error('选择文件夹失败: ' + e.message) }
-}
 
 function parseUrls(input) {
   const matches = input.match(/https?:\/\/play\.google\.com\/[^\s,;，；\n]+/gi)
@@ -83,7 +65,8 @@ async function startScrape() {
   let successCount = 0, failCount = 0, totalImages = 0
   for (let i = 0; i < links.length; i++) {
     try {
-      const res = await scrapeApi.scrape({ url: links[i], save_dir: saveDir.value, include_ads_images: includeAds.value })
+      // 保存路径已收窄为服务器默认目录（2026-09-24 裁决），前端不再传自定义 save_dir
+      const res = await scrapeApi.scrape({ url: links[i], include_ads_images: includeAds.value })
       results.value[i] = { url: links[i], package_name: res.package_name, image_count: res.image_count, error: '', saved_path: res.saved_path, from_cache: res.from_cache }
       successCount++; totalImages += (res.image_count || 0) + (res.logo ? 1 : 0)
     } catch (e) {
