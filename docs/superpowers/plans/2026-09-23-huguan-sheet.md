@@ -2534,6 +2534,24 @@ class TestTtReassignCrossUser:
         assert client.put(f"/api/tt/accounts/{aid}/reassign", headers=dev,
                           json={"owner_id": other}).status_code == 200
 
+    def test_zero_owner_id_falls_back_to_self(self, client):
+        """owner_id 给 0 不得被当成合法目标。
+
+        `"0".isdigit()` 为真，所以必须先 `or ""` 吃掉 —— 否则归属会被设成
+        不存在的用户 0。这一步与 GG 既有写法（main.py:4378-4381）逐字对齐。
+        """
+        hg, hid = _create_user(client, "_tt_rg_zero", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-4", _seed(db, "_tt_rg_zother", "周九"))
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": 0})
+        assert resp.status_code == 200
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
+                          (aid,)).fetchone()["owner_id"] == hid
+        db.close()
+
 
 class TestTTTriggerPoints:
     def test_tt_create_triggers_writeback(self, client, monkeypatch):
@@ -2576,17 +2594,20 @@ Expected: FAIL — `test_huguan_can_transfer_to_another_user` 断言 owner_id �
 
 - [ ] **Step 3: 扩展 TT reassign**
 
-修改 `py/routes/tt_accounts_routes.py` 的 `reassign_account`（`:466`）。**只加一小段，其余逐字节不动**：
+修改 `py/routes/tt_accounts_routes.py` 的 `reassign_account`（按**函数名**定位，行号会漂）。**只加一小段，其余逐字节不动**：
 
-在 `uid = get_uid()`（`:472`）之后插入目标归属的计算：
+在 `data = parse_body()` 之后（该函数前几行依次是 `db = get_db()` / `uid = get_uid()` / `data = parse_body()`）插入目标归属的计算。
+**注意必须排在 `data = parse_body()` 之后**——下面这段读 `data.get("owner_id")`，插在它前面会直接 `NameError`：
 
 ```python
     # 目标归属：跨用户角色（developer/admin/户管）可用 owner_id 转给指定用户，
     # 其余角色恒为调用者自己（默认路径与改动前逐字节一致）。
+    # `or ""` 不能省：owner_id 给 0 时 `"0".isdigit()` 为真，会把手属设成不存在的用户 0；
+    # 这一步与 GG 的既有写法（main.py:4378-4381）逐字对齐。
     target_owner = uid
     if _get_role(db, uid) in CROSS_USER_ROLES:
-        raw_owner = data.get("owner_id")
-        if raw_owner is not None and str(raw_owner).strip().isdigit():
+        raw_owner = (data.get("owner_id") or "")
+        if str(raw_owner).strip().isdigit():
             target_owner = int(str(raw_owner).strip())
 ```
 
@@ -2668,12 +2689,12 @@ def _huguan_owner_channel(uid, account_id, new_owner_id):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 95 passed）
+Expected: PASS（聚焦 ≥ 96 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量 ≥ 519 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 520 passed，不得低于上一任务实测值）
 
 - [ ] **Step 7: 提交**
 
