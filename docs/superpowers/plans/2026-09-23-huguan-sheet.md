@@ -26,6 +26,7 @@
 - **名称 → 主键的唯一口径（§8.4）**：唯一命中才落库；命中 0 条或 ≥2 条 → 记 warning，**该列**不落库，该行其余列照常处理。
 - **状态解析必须带平台（Task 6 起）**：`resolve_status_id(db, name, owner_id, platform)`。`account_statuses.platform` 默认 `'gg'`、唯一约束是 `(name, platform)`、下拉按平台过滤（`main.py:6059`）—— 漏平台会让 TT 的状态落进 gg 命名空间。
 - **请求体读字段的统一口径（所有 `/api/huguan/*` 端点）**：`data = request.get_json(silent=True)` 后先判 `isinstance(data, dict)`，否则 400；字段一律 `str(... or "")` 兜底再 `.strip()`。**禁止**写 `(data.get(x) or "").strip()` —— 客户端给个数字或 `null` 就会 `AttributeError` 炸成 500（Task 5 审查实测 `{"platform": 5}` / `{"spreadsheet_id": 123}` / `[1,2]` 三种 body 全中）。
+- **同一口径适用于「容器型字段」**：`confirmed` 这类期望 dict 的字段，`data.get(x) or {}` 只能兜住 `None`/`""`/`0`，兜不住真值非 dict（`[1,2]`、`"abc"`）—— 那样会把 `AttributeError` 带到逻辑层炸成 500。必须显式判类型，非 dict 一律 400。判据与上一条相同：**客户端能构造出的畸形 body，只能是 4xx，不能是 5xx**。
 - **测试门禁**：`cd py && python -m pytest tests/ -q`，基线 **424 passed**（2026-09-23 实测；子项目 A 收尾时为 420，其后 `f46007c` 净增 4 条）。每次提交后不得低于此数。
 - **各任务的计数是「累计预期」，为下界而非精确值**：以 `.superpowers/sdd/progress.md` 里记的**上一任务实测值**为准。若实际条数与预期不符，**先核实是计划写错还是实现漏做**：计划写错就改计划（并顺移后续累计值），实现漏做就补实现 —— 不要为了对上数字而删测试或改断言（Task 2 就因计划漏数而多出 1 条）。
 - **前端门禁**：`cd frontend && npm run build` 必须通过。
@@ -1638,8 +1639,9 @@ git commit -m "feat: 户管看板差异比对与名称解析（唯一命中才�
 # ---------- Task 7: 同步落库 ----------
 
 def _stub_sheets(monkeypatch, captured):
-    """把 update_rows_by_account_id 换成桩，记录调用。返回 (rows, cells) 列表。"""
+    """把 update_rows_by_account_id 换成桩，记录调用（同步执行，见下）。"""
     import google_sheets_service as gs
+    import main as m
 
     def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
         captured.append({"spreadsheet_id": spreadsheet_id, "sheet_name": sheet_name,
@@ -1648,6 +1650,11 @@ def _stub_sheets(monkeypatch, captured):
 
     monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
     monkeypatch.setattr(gs, "build_service", lambda path: object())
+    # 端点经 main._sync_sheets_background 起**后台线程**写表。不拦住它，断言就会
+    # 和后台线程抢时间 —— 本机快时偶然通过、CI 慢时红，是最难查的一类间歇失败。
+    # 换成直接调用，让「后台」在测试里同步发生。端点用的是函数体内
+    # `from main import ...`，调用时才取属性，故此处 patch 生效。
+    monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
 
 
 class TestOwnerChannelCells:
@@ -1695,15 +1702,18 @@ class TestApplyDiff:
         assert row["owner_id"] is None
         db.close()
 
-    def test_owner_change_applies_and_sets_death_date(self, client):
+    def test_owner_change_applies_to_new_owner(self, client):
+        """归属变更只改 owner_id；death_date 归 B 列「是否封户」管，两者不相干。"""
         from huguan_dashboard import build_diff, parse_row, apply_diff
         db, u1, u2 = self._setup(client)
         _seed_account(db, "OC-1", u1)
         parsed = [dict(parse_row(["", "", "OC-1", "", "", "", "张三", "李四"], "gg"), row=2)]
         res = apply_diff(db, build_diff(db, parsed, "gg"), "gg", {"owner": [2]}, user_id=u1)
         assert res["owner_changed"] == 1
-        row = db.execute("SELECT owner_id FROM accounts WHERE account_id='OC-1'").fetchone()
+        row = db.execute("SELECT owner_id, death_date FROM accounts "
+                         "WHERE account_id='OC-1'").fetchone()
         assert row["owner_id"] == u2
+        assert not (row["death_date"] or "").strip()
         db.close()
 
     def test_status_dead_sets_death_date(self, client):
@@ -1791,12 +1801,34 @@ class TestSyncEndpoint:
         assert db.execute("SELECT owner_id FROM accounts WHERE account_id='AP-1'").fetchone()["owner_id"] == target
         db.close()
 
-        # 收尾写入：只含 运营(G) 与 重新分配(H)，且 H 被清空
-        tail = [c for c in captured if any("H" in r["cells"] for r in c["rows"])]
-        assert tail, "应收尾写归属变更通道列"
-        cells = {r["account_id"]: r["cells"] for r in tail[-1]["rows"]}
-        assert cells["AP-1"]["H"] == ""
-        assert cells["AP-1"]["G"] == "李四"
+        # 收尾写入分两次：先回写运营列(G)，再清空变更通道列(H)。
+        # 两列刻意分开写 —— owner_channel_cells 只含 H，不会顺手冲掉别的手工列。
+        g_rows = [r for c in captured for r in c["rows"] if "G" in r["cells"]]
+        assert {r["account_id"]: r["cells"]["G"] for r in g_rows}["AP-1"] == "李四"
+        h_rows = [r for c in captured for r in c["rows"] if "H" in r["cells"]]
+        assert h_rows, "应收尾清空归属变更通道列"
+        assert {r["account_id"]: r["cells"]["H"] for r in h_rows}["AP-1"] == ""
+
+    def test_malformed_confirmed_is_400(self, client, monkeypatch):
+        """畸形 confirmed 只能是 4xx，不能把 AttributeError 带成 500。"""
+        hg, uid = _create_user(client, "_syn_badcf", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [["日期", "是否封户", "账户ID"], ["", "", "BAD-1"]])
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+
+        # 外层不是 dict，以及值是数组以外的类型，两条路径都要挡在 4xx
+        for bad in ([1, 2], "abc", 5, {"create": 2}, {"owner": "2"}):
+            resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                               json={"platform": "gg", "dry_run": False, "confirmed": bad})
+            assert resp.status_code == 400, f"confirmed={bad!r} 应返回 400"
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1944,8 +1976,18 @@ def dashboard_sync():
         if data.get("dry_run", True):
             return ok({"diff": diff})
 
-        result = hd.apply_diff(db, diff, platform,
-                               data.get("confirmed") or {}, user_id=uid)
+        # confirmed 期望 {"create": [行号], "update": [行号], "owner": [行号]}。
+        # `or {}` 兜不住真值非 dict（[1,2] / "abc"）→ apply_diff 里 conf.get 炸 500；
+        # 值不是数组同样炸（`2 not in 2` → TypeError）。两层都在这里挡住。
+        confirmed = data.get("confirmed")
+        if not isinstance(confirmed, dict):
+            return err("confirmed 必须是对象", 400)
+        for k in ("create", "update", "owner"):
+            v = confirmed.get(k)
+            if v is not None and not isinstance(v, list):
+                return err(f"confirmed.{k} 必须是行号数组", 400)
+
+        result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid)
 
         # 规格 §7.2 规则 3② + 规则 4：应用了归属变更的行，回写运营列并清空变更通道列
         applied = result.pop("applied_owner_rows", [])
@@ -1982,12 +2024,12 @@ def _write_background(service, conf, rows):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 78 passed）
+Expected: PASS（聚焦 ≥ 79 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量 ≥ 502 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 503 passed，不得低于上一任务实测值）
 
 - [ ] **Step 7: 提交**
 
@@ -2340,12 +2382,12 @@ def _huguan_owner_channel(user_id, platform, account_id, new_owner_id):
 - [ ] **Step 6: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 87 passed）
+Expected: PASS（聚焦 ≥ 88 passed）
 
 - [ ] **Step 7: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量 ≥ 511 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 512 passed，不得低于上一任务实测值）
 
 - [ ] **Step 8: 提交**
 
@@ -2559,12 +2601,12 @@ def _huguan_owner_channel(uid, account_id, new_owner_id):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 92 passed）
+Expected: PASS（聚焦 ≥ 93 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量 ≥ 516 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 517 passed，不得低于上一任务实测值）
 
 - [ ] **Step 7: 提交**
 
@@ -2948,5 +2990,5 @@ git commit -m "fix: 代码审查收口"
 - **TT 行字典必须用 `account_id` 作键（Task 2 审查者指出的跨任务交接项）**：`cells_for_row` 一律读 `row["account_id"]`，而 TT 的数据库列名是 `advertiser_id`。Task 8 的 `_TT_ROW_SQL` 已经用 `a.advertiser_id AS account_id` 别名兜住了，**任何新增的 TT 行查询都必须照做** —— 否则 C 列（定位键）会被写成空串，而它正在写入区间 `A:J` 之内，会静默清掉表里的账户ID。
 - **`_dead_flag` 假定 `death_date` 是 str**：`cells_for_row` 对它直接 `.strip()`（未走 `str(...)` 兜底）。SQLite 里该列是 TEXT 且 Task 8 的查询原样取出，故当前无风险；但若将来有调用方传入 `datetime.date`，会抛 `AttributeError`。Task 2 审查者标记为 Minor，未修。
 - **命名遮蔽警告（Task 1 实现者与审查者共同确认）**：既有的 `update_cell_by_account_id` 内部有两个同名符号会遮蔽本计划新增的模块级函数 —— **`:581` 的形参 `col_index`**（遮蔽整个函数体）与 **`:602` 附近的局部变量 `col_letter`**。既有逻辑完全不受影响（该函数把它们当整数用，从不调用新函数），但**在那个函数体内调用新 `col_letter()` / `col_index()` 会静默拿到形参/局部值而非函数**。Task 4 新增的 `update_rows_by_account_id` 是独立函数、不在此列，无需处理；仅当后续需要在旧函数体内复用新工具时才要先改名。
-- **Task 7 的 `confirmed` 只做了粗校验（未修，Task 7 实现时须显式处理）**：sync 端点的 `confirmed` 载荷直接来自客户端，任务 7 的代码只写了 `data.get("confirmed") or {}`，没有校验它是不是 dict、其内层 item 是不是 dict。`apply_diff` 里 `dict(item.get("cells") or {})` / `item.get("owner_id")` 对非 dict 的 item 会 `AttributeError` → 500。这**不属于**「请求体字段直接 `.strip()`」那一族（那族已在端点层统一兜底），是嵌套载荷的结构校验，故不预先改写 `apply_diff`，留待 Task 7 在实现时按 `apply_diff` 的真实契约决定校验粒度。
+- **Task 7 的 `confirmed` 结构校验已在计划内补齐（原为此处记录的风险，现已在端点层闭合）**：`confirmed` 载荷直接来自客户端，原写法 `data.get("confirmed") or {}` 只兜得住 `None`/`""`/`0`。已实测两条会炸成 500 的路径：① 外层是真值非 dict（`[1,2]` / `"abc"`）→ `apply_diff` 里 `conf.get` 抛 `AttributeError`；② 值不是数组（`{"create": 2}`）→ `item["row"] not in 2` 抛 `TypeError`。端点现已两层都判、非 dict 或非 list 一律 400，并配 `test_malformed_confirmed_is_400`。**`apply_diff` 内层 item 无需校验** —— 那些 item 由本模块 `build_diff` 产出、不经客户端，唯一的客户端输入就是行号。这条已并入 Global Constraints 的「容器型字段」口径。
 - **警告数基线已从 618 漂到 630，不是新缺陷**：`conftest.py:28` 把 `JWT_SECRET_KEY` 固定成 15 字节的 `"test-secret-key"`，PyJWT 每次 encode/decode 都发 `InsecureKeyLengthWarning`。任何**首次**在测试文件里做 JWT 登录的任务都会抬高全量警告数（Task 5 +12）。已实测对照：未被触碰的 `test_huguan_role.py` 同样产出 289 条同类警告。**判据不是「警告数不变」而是「新增警告是否源自仓库代码」** —— 全部出自 site-packages 的 `jwt/api_jwt.py`，故不修。真正归属方是 conftest 共享 fixture（改成 ≥32 字节可一次清掉全仓），会牵动全套测试，不在本计划范围。
