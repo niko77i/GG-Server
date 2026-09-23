@@ -24,7 +24,8 @@
   4. 应用归属变更后，回写 `运营` / `接户运营` 列为新归属名。
 - **配置 key**：`config` 表，key = `huguan_dashboard_{user_id}`，value 为 JSON `{"gg": {...}, "tt": {...}}`。
 - **名称 → 主键的唯一口径（§8.4）**：唯一命中才落库；命中 0 条或 ≥2 条 → 记 warning，**该列**不落库，该行其余列照常处理。
-- **测试门禁**：`cd py && python -m pytest tests/ -q`，基线 **424 passed**（2026-09-23 实测；子项目 A 收尾时为 420，其后 `f46007c` 净增 4 条）。每次提交后不得低于此数。本计划各任务写的 `≥ N` 阈值是按旧基线 420 推算的**下界**，只多不少即可。
+- **测试门禁**：`cd py && python -m pytest tests/ -q`，基线 **424 passed**（2026-09-23 实测；子项目 A 收尾时为 420，其后 `f46007c` 净增 4 条）。每次提交后不得低于此数。
+- **各任务的计数是「累计预期」，为下界而非精确值**：以 `.superpowers/sdd/progress.md` 里记的**上一任务实测值**为准。若实际条数与预期不符，**先核实是计划写错还是实现漏做**：计划写错就改计划（并顺移后续累计值），实现漏做就补实现 —— 不要为了对上数字而删测试或改断言（Task 2 就因计划漏数而多出 1 条）。
 - **前端门禁**：`cd frontend && npm run build` 必须通过。
 - **前端 UI 前置**：Task 10 / Task 11 动手前必须先调用 `/frontend-design` 技能完成视觉设计（CLAUDE.md 硬性要求）。
 - **git**：本仓库常有并行会话在途改文件，**禁用 `git add -A` / `git add .`**，每次只 `git add` 本任务明确列出的文件。
@@ -340,7 +341,7 @@ class TestCellsForRow:
         assert cells["G"] == "李四"
         assert cells["H"] == "Asia/Shanghai"
         assert cells["J"] == "120.5"
-        assert cells["K"] not in cells   # 位置列不映射
+        assert "K" not in cells   # 位置列不映射
         assert cells["M"] == "产品X"
 
     def test_missing_field_becomes_empty_string(self):
@@ -459,7 +460,7 @@ def cells_for_row(row: dict, platform: str) -> dict:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（6 + 12 = 18 passed）
+Expected: PASS（聚焦 19 passed：Task 1 的 6 条 + 本任务 13 条）
 
 - [ ] **Step 5: 提交**
 
@@ -635,7 +636,7 @@ def is_dead(parsed: dict) -> bool:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（18 + 12 = 30 passed）
+Expected: PASS（聚焦 31 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -867,7 +868,7 @@ def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（30 + 7 = 37 passed）
+Expected: PASS（聚焦 38 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -1117,12 +1118,12 @@ app.register_blueprint(huguan_dashboard_bp)
 - [ ] **Step 7: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（37 + 7 = 44 passed）
+Expected: PASS（聚焦 45 passed）
 
 - [ ] **Step 8: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（≥ 464 passed）
+Expected: PASS（全量累计预期 469 passed，不得低于上一任务实测值）
 
 - [ ] **Step 9: 提交**
 
@@ -1557,7 +1558,7 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（44 + 15 = 59 passed）
+Expected: PASS（聚焦 60 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -1932,12 +1933,12 @@ def _write_background(service, conf, rows):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（59 + 11 = 70 passed）
+Expected: PASS（聚焦 71 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（≥ 490 passed）
+Expected: PASS（全量累计预期 495 passed，不得低于上一任务实测值）
 
 - [ ] **Step 7: 提交**
 
@@ -2288,12 +2289,12 @@ def _huguan_owner_channel(user_id, platform, account_id, new_owner_id):
 - [ ] **Step 6: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（70 + 9 = 79 passed）
+Expected: PASS（聚焦 80 passed）
 
 - [ ] **Step 7: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（≥ 499 passed）
+Expected: PASS（全量累计预期 504 passed，不得低于上一任务实测值）
 
 - [ ] **Step 8: 提交**
 
@@ -2507,12 +2508,12 @@ def _huguan_owner_channel(uid, account_id, new_owner_id):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（79 + 5 = 84 passed）
+Expected: PASS（聚焦 85 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（≥ 504 passed）
+Expected: PASS（全量累计预期 509 passed，不得低于上一任务实测值）
 
 - [ ] **Step 7: 提交**
 
@@ -2817,7 +2818,7 @@ git commit -m "feat: 账户面板新增户管专属「户归属」列"
 - [ ] **Step 1: 后端全量测试**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS，且总数 ≥ 504（基线 420 + 本计划新增 ≈ 84）
+Expected: PASS，全量总数 ≥ 509（基线 424 + 本计划新增 ≈ 85）
 
 - [ ] **Step 2: 前端构建**
 
