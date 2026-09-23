@@ -4414,11 +4414,15 @@ def accounts_reassign(aid):
         raw_owner_str = str(raw_owner).strip()
         if raw_owner_str:
             if not (raw_owner_str.isascii() and raw_owner_str.isdigit()):
-                return jsonify({"success": False, "error": "owner_id 必须是数字"}), 400
+                return jsonify({"success": False, "error": "owner_id 不合法"}), 400
             try:
                 target_owner = int(raw_owner_str)
             except (ValueError, OverflowError):
-                return jsonify({"success": False, "error": "owner_id 必须是数字"}), 400
+                return jsonify({"success": False, "error": "owner_id 不合法"}), 400
+            # SQLite INTEGER 是 64 位有符号：超界的值 int() 能解析，但会在
+            # sqlite3 参数绑定处抛 OverflowError（不在此处的作用域内）⇒ 必须显式挡在这里。
+            if target_owner > 2**63 - 1:
+                return jsonify({"success": False, "error": "owner_id 不合法"}), 400
     db = _yt_db()
     try:
         # 检查账户是否存在

@@ -354,3 +354,57 @@ class TestC1ReassignInvalidOwner:
         _, target = _create_user(client, "_c1_target", role="user")
         resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": target}, headers=dev)
         assert resp.status_code == 200
+
+    def test_reassign_oversized_digit_returns_400(self, client):
+        """超 SQLite 64 位的有符号整数上界（2^63-1）⇒ 400 而非 500。
+
+        `int("9"*30)` 在 Python 侧**成功**（任意精度），溢出发生在 sqlite3 参数绑定处，
+        抛出的 OverflowError 不在 `int()` 的 except 作用域内 ⇒ 改前会漏成 500 并吐英文原文。
+        """
+        dev, aid = self._setup(client)
+        for raw in ("9223372036854775808", "9" * 19, "9" * 30, "9" * 4096):
+            resp = client.put(f"/api/accounts/{aid}/reassign",
+                              json={"owner_id": raw}, headers=dev)
+            assert resp.status_code == 400, f"{raw[:20]} 应 400，实得 {resp.status_code}"
+
+    def test_reassign_max_valid_int64_still_goes_to_existence_check(self, client):
+        """边界对照：2^63-1（合法 int64 上界）必须仍走**存在性预检**而非格式闸门。
+
+        若上界写成 `>= 2**63 - 1` 或把闸门写成「长度 > 19」之类，这条会变红
+        —— 它钉住「上界不误伤合法边界值」。
+        """
+        dev, aid = self._setup(client)
+        resp = client.put(f"/api/accounts/{aid}/reassign",
+                          json={"owner_id": "9223372036854775807"}, headers=dev)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "目标用户不存在"
+
+    def test_reassign_non_ascii_digit_cannot_impersonate_user_id(self, client):
+        """ASCII 契约：Unicode 数字必须被格式闸门拒掉，不得被 int() 当作等价数字放行。
+
+        承重设计：`int("١") == 1`、`int("٢") == 2` …（阿拉伯-印度数字）。本用例**刻意先建一个
+        id 恰好等于 `int(该 Unicode 数字)` 的真实用户**，于是：
+        - 闸门完好 ⇒ 400「owner_id 不合法」，账户归属**不变**；
+        - 若 `isascii()` 被摘掉 ⇒ `int()` 解析成合法用户 id、存在性预检通过 ⇒ **转移成功** ⇒ 本用例红。
+        （仅断言状态码是不够的：摘掉 isascii 后会落到存在性预检、仍是 400 ⇒ 假绿。）
+        """
+        _, owner = _create_user(client, "_c1a_o", role="user")
+        _, target = _create_user(client, "_c1a_t", role="user")
+        dev, _ = _create_user(client, "_c1a_d", role="developer")
+        db = database.get_db()
+        _mk_account(db, owner, "GG-C1-A", "C1非ASCII")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-C1-A'").fetchone()["id"]
+        db.close()
+        assert 1 <= target <= 9, f"本用例依赖 target id ≤ 9 以构造阿拉伯-印度数字，实得 {target}"
+        fake = chr(0x0660 + target)
+        assert int(fake) == target, "前置失败：构造的 Unicode 数字未映射到 target id"
+
+        resp = client.put(f"/api/accounts/{aid}/reassign",
+                          json={"owner_id": fake}, headers=dev)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "owner_id 不合法"
+        # 承重：归属必须未变（若 isascii 闸门失守，账户会被静默转给 target）
+        db = database.get_db()
+        ow = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()["owner_id"]
+        db.close()
+        assert ow == owner, "Unicode 数字绕过了 ASCII 闸门并改变了账户归属"
