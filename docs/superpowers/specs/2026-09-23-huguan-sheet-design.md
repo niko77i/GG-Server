@@ -120,7 +120,7 @@
 | G | 运营 | `users.display_name`（`owner_id`） | ✓ | ✓ |
 | H | 重新分配 | `users.display_name`（`owner_id`） | ✓（按 §7 规则） | ✓（按 §7 规则） |
 | I | 时区 | `accounts.timezone` | ✓ | ✓ |
-| J | 大MCC | 父 `mcc.name`（`mcc.parent_mcc_id`） | ✓ | ✓ |
+| J | 大MCC | 父 `mcc.name`（`mcc.parent_mcc_id`） | ✓（派生，由 D 列推出） | ✗（派生列，读回会与 D 列打架） |
 | K | 状态 | `account_statuses.name`（`status_id`） | ✓ | ✓ |
 | L | 位置 | — | ✗ | ✗ |
 | M | 消耗 | —（`accounts` 无此字段） | ✗ | ✗ |
@@ -128,6 +128,7 @@
 
 - 可写范围（非连续，跳过 E / L / M / N）：**`A:D` + `F:H` + `I:K`**
 - 读回范围：**`A:N`**（14 列整段读，未映射列直接忽略）
+- 读回**忽略**的列：`C`（定位键）、`J`（派生列，由 D 列 MCC 的父级推出，独立读回会与 D 列互相打架）、`E` / `L` / `M` / `N`（系统无对应字段）
 
 ### 5.2 TT（13 列）
 
@@ -149,6 +150,7 @@
 
 - 可写范围：**`A:J` + `L:M`**（跳过 K）
 - 读回范围：**`A:M`**
+- 读回**忽略**的列：`C`（定位键）、`K`（系统无对应字段）
 
 ---
 
