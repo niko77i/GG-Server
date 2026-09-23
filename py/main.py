@@ -568,10 +568,16 @@ def scrape():
 
 
 @app.route("/api/scrape/download", methods=["GET"])
+@jwt_required(optional=True)
 def scrape_download():
     """将爬取的图片目录打包为 zip 下载。"""
     path = request.args.get("path", "").strip()
     if not path or not os.path.isdir(path):
+        return jsonify({"success": False, "error": "目录不存在"}), 404
+    # 白名单：只允许 _SCRAPE_DEFAULT_DIR 内的目录打包（路径穿越防护）
+    real = os.path.realpath(path)
+    scrape_real = os.path.realpath(_SCRAPE_DEFAULT_DIR)
+    if not (real == scrape_real or real.startswith(scrape_real + os.sep)):
         return jsonify({"success": False, "error": "目录不存在"}), 404
     pkg_name = os.path.basename(path)
 
@@ -1671,6 +1677,17 @@ def serve_font_file():
     path = request.args.get("path", "").strip()
     if not path or not os.path.isfile(path):
         return "", 404
+    # 扩展名白名单：只允许字体文件
+    if not path.lower().endswith((".ttf", ".otf", ".ttc", ".woff", ".woff2")):
+        return "", 404
+    # 目录白名单：只允许 _FONTS_DIR 与系统字体目录（_scan_fonts_dir 返回的两类来源）
+    real = os.path.realpath(path)
+    allowed_dirs = [
+        os.path.realpath(_FONTS_DIR),
+        os.path.realpath(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Fonts")),
+    ]
+    if not any(real == d or real.startswith(d + os.sep) for d in allowed_dirs):
+        return "", 403
     mt = "font/ttf" if path.lower().endswith('.ttf') else "font/otf"
     return send_file(path, mimetype=mt)
 

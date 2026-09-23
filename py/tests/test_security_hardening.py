@@ -72,3 +72,31 @@ class TestAClassLoggedIn:
         # 对照断言：合法用户绝不能被新补的鉴权误挡成 401
         resp = client.post(path, json=body, headers=auth_headers)
         assert resp.status_code != 401
+
+
+class TestAClassFileWhitelist:
+    def test_scrape_download_rejects_path_outside_scrape_dir(self, client, auth_headers):
+        # 白名单外目录（系统目录）必须被拒，且不能被匿名打包
+        resp = client.get("/api/scrape/download?path=C:\\Windows", headers=auth_headers)
+        assert resp.status_code in (403, 404)
+
+    def test_scrape_download_requires_existing_dir(self, client, auth_headers):
+        resp = client.get("/api/scrape/download?path=C:\\nonexistent\\dir", headers=auth_headers)
+        assert resp.status_code == 404
+
+    def test_font_file_rejects_non_font_file(self, client, auth_headers):
+        # 任意存在的文件（非字体扩展名）必须被拒
+        import tempfile, os
+        fd, fp = tempfile.mkstemp(suffix=".txt")
+        try:
+            os.write(fd, b"secret")
+            os.close(fd)
+            resp = client.get(f"/api/font-file?path={fp}", headers=auth_headers)
+            assert resp.status_code in (403, 404)
+        finally:
+            os.unlink(fp)
+
+    def test_serve_image_still_rejects_non_png(self, client):
+        # serve_image 已有 _is_safe_path + .png 双闸门，匿名端点白名单行为钉住
+        resp = client.get("/api/image?path=C:\\Windows\\win.ini")
+        assert resp.status_code == 404
