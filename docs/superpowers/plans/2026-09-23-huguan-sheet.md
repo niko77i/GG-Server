@@ -24,7 +24,9 @@
   4. 应用归属变更后，回写 `运营` / `接户运营` 列为新归属名。
 - **配置 key**：`config` 表，key = `huguan_dashboard_{user_id}`，value 为 JSON `{"gg": {...}, "tt": {...}}`。
 - **名称 → 主键的唯一口径（§8.4）**：唯一命中才落库；命中 0 条或 ≥2 条 → 记 warning，**该列**不落库，该行其余列照常处理。
-- **状态解析必须带平台（Task 6 起）**：`resolve_status_id(db, name, owner_id, platform)`。`account_statuses.platform` 默认 `'gg'`、唯一约束是 `(name, platform)`、下拉按平台过滤（`main.py:6059`）—— 漏平台会让 TT 的状态落进 gg 命名空间。
+- **状态解析必须带平台（Task 6 起）**：`resolve_status_id(db, name, owner_id, platform, *, create_missing=True)`。`account_statuses.platform` 默认 `'gg'`、唯一约束是 `(name, platform)`、下拉按平台过滤（`main.py:6059`）—— 漏平台会让 TT 的状态落进 gg 命名空间。
+- **状态查重键是 `(name, platform)`，不含 `owner_id`**（规格 §8.4）—— 真实唯一约束就是这两个列（`database.py:1225` 的迁移重建，PRAGMA 实测），带上 `owner_id` 会让两个运营写同名状态时重复 `INSERT` 撞约束，`IntegrityError` 穿到 `build_diff` 把整份报告带崩。既有正确对照：`main.py:6102`、`routes/tt_accounts_routes.py:65`。
+- **`dry_run=true` 全程只读**（规格 §8.3 步骤 7 / §10.1 第 6 项）：`build_diff` 一律 `create_missing=False`；系统里没有的状态名以 `pending_status` 原样进报告（不是 id、不是 warning），`INSERT` 只发生在 `apply_diff`。
 - **请求体读字段的统一口径（所有 `/api/huguan/*` 端点）**：`data = request.get_json(silent=True)` 后先判 `isinstance(data, dict)`，否则 400；字段一律 `str(... or "")` 兜底再 `.strip()`。**禁止**写 `(data.get(x) or "").strip()` —— 客户端给个数字或 `null` 就会 `AttributeError` 炸成 500（Task 5 审查实测 `{"platform": 5}` / `{"spreadsheet_id": 123}` / `[1,2]` 三种 body 全中）。
 - **同一口径适用于「容器型字段」**：`confirmed` 这类期望 dict 的字段，`data.get(x) or {}` 只能兜住 `None`/`""`/`0`，兜不住真值非 dict（`[1,2]`、`"abc"`）—— 那样会把 `AttributeError` 带到逻辑层炸成 500。必须显式判类型，非 dict 一律 400。判据与上一条相同：**客户端能构造出的畸形 body，只能是 4xx，不能是 5xx**。
 - **「畸形」的边界（避免两种口径打架）**：畸形 = ①body 不是 JSON 对象；②容器型字段的类型不符。**标量字段给数字/`None` 不算畸形** —— 按 `str(... or "")` 兜底后照常走后续校验，该 200 就 200（`sheet_name: 5` → `"5"` 存下来），该 400 才 400（`platform: 5` → `"5"` 不在 `PLATFORMS` 里）。**不要**为了「数字也该拒绝」而对标量字段加 `isinstance(x, str)` 检查，那会与 `test_numeric_fields_are_coerced_not_500` 直接冲突（Task 5 修复时计划里真出现过这对互斥断言，一站一立才收敛）。
@@ -1255,9 +1257,11 @@ git commit -m "feat: 户管看板配置读写接口与户管限定装饰器"
 - Produces:
   - `resolve_owner_id(db, name: str) -> int | None`
   - `resolve_named_id(db, sql: str, params: tuple) -> int | None` — 唯一命中才返回
-  - `resolve_status_id(db, name: str, owner_id, platform: str) -> int | None` — 查不到则在该 owner 的**该平台**下新建
+  - `resolve_status_id(db, name: str, owner_id, platform: str, *, create_missing: bool = True) -> int | None` — 查重键 `(name, platform)`（**不含 owner_id**）；查不到且 `create_missing=False` 时返回 `None`（不建行），`owner_id` 只用于给新建行记「谁先建的」
   - `build_diff(db, parsed_rows: list, platform: str) -> dict` — 返回 `{"to_create": [...], "to_update": [...], "owner_changes": [...], "to_skip": [...], "warnings": [...], "summary": {...}}`
   - 每个 diff 项都带 `"row"`（表里 1-indexed 行号，供前端回传确认）
+  - 每个 diff 项还带 `"pending_status": str | None` — 该行状态名在系统里尚不存在时的名字。**`build_diff` 绝不建行**（`dry_run` 只读），`INSERT` 推迟到 Task 7 的 `apply_diff`。文本列的新值为空串时，该列名进 `to_update[i]["clears"]`（前端必须显式标注「将清空」）
+  - `summary` 额外带 `"clears": int` — 本次将被清空的列总数（首次同步前用它量化影响面）
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1284,8 +1288,20 @@ def _seed_account(db, account_id, owner_id, **over):
     return db.execute("SELECT id FROM accounts WHERE account_id=?", (account_id,)).fetchone()["id"]
 
 
+def _seed_tt_account(db, advertiser_id, owner_id, **over):
+    """TT 侧夹具。定位键是 `advertiser_id`（Task 6/9 的 TT 路径都靠它）。"""
+    cols = {"advertiser_id": advertiser_id, "name": advertiser_id, "owner_id": owner_id,
+            "country": "", "timezone": "", "consumption": "", "remark": "",
+            "death_date": "", "deleted_at": None, "acquired_date": ""}
+    cols.update(over)
+    keys = ", ".join(cols)
+    marks = ", ".join("?" for _ in cols)
+    db.execute(f"INSERT INTO tt_accounts({keys}) VALUES({marks})", tuple(cols.values()))
+    db.commit()
+
+
 class TestResolvers:
-    def test_resolve_owner_prefers_display_name(self, client):
+    def test_resolve_owner_by_display_name(self, client):
         from huguan_dashboard import resolve_owner_id
         db = database.get_db()
         uid = _seed(db, "_r1", "张三")
@@ -1306,6 +1322,21 @@ class TestResolvers:
         _seed(db, "_r3a", "重名")
         _seed(db, "_r3b", "重名")
         assert resolve_owner_id(db, "重名") is None
+        db.close()
+
+    def test_username_colliding_with_another_display_name_is_ambiguous(self, client):
+        """甲的 display_name 撞上乙的 username ⇒ 必须判为歧义，不得猜中甲。
+
+        拆成「先查 display_name，查不到再查 username」两条查询时，这里会静默返回
+        `_r5a`（display_name 那条先命中），把账户挂到错误的人名下。写表方向
+        （`COALESCE(NULLIF(display_name,''), username)`）产出的是一个合成名字空间，
+        反向解析必须对称。对照行 `_r5b` 是**必须被算进去的第二个命中**。
+        """
+        from huguan_dashboard import resolve_owner_id
+        db = database.get_db()
+        _seed(db, "_r5a", "撞名")   # display_name = "撞名"
+        _seed(db, "撞名", "")       # username     = "撞名"（display_name 空 → 回退后也叫"撞名"）
+        assert resolve_owner_id(db, "撞名") is None
         db.close()
 
     def test_unknown_name_returns_none(self, client):
@@ -1436,7 +1467,10 @@ class TestBuildDiff:
         """
         from huguan_dashboard import build_diff, parse_row
         db, u1, _ = self._prepare(client)
-        _seed_account(db, "MCCACC", u1)
+        # acquired_date 必须显式钉成 ""：`accounts.acquired_date` 的 DDL 默认值是
+        # `date('now','localtime')`（database.py:236），不钉住它就与表里的空 A 列
+        # 构成一条**真实差异**，`fields` 会多出 `acquired_date: ""` 而非只有 timezone。
+        _seed_account(db, "MCCACC", u1, acquired_date="")
         db.execute("INSERT INTO mcc(name, mcc_id) VALUES('同名MCC','1')")
         db.execute("INSERT INTO mcc(name, mcc_id) VALUES('同名MCC','2')")
         db.commit()
@@ -1462,6 +1496,247 @@ class TestBuildDiff:
         assert s["owner_changes"] == 1
         assert s["new_accounts"] == 1
         db.close()
+
+    def test_blank_text_column_clears_system_value(self, client):
+        """表里文本列空着 = 把系统里该列清空（规格 §8.3「按表覆盖该列」）。
+
+        这是**刻意的**不对称：名称类字段空值跳过（空串解析不出候选，属 §8.4 的
+        「命中 0 条」），文本列空值照常落库。改成「空值一律跳过」会让户管永远
+        无法从表里清掉一个值（B 列「是否封户」清空即撤销死亡）。
+        对照行：库里 timezone='Asia/Shanghai' 而表里 I 列为空 ⇒ 必须出现空值差异。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "BLANK-1", u1, acquired_date="", timezone="Asia/Shanghai")
+        parsed = [dict(parse_row(["", "", "BLANK-1"], "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert len(diff["to_update"]) == 1
+        assert diff["to_update"][0]["fields"]["timezone"] == ""
+        db.close()
+
+    def test_soft_deleted_bc_is_not_matched(self, client):
+        """软删的 BC 不得被「唯一命中」放行（否则账户挂到已删的 BC 上）。
+
+        对照行：同名 BC 只有一条、且已软删 ⇒ 若 SQL 不带 `deleted_at IS NULL`，
+        它会成为唯一命中并被写入 bc_id。仓库既有口径见 tt_routes.py:133/198/1054/1058。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_tt_account(db, "BCDEL-1", u1)
+        db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id, deleted_at) "
+                   "VALUES('已删BC','1',?,datetime('now'))", (u1,))
+        db.commit()
+        row = ["", "", "BCDEL-1", "已删BC", "", "", "", "", "", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        assert diff["to_update"] == []
+        assert any("已删BC" in w["message"] for w in diff["warnings"])
+        db.close()
+
+    def test_tt_diff_uses_advertiser_id_and_reports_pending_status(self, client):
+        """TT 侧端到端：定位键走 `advertiser_id`、新状态名走 `pending_status`。
+
+        本任务此前**零 TT 覆盖**（实现者只用一次性探针验过），而 Task 9 的触发点
+        全在 TT 侧 —— 这条把 TT 路径钉进测试网。
+        系统里还没有「待优化」(tt) ⇒ 该走 pending_status（名字原样），
+        **且此刻不得建行**（dry_run 只读，规格 §8.3 步骤 7）。
+        落库侧的平台命名空间断言在 Task 7 的 apply 测试里。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_tt_account(db, "TTD-1", u1)
+        row = ["", "", "TTD-1", "", "", "", "", "", "待优化", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        assert len(diff["to_update"]) == 1
+        assert diff["to_update"][0]["account_id"] == "TTD-1"
+        assert diff["to_update"][0]["pending_status"] == "待优化"
+        assert "status_id" not in diff["to_update"][0]["fields"]
+        # 只读：状态行不能在这一步出现，否则 dry_run 承诺的「不改库」就是假的
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 0
+        # 定位键必须真是 advertiser_id —— 写错列会 INSERT 出第二行而不是更新这一行
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE advertiser_id='TTD-1'"
+                          ).fetchone()["owner_id"] == u1
+        assert db.execute("SELECT COUNT(*) AS n FROM tt_accounts").fetchone()["n"] == 1
+        db.close()
+
+    def test_two_owners_same_status_name_does_not_crash(self, client):
+        """两个运营写同名状态 ⇒ 必须复用同一行，不得 IntegrityError。
+
+        真实唯一约束是 `UNIQUE(name, platform)`，**不含 owner_id**（database.py:1225
+        的迁移重建，PRAGMA 实测索引列为 ['name','platform']）。若查重键带上 owner_id，
+        乙的账户写「待优化」时查不中而重复 INSERT → IntegrityError 从解析穿到
+        build_diff，**整份差异报告全丢**（同一 sheet 其它行的结果也拿不到）。
+        对照写法：main.py:6102。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, u2 = self._prepare(client)
+        _seed_account(db, "DUP-A", u1, acquired_date="")
+        _seed_account(db, "DUP-B", u2, acquired_date="")
+        rows = [
+            # GG 状态是 K 列（index 10）；写成 index 8 会落进 I 列（时区）
+            dict(parse_row(["", "", "DUP-A", "", "", "", "张三", "", "", "", "待优化"], "gg"),
+                 row=2),
+            dict(parse_row(["", "", "DUP-B", "", "", "", "李四", "", "", "", "待优化"], "gg"),
+                 row=3),
+        ]
+        diff = build_diff(db, rows, "gg")           # 不得抛异常
+        assert len(diff["to_update"]) == 2
+        assert {i["pending_status"] for i in diff["to_update"]} == {"待优化"}
+        # 从解析层再确认一次：两个人解析同名同平台，拿到的是同一行
+        from huguan_dashboard import resolve_status_id
+        sid_a = resolve_status_id(db, "待优化", u1, "gg")
+        sid_b = resolve_status_id(db, "待优化", u2, "gg")
+        assert sid_a == sid_b
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 1
+        db.close()
+
+    def test_diff_is_read_only_even_with_new_status_name(self, client):
+        """dry_run 全程只读：连「需要新建的状态行」也不许在这一步落库。
+
+        规格 §8.3 步骤 7 / §10.1 第 6 项「dry_run=true 不改库」。插入若挂在共享连接上，
+        调用方随后任何一次 commit 都会把它真写进去，而报告里的 id 也只有在提交后才存在
+        ——所以必须在解析层就拦住，不能靠「反正没 commit」。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "RO-1", u1, acquired_date="")
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('RO-MCC','7')")
+        db.commit()
+        rows = [dict(parse_row(["", "", "RO-1", "RO-MCC", "", "", "张三", "", "", "", "全新状态"],
+                               "gg"), row=2)]
+        before = db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"]
+        diff = build_diff(db, rows, "gg")
+        db.commit()          # 调用方正常收尾的提交：不该让任何东西冒出来
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == before
+        item = diff["to_update"][0]
+        assert item["pending_status"] == "全新状态"
+        # 其余列照常比对（只有状态那一列是 pending）
+        assert item["fields"]["mcc_id"] == db.execute(
+            "SELECT id FROM mcc WHERE name='RO-MCC'").fetchone()["id"]
+        db.close()
+
+    def test_dead_flag_reaches_the_diff(self, client):
+        """`_is_dead` 必须真的进报告 —— 它恒为 False 时封户/撤销死亡永不落库。
+
+        对照组三行：死亡状态、B 列「是否封户」= 是、都不是。只断言 True 的那种
+        测试杀不掉「恒 False」的变异体，所以第三条断言 False 是必需的。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "DEAD-1", u1, acquired_date="")
+        _seed_account(db, "DEAD-2", u1, acquired_date="")
+        _seed_account(db, "DEAD-3", u1, death_date="2026-01-01")
+        rows = [
+            # GG 状态是 K 列（index 10）
+            dict(parse_row(["", "", "DEAD-1", "", "", "", "张三", "", "", "", "死亡"], "gg"),
+                 row=2),
+            # B 列「是否封户」是 index 1 —— index 0 是 A 列日期，写错位置会变成
+            # 「日期=是」，`_is_dead` 仍是 False 而被 `_same_as_existing` 过滤掉，
+            # 断言直接 KeyError。
+            dict(parse_row(["", "是", "DEAD-2", "", "", "", "张三"], "gg"), row=3),
+            dict(parse_row(["", "", "DEAD-3", "", "", "", "张三"], "gg"), row=4),
+        ]
+        diff = build_diff(db, rows, "gg")
+        by_row = {i["row"]: i for i in diff["to_update"]}
+        assert by_row[2]["fields"]["_is_dead"] is True      # K 列「死亡」
+        assert by_row[3]["fields"]["_is_dead"] is True      # B 列「是否封户」= 是
+        assert by_row[4]["fields"]["_is_dead"] is False     # 撤销死亡
+        db.close()
+
+    def test_to_create_carries_db_values_not_cells(self, client):
+        """`to_create` 的键名叫 `db_values` 且真装着要写进库的值。
+
+        两个变异体一起钉住：键名被改成 `cells`（与 Task 4 的「表列字母 → 单元格值」
+        契约撞名，apply_diff 会当成列字母拼出非法 SQL），以及值被置空
+        （新建出来的账户会丢掉表里所有列）。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('NEW-MCC','9')")
+        db.commit()
+        mcc_id = db.execute("SELECT id FROM mcc WHERE name='NEW-MCC'").fetchone()["id"]
+        rows = [dict(parse_row(["", "", "NEW-DB", "NEW-MCC", "", "", "张三", "",
+                                "Asia/Shanghai"], "gg"), row=2)]
+        item = build_diff(db, rows, "gg")["to_create"][0]
+        assert "db_values" in item and "cells" not in item
+        dv = item["db_values"]
+        assert dv["mcc_id"] == mcc_id          # 值必须在
+        assert dv["timezone"] == "Asia/Shanghai"
+        assert dv["_is_dead"] is False
+        db.close()
+
+    def test_agent_namespace_is_platform_scoped(self, client):
+        """代理解析必须按平台隔离：GG 的表不能挂到 TT 的代理上（反之亦然）。
+
+        两边的查名 SQL 分别是 `_SQL_AGENT_GG` / `_SQL_AGENT_TT`，写反了不会报错
+        —— 只会把账户静默挂到**另一个平台**的同名代理上。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "AG-GG", u1, acquired_date="")
+        _seed_tt_account(db, "AG-TT", u1)
+        db.execute("INSERT INTO agents(name, platform) VALUES('张三代理','gg')")
+        db.execute("INSERT INTO agents(name, platform) VALUES('TT代理','tt')")
+        db.commit()
+        gg_id = db.execute("SELECT id FROM agents WHERE platform='gg'").fetchone()["id"]
+        tt_id = db.execute("SELECT id FROM agents WHERE platform='tt'").fetchone()["id"]
+        # GG 的表里写了 TT 侧的代理名 ⇒ 查不到，记警告，不落库
+        gg_diff = build_diff(db, [dict(parse_row(
+            ["", "", "AG-GG", "", "", "TT代理", "张三"], "gg"), row=2)], "gg")
+        assert gg_diff["to_update"] == []
+        assert any("TT代理" in w["message"] for w in gg_diff["warnings"])
+        # 反向：TT 的表里写 GG 侧代理名 ⇒ 同样不落库
+        tt_row = ["", "", "AG-TT", "", "", "张三代理", "", "", "", "", "", "", ""]
+        tt_diff = build_diff(db, [dict(parse_row(tt_row, "tt"), row=2)], "tt")
+        assert tt_diff["to_update"] == []
+        assert any("张三代理" in w["message"] for w in tt_diff["warnings"])
+        # 各自命中的正例：GG 用 gg 代理、TT 用 tt 代理（不能用上面那两行，那两行
+        # 刻意写的是对侧平台的代理名）
+        gg_ok = build_diff(db, [dict(parse_row(
+            ["", "", "AG-GG", "", "", "张三代理", "张三"], "gg"), row=2)], "gg")
+        assert gg_ok["to_update"][0]["fields"]["agent_id"] == gg_id
+        tt_row_ok = ["", "", "AG-TT", "", "", "TT代理", "", "", "", "", "", "", ""]
+        tt_ok = build_diff(db, [dict(parse_row(tt_row_ok, "tt"), row=2)], "tt")
+        assert tt_ok["to_update"][0]["fields"]["agent_id"] == tt_id
+        db.close()
+
+    def test_duplicate_account_id_rows_are_deduped(self, client):
+        """同一账户ID 在表里出现两行 ⇒ 首行生效，后续行记警告。
+
+        不去重的话两行都会进 `to_create`，落库阶段第二行撞唯一约束，整批报错。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        rows = [
+            dict(parse_row(["", "", "DUP-ROW", "", "", "", "张三"], "gg"), row=2),
+            dict(parse_row(["", "", "DUP-ROW", "", "", "", "张三"], "gg"), row=5),
+        ]
+        diff = build_diff(db, rows, "gg")
+        assert len(diff["to_create"]) == 1
+        assert diff["to_create"][0]["row"] == 2          # 首次出现的那行
+        assert diff["summary"]["total_in_sheet"] == 2    # 表里确实有两行，不虚报
+        assert any(w["row"] == 5 and "DUP-ROW" in w["message"] for w in diff["warnings"])
+        db.close()
+
+    def test_update_item_lists_columns_that_will_be_cleared(self, client):
+        """新值为空的列必须进 `clears`，且 summary 汇总计数。
+
+        清空不可逆：首次同步前户管要能一眼看到「将清空多少列」，而不是在几百行差异里
+        自己发现 acquired_date 被清掉了。新建账户的空列**不算**清空（那是「不填」）。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "CLR-1", u1, acquired_date="2026-01-01", timezone="Asia/Shanghai")
+        diff = build_diff(db, [dict(parse_row(["", "", "CLR-1"], "gg"), row=2)], "gg")
+        item = diff["to_update"][0]
+        assert item["clears"] == ["acquired_date", "timezone"]   # sorted，两个都被清
+        assert diff["summary"]["clears"] == 2
+        # 新建账户的空列不产生 clears
+        new_diff = build_diff(db, [dict(parse_row(["", "", "CLR-NEW"], "gg"), row=3)], "gg")
+        assert new_diff["to_create"][0].get("clears") is None
+        assert new_diff["summary"]["clears"] == 0
+        db.close()
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1484,40 +1759,57 @@ def resolve_named_id(db, sql: str, params: tuple = ()) -> int | None:
 
 
 def resolve_owner_id(db, name: str):
-    """归属名 → users.id。display_name 优先，回退 username。"""
-    name = (name or "").strip()
-    if not name:
-        return None
-    for sql in ("SELECT id FROM users WHERE display_name=?",
-                "SELECT id FROM users WHERE username=?"):
-        rows = db.execute(sql, (name,)).fetchall()
-        if len(rows) == 1:
-            return rows[0]["id"]
-        if len(rows) > 1:
-            return None
-    return None
+    """归属名 → users.id。空 display_name 回退 username，唯一命中才返回。
 
-
-def resolve_status_id(db, name: str, owner_id, platform: str):
-    """状态名 → account_statuses.id，按「该账户的 owner + 平台」作用域。
-
-    **必须带 platform**：account_statuses.platform 默认 'gg'（database.py:153），
-    唯一约束是 (name, platform)（database.py:1225），而状态下拉按平台过滤
-    （main.py:6059 `/api/statuses/list`）。不写平台会让 TT 同步新建的状态落进
-    gg 命名空间 —— TT 下拉里看不见，反而出现在 GG 下拉里。
-    既有代码的两种写法可对照：GG 侧靠默认值吃 'gg'（main.py:4042/4184/4944/5068），
-    TT 侧显式写 'tt'（main.py:6085、tt_accounts_routes.py:69）。
+    必须用**单条** COALESCE(NULLIF(display_name,''), username) 查询，不能拆成
+    「先查 display_name，查不到再查 username」两条：后者会在
+    「甲的 display_name 与乙的 username 同名」时静默返回甲 —— 而写表方向
+    （`_GG_ROW_SQL` / `_TT_ROW_SQL`）产出的正是这一个合成名字空间，两边不对称
+    就会把账户挂到错误的人名下。规格 §8.4 的统一口径是「唯一命中才落库」，
+    跨命名空间撞名属 ≥2 条命中，应出警告而不是猜。
     """
     name = (name or "").strip()
     if not name:
         return None
-    # 查重也必须带 platform：唯一约束含 platform，同名不同平台可并存，
-    # 不带平台过滤会命中 2 行而 fetchone() 任取一条。
-    row = db.execute(
-        "SELECT id FROM account_statuses WHERE name=? AND owner_id IS ? AND platform=?",
-        (name, owner_id, platform)).fetchone()
+    return resolve_named_id(
+        db,
+        "SELECT id FROM users WHERE COALESCE(NULLIF(display_name, ''), username) = ?",
+        (name,))
+
+
+def resolve_status_id(db, name: str, owner_id, platform: str, *, create_missing: bool = True):
+    """状态名 → account_statuses.id。
+
+    **查重键是 (name, platform)，不含 owner_id。** 真实唯一约束就是这两个列
+    （database.py:1225 的迁移重建；database.py:505 的原始建表 UNIQUE(name, owner_id)
+    已被覆盖，PRAGMA 实测 sqlite_autoindex_account_statuses_1 = ['name','platform']）。
+    带上 owner_id 查重会让「甲已有『待优化』(gg)、乙的账户也写『待优化』」查不中而
+    重复 INSERT，直接 sqlite3.IntegrityError —— 该异常从 _resolve_field 穿到
+    build_diff，**把整份差异报告带崩**（同 sheet 其它行的结果也拿不到）。
+    owner_id 只是「谁先建的」这个记账，不参与查重。
+    既有正确对照：main.py:6102（/api/statuses/list 的创建）、routes/tt_accounts_routes.py:65。
+
+    **必须带 platform**：account_statuses.platform 默认 'gg'（database.py:153），
+    而状态下拉按平台过滤（main.py:6059 `/api/statuses/list`）。不写平台会让 TT 同步
+    新建的状态落进 gg 命名空间 —— TT 下拉里看不见，反而出现在 GG 下拉里。
+    既有代码的两种写法可对照：GG 侧靠默认值吃 'gg'（main.py:4042/4184/4944/5068），
+    TT 侧显式写 'tt'（main.py:6085、tt_accounts_routes.py:69）。
+
+    因为唯一约束成立，(name, platform) **至多命中 1 行**，所以状态解析没有
+    规格 §8.4 的「命中 ≥2 条」歧义档 —— 只有 id / None 两种结果。
+
+    create_missing=False 时只查不建（规格 §8.3 步骤 7：dry_run 不改库），
+    查不到返回 None，由调用方按 pending 处理（不是 warning）。
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    row = db.execute("SELECT id FROM account_statuses WHERE name=? AND platform=?",
+                     (name, platform)).fetchone()
     if row:
         return row["id"]
+    if not create_missing:
+        return None
     db.execute("INSERT INTO account_statuses(name, owner_id, platform) VALUES(?,?,?)",
                (name, owner_id, platform))
     return db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
@@ -1527,13 +1819,23 @@ def resolve_status_id(db, name: str, owner_id, platform: str):
 _SQL_MCC = "SELECT id FROM mcc WHERE name=?"
 _SQL_AGENT_GG = "SELECT id FROM agents WHERE name=? AND (platform='gg' OR platform IS NULL)"
 _SQL_AGENT_TT = "SELECT id FROM agents WHERE name=? AND platform='tt'"
-_SQL_BC = "SELECT id FROM tt_bcs WHERE name=?"
+# tt_bcs 有 deleted_at（database.py），必须过滤软删：否则一个已删的 BC 若恰好是
+# 唯一同名行，会被「唯一命中才落库」放行，把账户挂到已删的 BC 上。仓库既有口径一致
+# （tt_routes.py:133/198/1054/1058 全部带 deleted_at IS NULL）。
+# mcc / agents 无 deleted_at，不加；users 也无。
+_SQL_BC = "SELECT id FROM tt_bcs WHERE name=? AND deleted_at IS NULL"
 
 
-def _resolve_field(db, platform: str, field: str, value: str, owner_id):
+def _resolve_field(db, platform: str, field: str, value: str):
     """把表里的一个名称解析成系统主键；不认识的字段返回 (True, None) 表示无需解析。
 
     返回 (ok, resolved)：ok=False 表示该列要记 warning 且不落库。
+
+    **status_name 刻意不在这里。** 状态有三档而其它名称只有两档：其它名称是
+    「唯一命中 / 歧义（0 或 ≥2 条）」，状态是「已有 id / 系统里还没有（pending）」
+    —— 因为唯一约束 (name, platform) 让状态至多命中 1 行，不存在歧义档。
+    混进本函数会让「查不到」被误判成歧义而记 warning、把该列丢弃，正是规格
+    §8.3 步骤 7 要避免的。状态的解析在 `_collect_updates` 里单独走。
     """
     if field == "mcc_name":
         return True, resolve_named_id(db, _SQL_MCC, (value,))
@@ -1542,8 +1844,6 @@ def _resolve_field(db, platform: str, field: str, value: str, owner_id):
         return True, resolve_named_id(db, sql, (value,))
     if field == "bc_name":
         return True, resolve_named_id(db, _SQL_BC, (value,))
-    if field == "status_name":
-        return True, resolve_status_id(db, value, owner_id, platform)
     return False, None
 
 
@@ -1566,6 +1866,30 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
     每个产出项都带 "row"，供前端回传确认。
     """
     key_field = ACCOUNT_KEY_FIELD[platform]
+    sheet_rows = len(parsed_rows)   # 表里数据行总数（**去重前**），供 summary 用
+
+    # 产出列表必须**先于**去重循环初始化：去重本身会往 `warnings` 里塞一条，
+    # 放到循环之后会 UnboundLocalError（`compile()` 查不出这种运行期绑定错误）。
+    to_create, to_update, owner_changes, to_skip = [], [], [], []
+    warnings = []
+
+    # 按账户ID 去重：同一 ID 在表里出现两行时，若两行都进 to_create，落库阶段第二行
+    # 会撞唯一约束。取**首次出现**的那行生效，后续行记 warning（户管要能看到并去改表）。
+    # 账户ID 为空的行不在这里拦 —— 它们要按原有路径记「账户ID为空，跳过」。
+    seen_rows, deduped = {}, []
+    for p in parsed_rows:
+        aid = (p.get("account_id") or "").strip()
+        if not aid:
+            deduped.append(p)
+            continue
+        if aid in seen_rows:
+            warnings.append({"row": p.get("row"),
+                             "message": f"账户ID「{aid}」已在第 {seen_rows[aid]} 行出现，本行跳过"})
+            continue
+        seen_rows[aid] = p.get("row")
+        deduped.append(p)
+    parsed_rows = deduped
+
     ids = [p.get("account_id") for p in parsed_rows if p.get("account_id")]
 
     existing_map = {}
@@ -1580,8 +1904,6 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         ).fetchall()
         for r in rows:
             existing_map[r[key_field]] = dict(r)
-
-    to_create, to_update, owner_changes, to_skip, warnings = [], [], [], [], []
 
     for p in parsed_rows:
         row_no = p.get("row")
@@ -1600,6 +1922,11 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
 
         existing = existing_map.get(aid)
         if existing is None:
+            db_values = _collect_updates(db, platform, p, want_owner_id, row_no, warnings,
+                                         create_missing=False)
+            # 先摘掉合成键再入报告：db_values 会被 apply_diff 直接拼 INSERT 列名，
+            # 带上下划线开头的键会变成非法 SQL。
+            pending = db_values.pop("_pending_status", None)
             to_create.append({
                 "row": row_no,
                 "account_id": aid,
@@ -1608,7 +1935,9 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
                 # 键名刻意不叫 "cells"：本模块里 "cells" 一律指「表列字母 → 单元格值」
                 # （Task 4 的 update_rows_by_account_id 契约），这里装的是
                 # 「数据库列名 → 值」，供 apply_diff 拼 INSERT。两者同名会被误用。
-                "db_values": _collect_updates(db, platform, p, want_owner_id, row_no, warnings),
+                "db_values": db_values,
+                # 系统里还没有的状态名；apply_diff 落库前才 INSERT（build_diff 只读）
+                "pending_status": pending,
             })
             continue
 
@@ -1630,12 +1959,21 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
 
         # 归属变更后，状态/渠道等要按新 owner 作用域解析
         scope_owner = want_owner_id if want_owner_id is not None else cur_owner
-        fields = _collect_updates(db, platform, p, scope_owner, row_no, warnings)
+        fields = _collect_updates(db, platform, p, scope_owner, row_no, warnings,
+                                  create_missing=False)
+        pending = fields.pop("_pending_status", None)
         changed = {k: v for k, v in fields.items()
                    if not _same_as_existing(db, platform, existing, k, v)}
-        if changed:
+        # pending 也算真实变更：系统里没这个状态名，建出来必然与现状不同。
+        # 只比 `changed` 会让「这一行只改了状态」被整行漏掉。
+        if changed or pending:
             to_update.append({"row": row_no, "account_id": aid,
-                              "existing_id": existing["id"], "fields": changed})
+                              "existing_id": existing["id"], "fields": changed,
+                              "pending_status": pending,
+                              # apply_diff 建缺失状态行时用它记 owner（谁先建的）
+                              "scope_owner_id": scope_owner,
+                              # 新值为空串的文本列：清空是不可逆的，必须让前端显式标注
+                              "clears": _blank_columns(platform, changed)})
 
     return {
         "to_create": to_create,
@@ -1644,29 +1982,57 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         "to_skip": to_skip,
         "warnings": warnings,
         "summary": {
-            "total_in_sheet": len(parsed_rows),
+            "total_in_sheet": sheet_rows,
             "new_accounts": len(to_create),
             "updates": len(to_update),
             "owner_changes": len(owner_changes),
             "skipped": len(to_skip),
             "warnings": len(warnings),
+            # 只统计 to_update：新建账户的空列是「不填」，不是「清空已有值」。
+            # 首次正式同步前先跑 dry_run 看这个数，是这次「空值=清空」口径的
+            # 唯一量化手段（规格 §8.3）。
+            "clears": sum(len(i.get("clears") or []) for i in to_update),
         },
     }
 
 
-def _collect_updates(db, platform, p, owner_id, row_no, warnings) -> dict:
+def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_missing=True) -> dict:
     """把一行解析结果里「要写进系统」的字段收集成 {字段名: 值}。
 
     名称类字段先解析成主键，解析不唯一则记 warning 并丢弃该字段。
+
+    **文本列的空值照常落库，不得写成 `if not value: continue`。** 规格 §8.3 对
+    `to_update` 的口径是「**按表覆盖该列**」——表里空着就是把系统里该列清空，
+    否则户管永远无法从表里清掉一个值（B 列「是否封户」清空即撤销死亡，同理）。
+    §7.4「不因表里空着就把 owner_id 清空」是**归属专属例外**，不能推广到文本列。
+    与下方名称类字段的 `if not value: continue` 不对称是**刻意的**：空串在名称
+    命名空间里根本没有可解析的候选，属规格 §8.4 的「命中 0 条」。
+
+    产出里可能带两个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
+    `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名。
+
+    create_missing 由 build_diff 传 False（dry_run 只读），落库阶段才用默认 True。
     """
     out = {}
     for f in _PLAIN_TEXT_FIELDS[platform]:
-        out[f] = p.get(f, "")
+        # `_conf_text` 兜底是因为 p 未必全是 str（同 `_conf_text` 的既有理由）
+        out[f] = _conf_text(p.get(f))
     for f in _parseable_fields(platform):
         value = (p.get(f) or "").strip()
         if not value:
             continue
-        _known, resolved = _resolve_field(db, platform, f, value, owner_id)
+        if f == "status_name":
+            # 状态单独走：它没有「歧义」档（唯一约束 (name, platform) 至多命中 1 行），
+            # 所以查不到**不是**警告，而是「系统里还没有」——create_missing=False 时
+            # 记成 pending，落库阶段再 INSERT。走下面的通用分支会被误判成歧义而丢弃。
+            sid = resolve_status_id(db, value, owner_id, platform,
+                                    create_missing=create_missing)
+            if sid is None:
+                out["_pending_status"] = value
+            else:
+                out["status_id"] = sid
+            continue
+        _known, resolved = _resolve_field(db, platform, f, value)
         if not _known:
             continue
         if resolved is None:
@@ -1678,8 +2044,23 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings) -> dict:
     return out
 
 
+def _blank_columns(platform: str, fields: dict) -> list:
+    """fields 里新值为空串的文本列（下划线开头的合成键不算）。
+
+    规格 §8.3：文本列空着 = 清空系统里该列。这是不可逆的批量动作，所以单独列出来
+    让前端显式标注「将清空」——不能让「几百行的 acquired_date 被悄悄清掉」藏在差异
+    报告里。只认文本列：`_is_dead`（合成键）与主键列（`mcc_id` 等）不在此列。
+    """
+    return sorted(k for k, v in fields.items()
+                  if k in _PLAIN_TEXT_FIELDS[platform] and v == "")
+
+
 def _target_column(platform: str, field: str) -> str:
-    """解析后的字段名 → 真实数据库列名。"""
+    """解析后的字段名 → 真实数据库列名。
+
+    `status_name` 这条**不**经 `_collect_updates` 的通用分支（状态走 pending 档），
+    但 apply_diff 落库时要靠它把 pending 状态名映射到 `status_id` 列，所以保留。
+    """
     return {
         "mcc_name": "mcc_id",
         "agent_name": "agent_id",
@@ -1702,12 +2083,25 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 67 passed：上一任务实测 52 条 + 本任务 15 条）
+Expected: PASS（聚焦 **≥ 81 passed / 0 failed**。实测口径：Task 5 末 55 条 + 本任务原始
+16 条 + 事后补的 3 条（空文本列清空 / 软删 BC 不命中 / TT 端到端）= 74，再加本轮审查修复
+净新增 7 条（同名状态不崩 / dry_run 只读 / `_is_dead` 三态 / `db_values` 契约 / 代理平台
+隔离 / 重复账户ID 去重 / `clears` 标注；TT 那条是**改写**旧测试，净增 0）= 81。
+**判据是 `0 failed`**，`≥` 是下限。）
+
+**变异体覆盖的诚实口径**：审查点名的 6 个变异体，本轮被杀掉 5 个。第 6 个
+——「状态作用域取错 owner（`scope_owner`）」——在 Task 6 里**杀不掉**，而且这不是
+漏写测试：C1 修复后 `owner_id` 既不参与查重、也不影响 `build_diff` 的任何输出
+（`build_diff` 已不再建状态行），它唯一的去向是 `to_update[i]["scope_owner_id"]`，
+要等落库才看得出差别。**它的杀测试在 Task 7**（`TestApplyDiff` 的
+`test_pending_status_row_records_scoped_owner`：落库后断言新建 `account_statuses`
+行的 `owner_id == scope_owner_id`）。在 Task 7 落地前，不要说「6 个变异体都能被杀」。
 
 - [ ] **Step 5: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量 ≥ 491 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 521 passed。**注意：本仓库有并行会话在途改 `py/main.py`**，
+全量数字会随其提交浮动 —— 判据是 `0 failed`，不是精确等于某个数。）
 
 - [ ] **Step 6: 提交**
 
@@ -1835,6 +2229,74 @@ class TestApplyDiff:
         res = apply_diff(db, build_diff(db, parsed, "gg"), "gg", {}, user_id=u1)
         assert res["owner_changed"] == 0
         assert db.execute("SELECT owner_id FROM accounts WHERE account_id='UN-1'").fetchone()["owner_id"] == u1
+        db.close()
+
+    def test_apply_creates_pending_status_in_tt_namespace(self, client):
+        """系统里没有的状态名，到 apply_diff 才建行，且平台必须是 'tt'。
+
+        `build_diff` 只读（pending_status 只是个名字），所以状态行的创建**只**发生
+        在这里。漏传 platform 会让 TT 的状态落进 gg 命名空间：TT 下拉里看不见、
+        反而出现在 GG 下拉里（规格 §8.4）。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        _seed_tt_account(db, "APS-1", u1)
+        row = ["", "", "APS-1", "", "", "", "", "", "新状态", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        assert diff["to_update"][0]["pending_status"] == "新状态"
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 0
+        apply_diff(db, diff, "tt", {"update": [2]}, user_id=u1)
+        rows = db.execute("SELECT id, name, platform FROM account_statuses").fetchall()
+        assert len(rows) == 1                      # 只建一行
+        assert rows[0]["name"] == "新状态"
+        assert rows[0]["platform"] == "tt"         # 不写平台会落进 gg
+        assert db.execute("SELECT status_id FROM tt_accounts WHERE advertiser_id='APS-1'"
+                          ).fetchone()["status_id"] == rows[0]["id"]
+        db.close()
+
+    def test_pending_status_row_records_scoped_owner(self, client):
+        """新建状态行的 owner_id 取**该行的作用域归属**（换了归属就用新归属）。
+
+        `scope_owner` 写错的后果不是报错，而是状态被记到旧运营名下 —— 静默错人。
+        对照行：G 列把归属从张三改成李四，K 列写一个不存在的状态名。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, u2 = self._setup(client)
+        _seed_account(db, "APS-2", u1, acquired_date="")
+        row = ["", "", "APS-2", "", "", "", "李四", "", "", "", "新状态X"]
+        parsed = [dict(parse_row(row, "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert diff["to_update"][0]["scope_owner_id"] == u2      # 新归属，不是 u1
+        apply_diff(db, diff, "gg", {"owner": [2], "update": [2]}, user_id=u1)
+        r = db.execute("SELECT owner_id FROM account_statuses WHERE name='新状态X'").fetchone()
+        assert r["owner_id"] == u2
+        db.close()
+
+    def test_two_accounts_same_new_status_name_create_one_row(self, client):
+        """两个账户写同一个新状态名 ⇒ 只建一行，第二行复用它（不得 IntegrityError）。
+
+        真实唯一约束是 UNIQUE(name, platform)，不含 owner_id。逐个 apply 时第二行
+        查重必须命中第一行建的那条；带 owner_id 查重会在这里炸。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, u2 = self._setup(client)
+        _seed_account(db, "AS-1", u1, acquired_date="")
+        _seed_account(db, "AS-2", u2, acquired_date="")
+        rows = [
+            dict(parse_row(["", "", "AS-1", "", "", "", "张三", "", "", "", "共享状态"], "gg"),
+                 row=2),
+            dict(parse_row(["", "", "AS-2", "", "", "", "李四", "", "", "", "共享状态"], "gg"),
+                 row=3),
+        ]
+        diff = build_diff(db, rows, "gg")
+        res = apply_diff(db, diff, "gg", {"update": [2, 3]}, user_id=u1)
+        assert res["errors"] == []
+        assert res["updated"] == 2
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 1
+        ids = {r["status_id"] for r in db.execute(
+            "SELECT status_id FROM accounts WHERE account_id IN ('AS-1','AS-2')").fetchall()}
+        assert len(ids) == 1                       # 两个账户指向同一行状态
         db.close()
 
 
@@ -1975,6 +2437,11 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             src = dict(item.get("db_values") or {})
             # _is_dead 是合成标记，不是数据库列，必须先摘掉再拼 INSERT
             want_dead = bool(src.pop("_is_dead", False))
+            # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读）
+            pending = item.get("pending_status")
+            if pending:
+                src[_target_column(platform, "status_name")] = resolve_status_id(
+                    db, pending, item.get("owner_id"), platform)
             src[key_field] = item["account_id"]
             src["name"] = item["account_id"]
             src["owner_id"] = item.get("owner_id")
@@ -1994,6 +2461,12 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
         try:
             fields = dict(item.get("fields") or {})
             is_dead_val = fields.pop("_is_dead", None)
+            # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读，规格 §8.3
+            # 步骤 7/8）。owner 取该行作用域归属，只记「谁先建的」——不参与查重。
+            pending = item.get("pending_status")
+            if pending:
+                fields[_target_column(platform, "status_name")] = resolve_status_id(
+                    db, pending, item.get("scope_owner_id"), platform)
             if fields:
                 sets = ", ".join(f"{k}=?" for k in fields)
                 db.execute(f"UPDATE {table} SET {sets}, "
@@ -2127,7 +2600,8 @@ def _write_background(service, conf, rows):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 79 passed）
+Expected: PASS（聚焦 ≥ 91 passed。口径：Task 6 审查修复后 83 条 + 本任务原 5 条 +
+本轮为 pending 状态落库补的 3 条。**判据是 `0 failed`**，`≥` 是下限。）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
@@ -2913,9 +3387,28 @@ async function syncHd() {
       `跳过 ${s.skipped} 个`,
       `警告 ${s.warnings} 条`,
     ]
+    // 清空是不可逆的：必须在确认弹窗里显式摆出来，不能藏在几百行差异里。
+    // 逐个列出行号，但封顶 20 行，避免首次同步时弹窗被刷屏。
+    if (s.clears) {
+      lines.push(`⚠ 将清空 ${s.clears} 个字段（表里留空 = 清空系统该列）`)
+    }
     if (d.owner_changes.length) {
       lines.push('', '【归属变更】')
       d.owner_changes.forEach(c => lines.push(`  第 ${c.row} 行 ${c.account_id}：${c.from || '（空）'} → ${c.to}`))
+    }
+    const clearing = d.to_update.filter(x => (x.clears || []).length)
+    if (clearing.length) {
+      lines.push('', '【将清空以下字段】（表里留空即清空，不可撤销）')
+      clearing.slice(0, 20).forEach(x => lines.push(
+        `  第 ${x.row} 行 ${x.account_id}：${x.clears.join('、')}`))
+      if (clearing.length > 20) lines.push(`  …另有 ${clearing.length - 20} 行`)
+    }
+    // 系统里还没有的状态名：确认后才会新建，所以弹窗里给的是名字而不是 id
+    const pendingStatus = [...d.to_create, ...d.to_update]
+      .map(x => x.pending_status).filter(Boolean)
+    if (pendingStatus.length) {
+      const names = [...new Set(pendingStatus)]
+      lines.push('', `【将新建状态】${names.join('、')}（系统里还没有）`)
     }
     if (!s.new_accounts && !s.updates && !s.owner_changes) {
       hdHint.value = '看板与系统已一致，无需同步'

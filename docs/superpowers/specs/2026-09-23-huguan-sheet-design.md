@@ -320,16 +320,24 @@ body：`{"platform": "gg"|"tt", "dry_run": true}` / `{"platform": ..., "dry_run"
 | `to_skip` | 系统有但已软删（`deleted_at` 非空） | 不动，报告里单列 |
 | `warnings` | 名称无法唯一匹配、账户ID 为空等 | 不动 |
 
-7. `dry_run=true` → 返回差异报告（含 `summary` 计数），前端展示给户管确认。
-8. `dry_run=false` → 只执行 `confirmed` 里户管勾选的部分，`db.commit()`，清缓存。
+**「按表覆盖该列」= 表里空着就把系统里该列清空**，没有「仅非空才写」的限定（§7.4「不因表里空着就清空 `owner_id`」是**归属专属例外**，不得推广到文本列）。这条能力是必需的 —— 否则户管永远无法从表里撤销一个值。但它是**不可逆的批量动作**，所以有两道显式约束：
+
+- 每个 `to_update` 项带 **`clears`** 字段：新值为空的列名清单（如 `["acquired_date"]`）。这不是给后端算的，是**给前端标注用的** —— 确认弹窗必须把「哪些列将被清空」显式摆到户管面前，不能让它藏在几百行差异里。
+- `summary` 带 **`clears`** 计数：首次正式同步前，必须先跑一次 `dry_run=true` 看清会清空多少列，再决定是否确认。这正是 §8.4「`dry_run` 只读」必须成立的理由 —— 空跑若自己会写库/崩溃，这个量化动作就不可信。
+
+7. `dry_run=true` → 返回差异报告（含 `summary` 计数），前端展示给户管确认。**此路径只读，不写任何表**（见 §8.4 状态的 `create_missing` 说明）。系统里尚不存在的状态名以 **`pending_status`** 原样出现在报告项里（不是 id、不是警告），落库时才 `INSERT`。
+8. `dry_run=false` → 只执行 `confirmed` 里户管勾选的部分，`db.commit()`，清缓存。此路径才允许 `INSERT` 缺失状态（`create_missing=True`），`owner_id` 取该账户当时的 owner。
 9. 收尾：对应用了归属变更的行，回写 `运营` 列 + 清空 `重新分配` 列（§7.2 规则 3②、规则 4）。
 
 ### 8.4 名称 → 主键的解析规则
 
-统一口径（MCC / 大MCC / BC / 渠道 / 状态 / 归属都适用）：
+统一口径（MCC / 大MCC / BC / 渠道 / 归属适用；**状态是唯一例外，见下方第 2 条**）：
 
 - **唯一命中才落库**；命中 0 条或 ≥2 条 → 警告，该列不落库，该行其余列照常。
-- 状态（GG K 列 / TT I 列）解析时按**该账户的 owner + 平台**双作用域查 `account_statuses(name, owner_id, platform)`；查不到则在该 owner 的**该平台**下 `INSERT` 新建。**必须带平台**：`account_statuses.platform` 默认 `'gg'`（`database.py:153`），唯一约束是 `(name, platform)`（`database.py:1225`），状态下拉也按平台过滤（`main.py:6059` `/api/statuses/list`）—— 不写平台会让 TT 同步新建的状态落进 gg 命名空间，**TT 下拉里看不见、反而出现在 GG 下拉里**。既有两种写法可对照：GG 侧靠默认值吃 `'gg'`（`main.py:4042/4184/4944/5068`），TT 侧显式写 `'tt'`（`main.py:6085`、`tt_accounts_routes.py:69`）。
+- 状态（GG K 列 / TT I 列）解析时**查重键是 `(name, platform)`，不含 `owner_id`**：`SELECT id FROM account_statuses WHERE name=? AND platform=?`；查不到才 `INSERT`，新行的 `owner_id` 记该账户的 owner（表示「谁先建的」），并显式带上 `platform`。**必须带平台**：`account_statuses.platform` 默认 `'gg'`（`database.py:153`），状态下拉按平台过滤（`main.py:6059` `/api/statuses/list`）—— 不写平台会让 TT 同步新建的状态落进 gg 命名空间，**TT 下拉里看不见、反而出现在 GG 下拉里**。既有两种写法可对照：GG 侧靠默认值吃 `'gg'`（`main.py:4042/4184/4944/5068`），TT 侧显式写 `'tt'`（`main.py:6085`、`tt_accounts_routes.py:69`）。
+  - **为什么查重键不能带 `owner_id`**：本表**真实唯一约束是 `UNIQUE(name, platform)`**（`database.py:1225` 的迁移重建；`database.py:505` 的原始建表 `UNIQUE(name, owner_id)` 已被该迁移覆盖，PRAGMA 实测 `sqlite_autoindex_account_statuses_1` 索引列为 `['name','platform']`）。若按 `(name, owner_id, platform)` 查重，则「甲已有『待优化』(gg)、乙的账户也写『待优化』」会查不中而重复 `INSERT`，直接 `IntegrityError` —— 该异常会从解析穿到差异比对，**把整份差异报告带崩**（同一 sheet 里其它行的结果也拿不到）。正确对照写法见 `main.py:6102`、`routes/tt_accounts_routes.py:65`。（同族既有缺陷：`main.py:4065/4207/4967` 是同一种错误写法，属既有代码，不在本子项目范围内。）
+  - 因为唯一约束成立，`(name, platform)` 在库里**至多命中 1 行**，所以状态解析**不存在**本条开头的「命中 ≥2 条」歧义情形；只有「命中 1 条」与「命中 0 条」两种。
+  - **`dry_run=true` 期间只读**：解析函数带 `create_missing` 开关，差异比对阶段传 `False` —— 只查不建（见 §8.3 步骤 7）。查不到时**不是警告**，而是该状态名原样进报告（`pending_status`），由户管在确认弹窗里看到状态名；真正的 `INSERT` 推迟到落库阶段（§8.3 步骤 8）。这样 §10.1 第 6 项「`dry_run=true` 不改库」才成立。
 - `是否封户`（GG B）与 `状态`（GG K）都能表达状态，**冲突时 K 列为准**（更具体）；`is_dead = (K == "死亡") or (B in ("是",))`，实际落库时由最终状态反推 `death_date`。TT 的 `是否回收`（B）与 `状态`（I）同理。
 
 ---
@@ -353,6 +361,12 @@ body：`{"platform": "gg"|"tt", "dry_run": true}` / `{"platform": ..., "dry_run"
 | 「💾 保存配置」 | `POST /api/huguan/dashboard` |
 | 「🔄 同步到看板」 | `POST /api/huguan/dashboard/push`，全量刷新，出 toast |
 | 「⬇️ 从看板同步」 | `POST /api/huguan/dashboard/sync` `dry_run=true` → 弹差异确认框 → 确认后 `dry_run=false` |
+
+**差异确认框的强制内容**（「从看板同步」的唯一人工关卡，三样都不能省）：
+
+1. 五类计数（新增 / 更新 / 归属变更 / 跳过 / 警告）。
+2. **「将清空以下字段」区块** —— 逐行列出 `to_update[i].clears`（封顶 20 行，其余折叠计数）。表里留空 = 清空系统该列（§8.3），这是不可逆动作，**必须**摆到户管眼前，不能只给一个总数让他自己估。
+3. **「将新建状态」区块** —— 列出 `pending_status` 里的状态名。系统里还没有的状态，确认后才会新建，所以这里显示的必然是名字而不是 id（§8.4）。
 
 ### 9.2 账户面板新增「户归属」字段（仅户管可见可编辑）
 
