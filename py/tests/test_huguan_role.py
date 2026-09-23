@@ -1,6 +1,7 @@
 """户管（huguan）角色权限测试。"""
 import io
 import json
+import os
 
 import database
 
@@ -1948,3 +1949,107 @@ class TestGgProductVideoDomainHuguanDenied:
         resp = client.get("/api/video/download?path=" + quote(str(f)), headers=hg)
         assert resp.status_code == 403
         assert resp.get_json()["error"] == self.HUGUAN_MSG
+
+    # ---------------- 10. Task 20 修复：/api/tasks 收口与 /api/audio 收紧 ----------------
+
+    def test_tasks_rejects_huguan_and_keeps_user_list_intact(self, client):
+        """修复 1：户管调 `/api/tasks` → 403 + 原文案。
+
+        对照行（关键）：普通 `user` 仍 200，且能看到任务（不是空列表）——证明新增的
+        `@no_huguan` 只挡户管，未改变其他角色拿到的内容。
+        """
+        hg, _ = _huguan(client, "_t20_tasks_hg")
+        u, _ = _create_user(client, "_t20_tasks_user", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO video_tasks(task_id, status, output_path, created_at) VALUES(?,?,?,?)",
+                   ("t20-tasks-visible", "pending", "/tmp/t20_visible.mp4", "2026-01-01 00:00"))
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/tasks", headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+
+        ok = client.get("/api/tasks", headers=u)
+        assert ok.status_code == 200, ok.get_json()
+        body = ok.get_json()
+        assert body["success"] is True
+        ids = [t["task_id"] for t in body["tasks"]]
+        assert "t20-tasks-visible" in ids, "对照行拿不到任务 —— 守卫误伤了普通用户"
+
+    def test_audio_rejects_audio_replace_artifact_even_anonymous(self, client):
+        """修复 2 的核心断言：`/api/audio` 不再能取到 `temp/audio_replace` 下的产物。
+
+        D24 给 `/api/audio-replace/download` 加了精确匹配白名单，但 `/api/audio` 的
+        全局静态目录白名单包含整个 `temp` 树，等于开了一道无鉴权的旁路。收紧到音乐目录后，
+        带 token 与**不带 token** 都必须 403。
+        """
+        from urllib.parse import quote
+        import main as _main
+        art_dir = os.path.join(_main._DATA_ROOT, "temp", "audio_replace")
+        os.makedirs(art_dir, exist_ok=True)
+        f = os.path.join(art_dir, "t20_artifact_probe_new.mp4")
+        with open(f, "wb") as fh:
+            fh.write(b"t20-replaced-artifact")
+        resp = anon = None
+        try:
+            url = "/api/audio?path=" + quote(f)
+            u, _ = _create_user(client, "_t20_audio_user", role="user", platform="gg")
+            resp = client.get(url, headers=u)
+            assert resp.status_code == 403, "音频替换产物仍可读 —— 白名单旁路未被堵死"
+            anon = client.get(url)
+            assert anon.status_code == 403, "匿名仍可取到音频替换产物"
+        finally:
+            # 若守卫回归放行，流式响应会持有文件句柄（Windows 下挡住删除），先关响应
+            for _r in (resp, anon):
+                if _r is not None:
+                    _r.close()
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    def test_audio_serves_music_dir_file_anonymously(self, client):
+        """修复 2 的回归面（D25）：**音乐目录内**的文件仍 200，且不带 token 仍 200。
+
+        钉住既有的匿名播放行为，防止本次收紧误伤正常调用点。
+        """
+        from urllib.parse import quote
+        import main as _main
+        os.makedirs(_main._MUSIC_DIR, exist_ok=True)
+        f = os.path.join(_main._MUSIC_DIR, "t20_music_probe.mp3")
+        with open(f, "wb") as fh:
+            fh.write(b"t20-music-bytes")
+        anon = None
+        try:
+            url = "/api/audio?path=" + quote(f)
+            anon = client.get(url)
+            assert anon.status_code == 200, anon.status_code
+            assert anon.data == b"t20-music-bytes"
+        finally:
+            # 流式响应持有文件句柄（Windows 下会挡住删除），先关响应再清理探针文件
+            if anon is not None:
+                anon.close()
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    def test_video_download_whitelisted_path_allows_logged_in_user(self, client, tmp_path):
+        """覆盖缺口：**已登录**的普通用户下载白名单内产物 → 200。
+
+        此前只覆盖了匿名放行分支（`optional=True` 无 token），这里补上「带 token」分支，
+        确保放行逻辑不是靠匿名路径意外成立的。
+        """
+        from urllib.parse import quote
+        u, _ = _create_user(client, "_t20_dl_user", role="user", platform="gg")
+        f = tmp_path / "t20_wl_loggedin.mp4"
+        f.write_bytes(b"logged-in-bytes")
+        db = database.get_db()
+        db.execute("INSERT INTO video_tasks(task_id, status, output_path) VALUES(?,?,?)",
+                   ("t20-wl-loggedin", "completed", str(f)))
+        db.commit()
+        db.close()
+        resp = client.get("/api/video/download?path=" + quote(str(f)), headers=u)
+        assert resp.status_code == 200, resp.status_code
+        assert resp.data == b"logged-in-bytes"

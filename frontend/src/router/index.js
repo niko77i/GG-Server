@@ -231,6 +231,21 @@ router.beforeEach((to, from, next) => {
     next('/tt/accounts')
     return
   }
+  // 户管不进 YouTube 素材域：后端 /api/youtube/* 16 条已全部对户管 403
+  if (auth.isHuguan && (to.path === '/youtube' || to.path.startsWith('/youtube/'))) {
+    next('/accounts/ads')
+    return
+  }
+  // 户管不进媒体工具（视频域 / 音频域）：后端 /api/video/*、/api/audio* 已对户管 403
+  if (auth.isHuguan && (to.path === '/media' || to.path.startsWith('/media/'))) {
+    next('/accounts/ads')
+    return
+  }
+  // 户管不进音频替换入口（仅此子页；/toolkit/zuobiao 按裁定放行）
+  if (auth.isHuguan && (to.path === '/toolkit/audio' || to.path.startsWith('/toolkit/audio/'))) {
+    next('/accounts/ads')
+    return
+  }
   next()
 })
 

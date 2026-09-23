@@ -742,6 +742,23 @@ _ALLOWED_STATIC_DIRS = [
 ]
 
 
+def _is_safe_music_path(path: str) -> bool:
+    """检查路径是否在背景音乐目录（_MUSIC_DIR）内。
+
+    `/api/audio` 的合法输入只有 music_list 列出的 `_MUSIC_DIR` 内文件；
+    不复用 `_is_safe_path`（其白名单含整个 temp 树，会放行音频替换产物）。
+    """
+    try:
+        real = os.path.realpath(path)
+    except (ValueError, OSError):
+        return False
+    try:
+        allowed_real = os.path.realpath(_MUSIC_DIR) if os.path.isdir(_MUSIC_DIR) else _MUSIC_DIR
+    except (ValueError, OSError):
+        return False
+    return real == allowed_real or real.startswith(allowed_real + os.sep)
+
+
 def _is_safe_path(path: str) -> bool:
     """检查路径是否在白名单目录内，防止路径遍历攻击。"""
     try:
@@ -967,6 +984,7 @@ def video_progress():
 
 @app.route("/api/tasks", methods=["GET"])
 @jwt_required()
+@no_huguan
 def list_active_tasks():
     """返回活跃任务及最近完成的任务列表。页面刷新后用于恢复。"""
     db = _yt_db()
@@ -1076,7 +1094,7 @@ def serve_audio():
     path = request.args.get("path", "").strip()
     if not path or not os.path.isfile(path):
         return "", 404
-    if not _is_safe_path(path):
+    if not _is_safe_music_path(path):
         return "", 403
     mt = "audio/mpeg" if path.lower().endswith('.mp3') else "audio/wav"
     return send_file(path, mimetype=mt)
