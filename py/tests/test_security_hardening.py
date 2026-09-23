@@ -423,3 +423,34 @@ class TestC1ReassignInvalidOwner:
             resp = client.put(f"/api/accounts/{raw}/reassign", json={}, headers=user)
             assert resp.status_code == 404, f"aid={raw[:20]} 应 404，实得 {resp.status_code}"
             assert resp.get_json()["error"] == "账户不存在"
+
+
+class TestC2UserSearch:
+    """C-2：developer 不带 platform 时搜索用户，`list_users` 曾把 `AND (...)` 直接拼在
+    `FROM users` 之后（空 `where_clause`）⇒ SQL 语法错误 ⇒ 500。
+
+    - `test_developer_search_without_platform_returns_200`：只断言 200（弱断言，防不住
+      「把搜索结果恒置空」的绕过实现），仅作状态码锚点；
+    - `test_developer_search_returns_matching_users`：**承重**正向对照，必须真的返回匹配行；
+    - `test_developer_search_with_platform_still_works`：纯增量对照（带 platform 的路径
+      改前就能拼对，修好后必须仍 200 且返回匹配行）。
+    """
+
+    def test_developer_search_without_platform_returns_200(self, client):
+        dev, _ = _create_user(client, "_c2_dev", role="developer")
+        resp = client.get("/api/admin/users?search=foo", headers=dev)
+        assert resp.status_code == 200
+
+    def test_developer_search_returns_matching_users(self, client):
+        dev, _ = _create_user(client, "_c2_dev2", role="developer")
+        _create_user(client, "_c2_match", role="user")
+        resp = client.get("/api/admin/users?search=_c2_match", headers=dev)
+        assert resp.status_code == 200
+        assert any(u["username"] == "_c2_match" for u in resp.get_json()["users"])
+
+    def test_developer_search_with_platform_still_works(self, client):
+        dev, _ = _create_user(client, "_c2_dev3", role="developer")
+        _create_user(client, "_c2_match2", role="user")
+        resp = client.get("/api/admin/users?search=_c2_match2&platform=gg", headers=dev)
+        assert resp.status_code == 200
+        assert any(u["username"] == "_c2_match2" for u in resp.get_json()["users"])

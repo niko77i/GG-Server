@@ -101,9 +101,7 @@ def list_users(search: str = "", page: int = 1, page_size: int = 20, current_use
 
         if search:
             like = f"%{search}%"
-            search_filter = f"({' OR '.join([base_where, '(username LIKE ? OR display_name LIKE ?)'] if base_where else ['username LIKE ? OR display_name LIKE ?'])})"
-            # simplify: add AND search to where
-            search_clause = " AND (username LIKE ? OR display_name LIKE ?)"
+            search_clause = (" WHERE " if not where_clause else " AND ") + "(username LIKE ? OR display_name LIKE ?)"
             total = conn.execute(
                 f"SELECT COUNT(*) as total FROM users{where_clause}{search_clause}",
                 params + [like, like]
