@@ -2507,3 +2507,87 @@ class TestAgentsCacheInvalidationCrossUser:
         # 第 3 步：A 再读 —— 缓存必须已失效，旧名不得再出现
         data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
         assert "待删代理" not in data["agents"]
+
+
+class TestGgAccountListDropdownScope:
+    """回归：跨用户角色的三个筛选下拉必须与账户列表口径一致。
+
+    缺陷（本需求自己引入）：`accounts_list` 在跨用户角色 + 不带 owner_id（「全部用户」）时
+    列表跨用户，但 `mcc_options` / `agents` / `timezone_options` 仍用 `owner_filter or user_id`
+    收窄到请求者自己 —— 户管名下通常没有账户，于是三个下拉全空，无法对全量列表筛选。
+    设计文档 docs/superpowers/specs/2026-09-22-huguan-role-design.md:154 点名要求避免这种不一致。
+
+    夹具刻意让**户管名下没有任何账户**，以复现「三个下拉全空」的真实场景；三个下拉的
+    数据全部挂在 u1 / u2 名下，改动前一并会被 `user_id` 收窄掉。
+    """
+
+    def _setup(self, client):
+        from cache import cache as _app_cache
+        _app_cache.clear()   # 进程级全局缓存；缓存键含 user_id，须防跨用例串数据
+
+        hg, hg_id = _huguan(client, "_ddsc_hg")            # 户管：名下无任何账户
+        hdr_u1, u1 = _create_user(client, "_ddsc_u1", role="user")
+        hdr_u2, u2 = _create_user(client, "_ddsc_u2", role="user")
+        db = database.get_db()
+        _mk_mcc(db, u1, "MCC-S1", "U1的MCC")
+        _mk_mcc(db, u2, "MCC-S2", "U2的MCC")
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('代理S1', ?, 'gg')", (u1,))
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('代理S2', ?, 'gg')", (u2,))
+        ag1 = db.execute("SELECT id FROM agents WHERE name='代理S1'").fetchone()["id"]
+        ag2 = db.execute("SELECT id FROM agents WHERE name='代理S2'").fetchone()["id"]
+        m1 = db.execute("SELECT id FROM mcc WHERE mcc_id='MCC-S1'").fetchone()["id"]
+        m2 = db.execute("SELECT id FROM mcc WHERE mcc_id='MCC-S2'").fetchone()["id"]
+        _mk_account(db, u1, "GG-SC-1", "U1账户")
+        _mk_account(db, u2, "GG-SC-2", "U2账户")
+        db.execute("UPDATE accounts SET agent_id=?, mcc_id=?, timezone='Asia/Shanghai' "
+                   "WHERE account_id='GG-SC-1'", (ag1, m1))
+        db.execute("UPDATE accounts SET agent_id=?, mcc_id=?, timezone='America/New_York' "
+                   "WHERE account_id='GG-SC-2'", (ag2, m2))
+        db.commit()
+        db.close()
+        return hg, hg_id, u1, u2, hdr_u1, hdr_u2
+
+    def test_huguan_all_users_dropdowns_cover_other_users(self, client):
+        """户管 + 不带 owner_id（「全部用户」）→ 他人名下的 MCC/代理/时区必须都出现在下拉里。
+
+        本缺陷的直接回归测试：户管名下无账户，改动前三个下拉全空。
+        """
+        hg, _, _, _, _, _ = self._setup(client)
+        resp = client.get("/api/accounts/list?size=50", headers=hg)
+        assert resp.status_code == 200
+        data = resp.get_json()
+        # 列表本身跨用户（既有行为，非本次改动）
+        assert {a["account_id"] for a in data["accounts"]} == {"GG-SC-1", "GG-SC-2"}
+        # 三个下拉必须覆盖全量，与列表口径一致
+        assert {"U1的MCC", "U2的MCC"} <= {m["name"] for m in data["mcc_options"]}
+        assert {"代理S1", "代理S2"} <= set(data["agents"])
+        assert {"Asia/Shanghai", "America/New_York"} <= set(data["timezone_options"])
+
+    def test_huguan_owner_filter_narrows_dropdowns(self, client):
+        """对照组：户管 + owner_id=u1 → 三个下拉只含 u1 的（改动前就该通过）。"""
+        hg, _, u1, _, _, _ = self._setup(client)
+        resp = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hg)
+        data = resp.get_json()
+        assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
+        assert data["agents"] == ["代理S1"]
+        assert data["timezone_options"] == ["Asia/Shanghai"]
+
+    def test_regular_user_dropdowns_stay_scoped_to_self(self, client):
+        """纯增量对照组：非跨用户 + 不带 owner_id → 只含自己的，不含他人的。"""
+        _, _, _, _, hdr_u1, _ = self._setup(client)
+        resp = client.get("/api/accounts/list?size=50", headers=hdr_u1)
+        data = resp.get_json()
+        assert {a["account_id"] for a in data["accounts"]} == {"GG-SC-1"}
+        assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
+        assert data["agents"] == ["代理S1"]
+        assert data["timezone_options"] == ["Asia/Shanghai"]
+
+    def test_regular_user_ignores_owner_id_on_dropdowns(self, client):
+        """非跨用户 + owner_id=他人 → 参数被忽略，三个下拉仍只含自己的。"""
+        _, _, _, u2, hdr_u1, _ = self._setup(client)
+        resp = client.get(f"/api/accounts/list?size=50&owner_id={u2}", headers=hdr_u1)
+        data = resp.get_json()
+        assert {a["account_id"] for a in data["accounts"]} == {"GG-SC-1"}
+        assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
+        assert data["agents"] == ["代理S1"]
+        assert data["timezone_options"] == ["Asia/Shanghai"]

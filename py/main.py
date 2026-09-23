@@ -3846,7 +3846,12 @@ def accounts_list():
     mcc_cache_key = f"accounts:mcc_options:{user_id}:{scope}"
     mcc_options = _app_cache.get(mcc_cache_key)
     if mcc_options is None:
-        if owner_filter:
+        if sub_owner is None:
+            # 跨用户 + 未筛选具体用户：与列表口径一致，不加归属条件
+            mcc_options = [dict(r) for r in db.execute(
+                "SELECT id, name, mcc_id FROM mcc ORDER BY name"
+            ).fetchall()]
+        elif owner_filter:
             mcc_options = [dict(r) for r in db.execute(
                 "SELECT id, name, mcc_id FROM mcc WHERE owner_id = ? ORDER BY name",
                 (owner_filter,)
@@ -3861,17 +3866,30 @@ def accounts_list():
     agents_cache_key = f"accounts:agents:{user_id}:{scope}"
     agents = _app_cache.get(agents_cache_key)
     if agents is None:
-        agents = [r["name"] for r in db.execute(
-            "SELECT DISTINCT ag.name FROM agents ag "
-            "INNER JOIN accounts a ON a.agent_id = ag.id "
-            "WHERE a.owner_id=? "
-            "ORDER BY 1", (owner_filter or user_id,)
-        ).fetchall()]
+        if sub_owner is None:
+            # 跨用户 + 未筛选具体用户：与列表口径一致，不加归属条件
+            agents = [r["name"] for r in db.execute(
+                "SELECT DISTINCT ag.name FROM agents ag "
+                "INNER JOIN accounts a ON a.agent_id = ag.id "
+                "ORDER BY 1").fetchall()]
+        else:
+            agents = [r["name"] for r in db.execute(
+                "SELECT DISTINCT ag.name FROM agents ag "
+                "INNER JOIN accounts a ON a.agent_id = ag.id "
+                "WHERE a.owner_id=? "
+                "ORDER BY 1", (sub_owner,)).fetchall()]
         _app_cache.set(agents_cache_key, agents, ttl=120)
     tz_cache_key = f"accounts:tz:{user_id}:{scope}"
     timezone_options = _app_cache.get(tz_cache_key)
     if timezone_options is None:
-        timezone_options = [r["timezone"] for r in db.execute("SELECT DISTINCT timezone FROM accounts WHERE timezone!='' AND owner_id=? ORDER BY timezone", (owner_filter or user_id,)).fetchall()]
+        if sub_owner is None:
+            # 跨用户 + 未筛选具体用户：与列表口径一致，不加归属条件
+            timezone_options = [r["timezone"] for r in db.execute(
+                "SELECT DISTINCT timezone FROM accounts WHERE timezone!='' ORDER BY timezone").fetchall()]
+        else:
+            timezone_options = [r["timezone"] for r in db.execute(
+                "SELECT DISTINCT timezone FROM accounts WHERE timezone!='' AND owner_id=? ORDER BY timezone",
+                (sub_owner,)).fetchall()]
         _app_cache.set(tz_cache_key, timezone_options, ttl=120)
     db.close()
     return jsonify({"success": True, "accounts": accounts, "total": total, "mcc_options": mcc_options, "agents": agents, "timezone_options": timezone_options, "status_counts": status_counts})
