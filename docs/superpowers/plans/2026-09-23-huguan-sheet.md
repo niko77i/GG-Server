@@ -1548,7 +1548,10 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
                 "account_id": aid,
                 "owner_id": want_owner_id,
                 "owner_name": want_owner_name,
-                "cells": _collect_updates(db, platform, p, want_owner_id, row_no, warnings),
+                # 键名刻意不叫 "cells"：本模块里 "cells" 一律指「表列字母 → 单元格值」
+                # （Task 4 的 update_rows_by_account_id 契约），这里装的是
+                # 「数据库列名 → 值」，供 apply_diff 拼 INSERT。两者同名会被误用。
+                "db_values": _collect_updates(db, platform, p, want_owner_id, row_no, warnings),
             })
             continue
 
@@ -1910,7 +1913,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
         if item["row"] not in conf.get("create", []):
             continue
         try:
-            src = dict(item.get("cells") or {})
+            # db_values 装的是「数据库列名 → 值」（见 build_diff 的 to_create），
+            # 与表列字母的 cells 不是一回事，切勿混用。
+            src = dict(item.get("db_values") or {})
             # _is_dead 是合成标记，不是数据库列，必须先摘掉再拼 INSERT
             want_dead = bool(src.pop("_is_dead", False))
             src[key_field] = item["account_id"]
