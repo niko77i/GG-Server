@@ -627,6 +627,18 @@ def _seed_account(db, account_id, owner_id, **over):
     return db.execute("SELECT id FROM accounts WHERE account_id=?", (account_id,)).fetchone()["id"]
 
 
+def _seed_tt_account(db, advertiser_id, owner_id, **over):
+    """TT 侧夹具。定位键是 `advertiser_id`（Task 6/9 的 TT 路径都靠它）。"""
+    cols = {"advertiser_id": advertiser_id, "name": advertiser_id, "owner_id": owner_id,
+            "country": "", "timezone": "", "consumption": "", "remark": "",
+            "death_date": "", "deleted_at": None, "acquired_date": ""}
+    cols.update(over)
+    keys = ", ".join(cols)
+    marks = ", ".join("?" for _ in cols)
+    db.execute(f"INSERT INTO tt_accounts({keys}) VALUES({marks})", tuple(cols.values()))
+    db.commit()
+
+
 class TestResolvers:
     def test_resolve_owner_by_display_name(self, client):
         from huguan_dashboard import resolve_owner_id
@@ -794,7 +806,10 @@ class TestBuildDiff:
         """
         from huguan_dashboard import build_diff, parse_row
         db, u1, _ = self._prepare(client)
-        _seed_account(db, "MCCACC", u1)
+        # acquired_date 必须显式钉成 ""：`accounts.acquired_date` 的 DDL 默认值是
+        # `date('now','localtime')`（database.py:236），不钉住它就与表里的空 A 列
+        # 构成一条**真实差异**，`fields` 会多出 `acquired_date: ""` 而非只有 timezone。
+        _seed_account(db, "MCCACC", u1, acquired_date="")
         db.execute("INSERT INTO mcc(name, mcc_id) VALUES('同名MCC','1')")
         db.execute("INSERT INTO mcc(name, mcc_id) VALUES('同名MCC','2')")
         db.commit()
@@ -819,4 +834,63 @@ class TestBuildDiff:
         assert s["total_in_sheet"] == 2
         assert s["owner_changes"] == 1
         assert s["new_accounts"] == 1
+        db.close()
+
+    def test_blank_text_column_clears_system_value(self, client):
+        """表里文本列空着 = 把系统里该列清空（规格 §8.3「按表覆盖该列」）。
+
+        这是**刻意的**不对称：名称类字段空值跳过（空串解析不出候选，属 §8.4 的
+        「命中 0 条」），文本列空值照常落库。改成「空值一律跳过」会让户管永远
+        无法从表里清掉一个值（B 列「是否封户」清空即撤销死亡）。
+        对照行：库里 timezone='Asia/Shanghai' 而表里 I 列为空 ⇒ 必须出现空值差异。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "BLANK-1", u1, acquired_date="", timezone="Asia/Shanghai")
+        parsed = [dict(parse_row(["", "", "BLANK-1"], "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert len(diff["to_update"]) == 1
+        assert diff["to_update"][0]["fields"]["timezone"] == ""
+        db.close()
+
+    def test_soft_deleted_bc_is_not_matched(self, client):
+        """软删的 BC 不得被「唯一命中」放行（否则账户挂到已删的 BC 上）。
+
+        对照行：同名 BC 只有一条、且已软删 ⇒ 若 SQL 不带 `deleted_at IS NULL`，
+        它会成为唯一命中并被写入 bc_id。仓库既有口径见 tt_routes.py:133/198/1054/1058。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_tt_account(db, "BCDEL-1", u1)
+        db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id, deleted_at) "
+                   "VALUES('已删BC','1',?,datetime('now'))", (u1,))
+        db.commit()
+        row = ["", "", "BCDEL-1", "已删BC", "", "", "", "", "", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        assert diff["to_update"] == []
+        assert any("已删BC" in w["message"] for w in diff["warnings"])
+        db.close()
+
+    def test_tt_diff_uses_advertiser_id_and_tt_status_namespace(self, client):
+        """TT 侧端到端：定位键走 `advertiser_id`、状态落 `platform='tt'`。
+
+        本任务此前**零 TT 覆盖**（实现者只用一次性探针验过），而 Task 9 的触发点
+        全在 TT 侧 —— 这条把 TT 路径钉进测试网。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_tt_account(db, "TTD-1", u1)
+        row = ["", "", "TTD-1", "", "", "", "", "", "待优化", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        assert len(diff["to_update"]) == 1
+        assert diff["to_update"][0]["account_id"] == "TTD-1"
+        sid = diff["to_update"][0]["fields"]["status_id"]
+        r = db.execute("SELECT platform FROM account_statuses WHERE id=?", (sid,)).fetchone()
+        assert r["platform"] == "tt"          # 不写平台会落进 gg 命名空间
+        # 定位键必须真是 advertiser_id —— 写错列会 INSERT 出第二行而不是更新这一行
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE advertiser_id='TTD-1'"
+                          ).fetchone()["owner_id"] == u1
+        assert db.execute("SELECT COUNT(*) AS n FROM tt_accounts").fetchone()["n"] == 1
         db.close()

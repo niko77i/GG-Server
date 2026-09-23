@@ -252,7 +252,11 @@ def resolve_status_id(db, name: str, owner_id, platform: str):
 _SQL_MCC = "SELECT id FROM mcc WHERE name=?"
 _SQL_AGENT_GG = "SELECT id FROM agents WHERE name=? AND (platform='gg' OR platform IS NULL)"
 _SQL_AGENT_TT = "SELECT id FROM agents WHERE name=? AND platform='tt'"
-_SQL_BC = "SELECT id FROM tt_bcs WHERE name=?"
+# tt_bcs 有 deleted_at（database.py），必须过滤软删：否则一个已删的 BC 若恰好是
+# 唯一同名行，会被「唯一命中才落库」放行，把账户挂到已删的 BC 上。仓库既有口径一致
+# （tt_routes.py:133/198/1054/1058 全部带 deleted_at IS NULL）。
+# mcc / agents 无 deleted_at，不加；users 也无。
+_SQL_BC = "SELECT id FROM tt_bcs WHERE name=? AND deleted_at IS NULL"
 
 
 def _resolve_field(db, platform: str, field: str, value: str, owner_id):
@@ -383,19 +387,18 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings) -> dict:
     """把一行解析结果里「要写进系统」的字段收集成 {字段名: 值}。
 
     名称类字段先解析成主键，解析不唯一则记 warning 并丢弃该字段。
+
+    **文本列的空值照常落库，不得写成 `if not value: continue`。** 规格 §8.3 对
+    `to_update` 的口径是「**按表覆盖该列**」——表里空着就是把系统里该列清空，
+    否则户管永远无法从表里清掉一个值（B 列「是否封户」清空即撤销死亡，同理）。
+    §7.4「不因表里空着就把 owner_id 清空」是**归属专属例外**，不能推广到文本列。
+    与下方名称类字段的 `if not value: continue` 不对称是**刻意的**：空串在名称
+    命名空间里根本没有可解析的候选，属规格 §8.4 的「命中 0 条」。
     """
     out = {}
     for f in _PLAIN_TEXT_FIELDS[platform]:
-        # 表里空着 → 不动系统里已有的值（与下方名称类字段的 `if not value: continue`
-        # 同口径，也与规格 §7.4「空归属不清空已有 owner_id」同理）。
-        # 不能写成 `out[f] = p.get(f, "")`：acquired_date 等列在库里常有默认值
-        # （accounts.acquired_date 默认当天），空单元格会被算成一条「差异」，
-        # 从而把系统里真实的日期/备注静默清空。
-        # `_conf_text` 兜底是因为 p 未必全是 str（同 `_conf_text` 的既有理由）。
-        value = _conf_text(p.get(f))
-        if not value:
-            continue
-        out[f] = value
+        # `_conf_text` 兜底是因为 p 未必全是 str（同 `_conf_text` 的既有理由）
+        out[f] = _conf_text(p.get(f))
     for f in _parseable_fields(platform):
         value = (p.get(f) or "").strip()
         if not value:
