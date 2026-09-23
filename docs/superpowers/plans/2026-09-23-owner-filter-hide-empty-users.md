@@ -31,7 +31,7 @@
 - Consumes: 既有 `_get_effective_platform()`（`py/main.py:6005`）、`_yt_db()`
 - Produces: `GET /api/platform/users` 返回体结构不变（`{"success": true, "users": [{id, username, display_name, platform}]}`），仅结果集收窄。无新增参数、无新增字段。
 
-- [ ] **Step 1: 新增平台→账户表白名单常量**
+- [x] **Step 1: 新增平台→账户表白名单常量**
 
 在 `py/main.py` 的 `platform_users()` 定义**上方**（即 `py/main.py:6015` 那个空行处，`_get_effective_platform()` 之后）插入：
 
@@ -41,7 +41,7 @@
 ACCOUNT_TABLE_BY_PLATFORM = {"gg": "accounts", "fb": "fb_accounts", "tt": "tt_accounts"}
 ```
 
-- [ ] **Step 2: 改写 `platform_users()` 的查询**
+- [x] **Step 2: 改写 `platform_users()` 的查询**
 
 把 `py/main.py:6019-6032` 的 docstring 与查询体替换为：
 
@@ -70,7 +70,7 @@ ACCOUNT_TABLE_BY_PLATFORM = {"gg": "accounts", "fb": "fb_accounts", "tt": "tt_ac
     return jsonify({"success": True, "users": [dict(r) for r in rows]})
 ```
 
-- [ ] **Step 3: 直连接口验证（不依赖测试套件，确认新口径生效）**
+- [x] **Step 3: 直连接口验证（不依赖测试套件，确认新口径生效）**
 
 创建临时脚本 `D:/server/cc/_gghist/verify_platform_users.py`（仓库外，不进版本库）：
 
@@ -119,7 +119,7 @@ TT: 1 人 -> 黎明(admin)
 
 （顺序按 `display_name` 排，中文排序可能与上面不同，**人数与集合**才是断言点。）
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 cd /d/server/cc/GG-Server
@@ -148,13 +148,13 @@ git commit -m "feat: 「归属人」下拉只列出有账户的用户（户管�
 - `tt_accounts`：`INSERT INTO tt_accounts(name, advertiser_id, owner_id) VALUES(?,?,?)`（`:986`）
 - `fb_accounts`：`INSERT INTO fb_accounts(name, account_id, owner_id) VALUES(?,?,?)`（`:1120`）
 
-- [ ] **Step 1: 先跑一遍，确认这 3 个用例确实红了**
+- [x] **Step 1: 先跑一遍，确认这 3 个用例确实红了**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py::TestPlatformUsersEndpoint -q`
 
 Expected: `3 failed`（三条失败都应落在 `... in names` 那类断言上）。**若此时是全绿，说明 Task 1 的改动没生效，先回去查 Task 1。**
 
-- [ ] **Step 2: 修 `test_huguan_sees_only_current_platform`**
+- [x] **Step 2: 修 `test_huguan_sees_only_current_platform`**
 
 把 `py/tests/test_huguan_role.py:360-376` 整段替换为：
 
@@ -186,7 +186,7 @@ Expected: `3 failed`（三条失败都应落在 `... in names` 那类断言上�
         assert "_hgpu_gg" not in names
 ```
 
-- [ ] **Step 3: 修 `test_includes_developer_excludes_hidden`**
+- [x] **Step 3: 修 `test_includes_developer_excludes_hidden`**
 
 把 `py/tests/test_huguan_role.py:378-395` 整段替换为：
 
@@ -220,7 +220,7 @@ Expected: `3 failed`（三条失败都应落在 `... in names` 那类断言上�
 
 > 注意 `_hgpu_hid` **也要**配账户：否则删掉 `role != 'hidden'` 这条约束，它仍会被账户过滤挡住，本用例不会红。
 
-- [ ] **Step 4: 修 `test_non_switch_role_cannot_pick_platform`**
+- [x] **Step 4: 修 `test_non_switch_role_cannot_pick_platform`**
 
 把 `py/tests/test_huguan_role.py:397-414` 整段替换为：
 
@@ -251,13 +251,13 @@ Expected: `3 failed`（三条失败都应落在 `... in names` 那类断言上�
         assert "_hgpu_plain" in names
 ```
 
-- [ ] **Step 5: 跑一遍，确认 3 个用例恢复绿**
+- [x] **Step 5: 跑一遍，确认 3 个用例恢复绿**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py::TestPlatformUsersEndpoint -q`
 
 Expected: `3 passed`
 
-- [ ] **Step 6: 新增 3 个用例覆盖新口径**
+- [x] **Step 6: 新增 3 个用例覆盖新口径**
 
 在 `TestPlatformUsersEndpoint` 类末尾（`test_non_switch_role_cannot_pick_platform` 之后、`def _mk_account` 之前）追加：
 
@@ -323,13 +323,13 @@ Expected: `3 passed`
         assert "_hgpu_ttonly" in tt
 ```
 
-- [ ] **Step 7: 跑这一类，确认 7 个用例全绿**
+- [x] **Step 7: 跑这一类，确认 7 个用例全绿**
 
 Run: `cd py && python -m pytest tests/test_huguan_role.py::TestPlatformUsersEndpoint -q`
 
 Expected: `7 passed`
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 cd /d/server/cc/GG-Server
@@ -348,14 +348,14 @@ git commit -m "test: 补账户夹具并覆盖「归属人」下拉的新口径�
 - Consumes: Task 1 + Task 2 的成果
 - Produces: 验收结论
 
-- [ ] **Step 1: 后端全量回归**
+- [x] **Step 1: 后端全量回归**
 
 Run: `cd py && python -m pytest tests/ -q`
 
 Expected: 全绿。基线为 `420 passed` + 本次新增 4 例 = **`424 passed`**。
 （若数字不符，先确认没有别处因本改动而红灯 —— 尤其 `test_user_platform_isolation.py`、`test_tt_platform.py`、`test_fb_platform.py`。）
 
-- [ ] **Step 2: 手工验收**
+- [x] **Step 2: 手工验收**
 
 启动后端与前端，按矩阵核对（前端本次**零改动**，故重点是下拉内容）：
 
@@ -369,9 +369,9 @@ Expected: 全绿。基线为 `420 passed` + 本次新增 4 例 = **`424 passed`*
 
 > 验收第 5 条若确认到裸 id，**不算缺陷** —— 那是用户明确裁定接受的行为，不要顺手去修。
 
-- [ ] **Step 3: 若验收发现问题 → 修复后重跑 Step 1、Step 2**
+- [x] **Step 3: 若验收发现问题 → 修复后重跑 Step 1、Step 2**
 
-- [ ] **Step 4: 代码审查**
+- [x] **Step 4: 代码审查**
 
 按 CLAUDE.md 要求，调用 `/code-review` 对本次改动做审查，修复发现的问题。
 
@@ -379,7 +379,7 @@ Expected: 全绿。基线为 `420 passed` + 本次新增 4 例 = **`424 passed`*
 1. **白色名单映射是否真的无注入面**（`platform` 必须走占位符，`table` 只能取字典值）；
 2. **测试断言是否仍非空**（新增的账户过滤会不会把某条负面断言变成恒真）。
 
-- [ ] **Step 5: 收尾提交（仅当有修复或文档更新时）**
+- [x] **Step 5: 收尾提交（仅当有修复或文档更新时）**
 
 ```bash
 cd /d/server/cc/GG-Server
@@ -394,3 +394,39 @@ git commit -m "docs: 补充「归属人」下拉只列有户用户的设计与�
 - 临时验证脚本 `D:/server/cc/_gghist/verify_platform_users.py` 留在仓库外，不进版本库。
 - 已知且已裁定接受的副作用：**FB 下拉彻底变空**（设计文档 §5.1.1）、**0 户用户默认选中自己时显示裸 id**（§5.1.2）。二者均**不在本次修复范围**。
 - 本次**不含**：69 户 `status_id` 悬空的数据订正、`COALESCE(st.name,'存活')` 显示层掩盖问题。独立议题，另行裁定。
+
+---
+
+## 完成记录（2026-09-23）
+
+全部 3 个 Task 完成，提交：`cd55dca`（后端）→ `f46007c`（测试）→ `6d957f5`（审查收口）。
+
+**结果**：`cd py && python -m pytest tests/ -q` → **`424 passed`**，与计划预测的基线 420 + 新增 4 完全吻合。
+
+### 执行中与计划的偏差（按实记载）
+
+1. **计划 Step 3 的验证脚本断言字段写错了。** 计划里写 `assert "户部尚书" in gg`，但 `gg` 是 `username` 集合，而该账号的 `username` 是 `feifei`、`display_name` 才是「户部尚书」（卡尔同理：`carl567`）。脚本因此报 `AssertionError`。已把断言改为按 `display_name || username`（下拉 label 的口径）。**这是脚本自身的问题，不影响接口。**
+
+2. **`test_account_table_follows_effective_platform` 初版是弱断言，靠变异测试才发现。** 初版夹具用普通 `user`/`tt`，查 gg 时会先被基础条件 `platform = ?` 挡掉，`not in gg` 恒真 —— 根本没验到表映射（变异 D 第一次跑时该用例没红）。改用 **developer** 做夹具（能穿透基础平台过滤）后，表的选择成为唯一变量，变异 D 即变红。
+
+3. **变异验证扩到 4 条**（计划里只要求跑测试，未要求变异）。实际对 4 条约束各做了一次破坏，确认全部有守卫：
+
+   | 变异 | 变红的用例 |
+   |---|---|
+   | A 去掉整条 EXISTS 约束 | `test_excludes_users_without_accounts`、`test_deleted_account_does_not_count`、`test_account_table_follows_effective_platform` |
+   | B 去掉户管豁免 | `test_huguan_exempt_even_without_accounts` |
+   | C 去掉 `deleted_at IS NULL` | `test_deleted_account_does_not_count` |
+   | D 表映射 gg↔tt 弄反 | 5 个用例（含 `test_account_table_follows_effective_platform`） |
+
+   脚本留在仓库外：`D:/server/cc/_gghist/mutation_check.py`。
+
+   > 复现注意：`AND a.deleted_at IS NULL` 在 `main.py` 出现 3 次（3914 / 4084 / 6041），朴素 `replace(..., 1)` 会打到无关位置，必须用唯一锚点 `WHERE a.owner_id = u.id AND a.deleted_at IS NULL`。
+
+4. **代码审查（`01216c6..f46007c`）结论：可以合并，0 阻塞。** 采纳并修复了 2 条 Minor：去掉 `test_excludes_users_without_accounts` 里一句恒真断言（`assert without_acc`）、修正 `main.py` 回退注释的措辞（回退的只是选表，`platform = ?` 仍用原样值）。
+
+   审查发现的 **I-1（跨面板筛选域不一致）** 已独立复核并在设计文档 §5.1.3 记录：MCC / FB-BM / FB-像素 / TT-BC 四个面板的归属人筛选域不是平台账户表。**今日实测损失为零**（各 owner 全在新下拉里；FB 两张表本就 0 行），属潜伏问题，本次只记录不处理。
+
+### 尚未完成
+
+- **手工验收（Task 3 Step 2）**：需人工在浏览器核对 5 行矩阵，**待用户执行**。前端本次零改动，重点看下拉内容。
+- **Task 3 Step 5 收尾提交**：本文档更新随之提交。
