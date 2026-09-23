@@ -10,12 +10,6 @@
           <el-input v-model="urls" type="textarea" :rows="4" placeholder="每行一个链接，或用逗号分隔" />
         </el-form-item>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
-          <el-form-item label="保存路径" style="flex:1;min-width:200px;">
-            <div style="display:flex;gap:6px;">
-              <el-input v-model="saveDir" :placeholder="isLocalhost() ? '例如：F:\\images\\google_ads\\' : '留空则使用服务器默认目录'" size="small" />
-              <el-button v-if="isLocalhost()" @click="browseFolder" style="width:36px;">📂</el-button>
-            </div>
-          </el-form-item>
           <el-form-item style="min-width:80px;">
             <el-checkbox v-model="includeAds" size="small">按 Google Ads 规格放大图片</el-checkbox>
           </el-form-item>
@@ -343,18 +337,10 @@ const taskStore = useTaskStore()
 
 // ========== ① 爬取 ==========
 const urls = ref('')
-const saveDir = ref('')
 const includeAds = ref(true)
 const scraping = ref(false)
 const scrapeResults = ref([])
 const scrapeSummary = ref('')
-
-async function browseFolder() {
-  try {
-    const res = await browseApi.folder({ initial_dir: saveDir.value || null })
-    if (res.path) saveDir.value = res.path
-  } catch(e) { ElMessage.error('选择文件夹失败: ' + e.message) }
-}
 
 function parseUrls(input) {
   const matches = input.match(/https?:\/\/play\.google\.com\/[^\s,;，；\n]+/gi)
@@ -370,7 +356,8 @@ async function startScrape() {
   let successCount = 0, failCount = 0, totalImages = 0
   for (let i = 0; i < links.length; i++) {
     try {
-      const res = await scrapeApi.scrape({ url: links[i], save_dir: saveDir.value, include_ads_images: includeAds.value })
+      // 保存路径已收窄为服务器默认目录（2026-09-24 裁决），前端不再传自定义 save_dir
+      const res = await scrapeApi.scrape({ url: links[i], include_ads_images: includeAds.value })
       scrapeResults.value[i] = { url: links[i], package_name: res.package_name, image_count: res.image_count, error: '', saved_path: res.saved_path, from_cache: res.from_cache }
       successCount++; totalImages += (res.image_count || 0) + (res.logo ? 1 : 0)
     } catch (e) {
