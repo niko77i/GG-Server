@@ -524,3 +524,104 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
     if cur is None and value in (None, ""):
         return True
     return str(cur if cur is not None else "") == str(value if value is not None else "")
+
+def owner_channel_cells(rows: list, platform: str, value: str) -> list:
+    """构造只写归属变更通道列的 rows（规格 §7.2 规则 3②）。
+
+    刻意只含这一列 —— 收尾写入若顺手带上别的列，就会把户管在表里的
+    其他手工改动一起冲掉。
+    """
+    col = OWNER_CHANNEL_COL[platform]
+    return [{"account_id": r["account_id"], "cells": {col: value}} for r in rows]
+
+
+def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> dict:
+    """执行户管确认过的差异（规格 §8.3 步骤 8）。
+
+    confirmed: {"create": [行号...], "update": [行号...], "owner": [行号...]}
+               缺哪个键就完全不执行该类别。
+    """
+    conf = confirmed or {}
+    created = updated = owner_changed = 0
+    errors = []
+    applied_owner_rows = []
+
+    table = "tt_accounts" if platform == "tt" else "accounts"
+    key_field = ACCOUNT_KEY_FIELD[platform]
+
+    for item in diff.get("to_create", []):
+        if item["row"] not in conf.get("create", []):
+            continue
+        try:
+            # db_values 装的是「数据库列名 → 值」（见 build_diff 的 to_create），
+            # 与表列字母的 cells 不是一回事，切勿混用。
+            src = dict(item.get("db_values") or {})
+            # _is_dead 是合成标记，不是数据库列，必须先摘掉再拼 INSERT
+            want_dead = bool(src.pop("_is_dead", False))
+            # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读）
+            pending = item.get("pending_status")
+            if pending:
+                src[_target_column(platform, "status_name")] = resolve_status_id(
+                    db, pending, item.get("owner_id"), platform)
+            src[key_field] = item["account_id"]
+            src["name"] = item["account_id"]
+            src["owner_id"] = item.get("owner_id")
+            src["death_date"] = ""
+            cols = ", ".join(src)
+            marks = ", ".join("?" for _ in src)
+            db.execute(f"INSERT INTO {table}({cols}) VALUES({marks})", tuple(src.values()))
+            new_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            _apply_death(db, platform, new_id, want_dead)
+            created += 1
+        except Exception as e:
+            errors.append({"row": item["row"], "error": str(e)})
+
+    for item in diff.get("to_update", []):
+        if item["row"] not in conf.get("update", []):
+            continue
+        try:
+            fields = dict(item.get("fields") or {})
+            is_dead_val = fields.pop("_is_dead", None)
+            # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读，规格 §8.3
+            # 步骤 7/8）。owner 取该行作用域归属，只记「谁先建的」——不参与查重。
+            pending = item.get("pending_status")
+            if pending:
+                fields[_target_column(platform, "status_name")] = resolve_status_id(
+                    db, pending, item.get("scope_owner_id"), platform)
+            if fields:
+                sets = ", ".join(f"{k}=?" for k in fields)
+                db.execute(f"UPDATE {table} SET {sets}, "
+                           "updated_at=datetime('now','localtime') WHERE id=?",
+                           tuple(fields.values()) + (item["existing_id"],))
+            if is_dead_val is not None:
+                _apply_death(db, platform, item["existing_id"], bool(is_dead_val))
+            updated += 1
+        except Exception as e:
+            errors.append({"row": item["row"], "error": str(e)})
+
+    for item in diff.get("owner_changes", []):
+        if item["row"] not in conf.get("owner", []):
+            continue
+        try:
+            db.execute(f"UPDATE {table} SET owner_id=?, "
+                       "updated_at=datetime('now','localtime') WHERE id=?",
+                       (item["to_owner_id"], item["existing_id"]))
+            owner_changed += 1
+            applied_owner_rows.append({"row": item["row"],
+                                       "account_id": item["account_id"]})
+        except Exception as e:
+            errors.append({"row": item["row"], "error": str(e)})
+
+    db.commit()
+    return {"created": created, "updated": updated, "owner_changed": owner_changed,
+            "applied_owner_rows": applied_owner_rows, "errors": errors}
+
+
+def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:
+    """按死亡标记同步 death_date（对照 main.py:4638 的既有语义）。"""
+    table = "tt_accounts" if platform == "tt" else "accounts"
+    if want_dead:
+        db.execute(f"UPDATE {table} SET death_date=date('now','localtime'), "
+                   "status_changed_date=datetime('now','localtime') WHERE id=?", (account_pk,))
+    else:
+        db.execute(f"UPDATE {table} SET death_date='' WHERE id=?", (account_pk,))

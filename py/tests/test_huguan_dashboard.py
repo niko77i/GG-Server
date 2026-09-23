@@ -1207,3 +1207,364 @@ class TestBuildDiff:
         diff = build_diff(db, [dict(parse_row(["", "", "OWN-5"], "gg"), row=2)], "gg")
         assert diff["warnings"] == []
         db.close()
+
+# ---------- Task 7: 同步落库 ----------
+
+def _stub_sheets(monkeypatch, captured):
+    """把 update_rows_by_account_id 换成桩，记录调用（同步执行，见下）。"""
+    import google_sheets_service as gs
+    import main as m
+
+    def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
+        captured.append({"spreadsheet_id": spreadsheet_id, "sheet_name": sheet_name,
+                         "rows": rows})
+        return {"updated": len(rows), "not_found": []}
+
+    monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
+    monkeypatch.setattr(gs, "build_service", lambda path: object())
+    # 端点经 main._sync_sheets_background 起**后台线程**写表。不拦住它，断言就会
+    # 和后台线程抢时间 —— 本机快时偶然通过、CI 慢时红，是最难查的一类间歇失败。
+    # 换成直接调用，让「后台」在测试里同步发生。端点用的是函数体内
+    # `from main import ...`，调用时才取属性，故此处 patch 生效。
+    monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+
+
+class TestOwnerChannelCells:
+    def test_only_channel_column_is_written(self):
+        """规格 §7.2 规则 3②：收尾只清 重新分配 / 换绑情况 这一列。"""
+        from huguan_dashboard import owner_channel_cells
+        got = owner_channel_cells(
+            [{"row": 2, "account_id": "A1"}, {"row": 3, "account_id": "A2"}], "gg", "")
+        assert got == [{"account_id": "A1", "cells": {"H": ""}},
+                       {"account_id": "A2", "cells": {"H": ""}}]
+
+    def test_tt_uses_its_own_column(self):
+        from huguan_dashboard import owner_channel_cells
+        got = owner_channel_cells([{"row": 2, "account_id": "A1"}], "tt", "李四")
+        assert got == [{"account_id": "A1", "cells": {"L": "李四"}}]
+
+
+class TestApplyDiff:
+    def _setup(self, client):
+        db = database.get_db()
+        u1 = _seed(db, "_ap_zhang", "张三")
+        u2 = _seed(db, "_ap_li", "李四")
+        return db, u1, u2
+
+    def test_creates_confirmed_accounts_only(self, client):
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        parsed = [
+            dict(parse_row(["", "", "C-1", "", "", "", "张三"], "gg"), row=2),
+            dict(parse_row(["", "", "C-2", "", "", "", "张三"], "gg"), row=3),
+        ]
+        diff = build_diff(db, parsed, "gg")
+        res = apply_diff(db, diff, "gg", {"create": [2]}, user_id=u1)
+        assert res["created"] == 1
+        assert db.execute("SELECT COUNT(*) AS c FROM accounts WHERE account_id='C-1'").fetchone()["c"] == 1
+        assert db.execute("SELECT COUNT(*) AS c FROM accounts WHERE account_id='C-2'").fetchone()["c"] == 0
+        db.close()
+
+    def test_create_with_null_owner(self, client):
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        parsed = [dict(parse_row(["", "", "C-3"], "gg"), row=2)]
+        apply_diff(db, build_diff(db, parsed, "gg"), "gg", {"create": [2]}, user_id=u1)
+        row = db.execute("SELECT owner_id FROM accounts WHERE account_id='C-3'").fetchone()
+        assert row["owner_id"] is None
+        db.close()
+
+    def test_owner_change_applies_to_new_owner(self, client):
+        """归属变更只改 owner_id；death_date 归 B 列「是否封户」管，两者不相干。"""
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, u2 = self._setup(client)
+        _seed_account(db, "OC-1", u1)
+        parsed = [dict(parse_row(["", "", "OC-1", "", "", "", "张三", "李四"], "gg"), row=2)]
+        res = apply_diff(db, build_diff(db, parsed, "gg"), "gg", {"owner": [2]}, user_id=u1)
+        assert res["owner_changed"] == 1
+        row = db.execute("SELECT owner_id, death_date FROM accounts "
+                         "WHERE account_id='OC-1'").fetchone()
+        assert row["owner_id"] == u2
+        assert not (row["death_date"] or "").strip()
+        db.close()
+
+    def test_status_dead_sets_death_date(self, client):
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        _seed_account(db, "ST-1", u1)
+        parsed = [dict(parse_row(["", "是", "ST-1", "", "", "", "张三"], "gg"), row=2)]
+        apply_diff(db, build_diff(db, parsed, "gg"), "gg", {"update": [2]}, user_id=u1)
+        row = db.execute("SELECT death_date FROM accounts WHERE account_id='ST-1'").fetchone()
+        assert (row["death_date"] or "").strip() != ""
+        db.close()
+
+    def test_unconfirmed_rows_are_not_applied(self, client):
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, u2 = self._setup(client)
+        _seed_account(db, "UN-1", u1)
+        parsed = [dict(parse_row(["", "", "UN-1", "", "", "", "张三", "李四"], "gg"), row=2)]
+        res = apply_diff(db, build_diff(db, parsed, "gg"), "gg", {}, user_id=u1)
+        assert res["owner_changed"] == 0
+        assert db.execute("SELECT owner_id FROM accounts WHERE account_id='UN-1'").fetchone()["owner_id"] == u1
+        db.close()
+
+    def test_apply_creates_pending_status_in_tt_namespace(self, client):
+        """系统里没有的状态名，到 apply_diff 才建行，且平台必须是 'tt'。
+
+        `build_diff` 只读（pending_status 只是个名字），所以状态行的创建**只**发生
+        在这里。漏传 platform 会让 TT 的状态落进 gg 命名空间：TT 下拉里看不见、
+        反而出现在 GG 下拉里（规格 §8.4）。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        _seed_tt_account(db, "APS-1", u1)
+        row = ["", "", "APS-1", "", "", "", "", "", "新状态", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        assert diff["to_update"][0]["pending_status"] == "新状态"
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 0
+        apply_diff(db, diff, "tt", {"update": [2]}, user_id=u1)
+        rows = db.execute("SELECT id, name, platform FROM account_statuses").fetchall()
+        assert len(rows) == 1                      # 只建一行
+        assert rows[0]["name"] == "新状态"
+        assert rows[0]["platform"] == "tt"         # 不写平台会落进 gg
+        assert db.execute("SELECT status_id FROM tt_accounts WHERE advertiser_id='APS-1'"
+                          ).fetchone()["status_id"] == rows[0]["id"]
+        db.close()
+
+    def test_pending_status_row_records_scoped_owner(self, client):
+        """新建状态行的 owner_id 取**该行的作用域归属**（换了归属就用新归属）。
+
+        `scope_owner` 写错的后果不是报错，而是状态被记到旧运营名下 —— 静默错人。
+        对照行：G 列把归属从张三改成李四，K 列写一个不存在的状态名。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, u2 = self._setup(client)
+        _seed_account(db, "APS-2", u1, acquired_date="")
+        row = ["", "", "APS-2", "", "", "", "李四", "", "", "", "新状态X"]
+        parsed = [dict(parse_row(row, "gg"), row=2)]
+        diff = build_diff(db, parsed, "gg")
+        assert diff["to_update"][0]["scope_owner_id"] == u2      # 新归属，不是 u1
+        apply_diff(db, diff, "gg", {"owner": [2], "update": [2]}, user_id=u1)
+        r = db.execute("SELECT owner_id FROM account_statuses WHERE name='新状态X'").fetchone()
+        assert r["owner_id"] == u2
+        db.close()
+
+    def test_two_accounts_same_new_status_name_create_one_row(self, client):
+        """两个账户写同一个新状态名 ⇒ 只建一行，第二行复用它（不得 IntegrityError）。
+
+        真实唯一约束是 UNIQUE(name, platform)，不含 owner_id。逐个 apply 时第二行
+        查重必须命中第一行建的那条；带 owner_id 查重会在这里炸。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, u2 = self._setup(client)
+        _seed_account(db, "AS-1", u1, acquired_date="")
+        _seed_account(db, "AS-2", u2, acquired_date="")
+        rows = [
+            dict(parse_row(["", "", "AS-1", "", "", "", "张三", "", "", "", "共享状态"], "gg"),
+                 row=2),
+            dict(parse_row(["", "", "AS-2", "", "", "", "李四", "", "", "", "共享状态"], "gg"),
+                 row=3),
+        ]
+        diff = build_diff(db, rows, "gg")
+        res = apply_diff(db, diff, "gg", {"update": [2, 3]}, user_id=u1)
+        assert res["errors"] == []
+        assert res["updated"] == 2
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 1
+        ids = {r["status_id"] for r in db.execute(
+            "SELECT status_id FROM accounts WHERE account_id IN ('AS-1','AS-2')").fetchall()}
+        assert len(ids) == 1                       # 两个账户指向同一行状态
+        db.close()
+
+
+class TestSyncEndpoint:
+    def test_dry_run_does_not_touch_db(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_syn_dry", role="huguan")
+        db = database.get_db()
+        hd_conf = {"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}}
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps(hd_conf)))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [["日期", "是否封户", "账户ID"],
+                                             ["", "", "DRY-1"]])
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "gg", "dry_run": True})
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["diff"]["summary"]["new_accounts"] == 1
+        db = database.get_db()
+        assert db.execute("SELECT COUNT(*) AS c FROM accounts WHERE account_id='DRY-1'").fetchone()["c"] == 0
+        db.close()
+
+    def test_unconfigured_returns_400(self, client):
+        hg, _ = _create_user(client, "_syn_nocfg", role="huguan")
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "gg", "dry_run": True})
+        assert resp.status_code == 400
+
+    def test_non_huguan_403(self, client):
+        h, _ = _create_user(client, "_syn_user", role="user")
+        assert client.post("/api/huguan/dashboard/sync", headers=h,
+                           json={"platform": "gg", "dry_run": True}).status_code == 403
+
+    def test_applies_owner_change_and_rewrites_channel(self, client, monkeypatch):
+        """规格 §7.2 规则 3② + 规则 4：应用后回写运营列、清空重新分配列。"""
+        hg, uid = _create_user(client, "_syn_apply", role="huguan")
+        db = database.get_db()
+        target = _seed(db, "_syn_target", "李四")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.execute("INSERT INTO accounts(account_id, name, owner_id) VALUES('AP-1','AP-1',?)", (uid,))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["日期", "是否封户", "账户ID", "MCC", "国家", "所属渠道", "运营", "重新分配"],
+            ["", "", "AP-1", "", "", "", "  户管本人 ", "李四"],
+        ])
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "gg", "dry_run": False,
+                                 "confirmed": {"owner": [2]}})
+        assert resp.status_code == 200
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM accounts WHERE account_id='AP-1'").fetchone()["owner_id"] == target
+        db.close()
+
+        # 收尾写入分两次：先回写运营列(G)，再清空变更通道列(H)。
+        # 两列刻意分开写 —— owner_channel_cells 只含 H，不会顺手冲掉别的手工列。
+        g_rows = [r for c in captured for r in c["rows"] if "G" in r["cells"]]
+        assert {r["account_id"]: r["cells"]["G"] for r in g_rows}["AP-1"] == "李四"
+        h_rows = [r for c in captured for r in c["rows"] if "H" in r["cells"]]
+        assert h_rows, "应收尾清空归属变更通道列"
+        assert {r["account_id"]: r["cells"]["H"] for r in h_rows}["AP-1"] == ""
+
+    def test_malformed_confirmed_is_400(self, client, monkeypatch):
+        """畸形 confirmed 只能是 4xx，不能把 AttributeError 带成 500。"""
+        hg, uid = _create_user(client, "_syn_badcf", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [["日期", "是否封户", "账户ID"], ["", "", "BAD-1"]])
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+
+        # 外层不是 dict，以及值是数组以外的类型，两条路径都要挡在 4xx
+        for bad in ([1, 2], "abc", 5, {"create": 2}, {"owner": "2"}):
+            resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                               json={"platform": "gg", "dry_run": False, "confirmed": bad})
+            assert resp.status_code == 400, f"confirmed={bad!r} 应返回 400"
+
+
+class TestApplyDiffUncoveredBranches:
+    """补齐落库阶段几条此前无测试能钉住的关键分支（见 task-7-report.md 的变异记录）。
+
+    这不是「多写测试」：下面每条都在对应变异体下是**唯一**会变红的那条，
+    少了它们，变异验证会出现「改坏了却全绿」的洞。
+    """
+
+    def _setup(self, client):
+        db = database.get_db()
+        u1 = _seed(db, "_apu_zhang", "张三")
+        return db, u1
+
+    def test_create_with_pending_status_lands_in_platform_namespace(self, client):
+        """新建账户 + 系统里没有的状态名 ⇒ 到 apply 才建行，平台与归属都必须正确。
+
+        `build_diff` 只读，所以 `to_create` 循环里的 `if pending:` 是**唯一**会给
+        新建账户建状态行的分支。漏传 platform 会让 TT 的状态落进 gg 命名空间
+        （TT 下拉里看不见、反而出现在 GG 下拉里，规格 §8.4）；
+        把 `_target_column(platform, "status_name")` 写成别的列则 status_id 永不落库。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1 = self._setup(client)
+        row = ["", "", "NPS-1", "", "", "", "张三", "", "全新状态NPS", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        assert diff["to_create"][0]["pending_status"] == "全新状态NPS"
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 0
+        res = apply_diff(db, diff, "tt", {"create": [2]}, user_id=u1)
+        assert res["errors"] == []
+        assert res["created"] == 1
+        st = db.execute("SELECT id, platform, owner_id FROM account_statuses "
+                        "WHERE name='全新状态NPS'").fetchone()
+        assert st is not None
+        assert st["platform"] == "tt"        # 不写平台会落进 gg
+        assert st["owner_id"] == u1          # 记的是该行的 owner_id
+        acc = db.execute("SELECT owner_id, status_id FROM tt_accounts "
+                         "WHERE advertiser_id='NPS-1'").fetchone()
+        assert acc["owner_id"] == u1
+        assert acc["status_id"] == st["id"]
+        db.close()
+
+    def test_create_with_death_flag_sets_death_date(self, client):
+        """新建账户带死亡标记 ⇒ `_is_dead` 必须真的驱动 `_apply_death`。
+
+        `_is_dead` 是 `db_values` 里的合成标记（不是数据库列）：摘掉它却不用，
+        封户状态就静默丢掉 —— 建出来的账户永远是活的。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1 = self._setup(client)
+        rows = [dict(parse_row(["", "是", "NDEAD-1", "", "", "", "张三"], "gg"), row=2)]
+        diff = build_diff(db, rows, "gg")
+        assert diff["to_create"][0]["db_values"]["_is_dead"] is True
+        apply_diff(db, diff, "gg", {"create": [2]}, user_id=u1)
+        row = db.execute("SELECT death_date FROM accounts WHERE account_id='NDEAD-1'"
+                         ).fetchone()
+        assert (row["death_date"] or "").strip() != ""
+        db.close()
+
+    def test_update_with_only_dead_flag_still_applies(self, client):
+        """整行唯一的变化是死亡标记时，`fields` 摘掉 `_is_dead` 后是空 dict。
+
+        空 dict 直接拼 UPDATE 会得到 `SET , updated_at=datetime('now','localtime')`
+        的语法错误，该行被记进 errors 而 death_date 永不落库 —— `if fields:` 这个
+        守卫就是为它存在的。对照行：库里 acquired_date / timezone 本来就是空，
+        表里 A / I 列也空，所以 `changed` 只剩 `_is_dead` 一项。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1 = self._setup(client)
+        _seed_account(db, "OD-1", u1, acquired_date="", timezone="")
+        rows = [dict(parse_row(["", "是", "OD-1", "", "", "", "张三"], "gg"), row=2)]
+        diff = build_diff(db, rows, "gg")
+        assert diff["to_update"][0]["fields"] == {"_is_dead": True}   # 非空才有意义
+        res = apply_diff(db, diff, "gg", {"update": [2]}, user_id=u1)
+        assert res["errors"] == []
+        assert res["updated"] == 1
+        row = db.execute("SELECT death_date FROM accounts WHERE account_id='OD-1'"
+                         ).fetchone()
+        assert (row["death_date"] or "").strip() != ""
+        db.close()
+
+    def test_apply_revives_dead_account(self, client):
+        """B 列清空 = 撤销死亡 ⇒ apply 必须把 death_date 清回空串。
+
+        `_apply_death` 的 else 分支此前零覆盖：删掉它，「撤销死亡」在落库阶段整条
+        失效，而所有测试照样全绿。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1 = self._setup(client)
+        _seed_account(db, "REV-1", u1, acquired_date="", death_date="2026-01-01")
+        rows = [dict(parse_row(["", "", "REV-1", "", "", "", "张三"], "gg"), row=2)]
+        diff = build_diff(db, rows, "gg")
+        assert diff["to_update"][0]["fields"]["_is_dead"] is False
+        apply_diff(db, diff, "gg", {"update": [2]}, user_id=u1)
+        row = db.execute("SELECT death_date FROM accounts WHERE account_id='REV-1'"
+                         ).fetchone()
+        assert (row["death_date"] or "").strip() == ""
+        db.close()
