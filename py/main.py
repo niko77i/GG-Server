@@ -4545,15 +4545,17 @@ def accounts_batch_delete():
     try:
         cross_user = _cross_user_actor(user_id)
         owner_clause = "" if cross_user else " AND owner_id=?"
+        deleted = 0
         for aid in ids:
-            db.execute(
+            cur = db.execute(
                 "UPDATE accounts SET deleted_at=datetime('now','localtime'), "
                 "updated_at=datetime('now','localtime') "
                 f"WHERE id=?{owner_clause} AND deleted_at IS NULL",
                 (aid,) if cross_user else (aid, user_id)
             )
+            deleted += cur.rowcount
         db.commit()
-        return jsonify({"success": True, "deleted": len(ids)})
+        return jsonify({"success": True, "deleted": deleted})
     finally:
         db.close()
 
@@ -6195,7 +6197,6 @@ def statuses_rename(sid):
         return jsonify({"success": False, "error": f"状态「{name}」已存在"}), 409
     db.execute("UPDATE account_statuses SET name=? WHERE id=?", (name, sid))
     db.commit()
-    _app_cache.delete(f"accounts:statuses:{user_id}")
     db.close()
     return jsonify({"success": True})
 
@@ -6226,7 +6227,6 @@ def statuses_delete(sid):
     db.execute("UPDATE tt_accounts SET status_id=NULL WHERE status_id=?", (sid,))
     db.execute("DELETE FROM account_statuses WHERE id=?", (sid,))
     db.commit()
-    _app_cache.delete(f"accounts:statuses:{user_id}")
     db.close()
     return jsonify({"success": True})
 

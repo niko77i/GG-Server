@@ -454,3 +454,46 @@ class TestC2UserSearch:
         resp = client.get("/api/admin/users?search=_c2_match2&platform=gg", headers=dev)
         assert resp.status_code == 200
         assert any(u["username"] == "_c2_match2" for u in resp.get_json()["users"])
+
+
+class TestD2BatchDeleteCount:
+    def test_batch_delete_reports_actual_count(self, client):
+        """承重对照：混入一个**存在**的 id ⇒ deleted 必须是 1 而非 len(ids)=2、也非恒 0。"""
+        dev, dev_id = _create_user(client, "_d2_dev", role="developer")
+        db = database.get_db()
+        _mk_account(db, dev_id, "GG-D2-1", "D2账户1")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-D2-1'").fetchone()["id"]
+        db.close()
+        # 1 个存在 + 1 个不存在 ⇒ 真实删除数 1
+        resp = client.post("/api/accounts/batch-delete", json={"ids": [aid, 999998]}, headers=dev)
+        assert resp.status_code == 200
+        assert resp.get_json()["deleted"] == 1
+        # 同一 id 再删一次（已软删，deleted_at IS NULL 不匹配）⇒ 0
+        resp = client.post("/api/accounts/batch-delete", json={"ids": [aid]}, headers=dev)
+        assert resp.status_code == 200
+        assert resp.get_json()["deleted"] == 0
+
+    def test_batch_delete_all_nonexistent_reports_zero(self, client):
+        dev, _ = _create_user(client, "_d2_dev2", role="developer")
+        resp = client.post("/api/accounts/batch-delete", json={"ids": [999999, 999998]}, headers=dev)
+        assert resp.status_code == 200
+        assert resp.get_json()["deleted"] == 0
+
+
+class TestD1StatusesSmoke:
+    """D-1 是纯删除死代码（缓存键从未被 set），无行为变化，用冒烟回归钉住改名/删除流程仍正常。
+
+    这是回归钉，不是失败测试 —— 改前改后都应通过。
+    """
+
+    def test_statuses_rename_delete_still_work(self, client):
+        dev, dev_id = _create_user(client, "_d1_dev", role="developer")
+        db = database.get_db()
+        db.execute("INSERT INTO account_statuses(name, platform, owner_id) VALUES('状态甲','gg',?)", (dev_id,))
+        sid = db.execute("SELECT id FROM account_statuses WHERE name='状态甲'").fetchone()["id"]
+        db.commit()
+        db.close()
+        resp = client.put(f"/api/statuses/{sid}", json={"name": "状态乙"}, headers=dev)
+        assert resp.status_code == 200
+        resp = client.delete(f"/api/statuses/{sid}", headers=dev)
+        assert resp.status_code == 200
