@@ -55,7 +55,7 @@
       <el-table-column prop="last_login" label="最后登录" width="160" />
       <el-table-column label="操作" width="360" fixed="right">
         <template #default="{ row }">
-          <el-button size="small" @click="showImportDialog(row)">📥 导入数据</el-button>
+          <el-button v-if="!authStore.isHuguan" size="small" @click="showImportDialog(row)">📥 导入数据</el-button>
           <template v-if="canModify(row)">
             <el-button size="small" @click="showEditDialog(row)">✏️ 编辑</el-button>
             <el-button size="small" @click="showPwdDialog(row)">🔑 改密</el-button>

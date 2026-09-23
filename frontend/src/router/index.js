@@ -219,6 +219,18 @@ router.beforeEach((to, from, next) => {
     next('/tt/accounts')
     return
   }
+  if (auth.isHuguan && (to.path === '/fb/extract' || to.path.startsWith('/fb/extract/'))) {
+    next('/fb/accounts')
+    return
+  }
+  if (auth.isHuguan && (to.path === '/fb/data-manage' || to.path.startsWith('/fb/data-manage/'))) {
+    next('/fb/accounts')
+    return
+  }
+  if (auth.isHuguan && (to.path === '/tt/extract' || to.path.startsWith('/tt/extract/'))) {
+    next('/tt/accounts')
+    return
+  }
   next()
 })
 

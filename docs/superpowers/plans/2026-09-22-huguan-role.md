@@ -3367,3 +3367,15 @@ git commit -m "feat: GG 账户与 MCC 写操作对跨用户角色放行"
 - [ ] **产品域负向验收**（Task 17）：用户管 token 直接调 `POST /api/fb/products/create`、`PUT /api/fb/products/<pid>`、`POST /api/tt/products/create`、`POST /api/tt/products/import-text` → 四者均须 403；再确认户管调 `POST /api/tt/bcs/create` 仍为 200（未误伤账户域）
 - [ ] **admin 不变量验收**（Task 1）：用 `platform='gg'` 的 admin token 调 `/api/tt/users?platform=tt` → 须 403（admin 不跨平台）
 - [ ] **GG 写操作验收**（Task 18）：户管 token 调 `PUT /api/mcc/<别人的id>`、`DELETE /api/mcc/<别人的id>`、`DELETE /api/accounts/<别人的id>` → 三者均 200；换普通 user token 重试 → 403 / 403 / 404，且文案不变
+
+---
+
+### Task 20: GG 产品/视频/文案/素材域对户管收口（最终审查 C-1 补口）
+
+**来源**：最终全分支审查（`b1eb46a..ccf6430`）的 Critical C-1 —— Task 17 的产品域收口只枚举了 FB/TT 两个蓝图，漏掉 `py/main.py` 里的 GG 域，
+实测户管可 `POST /api/products/create` 返回 200，违反设计文档 §3.9「产品域与视频素材域一律拒绝」。用户裁决 D19 定为「读写全拒」。
+
+**同样来自该审查/自查的连带项**：I-1（`UserManageView.vue` 的「导入数据」按钮对户管是死按钮，D20）、M19-2（户管可直链 `/fb/extract`、`/fb/data-manage`、`/tt/extract`，D21）、
+视频与音频替换域原本**完全无鉴权**（D23，须先补 `@jwt_required()` 才能让 `reject_huguan()` 生效）、两个下载端点的 `path` 参数是任意路径读文件（D24）。
+
+**完整需求与端点清单见 `.superpowers/sdd/task-20-brief.md`**（草稿目录，未纳入版本控制）。

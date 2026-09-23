@@ -35,7 +35,7 @@ import data_service
 import datetime
 import requests
 from functools import wraps
-from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform
+from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform, no_huguan
 from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES, GLOBAL_OPTION_ROLES
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 # google_ads_service 按需加载，不打包进 EXE
@@ -667,6 +667,8 @@ def scrape_upload_images():
 
 
 @app.route("/api/video/scan-dir", methods=["POST"])
+@jwt_required()
+@no_huguan
 def video_scan_dir():
     """扫描目录，返回 PNG 图片列表和 logo 信息。"""
     data = request.get_json(silent=True)
@@ -776,6 +778,7 @@ def serve_image():
 
 @app.route("/api/video/generate", methods=["POST"])
 @jwt_required()
+@no_huguan
 def video_generate():
     """提交视频生成任务（后台线程执行）。"""
     data = request.get_json(silent=True)
@@ -910,6 +913,8 @@ def video_generate():
 
 
 @app.route("/api/video/progress", methods=["GET"])
+@jwt_required()
+@no_huguan
 def video_progress():
     """查询视频生成任务进度。同时惰性清理过期任务（>1小时的完成任务）。"""
     task_id = request.args.get("task_id", "")
@@ -989,15 +994,24 @@ def list_active_tasks():
 
 
 @app.route("/api/video/download", methods=["GET"])
+@jwt_required(optional=True)
+@no_huguan
 def video_download():
-    """下载已生成的视频文件。"""
+    """下载已生成的视频文件。path 必须精确命中 video_tasks.output_path（产物在案）。"""
     path = request.args.get("path", "").strip()
-    if not path or not os.path.isfile(path):
+    if not path:
+        return jsonify({"success": False, "error": "文件不存在"}), 404
+    db = database.get_db()
+    row = db.execute("SELECT 1 FROM video_tasks WHERE output_path = ? LIMIT 1", (path,)).fetchone()
+    db.close()
+    if not row or not os.path.isfile(path):
         return jsonify({"success": False, "error": "文件不存在"}), 404
     return send_file(path, as_attachment=True)
 
 
 @app.route("/api/video/music-list", methods=["GET"])
+@jwt_required()
+@no_huguan
 def video_music_list():
     """列出服务器上可用的背景音乐。"""
     os.makedirs(_MUSIC_DIR, exist_ok=True)
@@ -1010,6 +1024,8 @@ def video_music_list():
 
 
 @app.route("/api/video/upload-music", methods=["POST"])
+@jwt_required()
+@no_huguan
 def video_upload_music():
     """上传背景音乐到服务器，支持 MP4（自动提取音频）。"""
     os.makedirs(_MUSIC_DIR, exist_ok=True)
@@ -1053,6 +1069,8 @@ def video_upload_music():
 
 
 @app.route("/api/audio", methods=["GET"])
+@jwt_required(optional=True)
+@no_huguan
 def serve_audio():
     """音频流服务，供前端预览播放。"""
     path = request.args.get("path", "").strip()
@@ -1068,6 +1086,8 @@ def serve_audio():
 
 
 @app.route("/api/audio-replace", methods=["POST"])
+@jwt_required()
+@no_huguan
 def audio_replace():
     """替换视频的音频轨道 — 上传视频+音频，处理后返回下载链接。"""
     video_file = request.files.get("video")
@@ -1155,15 +1175,25 @@ def audio_replace():
 
 
 @app.route("/api/audio-replace/download", methods=["GET"])
+@jwt_required(optional=True)
+@no_huguan
 def audio_replace_download():
-    """下载替换音频后的视频文件。"""
+    """下载替换音频后的视频文件。path 必须精确命中 audio_replace_history.output_path。"""
     path = request.args.get("path", "").strip()
-    if not path or not os.path.isfile(path):
+    if not path:
+        return jsonify({"success": False, "error": "文件不存在"}), 404
+    db = database.get_db()
+    row = db.execute("SELECT 1 FROM audio_replace_history WHERE output_path = ? LIMIT 1",
+                     (path,)).fetchone()
+    db.close()
+    if not row or not os.path.isfile(path):
         return jsonify({"success": False, "error": "文件不存在"}), 404
     return send_file(path, as_attachment=True)
 
 
 @app.route("/api/audio-replace/history", methods=["GET"])
+@jwt_required()
+@no_huguan
 def audio_replace_history_list():
     """列出音频替换历史（按时间倒序）。"""
     db = database.get_db()
@@ -1187,6 +1217,8 @@ def audio_replace_history_list():
 
 
 @app.route("/api/audio-replace/history/<int:hid>", methods=["DELETE"])
+@jwt_required()
+@no_huguan
 def audio_replace_history_delete(hid):
     """删除单条历史记录（同时删除对应文件）。"""
     db = database.get_db()
@@ -1205,6 +1237,8 @@ def audio_replace_history_delete(hid):
 
 
 @app.route("/api/audio-replace/history", methods=["DELETE"])
+@jwt_required()
+@no_huguan
 def audio_replace_history_clear():
     """清空全部历史记录（同时删除所有文件）。"""
     db = database.get_db()
@@ -1222,6 +1256,8 @@ def audio_replace_history_clear():
 
 
 @app.route("/api/video/next-filename", methods=["POST"])
+@jwt_required()
+@no_huguan
 def video_next_filename():
     """检查输出路径是否存在，返回不冲突的文件名。"""
     data = request.get_json(silent=True) or {}
@@ -1284,6 +1320,8 @@ def _list_packages() -> list[str]:
 
 
 @app.route("/api/video/history/save", methods=["POST"])
+@jwt_required()
+@no_huguan
 def video_history_save():
     """保存当前视频生成设置到对应包的历史文件（按用户名+包名分组）。"""
     data = request.get_json(silent=True) or {}
@@ -1309,6 +1347,8 @@ def video_history_save():
 
 
 @app.route("/api/video/history/list", methods=["GET"])
+@jwt_required()
+@no_huguan
 def video_history_list():
     """按用户名 → 包名两级分组返回所有历史。"""
     result = {}
@@ -1326,6 +1366,8 @@ def video_history_list():
 
 
 @app.route("/api/video/history/delete", methods=["POST"])
+@jwt_required()
+@no_huguan
 def video_history_delete():
     """删除指定包或包内指定索引的条目。"""
     data = request.get_json(silent=True) or {}
@@ -1743,6 +1785,7 @@ def _batch_import_videos(db, urls, region="通用", frame_type="非融帧", effe
 
 @app.route("/api/youtube/import", methods=["POST"])
 @jwt_required()
+@no_huguan
 def youtube_import():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -1769,6 +1812,7 @@ def youtube_import():
 
 @app.route("/api/youtube/list", methods=["GET"])
 @jwt_required()
+@no_huguan
 def youtube_list():
     user_id = int(get_jwt_identity())
     scope = request.args.get("scope", "all").strip()  # "public" | "private" | "all"
@@ -1836,6 +1880,7 @@ def youtube_list():
 
 @app.route("/api/youtube/dates", methods=["GET"])
 @jwt_required()
+@no_huguan
 def youtube_dates():
     """返回当前筛选条件下有视频的日期及数量，供日期选择器标记使用。"""
     user_id = int(get_jwt_identity())
@@ -1871,6 +1916,7 @@ def youtube_dates():
 
 @app.route("/api/youtube/backfill-channels", methods=["POST"])
 @jwt_required()
+@no_huguan
 def youtube_backfill_channels():
     """对 channel_name 为空的视频，调用 oEmbed 接口补全频道名。"""
     import requests as _requests
@@ -1948,6 +1994,7 @@ def _can_modify(db, user_id, table, item_id):
 
 @app.route("/api/youtube/delete", methods=["POST"])
 @jwt_required()
+@no_huguan
 def youtube_delete():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -1981,6 +2028,7 @@ def youtube_delete():
 
 @app.route("/api/youtube/edit", methods=["POST"])
 @jwt_required()
+@no_huguan
 def youtube_edit():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -2002,6 +2050,7 @@ def youtube_edit():
 
 @app.route("/api/youtube/batch-edit", methods=["POST"])
 @jwt_required()
+@no_huguan
 def youtube_batch_edit():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -2050,6 +2099,7 @@ def _reject_non_admin(user_id):
 
 @app.route("/api/youtube/<vid>/consumption", methods=["GET"])
 @jwt_required()
+@no_huguan
 def youtube_consumption_get(vid):
     """获取视频的消耗明细（所有角色可查看）。"""
     db = _yt_db()
@@ -2111,6 +2161,7 @@ def youtube_consumption_get(vid):
 
 @app.route("/api/youtube/<vid>/consumption", methods=["POST"])
 @jwt_required()
+@no_huguan
 def youtube_consumption_add(vid):
     """新增消耗记录（仅 admin/developer，且只能给自己添加）。"""
     user_id = int(get_jwt_identity())
@@ -2168,6 +2219,7 @@ def youtube_consumption_add(vid):
 
 @app.route("/api/youtube/<vid>/consumption/<int:cid>", methods=["PUT"])
 @jwt_required()
+@no_huguan
 def youtube_consumption_edit(vid, cid):
     """编辑消耗记录（仅记录 owner 本人可编辑）。"""
     user_id = int(get_jwt_identity())
@@ -2223,6 +2275,7 @@ def youtube_consumption_edit(vid, cid):
 
 @app.route("/api/youtube/<vid>/consumption/<int:cid>", methods=["DELETE"])
 @jwt_required()
+@no_huguan
 def youtube_consumption_delete(vid, cid):
     """删除消耗记录（仅记录 owner 本人可删除）。"""
     user_id = int(get_jwt_identity())
@@ -2249,6 +2302,7 @@ def youtube_consumption_delete(vid, cid):
 
 @app.route("/api/youtube/consumption/dates", methods=["GET"])
 @jwt_required()
+@no_huguan
 def youtube_consumption_dates():
     """返回有消耗记录的日期及数量，供日期选择器标记使用。"""
     user_id = int(get_jwt_identity())
@@ -2281,6 +2335,7 @@ def youtube_consumption_dates():
 
 @app.route("/api/youtube/tags", methods=["GET"])
 @jwt_required()
+@no_huguan
 def youtube_tags_get():
     db = _yt_db()
     tags = {
@@ -2299,6 +2354,7 @@ def youtube_tags_get():
 
 @app.route("/api/youtube/tags", methods=["POST"])
 @jwt_required()
+@no_huguan
 def youtube_tags_save():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -2366,6 +2422,7 @@ def _upsert_package(db, product_id: int, series_name: str, package_name: str, ur
 
 @app.route("/api/products/runner-products", methods=["GET"])
 @jwt_required()
+@no_huguan
 def runner_products():
     """返回当前用户作为 runner 的产品列表（供消耗录入下拉框使用）。"""
     user_id = int(get_jwt_identity())
@@ -2385,6 +2442,7 @@ def runner_products():
 
 @app.route("/api/products/list", methods=["GET"])
 @jwt_required(optional=True)
+@no_huguan
 def products_list():
     search = request.args.get("search", "").strip()
     region = request.args.get("region", "").strip()
@@ -2563,6 +2621,7 @@ def products_list():
 
 @app.route("/api/products/create", methods=["POST"])
 @jwt_required(optional=True)
+@no_huguan
 def products_create():
     reject = _reject_viewer()
     if reject: return reject
@@ -2662,6 +2721,7 @@ def products_create():
 
 @app.route("/api/products/<int:pid>", methods=["PUT"])
 @jwt_required()
+@no_huguan
 def products_update(pid):
     reject = _reject_viewer()
     if reject: return reject
@@ -2707,6 +2767,7 @@ def products_update(pid):
 
 @app.route("/api/products/<int:pid>", methods=["DELETE"])
 @jwt_required()
+@no_huguan
 def products_delete(pid):
     reject = _reject_viewer()
     if reject: return reject
@@ -2754,6 +2815,7 @@ def products_delete(pid):
 
 @app.route("/api/products/<int:pid>/restore", methods=["POST"])
 @jwt_required()
+@no_huguan
 def products_restore(pid):
     """恢复已删除或已暂停的产品（普通用户可操作，无需管理员确认）。
 
@@ -2813,6 +2875,7 @@ def products_restore(pid):
 
 @app.route("/api/products/merge", methods=["POST"])
 @jwt_required()
+@no_huguan
 def products_merge():
     """合并多个产品到主产品。"""
     reject = _reject_viewer()
@@ -2945,6 +3008,7 @@ def _link_mcc_chain_to_user(db, mcc_id, uid, visited=None):
 
 @app.route("/api/products/<int:pid>/runners", methods=["PUT"])
 @jwt_required()
+@no_huguan
 def products_update_runners(pid):
     """更新产品的 runner 列表。新增 runner 时自动分配产品 MCC。"""
     reject = _reject_viewer()
@@ -2989,6 +3053,8 @@ def products_update_runners(pid):
 
 
 @app.route("/api/products/<int:pid>/detail", methods=["GET"])
+@jwt_required()
+@no_huguan
 def products_detail(pid):
     db = _yt_db()
 
@@ -3037,6 +3103,7 @@ def products_detail(pid):
 
 @app.route("/api/products/<int:pid>/packages", methods=["POST"])
 @jwt_required()
+@no_huguan
 def products_add_package(pid):
     reject = _reject_viewer()
     if reject: return reject
@@ -3057,6 +3124,7 @@ def products_add_package(pid):
 
 @app.route("/api/products/packages/<int:pkg_id>", methods=["PUT"])
 @jwt_required()
+@no_huguan
 def products_update_package(pkg_id):
     reject = _reject_viewer()
     if reject: return reject
@@ -3074,6 +3142,7 @@ def products_update_package(pkg_id):
 
 @app.route("/api/products/packages/<int:pkg_id>", methods=["DELETE"])
 @jwt_required()
+@no_huguan
 def products_delete_package(pkg_id):
     reject = _reject_viewer()
     if reject: return reject
@@ -3089,6 +3158,7 @@ def products_delete_package(pkg_id):
 
 @app.route("/api/products/packages/batch-delete", methods=["POST"])
 @jwt_required()
+@no_huguan
 def products_batch_delete_packages():
     """批量删除包"""
     reject = _reject_viewer()
@@ -3110,6 +3180,7 @@ def products_batch_delete_packages():
 
 @app.route("/api/audit-log/list", methods=["GET"])
 @jwt_required()
+@no_huguan
 def audit_log_list():
     """返回删除产品的审计日志列表（所有角色可查看）。"""
     page = request.args.get("page", 1, type=int)
@@ -3148,6 +3219,7 @@ def audit_log_list():
 
 @app.route("/api/audit-log/restore/<int:log_id>", methods=["POST"])
 @jwt_required()
+@no_huguan
 def audit_log_restore(log_id):
     """从审计日志恢复已删除的产品（仅 developer 可操作）。"""
     user_id = int(get_jwt_identity())
@@ -3239,6 +3311,7 @@ def _build_delist_proxy_pool():
 
 @app.route("/api/products/<int:pid>/check-delist", methods=["POST"])
 @jwt_required()
+@no_huguan
 def products_check_delist(pid):
     """手动检测产品下所有正常状态包的掉包情况。"""
     reject = _reject_viewer()
@@ -3301,6 +3374,7 @@ def products_check_delist(pid):
 
 @app.route("/api/products/delist-status", methods=["GET"])
 @jwt_required()
+@no_huguan
 def products_delist_status():
     """获取当前用户关联产品的掉包检测状态。"""
     user_id = int(get_jwt_identity())
@@ -3477,6 +3551,7 @@ def delist_pending():
 
 @app.route("/api/products/import-text", methods=["POST"])
 @jwt_required()
+@no_huguan
 def products_import_text():
     reject = _reject_viewer()
     if reject: return reject
@@ -7334,6 +7409,7 @@ def google_sheets_list_sheets():
 
 @app.route("/api/copywriting/import", methods=["POST"])
 @jwt_required()
+@no_huguan
 def copywriting_import():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -7360,6 +7436,7 @@ def copywriting_import():
 
 @app.route("/api/copywriting/list", methods=["GET"])
 @jwt_required()
+@no_huguan
 def copywriting_list():
     user_id = int(get_jwt_identity())
     region = request.args.get("region", "").strip()
@@ -7391,6 +7468,7 @@ def copywriting_list():
 
 @app.route("/api/copywriting/edit", methods=["POST"])
 @jwt_required()
+@no_huguan
 def copywriting_edit():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -7413,6 +7491,7 @@ def copywriting_edit():
 
 @app.route("/api/copywriting/delete", methods=["POST"])
 @jwt_required()
+@no_huguan
 def copywriting_delete():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -7435,6 +7514,7 @@ def copywriting_delete():
 
 @app.route("/api/copywriting/batch-edit", methods=["POST"])
 @jwt_required()
+@no_huguan
 def copywriting_batch_edit():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
@@ -8281,6 +8361,7 @@ def admin_trigger_delist_check():
 
 @app.route("/api/products/<int:pid>/assets", methods=["GET"])
 @jwt_required()
+@no_huguan
 def product_assets_list(pid):
     """获取产品下所有成效素材（按 added_by 分组顺序）。"""
     db = _yt_db()
@@ -8298,6 +8379,7 @@ def product_assets_list(pid):
 
 @app.route("/api/products/<int:pid>/assets", methods=["POST"])
 @jwt_required()
+@no_huguan
 def product_assets_add(pid):
     """向产品添加成效素材（批量导入 YouTube 视频 + 建立关联）。"""
     reject = _reject_viewer()
@@ -8357,6 +8439,7 @@ def product_assets_add(pid):
 
 @app.route("/api/products/<int:pid>/assets/<video_id>", methods=["DELETE"])
 @jwt_required()
+@no_huguan
 def product_assets_delete(pid, video_id):
     """移除产品的成效素材关联（不删除 videos 表中的视频）。"""
     reject = _reject_viewer()
@@ -8369,6 +8452,7 @@ def product_assets_delete(pid, video_id):
 
 @app.route("/api/youtube/asset-products", methods=["GET"])
 @jwt_required()
+@no_huguan
 def youtube_asset_products():
     """返回有成效素材的产品名列表（用于筛选下拉框）。"""
     db = _yt_db()
@@ -8384,6 +8468,7 @@ def youtube_asset_products():
 
 @app.route("/api/youtube/product-assets", methods=["GET"])
 @jwt_required()
+@no_huguan
 def youtube_product_assets():
     """批量查询视频关联的产品名（全表扫描，不限用户/可见性）。"""
     ids_str = request.args.get("video_ids", "").strip()

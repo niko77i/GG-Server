@@ -1678,3 +1678,273 @@ class TestGgWriteOpsCrossUser:
         hdr, _ = _create_user(client, "_ggw_u4", role="user")
         _, _, _, acc_id = self._fixture(client)
         assert client.delete(f"/api/accounts/{acc_id}/mcc-history/1", headers=hdr).status_code == 403
+
+
+# ==================== Task 20: GG 产品/视频/文案/素材域对户管收口 ====================
+
+def _count_rows(table):
+    """返回某表的行数（表名为本文件内的字面量，非用户输入）。"""
+    db = database.get_db()
+    n = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    db.close()
+    return n
+
+
+def _mk_product(product_name="已存在产品", owner_id=1):
+    """直接插一条产品，返回 pid（用于产品读取/详情端点的对照与负面断言）。"""
+    db = database.get_db()
+    db.execute("INSERT INTO products(product_name, owner_id, runner_ids, created_at) VALUES(?,?,?,?)",
+               (product_name, owner_id, "[]", "2026-01-01 00:00"))
+    db.commit()
+    pid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.close()
+    return pid
+
+
+class TestGgProductVideoDomainHuguanDenied:
+    """Task 20（最终全分支审查 Critical C-1）：`py/main.py` 的 GG 产品域 / 文案域 /
+    YouTube 素材域 / 产品审计域此前**完全没有** `@no_huguan`，实测户管调
+    `POST /api/products/create` 返回 200（产品落库），违反设计文档 §3.9
+    「产品域与视频素材域一律拒绝户管」。
+
+    本类的每条用例都同时断三件事：谁被拒（状态码 + 文案）、谁没被拒（对照行）、
+    DB 有没有真的变（负面事实断言）。只断状态码等于假绿。
+    """
+
+    HUGUAN_MSG = "户管无产品/素材权限"
+
+    # ---------------- 1. 产品域写 ----------------
+
+    def test_huguan_create_product_denied_and_db_unchanged(self, client):
+        """户管建产品 → 403 + 原文案，且 products 表**没有**新增该产品。"""
+        hg, _ = _huguan(client, "_t20_prod_create")
+        before = _count_rows("products")
+        resp = client.post("/api/products/create", json={"product_name": "户管偷建的产品"}, headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM products WHERE product_name=?",
+                       ("户管偷建的产品",)).fetchone()[0]
+        db.close()
+        assert n == 0, "守卫只挡了响应，产品仍落库了"
+        assert _count_rows("products") == before
+
+    # ---------------- 2. 产品域读 ----------------
+
+    def test_huguan_list_products_denied(self, client):
+        """户管读产品列表 → 403（读写全拒，D19）。"""
+        hg, _ = _huguan(client, "_t20_prod_list")
+        _mk_product(product_name="存在的产品")
+        resp = client.get("/api/products/list", headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+
+    def test_huguan_product_detail_denied(self, client):
+        """户管读产品详情 → 403；该端点原本**无任何装饰器**，无 token 必须由 200 变 401。"""
+        hg, _ = _huguan(client, "_t20_prod_detail")
+        pid = _mk_product(product_name="详情产品")
+        resp = client.get(f"/api/products/{pid}/detail", headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+        # 补 @jwt_required() 的证据：不带 Authorization 头不再是 200
+        anon = client.get(f"/api/products/{pid}/detail")
+        assert anon.status_code == 401, "products_detail 仍可匿名访问（缺 @jwt_required）"
+
+    # ---------------- 3. 文案域写 ----------------
+
+    def test_huguan_copywriting_import_denied_and_db_unchanged(self, client):
+        """户管导文案 → 403，且 copywritings 表未新增。"""
+        hg, _ = _huguan(client, "_t20_cw_import")
+        before = _count_rows("copywritings")
+        resp = client.post("/api/copywriting/import",
+                           json={"text": "户管偷导的文案", "region": "通用"}, headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM copywritings WHERE content=?",
+                       ("户管偷导的文案",)).fetchone()[0]
+        db.close()
+        assert n == 0, "守卫只挡了响应，文案仍落库了"
+        assert _count_rows("copywritings") == before
+
+    # ---------------- 4. YouTube 素材域 ----------------
+
+    def test_huguan_youtube_list_denied(self, client):
+        """户管读 YouTube 素材列表 → 403。"""
+        hg, _ = _huguan(client, "_t20_yt_list")
+        resp = client.get("/api/youtube/list", headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+
+    def test_huguan_youtube_import_denied_and_db_unchanged(self, client):
+        """户管导 YouTube 素材 → 403，且 videos 表未新增。"""
+        hg, _ = _huguan(client, "_t20_yt_import")
+        before = _count_rows("videos")
+        resp = client.post("/api/youtube/import",
+                           json={"urls": ["https://www.youtube.com/watch?v=t20nope"]}, headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+        assert before == 0  # 防「两边都空也算相等」
+        assert _count_rows("videos") == before
+
+    # ---------------- 5. 产品审计域 ----------------
+
+    def test_huguan_audit_log_restore_denied(self, client):
+        """户管从审计日志恢复产品 → 403（原先拦它的是 developer 检查，文案不同）。"""
+        hg, _ = _huguan(client, "_t20_audit")
+        db = database.get_db()
+        db.execute("INSERT INTO audit_log(user_id, action, target_type, target_id, target_name, detail) "
+                   "VALUES(?,?,?,?,?,?)", (1, "delete_product", "product", 99999, "被删产品", "{}"))
+        db.commit()
+        log_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.close()
+        resp = client.post(f"/api/audit-log/restore/{log_id}", headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM products WHERE id=?", (99999,)).fetchone()[0]
+        db.close()
+        assert n == 0, "产品被恢复了 —— 守卫没生效"
+
+    # ---------------- 6. 视频 / 音频替换域 ----------------
+
+    def test_huguan_video_scan_dir_denied(self, client):
+        """户管调视频域（scan-dir）→ 403。"""
+        hg, _ = _huguan(client, "_t20_video_scan")
+        resp = client.post("/api/video/scan-dir", json={"dir": "."}, headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+
+    def test_huguan_audio_replace_denied(self, client):
+        """户管调音频替换域 → 403（原先该域**完全无鉴权**）。"""
+        hg, _ = _huguan(client, "_t20_audio_rep")
+        resp = client.get("/api/audio-replace/history", headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+
+    # ---------------- 7. 对照行：普通 user / developer 不得被堵死 ----------------
+
+    def test_regular_user_not_blocked_on_product_and_video_domain(self, client):
+        """对照行（关键）：普通 `user` 调同批端点**不得**是 403 / 户管文案。"""
+        u, _ = _create_user(client, "_t20_ctrl_user", role="user", platform="gg")
+
+        assert client.get("/api/products/list", headers=u).status_code != 403
+
+        r_create = client.post("/api/products/create", json={"product_name": "普通用户的产品"}, headers=u)
+        assert r_create.status_code == 200, r_create.get_json()
+        assert r_create.get_json()["success"] is True
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM products WHERE product_name=?",
+                       ("普通用户的产品",)).fetchone()[0]
+        db.close()
+        assert n == 1, "对照行的产品没落库 —— 说明守卫误伤了普通用户"
+
+        assert client.get("/api/video/history/list", headers=u).status_code != 403
+
+    def test_developer_not_blocked_on_product_and_video_domain(self, client):
+        """对照行：`developer` 调同批端点**不得**是 403 / 户管文案。"""
+        dev, _ = _create_user(client, "_t20_ctrl_dev", role="developer", platform="gg")
+
+        assert client.get("/api/products/list", headers=dev).status_code != 403
+
+        r_create = client.post("/api/products/create", json={"product_name": "开发者的产品"}, headers=dev)
+        assert r_create.status_code == 200, r_create.get_json()
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM products WHERE product_name=?",
+                       ("开发者的产品",)).fetchone()[0]
+        db.close()
+        assert n == 1
+
+        assert client.get("/api/video/history/list", headers=dev).status_code != 403
+
+    # ---------------- 8. 视频/音频域鉴权补口（D23） ----------------
+
+    def test_video_domain_requires_login(self, client):
+        """无 Authorization 头 → 401（不是 200）：原先这些端点完全裸奔。"""
+        assert client.post("/api/video/scan-dir", json={"dir": "."}).status_code == 401
+        assert client.get("/api/video/music-list").status_code == 401
+        assert client.post("/api/video/history/save", json={"entry": {}}).status_code == 401
+        assert client.get("/api/video/history/list").status_code == 401
+        assert client.get("/api/video/progress?task_id=x").status_code == 401
+
+    def test_video_domain_login_still_works_for_normal_user(self, client):
+        """对照行：带正常 token 的 `user` 调同批端点不是 401。"""
+        u, _ = _create_user(client, "_t20_auth_user", role="user", platform="gg")
+        assert client.get("/api/video/music-list", headers=u).status_code == 200
+        assert client.get("/api/video/history/list", headers=u).status_code == 200
+
+    def test_audio_replace_domain_requires_login(self, client):
+        """无 Authorization 头 → 401。"""
+        assert client.get("/api/audio-replace/history").status_code == 401
+        assert client.delete("/api/audio-replace/history").status_code == 401
+
+    # ---------------- 9. 下载路径白名单（D24） ----------------
+
+    def test_video_download_rejects_unlisted_path(self, client, tmp_path):
+        """临时文件不在 video_tasks 里 → 404 原文案；插入记录后同一请求 → 200。"""
+        from urllib.parse import quote
+        f = tmp_path / "t20_wl.mp4"
+        f.write_bytes(b"fake-video-bytes")
+        url = "/api/video/download?path=" + quote(str(f))
+        resp = client.get(url)
+        assert resp.status_code == 404, "任意路径仍可读文件"
+        assert resp.get_json()["error"] == "文件不存在"
+
+        db = database.get_db()
+        db.execute("INSERT INTO video_tasks(task_id, status, output_path) VALUES(?,?,?)",
+                   ("t20-wl-task", "completed", str(f)))
+        db.commit()
+        db.close()
+        ok = client.get(url)
+        assert ok.status_code == 200
+        assert ok.data == b"fake-video-bytes"
+
+    def test_audio_replace_download_rejects_unlisted_path(self, client, tmp_path):
+        """音频替换下载同法：不在 audio_replace_history 里 → 404，插入后 → 200。"""
+        from urllib.parse import quote
+        f = tmp_path / "t20_wl_audio.mp4"
+        f.write_bytes(b"fake-replaced-bytes")
+        url = "/api/audio-replace/download?path=" + quote(str(f))
+        resp = client.get(url)
+        assert resp.status_code == 404, "任意路径仍可读文件"
+        assert resp.get_json()["error"] == "文件不存在"
+
+        db = database.get_db()
+        db.execute("INSERT INTO audio_replace_history(video_name, audio_name, output_name, output_path, size_mb) "
+                   "VALUES(?,?,?,?,?)", ("v.mp4", "a.mp3", "out.mp4", str(f), 1.0))
+        db.commit()
+        db.close()
+        ok = client.get(url)
+        assert ok.status_code == 200
+        assert ok.data == b"fake-replaced-bytes"
+
+    def test_video_download_whitelist_is_exact_match(self, client, tmp_path):
+        """白名单必须**精确相等**：同目录下未登记的同名/邻近文件仍 404。"""
+        from urllib.parse import quote
+        listed = tmp_path / "t20_exact.mp4"
+        listed.write_bytes(b"listed")
+        sibling = tmp_path / "t20_exact_extra.mp4"
+        sibling.write_bytes(b"sibling")
+        db = database.get_db()
+        db.execute("INSERT INTO video_tasks(task_id, status, output_path) VALUES(?,?,?)",
+                   ("t20-exact-task", "completed", str(listed)))
+        db.commit()
+        db.close()
+        assert client.get("/api/video/download?path=" + quote(str(listed))).status_code == 200
+        assert client.get("/api/video/download?path=" + quote(str(sibling))).status_code == 404
+
+    def test_video_download_rejects_huguan_with_token(self, client, tmp_path):
+        """户管带 token 调下载 → 403（前端 window.open 不带 Authorization 头，
+        故这条只能验「带 token」这一路）。"""
+        from urllib.parse import quote
+        hg, _ = _huguan(client, "_t20_dl_hg")
+        f = tmp_path / "t20_wl_hg.mp4"
+        f.write_bytes(b"hg")
+        db = database.get_db()
+        db.execute("INSERT INTO video_tasks(task_id, status, output_path) VALUES(?,?,?)",
+                   ("t20-wl-hg", "completed", str(f)))
+        db.commit()
+        db.close()
+        resp = client.get("/api/video/download?path=" + quote(str(f)), headers=hg)
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
