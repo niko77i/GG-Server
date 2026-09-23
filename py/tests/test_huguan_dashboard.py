@@ -203,6 +203,19 @@ class TestCellsForRow:
 # ---------- Task 3: 表→系统 ----------
 
 class TestParseRow:
+    def test_parsed_key_name_is_normalized_to_account_id(self):
+        """解析结果的统一键名恒为 `account_id`；DB 列名另由 ACCOUNT_KEY_FIELD 映射。
+
+        这两个是**不同命名空间**：消费解析结果时用 `account_id`，
+        拼 SQL / 写库时用 `ACCOUNT_KEY_FIELD[platform]`。
+        谁把 parse_row 改成按平台输出 `advertiser_id`，这条就会红。
+        """
+        from huguan_dashboard import ACCOUNT_KEY_FIELD, parse_row
+        assert ACCOUNT_KEY_FIELD == {"gg": "account_id", "tt": "advertiser_id"}
+        p = parse_row(["", "", "'7001234567890"], "tt")
+        assert p["account_id"] == "7001234567890"
+        assert "advertiser_id" not in p
+
     def test_gg_parse_full_row(self):
         from huguan_dashboard import parse_row
         values = ["2026-09-01", "", "1234567890", "MCC-A", "美国", "渠道甲",
@@ -253,6 +266,14 @@ class TestParseRow:
         assert p["consumption"] == "120.5"
         assert p["remark"] == "产品X"
 
+    def test_tt_parse_emits_exact_field_set(self):
+        """TT 可读列的精确键集 —— 任一侧的读写 flag 被改都会红。"""
+        from huguan_dashboard import parse_row
+        p = parse_row(["", "", "'1"], "tt")
+        assert set(p) == {"account_id", "acquired_date", "_dead_flag", "bc_name",
+                          "country", "agent_name", "owner_name", "_owner_channel",
+                          "timezone", "status_name", "consumption", "remark"}
+
     def test_whitespace_is_stripped(self):
         from huguan_dashboard import parse_row
         p = parse_row(["  2026-09-01  ", "", "  123  "], "gg")
@@ -271,12 +292,22 @@ class TestEffectiveOwnerName:
         from huguan_dashboard import effective_owner_name
         assert effective_owner_name({"owner_name": "张三", "_owner_channel": ""}) == "张三"
 
+    def test_whitespace_channel_falls_back_to_owner(self):
+        """通道只有空白时不算「已填」，应回退到运营列。"""
+        from huguan_dashboard import effective_owner_name
+        assert effective_owner_name({"owner_name": "张三", "_owner_channel": "   "}) == "张三"
+
     def test_blank_when_both_empty(self):
         from huguan_dashboard import effective_owner_name
         assert effective_owner_name({"owner_name": "", "_owner_channel": "  "}) == ""
 
 
 class TestIsDead:
+    def test_status_alive_beats_dead_flag(self):
+        """状态列有值时以它为准：状态=存活 时，是否封户=是 也不能判死。"""
+        from huguan_dashboard import is_dead
+        assert is_dead({"status_name": "存活", "_dead_flag": "是"}) is False
+
     def test_status_column_wins(self):
         """状态列更具体：状态=死亡 时，是否封户 不填也算死亡。"""
         from huguan_dashboard import is_dead

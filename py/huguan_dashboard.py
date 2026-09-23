@@ -107,7 +107,10 @@ def parse_row(values: list, platform: str) -> dict:
         i = col_index(col)
         raw = values[i] if len(values) > i else ""
         out[field] = ("" if raw is None else str(raw)).strip()
-    # C 列是定位键，单独取，并去掉 _text() 加的强制文本前缀
+    # C 列是定位键，单独取。统一键名恒为 "account_id"（GG 与 TT 一致），
+    # 与 ACCOUNT_KEY_FIELD 里的 DB 列名是两个命名空间：消费解析结果用
+    # account_id，拼 SQL / 写库用 ACCOUNT_KEY_FIELD[platform]，勿混用。
+    # lstrip("'") 假定该值只带 _text() 加的那一个前缀。
     key_i = col_index(KEY_COL[platform])
     raw_key = values[key_i] if len(values) > key_i else ""
     out["account_id"] = ("" if raw_key is None else str(raw_key)).strip().lstrip("'").strip()
