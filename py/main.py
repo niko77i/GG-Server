@@ -5854,6 +5854,9 @@ def agents_create():
                    (name, user_id))
         db.commit()
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+        # （键以「请求者 id」打头，无法精确命中，故整体清空）
+        _app_cache.clear_prefix("accounts:agents:")
         db.close()
         return jsonify({"success": True, "id": new_id})
     existing = db.execute(
@@ -5865,6 +5868,9 @@ def agents_create():
     db.execute("INSERT INTO agents(name, owner_id) VALUES(?,?)", (name, user_id))
     db.commit()
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
+    # （键以「请求者 id」打头，无法精确命中，故整体清空）
+    _app_cache.clear_prefix("accounts:agents:")
     db.close()
     return jsonify({"success": True, "id": new_id})
 

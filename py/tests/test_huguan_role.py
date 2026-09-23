@@ -619,6 +619,52 @@ class TestGgAgentsDropdownCacheInvalidation:
         assert "改名后代理" in data["agents"]
         assert "改名前代理" not in data["agents"]
 
+    def test_create_invalidates_agents_dropdown_cache(self, client):
+        """回归：新增代理后，账户面板「代理」下拉的缓存必须立刻失效。
+
+        与上面那条同类：`/api/agents/create` 此前从不失效 `accounts:agents:{uid}:{scope}`，
+        故「面板已加载 → 新建代理 → 挂到账户上 → 面板重载」会在 120s TTL 内读到旧列表。
+
+        注意下拉的取值是
+        `SELECT DISTINCT ag.name FROM agents ag INNER JOIN accounts a ON a.agent_id = ag.id`
+        —— 只列**被账户引用**的代理，所以第 3 步必须先把新代理挂到账户上，
+        否则「新代理不在列表里」是正确行为，用例会变成假绿。
+
+        同 `test_rename_invalidates_agents_dropdown_cache`：清缓存只放在开头，
+        它不会掩盖 bug —— 若第 2 步的失效调用没生效，第 4 步会读到第 1 步的旧列表。
+        """
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        headers, uid = _create_user(client, "_ggcrt_u", role="user")
+        db = database.get_db()
+        _mk_account(db, uid, "GG-CRT-1", "新建缓存账户")
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?,?)",
+                   ("原有代理", uid, "gg"))
+        aid = db.execute("SELECT id FROM agents WHERE name='原有代理'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-CRT-1'", (aid,))
+        db.commit()
+        db.close()
+
+        # 第 1 步：加载面板 —— 同时把该键的缓存写热
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "原有代理" in data["agents"]
+
+        # 第 2 步：新增代理（此调用必须失效缓存）
+        resp = client.post("/api/agents/create", json={"name": "新建代理"}, headers=headers)
+        assert resp.status_code == 200
+
+        # 第 3 步：把新代理挂到账户上（账户写入路径不失效该缓存，故第 4 步要靠第 2 步的失效）
+        db = database.get_db()
+        new_aid = db.execute("SELECT id FROM agents WHERE name='新建代理'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-CRT-1'", (new_aid,))
+        db.commit()
+        db.close()
+
+        # 第 4 步：缓存必须已被第 2 步失效 —— 否则这里仍是第 1 步的旧列表
+        data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
+        assert "新建代理" in data["agents"]
+
 
 class TestGgAccountOwnership:
     def test_huguan_creates_for_other_user(self, client):
