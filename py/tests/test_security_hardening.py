@@ -281,3 +281,40 @@ class TestB2FbPixelsIsolation:
         resp = client.get("/api/fb/pixels/list?size=50", headers=dev)
         ids = {p["pixel_id"] for p in resp.get_json()["items"]}
         assert ids == {"PX-B2D-1", "PX-B2D-2"}
+
+
+class TestB4TtAgentOwnership:
+    def _setup(self, client):
+        _, owner = _create_user(client, "_b4_owner", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('TT代理A', ?, 'tt')", (owner,))
+        db.commit()
+        aid = db.execute("SELECT id FROM agents WHERE name='TT代理A'").fetchone()["id"]
+        db.close()
+        return owner, aid
+
+    def test_tt_user_cannot_rename_others_agent(self, client):
+        owner, aid = self._setup(client)
+        hdr, _ = _create_user(client, "_b4_att", role="user", platform="tt")
+        resp = client.put(f"/api/agents/{aid}?platform=tt", json={"name": "被改名"}, headers=hdr)
+        assert resp.status_code == 404
+        db = database.get_db()
+        name = db.execute("SELECT name FROM agents WHERE id=?", (aid,)).fetchone()["name"]
+        db.close()
+        assert name == "TT代理A"
+
+    def test_tt_user_cannot_delete_others_agent(self, client):
+        owner, aid = self._setup(client)
+        hdr, _ = _create_user(client, "_b4_att2", role="user", platform="tt")
+        resp = client.delete(f"/api/agents/{aid}?platform=tt", headers=hdr)
+        assert resp.status_code == 404
+        db = database.get_db()
+        row = db.execute("SELECT 1 FROM agents WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert row is not None
+
+    def test_developer_can_rename_any_tt_agent(self, client):
+        owner, aid = self._setup(client)
+        dev, _ = _create_user(client, "_b4_dev", role="developer")
+        resp = client.put(f"/api/agents/{aid}?platform=tt", json={"name": "代改名"}, headers=dev)
+        assert resp.status_code == 200

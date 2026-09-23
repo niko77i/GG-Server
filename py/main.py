@@ -5969,7 +5969,11 @@ def agents_rename(aid):
     user = auth.get_user_by_id(user_id)
     is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if platform == "tt":
-        row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
+        # TT 代理按 owner 私有：跨用户角色可操作任意 TT 代理，其余仅限本人（B-4）
+        if is_dev:
+            row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
+        else:
+            row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt' AND owner_id=?", (aid, user_id)).fetchone()
     elif is_dev:
         # 一并取出 owner_id：跨用户角色（含户管）可改他人代理，重名检查须按被改代理的所有者
         row = db.execute("SELECT id, owner_id FROM agents WHERE id=?", (aid,)).fetchone()
@@ -6016,7 +6020,11 @@ def agents_delete(aid):
     user = auth.get_user_by_id(user_id)
     is_dev = user and user.get("role") in GLOBAL_OPTION_ROLES
     if platform == "tt":
-        row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
+        # TT 代理按 owner 私有：跨用户角色可操作任意 TT 代理，其余仅限本人（B-4）
+        if is_dev:
+            row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
+        else:
+            row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt' AND owner_id=?", (aid, user_id)).fetchone()
     elif is_dev:
         row = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
     else:

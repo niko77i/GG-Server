@@ -395,26 +395,57 @@ def test_agents_platform_isolation(client, auth_headers, tt_headers):
 
 
 def test_agents_platform_rename_delete(client, tt_headers):
-    # TT 用户 A 创建平台共享代理
+    """TT 代理的改名/删除**按 owner 私有**（B-4，2026-09-23 安全加固）。
+
+    本用例原稿断言「另一个 TT 用户 B 跨 owner 改名/删除 → 200」，注释称 TT 代理为
+    「平台级共享，无 owner 限制」—— 该认知与数据模型不符：`agents` 表的唯一约束是
+    `UNIQUE(name, owner_id, platform)`（`py/database.py:1320`，2026-09-21 由 ef0a3a2 重建），
+    且 GG→TT 的代理复制是按 owner 逐份进行的 ⇒ TT 代理本就是 per-owner 私有。
+    `agents_rename`/`agents_delete` 的 `platform == "tt"` 分支写在 `is_dev` 判断之前、
+    且未校验 `owner_id`，属结构性遗漏（任何登录用户，连 viewer 在内，都能改/删他人 TT 代理）。
+    现按设计文档 §3.2 B-4 收紧：非跨用户角色只能操作自己的 TT 代理（无权返回 404）。
+
+    注意：TT 代理在**列表**上仍平台级可见（守护该行为的 test_agents_platform_isolation 未改动），
+    本次收窄的只是**写**（改名/删除）。
+    """
+    # TT 用户 A 创建代理
     resp = client.post("/api/agents/create", headers=tt_headers,
                        json={"name": "TT代理B"}, query_string={"platform": "tt"})
     assert resp.status_code == 200
     aid = resp.get_json()["id"]
-    # 另一个 TT 用户 B 跨 owner 重命名（平台级共享，无 owner 限制）
     tt_headers2 = _mk_tt_headers(client, "ttuser2")
+
+    # 另一个 TT 用户 B 跨 owner 改名 → 404，且名称未被改动
     resp = client.put(f"/api/agents/{aid}", headers=tt_headers2,
                       json={"name": "TT代理B改"}, query_string={"platform": "tt"})
+    assert resp.status_code == 404
+    db = database.get_db()
+    name = db.execute("SELECT name FROM agents WHERE id=?", (aid,)).fetchone()["name"]
+    db.close()
+    assert name == "TT代理B"
+
+    # owner 本人改名 → 200
+    resp = client.put(f"/api/agents/{aid}", headers=tt_headers,
+                      json={"name": "TT代理B改"}, query_string={"platform": "tt"})
     assert resp.status_code == 200
-    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers2)
-    names = [a["name"] for a in resp.get_json()["agents"]]
-    assert "TT代理B改" in names
-    # 跨 owner 删除（平台级共享）
+    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers)
+    assert "TT代理B改" in [a["name"] for a in resp.get_json()["agents"]]
+
+    # 另一个 TT 用户 B 跨 owner 删除 → 404，且行仍在
     resp = client.delete(f"/api/agents/{aid}", headers=tt_headers2,
                          query_string={"platform": "tt"})
+    assert resp.status_code == 404
+    db = database.get_db()
+    row = db.execute("SELECT 1 FROM agents WHERE id=?", (aid,)).fetchone()
+    db.close()
+    assert row is not None
+
+    # owner 本人删除 → 200，列表中消失
+    resp = client.delete(f"/api/agents/{aid}", headers=tt_headers,
+                         query_string={"platform": "tt"})
     assert resp.status_code == 200
-    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers2)
-    names = [a["name"] for a in resp.get_json()["agents"]]
-    assert "TT代理B改" not in names
+    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers)
+    assert "TT代理B改" not in [a["name"] for a in resp.get_json()["agents"]]
 
 
 def test_agents_delete_tt_referenced_by_tt_account(client, tt_headers):
