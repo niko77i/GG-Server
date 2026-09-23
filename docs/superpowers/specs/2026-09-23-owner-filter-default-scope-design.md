@@ -65,7 +65,7 @@
 
 ### 4.1 落点：共用组件内实现（单点改动）
 
-`OwnerFilterSelect.vue` 被 **9 个面板**共用：
+`OwnerFilterSelect.vue` 被 **8 个面板**共用：
 
 | 平台 | 面板 | 位置 |
 |---|---|---|
@@ -82,10 +82,10 @@
 
 在组件内做的理由：
 1. **口径统一**——同平台内不会出现「账户页默认自己、MCC/BC 页默认全部」的分裂；
-2. **DRY**——1 个文件 vs 9 处（其中 GG 走 Pinia `acFilters.owner_id`、TT/FB 走本地 `ref`，分散实现易漏改）；
-3. 组件已有 `watch(() => auth.user?.id, …, { immediate: true })` 的生命周期处理，身份就绪时机问题已解决，直接复用。
+2. **DRY**——1 个文件 vs 8 处（其中 GG 走 Pinia `acFilters.owner_id`、TT/FB 走本地 `ref`，分散实现易漏改）；
+3. 组件已有 `watch(() => auth.user?.id, …, { immediate: true })` 的生命周期处理，复用即可。
 
-> 说明：用户此前的授权是「GG / TT 一起改」。共用组件方案会把 FB 4 个面板与 MCC/BC 面板一并纳入。**此超出原有授权范围之处已于 2026-09-23 确认通过**（选择「共用组件，9 处统一」），落地范围即全部 9 处。
+> 说明：用户此前的授权是「GG / TT 一起改」。共用组件方案会把 FB 4 个面板与 MCC/BC 面板一并纳入。**此超出原有授权范围之处已于 2026-09-23 确认通过**（选择「共用组件，各处统一」），落地范围为全部 8 处。
 
 ### 4.2 默认值规则（单一表达式）
 
@@ -102,6 +102,9 @@
 
 ```js
 const props = defineProps({ modelValue: { type: [String, Number], default: '' } })
+
+// ★ 关键：身份水合必须赶在面板首次 load() 之前（理由见下方「首屏时序」）
+if (!auth.user) auth.initFromStorage()
 
 // 身份就绪后：拉用户列表 + 首次套用默认作用域（沿用既有 watch，不新增生命周期钩子）
 watch(
@@ -120,15 +123,32 @@ watch(
 function applyDefaultScope() {
   const v = props.modelValue
   if (v !== '' && v !== null && v !== undefined) return   // 父组件已有值（含用户已选）→ 不干预
-  if (auth.user?.role === 'huguan') return                // 户管保持「全部」
-  if (auth.user?.platform !== auth.effectivePlatform) return  // 跨平台 → 保持「全部」，避免空表
-  onChange(auth.user.id)
+  const def = defaultOwnerScope(auth.user, auth.effectivePlatform)
+  if (def !== '') onChange(def)
 }
 ```
 
 要点：
 - `onChange` 同时 `emit('update:modelValue')` 与 `emit('change')`，父组件的 `v-model` 同步赋值先于 `@change` 回调执行（`TtAccountPanel` 的 `ownerId.value`、GG 的 `store.acFilters.owner_id` 都是同步写入），因此 `@change="searchAndLoad"` 里读到的已是新值，**不会**出现「用旧值查一次」。
-- 首屏请求次数：`auth.user` 在 setup 阶段已就绪时（`initFromStorage` 已写入）为 **1 次**；`auth.user` 异步到达时为 2 次（空值一次 + 默认值一次）。与组件现有 `fetchUsers` 的处理方式一致，可接受。
+
+#### 首屏时序（本方案的核心风险点，初版曾在此处出错）
+
+`App.vue` 把 `initFromStorage()` 放在**根组件的 `onMounted`** 里，而 Vue 的挂载顺序是「子先父后」：面板的 `onMounted`（发起首次 `load()`）**早于** 根组件的 `onMounted`。本仓库 `UserManageView.vue:218` 已记录过同一教训（「不能在 ref 初始值里读 authStore，此刻 user 可能仍为 null」）。
+
+于是刷新页面时的时序是：
+
+1. 面板 setup → 子组件（本组件）setup → **面板 `onMounted` → `load()` 带着 `owner_id=''` 发出 R1**；
+2. 根组件 `onMounted` → `initFromStorage()` 写入 `auth.user` → 本组件 watch 触发 → 写入 `owner_id` 并 `emit('change')`；
+3. 但 GG/MCC 面板的 `loadAccounts`/`loadMccList` 走 `dedupLoader`（`utils/dedupLoader.js`）：**R1 仍在途 → 直接返回 R1 的 Promise，不会重发**。
+
+结果：**下拉显示「自己」，表格却是全部用户** —— 恰是本次要修的 99 症状原样复现，且无任何报错。
+
+因此本组件在 setup 阶段先补一次 `auth.initFromStorage()`（幂等，只读 localStorage 回填，与根组件稍后的调用结果一致）。组件 setup 恒早于面板 `onMounted`，默认值于是赶在 R1 之前写进筛选状态：
+
+- `auth.user` 原本就绪（SPA 内部跳转）→ **1 次请求，值正确**；
+- `auth.user` 尚未水合（刷新）→ 本组件补完水合 → 仍是 **1 次请求，值正确**。
+
+> 残留边界：若浏览器存在 token 但 localStorage 无缓存的 user 对象（UI 登录流程不会产生此状态，`login()` 必同时写入两者），则身份只能由异步 `fetchMe()` 补齐，此时 `user.id` 的首次变化发生在面板已 load 之后，`change` 仍会被 dedup 吞掉。该状态无法经正常操作产生，不额外加防护。
 
 ### 4.4 「全部用户」可达性（不得破坏）
 
@@ -146,10 +166,13 @@ function applyDefaultScope() {
 
 | 文件 | 改动 |
 |---|---|
-| `frontend/src/components/OwnerFilterSelect.vue` | 新增 `props` 具名接收 + `applyDefaultScope()`，并在既有 watch 内调用 |
-| `frontend/tests/…`（若有组件测试目录）| 新增用例，见 §6 |
+| `frontend/src/utils/ownerScope.js` | 新增纯函数 `defaultOwnerScope(user, effectivePlatform)` |
+| `frontend/src/components/OwnerFilterSelect.vue` | 新增 `props` 具名接收、setup 阶段的 `auth.initFromStorage()` 兜底水合、`applyDefaultScope()`，并在既有 watch 内调用 |
 
-**不改动**：全部 9 个面板、`stores/accounts.js`、`stores/auth.js`、所有后端文件。
+**不改动**：全部 8 个面板、`stores/accounts.js`、`stores/auth.js`、所有后端文件。
+（`stores/auth.js` 仅被**调用**其既有公开 action `initFromStorage()`，文件本身零改动。）
+
+前端无组件测试框架，故不新增测试文件；`ownerScope.js` 的纯函数用仓库外的 Node 脚本验证（见 §6.2）。
 
 ---
 
@@ -161,14 +184,16 @@ function applyDefaultScope() {
 
 | # | 身份 | 面板 | 期望 |
 |---|---|---|---|
-| 1 | 卡尔 / developer / gg | GG 广告账户 | 下拉默认显示「卡尔」，状态统计为其名下户数（不再是 99） |
-| 2 | 卡尔 / developer / gg | 切到 TT 广告账户 | 下拉为「全部用户」（**不得**是空表） |
-| 3 | 阿伟 / admin / gg | GG 广告账户 | 默认「阿伟」 |
-| 4 | 阿伟 / admin / gg | 访问 `/tt/accounts` | 被路由守卫弹回本平台（不因默认值出现异常） |
-| 5 | 黎明 / admin / tt | TT 广告账户 | 默认「黎明」 |
-| 6 | 户部尚书 / huguan / gg | GG / FB / TT 账户面板 | 一律「全部用户」（回归验证，不得改变） |
-| 7 | 卡尔 / developer / gg | GG 广告账户 → 点下拉 × 清空 | 切回「全部用户」且不被自动打回自己 |
-| 8 | 卡尔 / developer / gg | GG 广告账户 → 手动选「阿伟」 | 正常按其筛选，刷新前不被覆盖 |
+| 1 | 卡尔 / developer / gg | GG 广告账户（**刷新页面进入**） | 下拉默认显示「卡尔」，**且表格确实是其名下 263 户**（存活 22，非 98）—— 验证 §4.3 的时序修复 |
+| 2 | 卡尔 / developer / gg | 同上，从别的页面**跳转**进入 | 同 1，且只发 1 次列表请求（Network 面板确认） |
+| 3 | 卡尔 / developer / gg | 切到 TT 广告账户 | 下拉为「全部用户」（**不得**是空表） |
+| 4 | 阿伟 / admin / gg | GG 广告账户 | 默认「阿伟」 |
+| 5 | 阿伟 / admin / gg | 访问 `/tt/accounts` | 被路由守卫弹回本平台（不因默认值出现异常） |
+| 6 | 黎明 / admin / tt | TT 广告账户 | 默认「黎明」 |
+| 7 | 户部尚书 / huguan / gg | GG / FB / TT 账户面板（含刷新） | 一律「全部用户」（**关键回归，不得改变**） |
+| 8 | 卡尔 / developer / gg | GG 广告账户 → 点下拉 × 清空 | 切回「全部用户」且不被自动打回自己 |
+| 9 | 卡尔 / developer / gg | GG 广告账户 → 手动选「阿伟」 | 正常按其筛选，刷新前不被覆盖 |
+| 10 | 卡尔 / developer / gg | GG「MCC 管理」（刷新进入） | 同样默认「卡尔」（验证 8 处口径统一） |
 
 ### 6.2 组件单测（若有设施）
 
@@ -194,5 +219,5 @@ function applyDefaultScope() {
 
 ## 8. 已确认决议（2026-09-23）
 
-1. **落地范围**：按 §4.1 在共用组件 `OwnerFilterSelect.vue` 实现，覆盖全部 9 处，口径统一。
+1. **落地范围**：按 §4.1 在共用组件 `OwnerFilterSelect.vue` 实现，覆盖全部 8 处，口径统一。
 2. **`/frontend-design`**：不需要。本次无新增视觉元素、无样式与布局改动，仅是既有下拉的初始值变化，按 CLAUDE.md「简单样式微调不受限」的口径跳过视觉设计流程。

@@ -19,8 +19,14 @@ const visible = computed(() => auth.canManageAccounts)
 const users = ref([])
 let loaded = false
 
-// 身份可能晚于组件挂载就绪（auth.user 由 App.vue 根组件的 onMounted 或异步 fetchMe 写入），
-// 故用 watch 而不是 onMounted：user 一就绪就拉取，且只拉一次。
+// 身份由 App.vue 根组件的 onMounted 调 initFromStorage 水合，而子组件 setup 恒早于父组件
+// onMounted，面板的首次 load() 正落在父组件 onMounted 里（同类教训见 UserManageView.vue:218）。
+// 若等到 watch 触发才写默认值，GG/MCC 面板的 dedupLoader 会把那次 change 触发的重载吞掉
+// （首次请求仍在途 → 返回同一 Promise，不重发），表现为「下拉显示自己、表格却是全部用户」的
+// 静默错数据。故在 setup 阶段先幂等补一次水合，让默认值赶在首次请求之前落进筛选状态。
+if (!auth.user) auth.initFromStorage()
+
+// 用 watch 而非 onMounted：user 一就绪就拉取用户列表并套默认值，且只做一次。
 watch(
   () => auth.user?.id,
   (uid) => {

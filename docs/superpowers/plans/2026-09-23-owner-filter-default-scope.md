@@ -4,13 +4,13 @@
 
 **Goal:** 让 developer / admin 进入账户类面板时，「归属人」下拉默认选中自己；户管保持「全部」，且「全部」始终可手动选回。
 
-**Architecture:** 纯前端。把「默认作用域该取谁」抽成一个无副作用的纯函数放进 `src/utils/`（与既有的 `statusTag.js` 同一惯例，便于不引入测试框架也能跑验证），再由 9 个面板共用的 `OwnerFilterSelect.vue` 在身份就绪时调用一次。后端一行不改。
+**Architecture:** 纯前端。把「默认作用域该取谁」抽成一个无副作用的纯函数放进 `src/utils/`（与既有的 `statusTag.js` 同一惯例，便于不引入测试框架也能跑验证），再由 8 个面板共用的 `OwnerFilterSelect.vue` 在身份就绪时调用一次。后端一行不改。
 
 **Tech Stack:** Vue 3 `<script setup>` + Pinia + Element Plus；Vite 构建；Node 18 验证脚本。
 
 ## Global Constraints
 
-- **纯增量**：不改 9 个面板组件、不改 `stores/accounts.js`、不改 `stores/auth.js`、不改任何后端文件（`py/` 零改动）。
+- **纯增量**：不改 8 个面板组件、不改 `stores/accounts.js`、不改 `stores/auth.js`、不改任何后端文件（`py/` 零改动）。
 - **户管口径不变**：`role === 'huguan'` 时默认值恒为 `''`（全部用户）。
 - **「全部」必须仍可达**：默认值只在父组件尚无值时套用一次；用户手动清空或另选后不得被改回。
 - **跨平台不默认自己**：`user.platform !== effectivePlatform` 时返回 `''`，否则会出现空表。
@@ -139,8 +139,14 @@ const emit = defineEmits(['update:modelValue', 'change'])
 把既有的 watch 替换为：
 
 ```js
-// 身份可能晚于组件挂载就绪（auth.user 由 App.vue 根组件的 onMounted 或异步 fetchMe 写入），
-// 故用 watch 而不是 onMounted：user 一就绪就拉取，且只拉一次。
+// ★ 关键：身份水合必须赶在面板首次 load() 之前。
+// App.vue 把 initFromStorage 放在根组件 onMounted，而子组件 setup 恒早于父组件 onMounted；
+// 面板的首次 load() 就在父组件 onMounted 里 —— 若等到 watch 触发才写默认值，
+// GG/MCC 面板的 dedupLoader 会把那次 change 吞掉（首次请求仍在途 → 返回同一 Promise，不重发），
+// 表现为「下拉显示自己、表格却是全部用户」的静默错数据。故先幂等补一次水合。
+if (!auth.user) auth.initFromStorage()
+
+// 身份就绪后：拉用户列表 + 首次套用默认作用域
 watch(
   () => auth.user?.id,
   (uid) => {
@@ -191,7 +197,7 @@ git commit -m "feat: 账户面板「归属人」默认作用域（developer/admi
 - [ ] **Step 1: 后端回归（确认零影响）**
 
 Run: `cd /d/server/cc/GG-Server/py && python -m pytest tests/ -q`
-Expected: `269 passed`（本次未动后端，作为兜底）
+Expected: `420 passed`（本次未动后端，作为兜底）
 
 - [ ] **Step 2: 手工验收矩阵**
 
@@ -207,7 +213,7 @@ Expected: `269 passed`（本次未动后端，作为兜底）
 | 6 | 户部尚书 / huguan / gg | GG / FB / TT 账户面板 | 一律「全部用户」**（关键回归，不得改变）** |
 | 7 | 卡尔 / developer / gg | GG 广告账户 → 点下拉 × 清空 | 切回「全部用户」，且不被自动打回自己 |
 | 8 | 卡尔 / developer / gg | GG 广告账户 → 手动选「阿伟」 | 按其筛选，不被覆盖 |
-| 9 | 卡尔 / developer / gg | GG「MCC 管理」 | 同样默认「卡尔」（验证 9 处统一） |
+| 9 | 卡尔 / developer / gg | GG「MCC 管理」 | 同样默认「卡尔」（验证 8 处统一） |
 
 - [ ] **Step 3: 若验收发现问题 → 修复后重跑 Step 1、Step 2**
 
