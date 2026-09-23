@@ -14,7 +14,7 @@
 - **纯增量原则**：不得修改既有函数的行为。`google_sheets_service.update_cell_by_account_id`、`accounts_sync_from_sheet`、现有的「我的看板」逻辑一律不动。
 - **TT `reassign_account` 例外已报备**：唯一允许改既有行为的地方是 Task 9，且默认路径必须逐字节保持原逻辑与原返回文案。
 - **列规格（写死，不得擅自增删）**：
-  - GG 14 列，可写范围 **`A:D` + `F:H` + `I:K`**，读回 **`A:N`**，跳过可写的是 `E` / `L` / `M` / `N`。
+  - GG 14 列，可写列（`COLUMN_SPEC` 中 writable=True）**`A:D` + `F:K`**，读回 **`A:N`**。注意 **H 列（重新分配）虽标记可写，自动回写永不写入**（规则 2），故系统实际回写的区间是 **`A:D` + `F:G` + `I:K`** —— 真正被跳过的列是 `E` / `H` / `L` / `M` / `N`。
   - TT 13 列，可写范围 **`A:J` + `L:M`**，读回 **`A:M`**，跳过可写的是 `K`。
   - 两张表的定位键都是 **C 列**。
 - **§7.2 四条硬规则（违反任何一条都是缺陷）**：
@@ -24,7 +24,7 @@
   4. 应用归属变更后，回写 `运营` / `接户运营` 列为新归属名。
 - **配置 key**：`config` 表，key = `huguan_dashboard_{user_id}`，value 为 JSON `{"gg": {...}, "tt": {...}}`。
 - **名称 → 主键的唯一口径（§8.4）**：唯一命中才落库；命中 0 条或 ≥2 条 → 记 warning，**该列**不落库，该行其余列照常处理。
-- **测试门禁**：`cd py && python -m pytest tests/ -q`，基线 **420 passed**，每次提交后不得低于此数。
+- **测试门禁**：`cd py && python -m pytest tests/ -q`，基线 **424 passed**（2026-09-23 实测；子项目 A 收尾时为 420，其后 `f46007c` 净增 4 条）。每次提交后不得低于此数。本计划各任务写的 `≥ N` 阈值是按旧基线 420 推算的**下界**，只多不少即可。
 - **前端门禁**：`cd frontend && npm run build` 必须通过。
 - **前端 UI 前置**：Task 10 / Task 11 动手前必须先调用 `/frontend-design` 技能完成视觉设计（CLAUDE.md 硬性要求）。
 - **git**：本仓库常有并行会话在途改文件，**禁用 `git add -A` / `git add .`**，每次只 `git add` 本任务明确列出的文件。
@@ -99,10 +99,13 @@ class TestColumnUtils:
         assert merge_ranges(["A", "B", "C", "D"]) == ["A:D"]
 
     def test_merge_ranges_with_gap(self):
-        """GG 的 A:D + F:H + I:K 就是三条区间，非连续处必须断开。"""
+        """非连续处必须断开：E 是唯一断口，故 A:D 与 F:K 分成两条。
+
+        注意 F..K 本身是连续的（E 不在其中），所以只会断一次。
+        """
         from google_sheets_service import merge_ranges
         cols = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K"]
-        assert merge_ranges(cols) == ["A:D", "F:H", "I:K"]
+        assert merge_ranges(cols) == ["A:D", "F:K"]
 
     def test_merge_ranges_single_and_empty(self):
         from google_sheets_service import merge_ranges
@@ -137,7 +140,7 @@ def col_letter(idx: int) -> str:
 def merge_ranges(cols: list) -> list:
     """把列字母集合合并成连续区间。
 
-    ['A','B','C','D','F','G','H','I','J','K'] → ['A:D','F:H','I:K']
+    ['A','B','C','D','F','G','H','I','J','K'] → ['A:D','F:K']   # E 是唯一断口
 
     用于「一次写多列但必须绕开公式列」的场景：非连续处断开，
     中间被跳过的列（如 GG 的 E）绝不落进任何区间，从而不被清掉。
@@ -253,14 +256,41 @@ class TestColumnSpec:
         assert unmapped == {"K"}
 
     def test_writable_cols_produce_expected_ranges(self):
+        """COLUMN_SPEC 中标了 writable 的列 → A1 区间。
+
+        H 列虽然 writable=True，但见下一条测试：它绝不出现在回写区间里。
+        """
         from huguan_dashboard import COLUMN_SPEC
         from google_sheets_service import merge_ranges
         for platform in ("gg", "tt"):
             cols = [c[0] for c in COLUMN_SPEC[platform] if c[3]]
             if platform == "gg":
-                assert merge_ranges(cols) == ["A:D", "F:H", "I:K"]
+                # A..D 连续；E 跳过；F..K 连续 —— 只断一次
+                assert merge_ranges(cols) == ["A:D", "F:K"]
             else:
+                # A..J 连续；K 跳过；L、M 连续
                 assert merge_ranges(cols) == ["A:J", "L:M"]
+
+    def test_real_writeback_ranges_never_span_owner_channel(self):
+        """★这是规则 2 的守门测试：自动回写合并出的区间不得覆盖 H 列。
+
+        cells_for_row 不产出 H（§7.2 规则 2），而 merge_ranges 只合并 cells 里
+        相邻的列，因此 H 必然落在 F:G 与 I:K 之间的断口上。若哪天有人给
+        cells_for_row 加了 H，或改了 merge_ranges 的合并规则，这条会红。
+        """
+        from huguan_dashboard import cells_for_row
+        from google_sheets_service import merge_ranges
+        cells = cells_for_row(_gg_row(), "gg")
+        assert "H" not in cells
+        ranges = merge_ranges(list(cells.keys()))
+        assert ranges == ["A:D", "F:G", "I:K"]
+        # 逐列展开，确认 H 不在任何一个区间覆盖到的列里
+        covered = set()
+        for rng in ranges:
+            first, last = rng.split(":")
+            covered.update(chr(c) for c in range(ord(first), ord(last) + 1))
+        assert "H" not in covered
+        assert "E" not in covered
 
     def test_parent_mcc_is_writable_but_not_readable(self):
         """J 大MCC 是派生列：写回要用，读回必须忽略。"""
@@ -429,7 +459,7 @@ def cells_for_row(row: dict, platform: str) -> dict:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（6 + 11 = 17 passed）
+Expected: PASS（6 + 12 = 18 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -605,7 +635,7 @@ def is_dead(parsed: dict) -> bool:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（17 + 12 = 29 passed）
+Expected: PASS（18 + 12 = 30 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -837,7 +867,7 @@ def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（29 + 7 = 36 passed）
+Expected: PASS（30 + 7 = 37 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -1087,12 +1117,12 @@ app.register_blueprint(huguan_dashboard_bp)
 - [ ] **Step 7: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（36 + 7 = 43 passed）
+Expected: PASS（37 + 7 = 44 passed）
 
 - [ ] **Step 8: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（≥ 463 passed）
+Expected: PASS（≥ 464 passed）
 
 - [ ] **Step 9: 提交**
 
@@ -1527,7 +1557,7 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（43 + 15 = 58 passed）
+Expected: PASS（44 + 15 = 59 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -1902,12 +1932,12 @@ def _write_background(service, conf, rows):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（58 + 11 = 69 passed）
+Expected: PASS（59 + 11 = 70 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（≥ 489 passed）
+Expected: PASS（≥ 490 passed）
 
 - [ ] **Step 7: 提交**
 
@@ -2258,12 +2288,12 @@ def _huguan_owner_channel(user_id, platform, account_id, new_owner_id):
 - [ ] **Step 6: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（69 + 9 = 78 passed）
+Expected: PASS（70 + 9 = 79 passed）
 
 - [ ] **Step 7: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（≥ 498 passed）
+Expected: PASS（≥ 499 passed）
 
 - [ ] **Step 8: 提交**
 
@@ -2477,12 +2507,12 @@ def _huguan_owner_channel(uid, account_id, new_owner_id):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（78 + 5 = 83 passed）
+Expected: PASS（79 + 5 = 84 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（≥ 503 passed）
+Expected: PASS（≥ 504 passed）
 
 - [ ] **Step 7: 提交**
 
@@ -2787,7 +2817,7 @@ git commit -m "feat: 账户面板新增户管专属「户归属」列"
 - [ ] **Step 1: 后端全量测试**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS，且总数 ≥ 503（基线 420 + 本计划新增 ≈ 83）
+Expected: PASS，且总数 ≥ 504（基线 420 + 本计划新增 ≈ 84）
 
 - [ ] **Step 2: 前端构建**
 
@@ -2798,8 +2828,8 @@ Expected: 成功
 
 打开 `docs/superpowers/specs/2026-09-23-huguan-sheet-design.md`，逐条对照：
 - §7.2 规则 1 / 2 / 3 / 4 各有一条测试覆盖
-- GG 可写区间确为 `A:D` + `F:H` + `I:K`（E / L / M / N 未被写入）
-- TT 可写区间确为 `A:J` + `L:M`（K 未被写入）
+- GG 可写列确为 `A:D` + `F:K`；且 `cells_for_row` 产出的实际回写区间是 `A:D` + `F:G` + `I:K`，H 列不在任何区间覆盖范围内（`E` / `H` / `L` / `M` / `N` 未被写入）
+- TT 可写列确为 `A:J` + `L:M`（`K` 未被写入）
 - 软删 / 恢复 / 永久删在两张表下都不触发回写
 - 非户管访问 `/api/huguan/dashboard*` 全部 403
 
@@ -2863,3 +2893,4 @@ git commit -m "fix: 代码审查收口"
 
 - Task 8 / Task 9 的 6 处触发点行号是**近似行号**，实现时必须按端点名定位，不能只认行号（本仓库有并行会话在改文件，行号会漂）。
 - 已核对属实的既有事实（勿再怀疑）：`routes/decorators.py:5` 已导入 `HUGUAN_ROLE`（新增装饰器无需改 import）；`GoogleSheetsServiceError` 定义在 `google_sheets_service.py:15`；`mcc.parent_mcc_id` 存在；`main.py:7` 有模块级 `log`。
+- **命名遮蔽警告（Task 1 实现者实测发现）**：既有的 `update_cell_by_account_id`（`google_sheets_service.py:602` 附近）内部有同名局部变量 `col_letter` 与 `col_index`，它们会遮蔽本计划新增的同名模块级函数。既有逻辑不受影响（该函数从不调用新函数），但**在那些函数体内调用新 `col_letter()` / `col_index()` 会静默拿到局部值**。Task 4 新增的 `update_rows_by_account_id` 是独立函数、不在此列，无需处理；仅当后续需要在旧函数体内复用新工具时才要先改名。
