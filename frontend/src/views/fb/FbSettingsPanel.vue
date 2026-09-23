@@ -15,7 +15,7 @@
             <span class="card-title">🌍 地区管理</span>
           </template>
 
-          <div class="add-form">
+          <div v-if="authStore.canManageAccounts" class="add-form">
             <el-input v-model="newRegionName" placeholder="地区名" size="small" />
             <el-input v-model="newRegionTz" placeholder="时区（如 GMT+8）" size="small" />
             <el-button type="primary" size="small" @click="createRegion">添加</el-button>
@@ -24,7 +24,7 @@
           <div v-if="regionOptions.length" class="tag-list">
             <div v-for="item in regionOptions" :key="item.id" class="tag-row">
               <el-tag size="default">{{ item.name }}{{ item.timezone ? ' · ' + item.timezone : '' }}</el-tag>
-              <el-popconfirm title="确定删除？" @confirm="deleteRegion(item.id)">
+              <el-popconfirm v-if="authStore.canManageAccounts" title="确定删除？" @confirm="deleteRegion(item.id)">
                 <template #reference>
                   <el-button class="tag-delete-btn" size="small" type="danger" link>删除</el-button>
                 </template>
@@ -94,6 +94,9 @@
 import { ref, onMounted } from 'vue'
 import client from '../../api/client'
 import { ElMessage } from 'element-plus'
+import { useAuthStore } from '../../stores/auth'
+
+const authStore = useAuthStore()
 
 const regionOptions = ref([]); const newRegionName = ref(''); const newRegionTz = ref('')
 const salesPersons = ref([]); const newSalesName = ref('')

@@ -74,3 +74,20 @@ def tt_headers(client):
     })
     token = resp.get_json().get("access_token", "")
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def dev_headers(client):
+    """创建 developer 角色测试用户并返回带 JWT token 的请求头。"""
+    client.post("/api/auth/register", json={
+        "username": "devuser", "password": "test123",
+    })
+    db = database.get_db()
+    db.execute("UPDATE users SET role='developer' WHERE username='devuser'")
+    db.commit()
+    db.close()
+    resp = client.post("/api/auth/login", json={
+        "username": "devuser", "password": "test123",
+    })
+    token = resp.get_json().get("access_token", "")
+    return {"Authorization": f"Bearer {token}"}

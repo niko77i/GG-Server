@@ -10255,6 +10255,9 @@ def regions_list_api():
 @jwt_required()
 def regions_update_api(region_id):
     """更新地区时区。"""
+    user = auth.get_user_by_id(int(get_jwt_identity()))
+    if not user or user.get("role") not in GLOBAL_OPTION_ROLES:
+        return jsonify({"success": False, "error": "权限不足"}), 403
     data = request.get_json(silent=True) or {}
     timezone = (data.get("timezone") or "").strip()
     database.regions_update(region_id, timezone)
@@ -10265,6 +10268,9 @@ def regions_update_api(region_id):
 @jwt_required()
 def regions_create_api():
     """新增地区。"""
+    user = auth.get_user_by_id(int(get_jwt_identity()))
+    if not user or user.get("role") not in GLOBAL_OPTION_ROLES:
+        return jsonify({"success": False, "error": "权限不足"}), 403
     platform = _get_effective_platform()
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
@@ -10279,6 +10285,9 @@ def regions_create_api():
 @jwt_required()
 def regions_delete_api(region_id):
     """删除地区。"""
+    user = auth.get_user_by_id(int(get_jwt_identity()))
+    if not user or user.get("role") not in GLOBAL_OPTION_ROLES:
+        return jsonify({"success": False, "error": "权限不足"}), 403
     database.regions_delete(region_id)
     return jsonify({"success": True})
 

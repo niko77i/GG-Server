@@ -179,6 +179,10 @@ async function handleSave() {
   saving.value = true
   try {
     if (form.region && !regionOptions.value.some(r => r.name === form.region)) {
+      if (!auth.canManageAccounts) {
+        ElMessage.error('无权限新增地区，请选择已有地区')
+        return
+      }
       await client.post('/regions/create', { name: form.region, timezone: '' })
       try { const r = await client.get('/regions/list'); regionOptions.value = (r.regions || []).map(r => typeof r === 'string' ? { name: r } : r) } catch(e) {}
     }

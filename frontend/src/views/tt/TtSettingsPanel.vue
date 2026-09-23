@@ -196,6 +196,7 @@
                 <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
               </el-select>
               <el-button
+                v-if="isAdmin || authStore.isHuguan"
                 size="small"
                 type="danger"
                 :icon="Delete"
@@ -212,7 +213,7 @@
           </div>
 
           <!-- 新增行 -->
-          <div style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:#f9fafb;border-radius:6px;margin-top:8px;">
+          <div v-if="isAdmin || authStore.isHuguan" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:#f9fafb;border-radius:6px;margin-top:8px;">
             <el-input v-model="newRegionName" placeholder="新地区名" size="small" style="flex:0 0 100px;" @keyup.enter="addRegion" />
             <el-select v-model="newRegionTz" placeholder="时区" size="small" style="flex:1;" filterable>
               <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
