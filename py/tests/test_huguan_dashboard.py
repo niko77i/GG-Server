@@ -1892,9 +1892,12 @@ class TestPushEndpoint:
     def test_push_rejects_bad_platform_and_unconfigured(self, client, monkeypatch):
         """HTTP 边界的三种「不校验就会静默干错事」。
 
-        platform 不校验时 `collect_rows_for_push(db, "fb")` 会**静默落到 GG 分支**
-        （只有 "tt" 走 TT SQL），把 GG 账户写进一张来路不明的表；这条只有在 GG
-        **已配置**时才咬得住 —— 未配置的用户无论走哪个平台都会 400。
+        **platform 这条是哨兵，不是有效变异靶点。** 它防的是**将来有人把平台校验
+        挪到「配置查询」之后** —— 顺序一变，未知 platform 就会真的落到
+        `collect_rows_for_push` 的 GG 分支去写 GG 账户。在当前顺序下，未知 platform
+        （如 "fb"）必然先命中「未配置 → 400」，与平台校验的 400 **响应不可区分**，
+        **因此没有能打红它的变异体**（实测：整段删掉平台校验后聚焦套件
+        122 passed / 0 failed，无测试变红）。
         未配置档本身也要拦：否则会拿着空 spreadsheet_id 去打 Sheets API。
         另与 `/sync` 同口径，非 dict body 是 400 而不是 500。
         """
