@@ -400,7 +400,8 @@ def test_agents_platform_rename_delete(client, tt_headers):
     本用例原稿断言「另一个 TT 用户 B 跨 owner 改名/删除 → 200」，注释称 TT 代理为
     「平台级共享，无 owner 限制」—— 该认知与数据模型不符：`agents` 表的唯一约束是
     `UNIQUE(name, owner_id, platform)`（`py/database.py:1320`，2026-09-21 由 ef0a3a2 重建），
-    且 GG→TT 的代理复制是按 owner 逐份进行的 ⇒ TT 代理本就是 per-owner 私有。
+    且 `agents_create` 对 TT 代理写入 `owner_id=user_id`（`py/main.py:5932`）
+    ⇒ TT 代理本就是按 owner 私有（创建即私有）。
     `agents_rename`/`agents_delete` 的 `platform == "tt"` 分支写在 `is_dev` 判断之前、
     且未校验 `owner_id`，属结构性遗漏（任何登录用户，连 viewer 在内，都能改/删他人 TT 代理）。
     现按设计文档 §3.2 B-4 收紧：非跨用户角色只能操作自己的 TT 代理（无权返回 404）。
@@ -428,7 +429,8 @@ def test_agents_platform_rename_delete(client, tt_headers):
     resp = client.put(f"/api/agents/{aid}", headers=tt_headers,
                       json={"name": "TT代理B改"}, query_string={"platform": "tt"})
     assert resp.status_code == 200
-    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers)
+    # 改名后该条目仍跨 owner 可见（列表读能力未随写收窄）
+    resp = client.get("/api/agents/list?platform=tt", headers=tt_headers2)
     assert "TT代理B改" in [a["name"] for a in resp.get_json()["agents"]]
 
     # 另一个 TT 用户 B 跨 owner 删除 → 404，且行仍在

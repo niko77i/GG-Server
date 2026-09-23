@@ -318,3 +318,13 @@ class TestB4TtAgentOwnership:
         dev, _ = _create_user(client, "_b4_dev", role="developer")
         resp = client.put(f"/api/agents/{aid}?platform=tt", json={"name": "代改名"}, headers=dev)
         assert resp.status_code == 200
+
+    def test_developer_can_delete_any_tt_agent(self, client):
+        owner, aid = self._setup(client)
+        dev, _ = _create_user(client, "_b4_del_dev", role="developer")
+        resp = client.delete(f"/api/agents/{aid}?platform=tt", headers=dev)
+        assert resp.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT 1 FROM agents WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert row is None
