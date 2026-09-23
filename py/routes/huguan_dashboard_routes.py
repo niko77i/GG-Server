@@ -9,6 +9,7 @@ from flask_jwt_extended import jwt_required
 
 import database
 import huguan_dashboard as hd
+from cache import cache as _app_cache
 
 from .helpers import ok, err, get_uid
 from .decorators import huguan_required
@@ -98,10 +99,13 @@ def dashboard_sync():
 
         diff = hd.build_diff(db, parsed_rows, platform)
 
-        if data.get("dry_run", True):
+        # fail-safe：只有**显式布尔 False** 才落库。缺省 / true / null / "false"
+        # (字符串) / 0 全部走只读 dry_run —— 少了这个 is not False，JSON null 会因
+        # `None` 为假值而掉进落库分支，等于「传了个空值就把库改了」。
+        if data.get("dry_run") is not False:
             return ok({"diff": diff})
 
-        # confirmed 期望 {"create": [行号], "update": [行号], "owner": [行号]}。
+        # confirmed 期望 {"create": [账户ID...], "update": [账户ID...], "owner": [账户ID...]}。
         # `or {}` 兜不住真值非 dict（[1,2] / "abc"）→ apply_diff 里 conf.get 炸 500；
         # 值不是数组同样炸（`2 not in 2` → TypeError）。两层都在这里挡住。
         confirmed = data.get("confirmed")
@@ -110,19 +114,26 @@ def dashboard_sync():
         for k in ("create", "update", "owner"):
             v = confirmed.get(k)
             if v is not None and not isinstance(v, list):
-                return err(f"confirmed.{k} 必须是行号数组", 400)
+                return err(f"confirmed.{k} 必须是账户ID数组", 400)
 
         result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid)
+
+        # 规格 §8.3 步骤 8：落库后清缓存（账户写入了，代理/列表下拉必须立即刷新）。
+        # 只放在路由层 —— 纯逻辑的 apply_diff 不该依赖 cache。
+        _app_cache.clear_prefix("accounts:agents:")
+        if any(item.get("pending_status")
+               for item in diff.get("to_create", []) + diff.get("to_update", [])):
+            # 本次可能新建了状态行（build_diff 只读，状态行是在 apply_diff 里建的）
+            _app_cache.delete(f"accounts:statuses:{uid}")
 
         # 规格 §7.2 规则 3② + 规则 4：应用了归属变更的行，回写运营列并清空变更通道列
         applied = result.pop("applied_owner_rows", [])
         if applied:
-            rows = []
-            for item in applied:
-                new_owner = next((c["to"] for c in diff["owner_changes"]
-                                  if c["row"] == item["row"]), "")
-                rows.append({"account_id": item["account_id"],
-                             "cells": {hd.OWNER_COL[platform]: new_owner}})
+            # 新归属名直接取 item["to"]（apply_diff 已经带上），不再靠行号反查 ——
+            # 行号在重新拉表后可能已经位移到别人身上。
+            rows = [{"account_id": item["account_id"],
+                     "cells": {hd.OWNER_COL[platform]: item["to"]}}
+                    for item in applied]
             _write_background(service, conf, rows)
             _write_background(service, conf,
                               hd.owner_channel_cells(applied, platform, ""))

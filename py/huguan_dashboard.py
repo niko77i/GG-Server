@@ -538,20 +538,28 @@ def owner_channel_cells(rows: list, platform: str, value: str) -> list:
 def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> dict:
     """执行户管确认过的差异（规格 §8.3 步骤 8）。
 
-    confirmed: {"create": [行号...], "update": [行号...], "owner": [行号...]}
+    confirmed: {"create": [账户ID...], "update": [账户ID...], "owner": [账户ID...]}
                缺哪个键就完全不执行该类别。
+
+    **匹配键一律是 `account_id`，不是行号。** 落库时是重新拉表重算 diff 的，
+    行号会因表里插行/删行而整体位移 —— 按行号匹配会把「勾了账户甲」静默作用到
+    另一个账户上（diff 各项里仍保留 "row"，但只用于在 errors 里报「第几行出错」）。
+    返回里的 "not_applied" 收集「confirmed 勾了、当前 diff 里却没有任何一项
+    account_id 命中」的账户 —— 确认被静默丢弃比报错更危险：户管会以为改过了。
     """
     conf = confirmed or {}
     created = updated = owner_changed = 0
     errors = []
     applied_owner_rows = []
+    hit = {"create": set(), "update": set(), "owner": set()}
 
     table = "tt_accounts" if platform == "tt" else "accounts"
     key_field = ACCOUNT_KEY_FIELD[platform]
 
     for item in diff.get("to_create", []):
-        if item["row"] not in conf.get("create", []):
+        if item["account_id"] not in conf.get("create", []):
             continue
+        hit["create"].add(item["account_id"])
         try:
             # db_values 装的是「数据库列名 → 值」（见 build_diff 的 to_create），
             # 与表列字母的 cells 不是一回事，切勿混用。
@@ -577,8 +585,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             errors.append({"row": item["row"], "error": str(e)})
 
     for item in diff.get("to_update", []):
-        if item["row"] not in conf.get("update", []):
+        if item["account_id"] not in conf.get("update", []):
             continue
+        hit["update"].add(item["account_id"])
         try:
             fields = dict(item.get("fields") or {})
             is_dead_val = fields.pop("_is_dead", None)
@@ -588,9 +597,16 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             if pending:
                 fields[_target_column(platform, "status_name")] = resolve_status_id(
                     db, pending, item.get("scope_owner_id"), platform)
-            if fields:
-                sets = ", ".join(f"{k}=?" for k in fields)
-                db.execute(f"UPDATE {table} SET {sets}, "
+            # 状态真的变了（build_diff 只在状态真变了才把它放进 fields）⇒
+            # 「状态变更时间」必须跟着刷新，否则前端显示的永远是旧值。
+            # 注意 `datetime('now','localtime')` 是 SQL 表达式不是值：只能作为
+            # SET 子句里的**字面量**拼进去，塞进 fields.values() 走占位符会被当成
+            # 普通字符串写进该列。
+            sets = [f"{k}=?" for k in fields]
+            if "status_id" in fields:
+                sets.append("status_changed_date=datetime('now','localtime')")
+            if sets:
+                db.execute(f"UPDATE {table} SET {', '.join(sets)}, "
                            "updated_at=datetime('now','localtime') WHERE id=?",
                            tuple(fields.values()) + (item["existing_id"],))
             if is_dead_val is not None:
@@ -600,21 +616,35 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             errors.append({"row": item["row"], "error": str(e)})
 
     for item in diff.get("owner_changes", []):
-        if item["row"] not in conf.get("owner", []):
+        if item["account_id"] not in conf.get("owner", []):
             continue
+        hit["owner"].add(item["account_id"])
         try:
             db.execute(f"UPDATE {table} SET owner_id=?, "
                        "updated_at=datetime('now','localtime') WHERE id=?",
                        (item["to_owner_id"], item["existing_id"]))
             owner_changed += 1
-            applied_owner_rows.append({"row": item["row"],
-                                       "account_id": item["account_id"]})
+            # 带上 "to"（新归属名）：路由收尾直接用它回写运营列，不必再拿行号反查
+            applied_owner_rows.append({"account_id": item["account_id"],
+                                       "to": item["to"]})
         except Exception as e:
             errors.append({"row": item["row"], "error": str(e)})
 
+    # 「勾了却没作用上」是独立信号，不进 errors —— 差异报告变了不是出错，
+    # 但户管必须知道自己的勾选没生效。
+    not_applied = []
+    for cat in ("create", "update", "owner"):
+        picked = conf.get(cat)
+        if not isinstance(picked, list):
+            continue
+        for aid in picked:
+            if aid not in hit[cat]:
+                not_applied.append({"account_id": aid, "category": cat})
+
     db.commit()
     return {"created": created, "updated": updated, "owner_changed": owner_changed,
-            "applied_owner_rows": applied_owner_rows, "errors": errors}
+            "applied_owner_rows": applied_owner_rows, "not_applied": not_applied,
+            "errors": errors}
 
 
 def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:
@@ -624,4 +654,8 @@ def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:
         db.execute(f"UPDATE {table} SET death_date=date('now','localtime'), "
                    "status_changed_date=datetime('now','localtime') WHERE id=?", (account_pk,))
     else:
-        db.execute(f"UPDATE {table} SET death_date='' WHERE id=?", (account_pk,))
+        # 撤销死亡同样是「状态变更」：status_changed_date 必须一起刷新，否则前端
+        # 「状态变更时间」还停在上次封户的时刻上（与真值分支对称）。
+        db.execute(f"UPDATE {table} SET death_date='', "
+                   "status_changed_date=datetime('now','localtime') WHERE id=?",
+                   (account_pk,))
