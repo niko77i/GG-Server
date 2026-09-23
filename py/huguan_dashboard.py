@@ -223,26 +223,39 @@ def resolve_owner_id(db, name: str):
         (name,))
 
 
-def resolve_status_id(db, name: str, owner_id, platform: str):
-    """状态名 → account_statuses.id，按「该账户的 owner + 平台」作用域。
+def resolve_status_id(db, name: str, owner_id, platform: str, *, create_missing: bool = True):
+    """状态名 → account_statuses.id。
+
+    **查重键是 (name, platform)，不含 owner_id。** 真实唯一约束就是这两个列
+    （database.py:1225 的迁移重建；database.py:505 的原始建表 UNIQUE(name, owner_id)
+    已被覆盖，PRAGMA 实测 sqlite_autoindex_account_statuses_1 = ['name','platform']）。
+    带上 owner_id 查重会让「甲已有『待优化』(gg)、乙的账户也写『待优化』」查不中而
+    重复 INSERT，直接 sqlite3.IntegrityError —— 该异常从 _resolve_field 穿到
+    build_diff，**把整份差异报告带崩**（同 sheet 其它行的结果也拿不到）。
+    owner_id 只是「谁先建的」这个记账，不参与查重。
+    既有正确对照：main.py:6102（/api/statuses/list 的创建）、routes/tt_accounts_routes.py:65。
 
     **必须带 platform**：account_statuses.platform 默认 'gg'（database.py:153），
-    唯一约束是 (name, platform)（database.py:1225），而状态下拉按平台过滤
-    （main.py:6059 `/api/statuses/list`）。不写平台会让 TT 同步新建的状态落进
-    gg 命名空间 —— TT 下拉里看不见，反而出现在 GG 下拉里。
+    而状态下拉按平台过滤（main.py:6059 `/api/statuses/list`）。不写平台会让 TT 同步
+    新建的状态落进 gg 命名空间 —— TT 下拉里看不见，反而出现在 GG 下拉里。
     既有代码的两种写法可对照：GG 侧靠默认值吃 'gg'（main.py:4042/4184/4944/5068），
     TT 侧显式写 'tt'（main.py:6085、tt_accounts_routes.py:69）。
+
+    因为唯一约束成立，(name, platform) **至多命中 1 行**，所以状态解析没有
+    规格 §8.4 的「命中 ≥2 条」歧义档 —— 只有 id / None 两种结果。
+
+    create_missing=False 时只查不建（规格 §8.3 步骤 7：dry_run 不改库），
+    查不到返回 None，由调用方按 pending 处理（不是 warning）。
     """
     name = (name or "").strip()
     if not name:
         return None
-    # 查重也必须带 platform：唯一约束含 platform，同名不同平台可并存，
-    # 不带平台过滤会命中 2 行而 fetchone() 任取一条。
-    row = db.execute(
-        "SELECT id FROM account_statuses WHERE name=? AND owner_id IS ? AND platform=?",
-        (name, owner_id, platform)).fetchone()
+    row = db.execute("SELECT id FROM account_statuses WHERE name=? AND platform=?",
+                     (name, platform)).fetchone()
     if row:
         return row["id"]
+    if not create_missing:
+        return None
     db.execute("INSERT INTO account_statuses(name, owner_id, platform) VALUES(?,?,?)",
                (name, owner_id, platform))
     return db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
@@ -259,10 +272,16 @@ _SQL_AGENT_TT = "SELECT id FROM agents WHERE name=? AND platform='tt'"
 _SQL_BC = "SELECT id FROM tt_bcs WHERE name=? AND deleted_at IS NULL"
 
 
-def _resolve_field(db, platform: str, field: str, value: str, owner_id):
+def _resolve_field(db, platform: str, field: str, value: str):
     """把表里的一个名称解析成系统主键；不认识的字段返回 (True, None) 表示无需解析。
 
     返回 (ok, resolved)：ok=False 表示该列要记 warning 且不落库。
+
+    **status_name 刻意不在这里。** 状态有三档而其它名称只有两档：其它名称是
+    「唯一命中 / 歧义（0 或 ≥2 条）」，状态是「已有 id / 系统里还没有（pending）」
+    —— 因为唯一约束 (name, platform) 让状态至多命中 1 行，不存在歧义档。
+    混进本函数会让「查不到」被误判成歧义而记 warning、把该列丢弃，正是规格
+    §8.3 步骤 7 要避免的。状态的解析在 `_collect_updates` 里单独走。
     """
     if field == "mcc_name":
         return True, resolve_named_id(db, _SQL_MCC, (value,))
@@ -271,8 +290,6 @@ def _resolve_field(db, platform: str, field: str, value: str, owner_id):
         return True, resolve_named_id(db, sql, (value,))
     if field == "bc_name":
         return True, resolve_named_id(db, _SQL_BC, (value,))
-    if field == "status_name":
-        return True, resolve_status_id(db, value, owner_id, platform)
     return False, None
 
 
@@ -295,6 +312,29 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
     每个产出项都带 "row"，供前端回传确认。
     """
     key_field = ACCOUNT_KEY_FIELD[platform]
+    sheet_rows = len(parsed_rows)   # 表里数据行总数（**去重前**），供 summary 用
+
+    # 四个产出列表必须在去重循环**之前**建好：去重本身会往 warnings 里塞一条
+    to_create, to_update, owner_changes, to_skip = [], [], [], []
+    warnings = []
+
+    # 按账户ID 去重：同一 ID 在表里出现两行时，若两行都进 to_create，落库阶段第二行
+    # 会撞唯一约束。取**首次出现**的那行生效，后续行记 warning（户管要能看到并去改表）。
+    # 账户ID 为空的行不在这里拦 —— 它们要按原有路径记「账户ID为空，跳过」。
+    seen_rows, deduped = {}, []
+    for p in parsed_rows:
+        aid = (p.get("account_id") or "").strip()
+        if not aid:
+            deduped.append(p)
+            continue
+        if aid in seen_rows:
+            warnings.append({"row": p.get("row"),
+                             "message": f"账户ID「{aid}」已在第 {seen_rows[aid]} 行出现，本行跳过"})
+            continue
+        seen_rows[aid] = p.get("row")
+        deduped.append(p)
+    parsed_rows = deduped
+
     ids = [p.get("account_id") for p in parsed_rows if p.get("account_id")]
 
     existing_map = {}
@@ -309,8 +349,6 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         ).fetchall()
         for r in rows:
             existing_map[r[key_field]] = dict(r)
-
-    to_create, to_update, owner_changes, to_skip, warnings = [], [], [], [], []
 
     for p in parsed_rows:
         row_no = p.get("row")
@@ -329,6 +367,11 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
 
         existing = existing_map.get(aid)
         if existing is None:
+            db_values = _collect_updates(db, platform, p, want_owner_id, row_no, warnings,
+                                         create_missing=False)
+            # 先摘掉合成键再入报告：db_values 会被 apply_diff 直接拼 INSERT 列名，
+            # 带上下划线开头的键会变成非法 SQL。
+            pending = db_values.pop("_pending_status", None)
             to_create.append({
                 "row": row_no,
                 "account_id": aid,
@@ -337,7 +380,9 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
                 # 键名刻意不叫 "cells"：本模块里 "cells" 一律指「表列字母 → 单元格值」
                 # （Task 4 的 update_rows_by_account_id 契约），这里装的是
                 # 「数据库列名 → 值」，供 apply_diff 拼 INSERT。两者同名会被误用。
-                "db_values": _collect_updates(db, platform, p, want_owner_id, row_no, warnings),
+                "db_values": db_values,
+                # 系统里还没有的状态名；apply_diff 落库前才 INSERT（build_diff 只读）
+                "pending_status": pending,
             })
             continue
 
@@ -359,12 +404,21 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
 
         # 归属变更后，状态/渠道等要按新 owner 作用域解析
         scope_owner = want_owner_id if want_owner_id is not None else cur_owner
-        fields = _collect_updates(db, platform, p, scope_owner, row_no, warnings)
+        fields = _collect_updates(db, platform, p, scope_owner, row_no, warnings,
+                                  create_missing=False)
+        pending = fields.pop("_pending_status", None)
         changed = {k: v for k, v in fields.items()
                    if not _same_as_existing(db, platform, existing, k, v)}
-        if changed:
+        # pending 也算真实变更：系统里没这个状态名，建出来必然与现状不同。
+        # 只比 `changed` 会让「这一行只改了状态」被整行漏掉。
+        if changed or pending:
             to_update.append({"row": row_no, "account_id": aid,
-                              "existing_id": existing["id"], "fields": changed})
+                              "existing_id": existing["id"], "fields": changed,
+                              "pending_status": pending,
+                              # apply_diff 建缺失状态行时用它记 owner（谁先建的）
+                              "scope_owner_id": scope_owner,
+                              # 新值为空串的文本列：清空是不可逆的，必须让前端显式标注
+                              "clears": _blank_columns(platform, changed)})
 
     return {
         "to_create": to_create,
@@ -373,17 +427,21 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         "to_skip": to_skip,
         "warnings": warnings,
         "summary": {
-            "total_in_sheet": len(parsed_rows),
+            "total_in_sheet": sheet_rows,
             "new_accounts": len(to_create),
             "updates": len(to_update),
             "owner_changes": len(owner_changes),
             "skipped": len(to_skip),
             "warnings": len(warnings),
+            # 只统计 to_update：新建账户的空列是「不填」，不是「清空已有值」。
+            # 首次正式同步前先跑 dry_run 看这个数，是这次「空值=清空」口径的
+            # 唯一量化手段（规格 §8.3）。
+            "clears": sum(len(i.get("clears") or []) for i in to_update),
         },
     }
 
 
-def _collect_updates(db, platform, p, owner_id, row_no, warnings) -> dict:
+def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_missing=True) -> dict:
     """把一行解析结果里「要写进系统」的字段收集成 {字段名: 值}。
 
     名称类字段先解析成主键，解析不唯一则记 warning 并丢弃该字段。
@@ -394,6 +452,11 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings) -> dict:
     §7.4「不因表里空着就把 owner_id 清空」是**归属专属例外**，不能推广到文本列。
     与下方名称类字段的 `if not value: continue` 不对称是**刻意的**：空串在名称
     命名空间里根本没有可解析的候选，属规格 §8.4 的「命中 0 条」。
+
+    产出里可能带两个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
+    `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名。
+
+    create_missing 由 build_diff 传 False（dry_run 只读），落库阶段才用默认 True。
     """
     out = {}
     for f in _PLAIN_TEXT_FIELDS[platform]:
@@ -403,7 +466,18 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings) -> dict:
         value = (p.get(f) or "").strip()
         if not value:
             continue
-        _known, resolved = _resolve_field(db, platform, f, value, owner_id)
+        if f == "status_name":
+            # 状态单独走：它没有「歧义」档（唯一约束 (name, platform) 至多命中 1 行），
+            # 所以查不到**不是**警告，而是「系统里还没有」——create_missing=False 时
+            # 记成 pending，落库阶段再 INSERT。走下面的通用分支会被误判成歧义而丢弃。
+            sid = resolve_status_id(db, value, owner_id, platform,
+                                    create_missing=create_missing)
+            if sid is None:
+                out["_pending_status"] = value
+            else:
+                out["status_id"] = sid
+            continue
+        _known, resolved = _resolve_field(db, platform, f, value)
         if not _known:
             continue
         if resolved is None:
@@ -415,8 +489,23 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings) -> dict:
     return out
 
 
+def _blank_columns(platform: str, fields: dict) -> list:
+    """fields 里新值为空串的文本列（下划线开头的合成键不算）。
+
+    规格 §8.3：文本列空着 = 清空系统里该列。这是不可逆的批量动作，所以单独列出来
+    让前端显式标注「将清空」——不能让「几百行的 acquired_date 被悄悄清掉」藏在差异
+    报告里。只认文本列：`_is_dead`（合成键）与主键列（`mcc_id` 等）不在此列。
+    """
+    return sorted(k for k, v in fields.items()
+                  if k in _PLAIN_TEXT_FIELDS[platform] and v == "")
+
+
 def _target_column(platform: str, field: str) -> str:
-    """解析后的字段名 → 真实数据库列名。"""
+    """解析后的字段名 → 真实数据库列名。
+
+    `status_name` 这条**不**经 `_collect_updates` 的通用分支（状态走 pending 档），
+    但 apply_diff 落库时要靠它把 pending 状态名映射到 `status_id` 列，所以保留。
+    """
     return {
         "mcc_name": "mcc_id",
         "agent_name": "agent_id",

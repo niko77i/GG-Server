@@ -872,11 +872,14 @@ class TestBuildDiff:
         assert any("已删BC" in w["message"] for w in diff["warnings"])
         db.close()
 
-    def test_tt_diff_uses_advertiser_id_and_tt_status_namespace(self, client):
-        """TT 侧端到端：定位键走 `advertiser_id`、状态落 `platform='tt'`。
+    def test_tt_diff_uses_advertiser_id_and_reports_pending_status(self, client):
+        """TT 侧端到端：定位键走 `advertiser_id`、新状态名走 `pending_status`。
 
         本任务此前**零 TT 覆盖**（实现者只用一次性探针验过），而 Task 9 的触发点
         全在 TT 侧 —— 这条把 TT 路径钉进测试网。
+        系统里还没有「待优化」(tt) ⇒ 该走 pending_status（名字原样），
+        **且此刻不得建行**（dry_run 只读，规格 §8.3 步骤 7）。
+        落库侧的平台命名空间断言在 Task 7 的 apply 测试里。
         """
         from huguan_dashboard import build_diff, parse_row
         db, u1, _ = self._prepare(client)
@@ -886,11 +889,188 @@ class TestBuildDiff:
         diff = build_diff(db, parsed, "tt")
         assert len(diff["to_update"]) == 1
         assert diff["to_update"][0]["account_id"] == "TTD-1"
-        sid = diff["to_update"][0]["fields"]["status_id"]
-        r = db.execute("SELECT platform FROM account_statuses WHERE id=?", (sid,)).fetchone()
-        assert r["platform"] == "tt"          # 不写平台会落进 gg 命名空间
+        assert diff["to_update"][0]["pending_status"] == "待优化"
+        assert "status_id" not in diff["to_update"][0]["fields"]
+        # 只读：状态行不能在这一步出现，否则 dry_run 承诺的「不改库」就是假的
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 0
         # 定位键必须真是 advertiser_id —— 写错列会 INSERT 出第二行而不是更新这一行
         assert db.execute("SELECT owner_id FROM tt_accounts WHERE advertiser_id='TTD-1'"
                           ).fetchone()["owner_id"] == u1
         assert db.execute("SELECT COUNT(*) AS n FROM tt_accounts").fetchone()["n"] == 1
+        db.close()
+
+    def test_two_owners_same_status_name_does_not_crash(self, client):
+        """两个运营写同名状态 ⇒ 必须复用同一行，不得 IntegrityError。
+
+        真实唯一约束是 `UNIQUE(name, platform)`，**不含 owner_id**（database.py:1225
+        的迁移重建，PRAGMA 实测索引列为 ['name','platform']）。若查重键带上 owner_id，
+        乙的账户写「待优化」时查不中而重复 INSERT → IntegrityError 从解析穿到
+        build_diff，**整份差异报告全丢**（同一 sheet 其它行的结果也拿不到）。
+        对照写法：main.py:6102。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, u2 = self._prepare(client)
+        _seed_account(db, "DUP-A", u1, acquired_date="")
+        _seed_account(db, "DUP-B", u2, acquired_date="")
+        rows = [
+            # GG 状态是 K 列（index 10）；写成 index 8 会落进 I 列（时区）
+            dict(parse_row(["", "", "DUP-A", "", "", "", "张三", "", "", "", "待优化"], "gg"),
+                 row=2),
+            dict(parse_row(["", "", "DUP-B", "", "", "", "李四", "", "", "", "待优化"], "gg"),
+                 row=3),
+        ]
+        diff = build_diff(db, rows, "gg")           # 不得抛异常
+        assert len(diff["to_update"]) == 2
+        assert {i["pending_status"] for i in diff["to_update"]} == {"待优化"}
+        # 从解析层再确认一次：两个人解析同名同平台，拿到的是同一行
+        from huguan_dashboard import resolve_status_id
+        sid_a = resolve_status_id(db, "待优化", u1, "gg")
+        sid_b = resolve_status_id(db, "待优化", u2, "gg")
+        assert sid_a == sid_b
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 1
+        db.close()
+
+    def test_diff_is_read_only_even_with_new_status_name(self, client):
+        """dry_run 全程只读：连「需要新建的状态行」也不许在这一步落库。
+
+        规格 §8.3 步骤 7 / §10.1 第 6 项「dry_run=true 不改库」。插入若挂在共享连接上，
+        调用方随后任何一次 commit 都会把它真写进去，而报告里的 id 也只有在提交后才存在
+        ——所以必须在解析层就拦住，不能靠「反正没 commit」。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "RO-1", u1, acquired_date="")
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('RO-MCC','7')")
+        db.commit()
+        rows = [dict(parse_row(["", "", "RO-1", "RO-MCC", "", "", "张三", "", "", "", "全新状态"],
+                               "gg"), row=2)]
+        before = db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"]
+        diff = build_diff(db, rows, "gg")
+        db.commit()          # 调用方正常收尾的提交：不该让任何东西冒出来
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == before
+        item = diff["to_update"][0]
+        assert item["pending_status"] == "全新状态"
+        # 其余列照常比对（只有状态那一列是 pending）
+        assert item["fields"]["mcc_id"] == db.execute(
+            "SELECT id FROM mcc WHERE name='RO-MCC'").fetchone()["id"]
+        db.close()
+
+    def test_dead_flag_reaches_the_diff(self, client):
+        """`_is_dead` 必须真的进报告 —— 它恒为 False 时封户/撤销死亡永不落库。
+
+        对照组三行：死亡状态、B 列「是否封户」= 是、都不是。只断言 True 的那种
+        测试杀不掉「恒 False」的变异体，所以第三条断言 False 是必需的。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "DEAD-1", u1, acquired_date="")
+        _seed_account(db, "DEAD-2", u1, acquired_date="")
+        _seed_account(db, "DEAD-3", u1, death_date="2026-01-01")
+        rows = [
+            # GG 状态是 K 列（index 10）
+            dict(parse_row(["", "", "DEAD-1", "", "", "", "张三", "", "", "", "死亡"], "gg"),
+                 row=2),
+            # B 列「是否封户」= 是（B 是 index 1；写成 index 0 会落进 A 列日期）
+            dict(parse_row(["", "是", "DEAD-2", "", "", "", "张三"], "gg"), row=3),
+            dict(parse_row(["", "", "DEAD-3", "", "", "", "张三"], "gg"), row=4),
+        ]
+        diff = build_diff(db, rows, "gg")
+        by_row = {i["row"]: i for i in diff["to_update"]}
+        assert by_row[2]["fields"]["_is_dead"] is True      # K 列「死亡」
+        assert by_row[3]["fields"]["_is_dead"] is True      # B 列「是否封户」= 是
+        assert by_row[4]["fields"]["_is_dead"] is False     # 撤销死亡
+        db.close()
+
+    def test_to_create_carries_db_values_not_cells(self, client):
+        """`to_create` 的键名叫 `db_values` 且真装着要写进库的值。
+
+        两个变异体一起钉住：键名被改成 `cells`（与 Task 4 的「表列字母 → 单元格值」
+        契约撞名，apply_diff 会当成列字母拼出非法 SQL），以及值被置空
+        （新建出来的账户会丢掉表里所有列）。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('NEW-MCC','9')")
+        db.commit()
+        mcc_id = db.execute("SELECT id FROM mcc WHERE name='NEW-MCC'").fetchone()["id"]
+        rows = [dict(parse_row(["", "", "NEW-DB", "NEW-MCC", "", "", "张三", "",
+                                "Asia/Shanghai"], "gg"), row=2)]
+        item = build_diff(db, rows, "gg")["to_create"][0]
+        assert "db_values" in item and "cells" not in item
+        dv = item["db_values"]
+        assert dv["mcc_id"] == mcc_id          # 值必须在
+        assert dv["timezone"] == "Asia/Shanghai"
+        assert dv["_is_dead"] is False
+        db.close()
+
+    def test_agent_namespace_is_platform_scoped(self, client):
+        """代理解析必须按平台隔离：GG 的表不能挂到 TT 的代理上（反之亦然）。
+
+        两边的查名 SQL 分别是 `_SQL_AGENT_GG` / `_SQL_AGENT_TT`，写反了不会报错
+        —— 只会把账户静默挂到**另一个平台**的同名代理上。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "AG-GG", u1, acquired_date="")
+        _seed_tt_account(db, "AG-TT", u1)
+        db.execute("INSERT INTO agents(name, platform) VALUES('张三代理','gg')")
+        db.execute("INSERT INTO agents(name, platform) VALUES('TT代理','tt')")
+        db.commit()
+        gg_id = db.execute("SELECT id FROM agents WHERE platform='gg'").fetchone()["id"]
+        tt_id = db.execute("SELECT id FROM agents WHERE platform='tt'").fetchone()["id"]
+        # GG 的表里写了 TT 侧的代理名 ⇒ 查不到，记警告，不落库
+        gg_diff = build_diff(db, [dict(parse_row(
+            ["", "", "AG-GG", "", "", "TT代理", "张三"], "gg"), row=2)], "gg")
+        assert gg_diff["to_update"] == []
+        assert any("TT代理" in w["message"] for w in gg_diff["warnings"])
+        # 反向：TT 的表里写 GG 侧代理名 ⇒ 同样不落库
+        tt_row = ["", "", "AG-TT", "", "", "张三代理", "", "", "", "", "", "", ""]
+        tt_diff = build_diff(db, [dict(parse_row(tt_row, "tt"), row=2)], "tt")
+        assert tt_diff["to_update"] == []
+        assert any("张三代理" in w["message"] for w in tt_diff["warnings"])
+        # 各自命中的正例：GG 用 gg 代理、TT 用 tt 代理（不能用上面那两行，那两行
+        # 刻意写的是对侧平台的代理名）
+        gg_ok = build_diff(db, [dict(parse_row(
+            ["", "", "AG-GG", "", "", "张三代理", "张三"], "gg"), row=2)], "gg")
+        assert gg_ok["to_update"][0]["fields"]["agent_id"] == gg_id
+        tt_row_ok = ["", "", "AG-TT", "", "", "TT代理", "", "", "", "", "", "", ""]
+        tt_ok = build_diff(db, [dict(parse_row(tt_row_ok, "tt"), row=2)], "tt")
+        assert tt_ok["to_update"][0]["fields"]["agent_id"] == tt_id
+        db.close()
+
+    def test_duplicate_account_id_rows_are_deduped(self, client):
+        """同一账户ID 在表里出现两行 ⇒ 首行生效，后续行记警告。
+
+        不去重的话两行都会进 `to_create`，落库阶段第二行撞唯一约束，整批报错。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        rows = [
+            dict(parse_row(["", "", "DUP-ROW", "", "", "", "张三"], "gg"), row=2),
+            dict(parse_row(["", "", "DUP-ROW", "", "", "", "张三"], "gg"), row=5),
+        ]
+        diff = build_diff(db, rows, "gg")
+        assert len(diff["to_create"]) == 1
+        assert diff["to_create"][0]["row"] == 2          # 首次出现的那行
+        assert diff["summary"]["total_in_sheet"] == 2    # 表里确实有两行，不虚报
+        assert any(w["row"] == 5 and "DUP-ROW" in w["message"] for w in diff["warnings"])
+        db.close()
+
+    def test_update_item_lists_columns_that_will_be_cleared(self, client):
+        """新值为空的列必须进 `clears`，且 summary 汇总计数。
+
+        清空不可逆：首次同步前户管要能一眼看到「将清空多少列」，而不是在几百行差异里
+        自己发现 acquired_date 被清掉了。新建账户的空列**不算**清空（那是「不填」）。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "CLR-1", u1, acquired_date="2026-01-01", timezone="Asia/Shanghai")
+        diff = build_diff(db, [dict(parse_row(["", "", "CLR-1"], "gg"), row=2)], "gg")
+        item = diff["to_update"][0]
+        assert item["clears"] == ["acquired_date", "timezone"]   # sorted，两个都被清
+        assert diff["summary"]["clears"] == 2
+        # 新建账户的空列不产生 clears
+        new_diff = build_diff(db, [dict(parse_row(["", "", "CLR-NEW"], "gg"), row=3)], "gg")
+        assert new_diff["to_create"][0].get("clears") is None
+        assert new_diff["summary"]["clears"] == 0
         db.close()
