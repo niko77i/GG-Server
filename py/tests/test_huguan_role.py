@@ -208,7 +208,8 @@ class TestAuthRoleFixes:
 
     def test_list_users_role_filter_combined_with_search(self, client):
         """`role_filter` 与 `search` 的组合：search 非空时 list_users 走的是**另一条**
-        COUNT/SELECT 分支（`py/auth.py:97-110`），与空 search 分支（`:111-120`）分开拼 SQL，
+        COUNT/SELECT 分支（`py/auth.py` 里 `if search:` 的那一支），与空 search 分支
+        （同函数的 `else:` 支）分开拼 SQL，
         而既有 role_filter 用例（上面两条）都只覆盖了空 search 分支。
 
         构造：两个用户名都含特征子串 `zqx`（`_create_user` 不传 display_name，故这里靠
@@ -221,10 +222,9 @@ class TestAuthRoleFixes:
         _, user_id = _create_user(client, "_hg_zqx_user", role="user")
 
         # 前置校验：两个账号都该被 `zqx` 命中，否则下面的「排除」断言可能只是搜索没匹配上、
-        # 而非 role_filter 生效。这里直接查库验证 LIKE 命中集，**不**调
-        # `list_users(search=...)` 且不带 platform / role_filter —— 那条路径会撞上
-        # `py/auth.py:99-101` 的既有缺陷（base_where 为空时仍拼 " AND (...)"，SQL 语法错误），
-        # 与本次 role_filter 改动无关，见修复报告的「遗留发现」。
+        # 而非 role_filter 生效。这里直接查库验证 LIKE 命中集，**不**调 `list_users(search=...)`：
+        # 裸 SQL 校验必须独立于被测代码（否则 SQL 拼接写错会被伪装成 role_filter 的问题），
+        # 且不受 list_users 的 page_size 截断影响。
         db = database.get_db()
         matched = {r["id"] for r in db.execute(
             "SELECT id FROM users WHERE username LIKE ? OR display_name LIKE ?",
@@ -236,7 +236,7 @@ class TestAuthRoleFixes:
         assert hg_id in {u["id"] for u in res["users"]}
         assert user_id not in {u["id"] for u in res["users"]}
         assert {u["role"] for u in res["users"]} == {"huguan"}
-        # total 来自独立的 COUNT 查询（`py/auth.py:102`），是前端分页契约；
+        # total 来自独立的 COUNT 查询（`py/auth.py` search 分支内的那一句），是前端分页契约；
         # 若只筛 SELECT 而漏筛 COUNT，users 看着对、分页却会按未过滤的总数算页数。
         assert res["total"] == 1
 
