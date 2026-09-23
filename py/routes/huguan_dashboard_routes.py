@@ -37,14 +37,17 @@ def dashboard_config_get():
 @huguan_required
 def dashboard_config_save():
     """保存某平台的看板配置。表格 ID 接受裸 ID 或完整 URL。"""
-    data = request.get_json(silent=True) or {}
-    platform = (data.get("platform") or "").strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return err("请求体必须是 JSON 对象", 400)
+    # 字段一律先 str() 兜底：给个数字或 null 不该炸成 500，按取不到值处理
+    platform = str(data.get("platform") or "").strip()
     if platform not in hd.PLATFORMS:
         return err("platform 必须是 gg 或 tt", 400)
 
     from main import _parse_sheet_id
-    ss_id = _parse_sheet_id((data.get("spreadsheet_id") or "").strip())
-    sheet_name = (data.get("sheet_name") or "").strip()
+    ss_id = _parse_sheet_id(str(data.get("spreadsheet_id") or "").strip())
+    sheet_name = str(data.get("sheet_name") or "").strip()
 
     db = database.get_db()
     try:

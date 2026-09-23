@@ -520,3 +520,39 @@ class TestDashboardConfig:
 
     def test_requires_jwt(self, client):
         assert client.get("/api/huguan/dashboard").status_code == 401
+
+    def test_malformed_body_is_400_not_500(self, client):
+        """畸形 body 必须 400 —— 非 dict body，以及 platform/sheet_name 给非字符串。
+
+        这三条以前会 AttributeError 炸成 500。
+        """
+        hg, _ = _create_user(client, "_hg_badbody", role="huguan")
+        for payload in ({"platform": 5}, {"spreadsheet_id": 123},
+                        {"platform": "gg", "sheet_name": 5}):
+            resp = client.post("/api/huguan/dashboard", headers=hg, json=payload)
+            assert resp.status_code == 400, payload
+        assert client.post("/api/huguan/dashboard", headers=hg,
+                           json=[1, 2]).status_code == 400
+
+    def test_numeric_spreadsheet_id_is_coerced(self, client):
+        """数字型 spreadsheet_id 不报错，转成字符串存下来。"""
+        hg, _ = _create_user(client, "_hg_numid", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "gg", "spreadsheet_id": 123456, "sheet_name": "S",
+        })
+        assert resp.status_code == 200
+        got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert got["gg"]["spreadsheet_id"] == "123456"
+
+    def test_non_dict_platform_entry_is_tolerated(self, client):
+        """config 里平台条目是「真值非 dict」时不得抛异常（该表被别处共用）。"""
+        from huguan_dashboard import get_platform_config
+        _, uid = _create_user(client, "_hg_nondict", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", '{"gg": "just-a-string", "tt": null}'))
+        db.commit()
+        empty = {"spreadsheet_id": "", "sheet_name": ""}
+        assert get_platform_config(db, uid, "gg") == empty
+        assert get_platform_config(db, uid, "tt") == empty
+        db.close()

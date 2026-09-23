@@ -160,7 +160,9 @@ def load_config(db, user_id: int) -> dict:
 
 def get_platform_config(db, user_id: int, platform: str) -> dict:
     """取某平台的看板配置，永远返回两项（未配置时为空串，调用方无需判 None）。"""
-    entry = load_config(db, user_id).get(platform) or {}
+    entry = load_config(db, user_id).get(platform)
+    if not isinstance(entry, dict):
+        entry = {}
     return {
         "spreadsheet_id": (entry.get("spreadsheet_id") or "").strip(),
         "sheet_name": (entry.get("sheet_name") or "").strip(),
