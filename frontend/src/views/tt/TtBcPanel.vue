@@ -12,7 +12,7 @@
         <el-option label="正常" value="normal" />
         <el-option label="封禁" value="banned" />
       </el-select>
-      <OwnerFilterSelect v-model="ownerId" @change="loadData" />
+      <OwnerFilterSelect v-model="ownerId" @change="onOwnerChange" />
     </div>
 
     <!-- 表格 + 分页 — 滚动区 -->
@@ -94,6 +94,12 @@ async function loadData() {
     const res = await ttApi.listBcs(p)
     items.value = res.items || []; total.value = res.total || 0
   } catch(e) { ElMessage.error(e.response?.data?.error || '加载失败') } finally { loading.value = false }
+}
+
+// 切换用户筛选后回到第 1 页，避免当前页码超出新结果集导致列表空白且分页控件消失
+function onOwnerChange() {
+  page.value = 1
+  loadData()
 }
 
 function openCreate() {

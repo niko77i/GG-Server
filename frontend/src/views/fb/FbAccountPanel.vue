@@ -35,7 +35,7 @@
         <el-select v-model="filterBm" placeholder="全部BM" clearable style="width:180px" @change="loadData">
           <el-option v-for="b in bmOptions" :key="b.id" :label="b.name" :value="b.id" />
         </el-select>
-        <OwnerFilterSelect v-model="ownerId" @change="loadData" />
+        <OwnerFilterSelect v-model="ownerId" @change="onOwnerChange" />
         <el-button @click="loadData">刷新</el-button>
         <el-button type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">
           批量删除({{ selectedIds.length }})
@@ -134,6 +134,13 @@ async function loadData() {
     items.value = res.items; total.value = res.total
   } finally { loading.value = false }
 }
+
+// 切换用户筛选后回到第 1 页，避免当前页码超出新结果集导致列表空白且分页控件消失
+function onOwnerChange() {
+  page.value = 1
+  loadData()
+}
+
 async function loadOptions() {
   try { const r = await fbApi.bmOptions(); bmOptions.value = r.data || [] } catch(e) { console.warn('loadOptions bm', e) }
   try { const r = await client.get('/statuses/list'); statusOptions.value = r.statuses || r.data || [] } catch(e) { console.warn('loadOptions statuses', e) }

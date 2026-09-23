@@ -5886,31 +5886,38 @@ def agents_rename(aid):
     if platform == "tt":
         row = db.execute("SELECT id FROM agents WHERE id=? AND platform='tt'", (aid,)).fetchone()
     elif is_dev:
-        row = db.execute("SELECT id FROM agents WHERE id=?", (aid,)).fetchone()
+        # 一并取出 owner_id：跨用户角色（含户管）可改他人代理，重名检查须按被改代理的所有者
+        row = db.execute("SELECT id, owner_id FROM agents WHERE id=?", (aid,)).fetchone()
     else:
         row = db.execute("SELECT id FROM agents WHERE id=? AND owner_id=?", (aid, user_id)).fetchone()
     if not row:
         db.close()
         return jsonify({"success": False, "error": "代理不存在或无权修改"}), 404
-    # 检查重名
+    # 检查重名（非 TT 按被改代理的 owner_id 过滤；普通 user 的目标即自己，语义与改动前一致）
     if platform == "tt":
         dup = db.execute(
             "SELECT id FROM agents WHERE name=? AND platform='tt' AND id!=?",
             (name, aid)
         ).fetchone()
     else:
+        target_owner = row["owner_id"] if is_dev else user_id
         dup = db.execute(
             "SELECT id FROM agents WHERE name=? AND owner_id=? AND platform='gg' AND id!=?",
-            (name, user_id, aid)
+            (name, target_owner, aid)
         ).fetchone()
     if dup:
         db.close()
         return jsonify({"success": False, "error": f"代理「{name}」已存在"}), 409
-    db.execute("UPDATE agents SET name=? WHERE id=?", (name, aid))
-    db.commit()
-    # 清除缓存
-    _app_cache.clear_prefix(f"accounts:agents:{user_id}:")
-    db.close()
+    try:
+        db.execute("UPDATE agents SET name=? WHERE id=?", (name, aid))
+        db.commit()
+    except _sqlite3.IntegrityError:
+        # 兜底：重名检查与 UPDATE 之间发生竞态时，撞 UNIQUE(name, owner_id, platform)
+        return jsonify({"success": False, "error": f"代理「{name}」已存在"}), 409
+    finally:
+        db.close()
+    # 清除缓存：键以「请求者 id」打头，跨用户改名需覆盖任意请求者 × 任意 scope，故整体清空
+    _app_cache.clear_prefix("accounts:agents:")
     return jsonify({"success": True})
 
 
@@ -5953,7 +5960,8 @@ def agents_delete(aid):
     db.execute("DELETE FROM agents WHERE id=?", (aid,))
     db.execute("PRAGMA foreign_keys=ON")
     db.commit()
-    _app_cache.clear_prefix(f"accounts:agents:{user_id}:")
+    # 清除缓存：键以「请求者 id」打头，跨用户删除需覆盖任意请求者 × 任意 scope，故整体清空
+    _app_cache.clear_prefix("accounts:agents:")
     db.close()
     return jsonify({"success": True})
 

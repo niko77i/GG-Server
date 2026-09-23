@@ -2053,3 +2053,168 @@ class TestGgProductVideoDomainHuguanDenied:
         resp = client.get("/api/video/download?path=" + quote(str(f)), headers=u)
         assert resp.status_code == 200, resp.status_code
         assert resp.data == b"logged-in-bytes"
+
+
+# ==================== 代码审查修复：代理改名/删除的跨用户收口 ====================
+
+class TestAgentsRenameCrossUserDuplicate:
+    """修复 C：跨用户（含户管）改代理名时，重名检查必须按**被改代理的所有者**过滤。
+
+    改动前 `agents_rename` 的重名检查用调用者 `user_id` 当 `owner_id`：
+    户管把用户 A 的代理改成「A 名下已存在的名字」时查的是**户管自己**名下的重名，
+    查不到 → UPDATE 撞 `UNIQUE(name, owner_id, platform)` → `sqlite3.IntegrityError`
+    未被捕获 → 接口 500（且异常路径上 `db.close()` 不执行，连接泄漏）。
+
+    纯增量约束：普通 `user`（被改代理的所有者就是自己）的重名语义必须逐字不变。
+    """
+
+    def test_huguan_rename_to_existing_name_of_owner_returns_409_and_db_unchanged(self, client):
+        """户管把 A 的代理改成 A 名下已有的名字 → 409 + 原文案，且 DB 里该代理名未被改动。"""
+        hg, _ = _huguan(client, "_arc_hg")
+        _, u1 = _create_user(client, "_arc_u1", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('甲代理', ?, 'gg')", (u1,))
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('乙代理', ?, 'gg')", (u1,))
+        db.commit()
+        a_id = db.execute("SELECT id FROM agents WHERE name='甲代理'").fetchone()["id"]
+        db.close()
+
+        resp = client.put(f"/api/agents/{a_id}?platform=gg", json={"name": "乙代理"}, headers=hg)
+        assert resp.status_code == 409, resp.get_json()
+        assert resp.get_json()["error"] == "代理「乙代理」已存在"
+
+        # 负面事实：被改代理的名字不得变化，也不得凭空多出一条同名代理
+        db = database.get_db()
+        name = db.execute("SELECT name FROM agents WHERE id=?", (a_id,)).fetchone()["name"]
+        n_dup = db.execute("SELECT COUNT(*) FROM agents WHERE name='乙代理' AND owner_id=?",
+                           (u1,)).fetchone()[0]
+        db.close()
+        assert name == "甲代理", "重名请求把代理改名了 —— 重名检查未生效"
+        assert n_dup == 1, "不得新增/复制出第二条同名代理"
+
+    def test_regular_user_rename_to_own_duplicate_still_409(self, client):
+        """纯增量：普通 `user` 改自己代理为自身重复名仍是 409（与改动前逐字一致）。"""
+        me, me_id = _create_user(client, "_arc_u2", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('丙代理', ?, 'gg')", (me_id,))
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('丁代理', ?, 'gg')", (me_id,))
+        db.commit()
+        c_id = db.execute("SELECT id FROM agents WHERE name='丙代理'").fetchone()["id"]
+        db.close()
+
+        resp = client.put(f"/api/agents/{c_id}?platform=gg", json={"name": "丁代理"}, headers=me)
+        assert resp.status_code == 409, resp.get_json()
+        assert resp.get_json()["error"] == "代理「丁代理」已存在"
+        db = database.get_db()
+        name = db.execute("SELECT name FROM agents WHERE id=?", (c_id,)).fetchone()["name"]
+        db.close()
+        assert name == "丙代理"
+
+    def test_regular_user_rename_to_new_name_still_200_and_updated(self, client):
+        """纯增量对照：普通 `user` 改成全新名字仍 200 且 DB 已更新。"""
+        me, me_id = _create_user(client, "_arc_u3", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('戊代理', ?, 'gg')", (me_id,))
+        db.commit()
+        e_id = db.execute("SELECT id FROM agents WHERE name='戊代理'").fetchone()["id"]
+        db.close()
+
+        resp = client.put(f"/api/agents/{e_id}?platform=gg", json={"name": "全新代理名"}, headers=me)
+        assert resp.status_code == 200, resp.get_json()
+        db = database.get_db()
+        name = db.execute("SELECT name FROM agents WHERE id=?", (e_id,)).fetchone()["name"]
+        db.close()
+        assert name == "全新代理名"
+
+    def test_huguan_rename_to_new_name_still_200(self, client):
+        """对照行：修复 C 不得误伤户管改他人代理的正常路径。"""
+        hg, _ = _huguan(client, "_arc_hg2")
+        _, u1 = _create_user(client, "_arc_u4", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('己代理', ?, 'gg')", (u1,))
+        db.commit()
+        f_id = db.execute("SELECT id FROM agents WHERE name='己代理'").fetchone()["id"]
+        db.close()
+
+        resp = client.put(f"/api/agents/{f_id}?platform=gg", json={"name": "户管改的新名"}, headers=hg)
+        assert resp.status_code == 200, resp.get_json()
+        db = database.get_db()
+        name = db.execute("SELECT name FROM agents WHERE id=?", (f_id,)).fetchone()["name"]
+        db.close()
+        assert name == "户管改的新名"
+
+
+class TestAgentsCacheInvalidationCrossUser:
+    """修复 B：跨用户改/删代理时，代理名下拉缓存必须对**代理所有者**失效。
+
+    缓存键 `accounts:agents:{请求者 id}:{scope}` 以请求者 id 打头，而缓存值是
+    「按 `owner_filter or user_id` 查出的代理名」。改动前写接口只清 `{调用者}:` 前缀 ——
+    户管改/删他人代理时，代理**所有者**的缓存最长 120 秒仍是旧名；用户在「代理」下拉里
+    选中旧名后按名过滤匹配不到账号，列表为空。
+    """
+
+    def test_rename_by_huguan_invalidates_owner_dropdown_cache(self, client):
+        """A 先读列表把缓存写热 → 户管改 A 的代理名 → A 再读必须看到**新名**。"""
+        from cache import cache as _app_cache
+        _app_cache.clear()   # 进程级全局缓存，pytest 不重置；见 TestGgAgentsDropdownCacheInvalidation
+
+        hg, _ = _huguan(client, "_aci_hg")
+        hdr_a, a_id = _create_user(client, "_aci_u1", role="user", platform="gg")
+        db = database.get_db()
+        _mk_account(db, a_id, "GG-ACI-1", "A的账户")
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('改名前代理', ?, 'gg')", (a_id,))
+        ag = db.execute("SELECT id FROM agents WHERE name='改名前代理'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-ACI-1'", (ag,))
+        db.commit()
+        db.close()
+
+        # 第 1 步：A（所有者）读列表 → 把 `accounts:agents:{A}:{A}` 写热
+        data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
+        assert "改名前代理" in data["agents"]
+
+        # 第 2 步：**户管**（非所有者）改名
+        resp = client.put(f"/api/agents/{ag}?platform=gg", json={"name": "改名后代理"}, headers=hg)
+        assert resp.status_code == 200, resp.get_json()
+
+        # 第 3 步：A 再读 —— 缓存必须已失效，否则仍是旧名
+        data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
+        assert "改名后代理" in data["agents"]
+        assert "改名前代理" not in data["agents"]
+
+    def test_delete_by_huguan_invalidates_owner_dropdown_cache(self, client):
+        """A 先读列表把缓存写热 → 户管删 A 的代理 → A 再读不得再有该旧名。
+
+        构造要点：`agents_delete` 在有账户引用时会 409，因此第 1 步（把「待删代理」
+        写进 A 的缓存）与第 2 步之间先把账户的 `agent_id` 置空解除引用 ——
+        缓存里仍留着旧名，正是要钉住的「陈旧缓存」。
+        """
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        hg, _ = _huguan(client, "_aci_hg2")
+        hdr_a, a_id = _create_user(client, "_aci_u2", role="user", platform="gg")
+        db = database.get_db()
+        _mk_account(db, a_id, "GG-ACI-2", "A的账户")
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('待删代理', ?, 'gg')", (a_id,))
+        ag = db.execute("SELECT id FROM agents WHERE name='待删代理'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-ACI-2'", (ag,))
+        db.commit()
+        db.close()
+
+        # 第 1 步：A 读列表 → 缓存写热，含「待删代理」
+        data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
+        assert "待删代理" in data["agents"]
+
+        # 解除引用，使删除可通过账户引用检查
+        db = database.get_db()
+        db.execute("UPDATE accounts SET agent_id=NULL WHERE account_id='GG-ACI-2'")
+        db.commit()
+        db.close()
+
+        # 第 2 步：户管删除该代理
+        resp = client.delete(f"/api/agents/{ag}?platform=gg", headers=hg)
+        assert resp.status_code == 200, resp.get_json()
+
+        # 第 3 步：A 再读 —— 缓存必须已失效，旧名不得再出现
+        data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
+        assert "待删代理" not in data["agents"]
