@@ -186,6 +186,7 @@
             >
               <span style="flex:0 0 100px;font-size:14px;font-weight:500;color:#374151;">{{ row.name }}</span>
               <el-select
+                v-if="isAdmin || authStore.isHuguan"
                 v-model="row._editTz"
                 placeholder="选择时区"
                 size="small"
@@ -195,6 +196,7 @@
               >
                 <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
               </el-select>
+              <span v-else style="flex:1;font-size:13px;color:#6b7280;">{{ row.timezone || '—' }}</span>
               <el-button
                 v-if="isAdmin || authStore.isHuguan"
                 size="small"
