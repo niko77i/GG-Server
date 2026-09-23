@@ -4411,8 +4411,14 @@ def accounts_reassign(aid):
     target_owner = user_id
     if actor_role in CROSS_USER_ROLES:
         raw_owner = (data.get("owner_id") or "")
-        if str(raw_owner).strip().isdigit():
-            target_owner = int(str(raw_owner).strip())
+        raw_owner_str = str(raw_owner).strip()
+        if raw_owner_str:
+            if not (raw_owner_str.isascii() and raw_owner_str.isdigit()):
+                return jsonify({"success": False, "error": "owner_id 必须是数字"}), 400
+            try:
+                target_owner = int(raw_owner_str)
+            except (ValueError, OverflowError):
+                return jsonify({"success": False, "error": "owner_id 必须是数字"}), 400
     db = _yt_db()
     try:
         # 检查账户是否存在
@@ -4424,6 +4430,11 @@ def accounts_reassign(aid):
         if not existing:
             db.close()
             return jsonify({"success": False, "error": "账户不存在"}), 404
+        # 目标用户存在校验：转移给不存在的用户会触发 FK IntegrityError → 500，改为 400
+        if target_owner != user_id:
+            if not db.execute("SELECT 1 FROM users WHERE id=?", (target_owner,)).fetchone():
+                db.close()
+                return jsonify({"success": False, "error": "目标用户不存在"}), 400
         # 归属校验：非跨用户角色不能转移他人账户
         if int(existing["owner_id"] or 0) != user_id and not _cross_user_actor(user_id):
             db.close()

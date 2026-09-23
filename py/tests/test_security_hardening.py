@@ -328,3 +328,29 @@ class TestB4TtAgentOwnership:
         row = db.execute("SELECT 1 FROM agents WHERE id=?", (aid,)).fetchone()
         db.close()
         assert row is None
+
+
+class TestC1ReassignInvalidOwner:
+    def _setup(self, client):
+        dev, dev_id = _create_user(client, "_c1_dev", role="developer")
+        db = database.get_db()
+        _mk_account(db, dev_id, "GG-C1-1", "C1账户")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-C1-1'").fetchone()["id"]
+        db.close()
+        return dev, aid
+
+    def test_reassign_superscript_digit_returns_400(self, client):
+        dev, aid = self._setup(client)
+        resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": "²"}, headers=dev)
+        assert resp.status_code == 400
+
+    def test_reassign_nonexistent_user_returns_400(self, client):
+        dev, aid = self._setup(client)
+        resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": "99999999"}, headers=dev)
+        assert resp.status_code == 400
+
+    def test_reassign_valid_user_succeeds(self, client):
+        dev, aid = self._setup(client)
+        _, target = _create_user(client, "_c1_target", role="user")
+        resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": target}, headers=dev)
+        assert resp.status_code == 200
