@@ -145,8 +145,17 @@ function applyDefaultScope() {
 
 因此本组件在 setup 阶段先补一次 `auth.initFromStorage()`（幂等，只读 localStorage 回填，与根组件稍后的调用结果一致）。组件 setup 恒早于面板 `onMounted`，默认值于是赶在 R1 之前写进筛选状态：
 
-- `auth.user` 原本就绪（SPA 内部跳转）→ **1 次请求，值正确**；
-- `auth.user` 尚未水合（刷新）→ 本组件补完水合 → 仍是 **1 次请求，值正确**。
+- `auth.user` 原本就绪（SPA 内部跳转）→ 首次请求即带对 `owner_id`；
+- `auth.user` 尚未水合（刷新）→ 本组件补完水合 → 同上。
+
+首屏请求次数按面板分两类（均已核实）：
+
+| 面板 | 次数 | 原因 |
+|---|---|---|
+| GG 广告账户 / MCC | **1** | 走 `dedupLoader`：`onMounted` 的第二次 `load()` 被在途的首次请求吞掉，合并为一次 |
+| FB ×4 / TT ×2 | **2** | 无 dedup：本组件 setup 期的 `emit('change')` 触发一次，面板 `onMounted` 再触发一次 |
+
+FB/TT 的两次请求**值都正确**（都带默认 `owner_id`），仅多一次冗余请求、无正确性影响。若要去掉，需让主路径只 `emit('update:modelValue')` 不 `emit('change')`（仅身份晚于面板首次 load 时才补 `change`）—— 代价是引入一个 `mounted` 标志与分支，而为兜的残留边界（见下）经正常 UI 操作不可达，故**不采用**，维持现状。
 
 > 残留边界：若浏览器存在 token 但 localStorage 无缓存的 user 对象（UI 登录流程不会产生此状态，`login()` 必同时写入两者），则身份只能由异步 `fetchMe()` 补齐，此时 `user.id` 的首次变化发生在面板已 load 之后，`change` 仍会被 dedup 吞掉。该状态无法经正常操作产生，不额外加防护。
 
@@ -194,6 +203,8 @@ function applyDefaultScope() {
 | 8 | 卡尔 / developer / gg | GG 广告账户 → 点下拉 × 清空 | 切回「全部用户」且不被自动打回自己 |
 | 9 | 卡尔 / developer / gg | GG 广告账户 → 手动选「阿伟」 | 正常按其筛选，刷新前不被覆盖 |
 | 10 | 卡尔 / developer / gg | GG「MCC 管理」（刷新进入） | 同样默认「卡尔」（验证 8 处口径统一） |
+
+> 若在 Network 面板核对：GG 两个面板首屏应为 **1 次**列表请求；FB/TT 面板为 **2 次**（两次都带默认 `owner_id`，属已知冗余，见 §4.3）。
 
 ### 6.2 组件单测（若有设施）
 
