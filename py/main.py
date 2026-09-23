@@ -4420,9 +4420,16 @@ def accounts_reassign(aid):
             except (ValueError, OverflowError):
                 return jsonify({"success": False, "error": "owner_id 不合法"}), 400
             # SQLite INTEGER 是 64 位有符号：超界的值 int() 能解析，但会在
-            # sqlite3 参数绑定处抛 OverflowError（不在此处的作用域内）⇒ 必须显式挡在这里。
+            # sqlite3 参数绑定处抛 OverflowError（内建 OverflowError，非 sqlite3.OverflowError）。
+            # 该溢出发生在绑定处、不在此 try 内 ⇒ 必须显式挡在这里。
+            # 注：本 try 的 `OverflowError` 半边不可达（通过上方闸门的输入 int() 只抛 ValueError），
+            # 保留仅为防御未来把绑定移进此 try。
             if target_owner > 2**63 - 1:
                 return jsonify({"success": False, "error": "owner_id 不合法"}), 400
+    # 同上：路径参数 `<int:aid>` 由 Werkzeug IntegerConverter 解析，同样无上界。
+    # 超 int64 的 id 不可能匹配任何行，在绑定处却会抛 OverflowError ⇒ 提前按「账户不存在」返回。
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "账户不存在"}), 404
     db = _yt_db()
     try:
         # 检查账户是否存在

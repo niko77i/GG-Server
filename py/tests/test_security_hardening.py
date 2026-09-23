@@ -370,8 +370,8 @@ class TestC1ReassignInvalidOwner:
     def test_reassign_max_valid_int64_still_goes_to_existence_check(self, client):
         """边界对照：2^63-1（合法 int64 上界）必须仍走**存在性预检**而非格式闸门。
 
-        若上界写成 `>= 2**63 - 1` 或把闸门写成「长度 > 19」之类，这条会变红
-        —— 它钉住「上界不误伤合法边界值」。
+        若上界误写成 `>= 2**63 - 1`，合法边界值 2^63-1 会被格式闸门拒掉、返回
+        「owner_id 不合法」而非「目标用户不存在」，这条即变红 —— 它钉住「上界不误伤合法边界值」。
         """
         dev, aid = self._setup(client)
         resp = client.put(f"/api/accounts/{aid}/reassign",
@@ -386,7 +386,9 @@ class TestC1ReassignInvalidOwner:
         id 恰好等于 `int(该 Unicode 数字)` 的真实用户**，于是：
         - 闸门完好 ⇒ 400「owner_id 不合法」，账户归属**不变**；
         - 若 `isascii()` 被摘掉 ⇒ `int()` 解析成合法用户 id、存在性预检通过 ⇒ **转移成功** ⇒ 本用例红。
-        （仅断言状态码是不够的：摘掉 isascii 后会落到存在性预检、仍是 400 ⇒ 假绿。）
+        （刻意选「Unicode 数字映射到已存在的用户」这一构造，而非「映射到不存在的 id」：
+        后者在摘掉 isascii 后仍会落到存在性预检返回 400，只断状态码会出现假绿；
+        本构造使越权真实发生（200 + 归属被改写），状态码与归属断言双重设防。）
         """
         _, owner = _create_user(client, "_c1a_o", role="user")
         _, target = _create_user(client, "_c1a_t", role="user")
@@ -408,3 +410,16 @@ class TestC1ReassignInvalidOwner:
         ow = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()["owner_id"]
         db.close()
         assert ow == owner, "Unicode 数字绕过了 ASCII 闸门并改变了账户归属"
+
+    def test_reassign_oversized_account_id_returns_404(self, client):
+        """同族向量：路径参数 aid 也走任意精度解析（Werkzeug IntegerConverter 无上界），
+        超 int64 的 id 会在 sqlite3 参数绑定处抛 OverflowError ⇒ 改前 500 + 英文原文。
+
+        与 owner_id 向量同根因、同表现，但触发门槛更低：**普通 user 角色即可打到**。
+        超界 id 不可能存在任何行 ⇒ 语义上应是 404「账户不存在」，与既有 404 路径合流。
+        """
+        user, _ = _create_user(client, "_c1b_u", role="user")
+        for raw in ("9223372036854775808", "9" * 19, "9" * 30):
+            resp = client.put(f"/api/accounts/{raw}/reassign", json={}, headers=user)
+            assert resp.status_code == 404, f"aid={raw[:20]} 应 404，实得 {resp.status_code}"
+            assert resp.get_json()["error"] == "账户不存在"
