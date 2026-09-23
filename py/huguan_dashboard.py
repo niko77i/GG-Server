@@ -92,3 +92,45 @@ def cells_for_row(row: dict, platform: str) -> dict:
         else:
             cells[col] = "" if row.get(field) is None else str(row.get(field)).strip()
     return cells
+
+
+def parse_row(values: list, platform: str) -> dict:
+    """表 → 系统：把一行原始单元格值转成 {字段名: 字符串值}。
+
+    不可读列（定位键 C、派生列、未映射列）一律不出现在结果里，
+    `_owner_channel` 与 `_dead_flag` 是合成字段，供上层判归属与生死。
+    """
+    out = {}
+    for col, _header, field, _writable, readable in COLUMN_SPEC[platform]:
+        if not readable or field is None:
+            continue
+        i = col_index(col)
+        raw = values[i] if len(values) > i else ""
+        out[field] = ("" if raw is None else str(raw)).strip()
+    # C 列是定位键，单独取，并去掉 _text() 加的强制文本前缀
+    key_i = col_index(KEY_COL[platform])
+    raw_key = values[key_i] if len(values) > key_i else ""
+    out["account_id"] = ("" if raw_key is None else str(raw_key)).strip().lstrip("'").strip()
+    return out
+
+
+def effective_owner_name(parsed: dict) -> str:
+    """规格 §7.1：归属变更通道非空时压过当前归属列。
+
+    「表里运营列和重新分配列不一致，就以表里的重新分配为准」（用户原话）。
+    """
+    channel = (parsed.get("_owner_channel") or "").strip()
+    if channel:
+        return channel
+    return (parsed.get("owner_name") or "").strip()
+
+
+def is_dead(parsed: dict) -> bool:
+    """该行是否应判为死亡。
+
+    状态列（GG K / TT I）比 是否封户 / 是否回收 更具体，有值时以它为准。
+    """
+    status = (parsed.get("status_name") or "").strip()
+    if status:
+        return status == DEAD_STATUS
+    return (parsed.get("_dead_flag") or "").strip() == "是"

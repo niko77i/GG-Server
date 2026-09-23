@@ -198,3 +198,95 @@ class TestCellsForRow:
         cells = cells_for_row({"account_id": "1"}, "gg")
         assert cells["A"] == ""
         assert cells["K"] == ""
+
+
+# ---------- Task 3: 表→系统 ----------
+
+class TestParseRow:
+    def test_gg_parse_full_row(self):
+        from huguan_dashboard import parse_row
+        values = ["2026-09-01", "", "1234567890", "MCC-A", "美国", "渠道甲",
+                  "张三", "", "America/New_York", "大MCC-A", "存活", "位置X", "", ""]
+        p = parse_row(values, "gg")
+        assert p["account_id"] == "1234567890"
+        assert p["acquired_date"] == "2026-09-01"
+        assert p["_dead_flag"] == ""
+        assert p["mcc_name"] == "MCC-A"
+        assert p["agent_name"] == "渠道甲"
+        assert p["owner_name"] == "张三"
+        assert p["_owner_channel"] == ""
+        assert p["timezone"] == "America/New_York"
+        assert p["status_name"] == "存活"
+
+    def test_strips_leading_apostrophe_from_key(self):
+        from huguan_dashboard import parse_row
+        p = parse_row(["", "", "'1234567890"], "gg")
+        assert p["account_id"] == "1234567890"
+
+    def test_ignores_derived_and_unmapped_columns(self):
+        """J 大MCC 是派生列、E/L/M/N 不映射 —— 解析结果里都不该有。"""
+        from huguan_dashboard import parse_row
+        p = parse_row(["", "", "1", "MCC-A", "美国", "", "", "", "", "大MCC-A",
+                       "", "位置X", "999", "产品Y"], "gg")
+        assert "parent_mcc_name" not in p
+        assert set(p) == {"account_id", "acquired_date", "_dead_flag", "mcc_name",
+                          "agent_name", "owner_name", "_owner_channel",
+                          "timezone", "status_name"}
+
+    def test_short_row_pads_empty(self):
+        from huguan_dashboard import parse_row
+        p = parse_row([], "tt")
+        assert p["account_id"] == ""
+        assert p["bc_name"] == ""
+        assert p["remark"] == ""
+
+    def test_tt_parse(self):
+        from huguan_dashboard import parse_row
+        values = ["2026-09-02", "是", "7001234567890", "BC-1", "US", "渠道乙",
+                  "李四", "Asia/Shanghai", "死亡", "120.5", "位置Y", "王五", "产品X"]
+        p = parse_row(values, "tt")
+        assert p["account_id"] == "7001234567890"
+        assert p["_dead_flag"] == "是"
+        assert p["bc_name"] == "BC-1"
+        assert p["country"] == "US"
+        assert p["_owner_channel"] == "王五"   # L 换绑情况
+        assert p["consumption"] == "120.5"
+        assert p["remark"] == "产品X"
+
+    def test_whitespace_is_stripped(self):
+        from huguan_dashboard import parse_row
+        p = parse_row(["  2026-09-01  ", "", "  123  "], "gg")
+        assert p["acquired_date"] == "2026-09-01"
+        assert p["account_id"] == "123"
+
+
+class TestEffectiveOwnerName:
+    def test_channel_wins_when_present(self):
+        """规格 §7.1：运营与重新分配不一致时以重新分配为准。"""
+        from huguan_dashboard import effective_owner_name
+        p = {"owner_name": "张三", "_owner_channel": "李四"}
+        assert effective_owner_name(p) == "李四"
+
+    def test_falls_back_to_owner_when_channel_empty(self):
+        from huguan_dashboard import effective_owner_name
+        assert effective_owner_name({"owner_name": "张三", "_owner_channel": ""}) == "张三"
+
+    def test_blank_when_both_empty(self):
+        from huguan_dashboard import effective_owner_name
+        assert effective_owner_name({"owner_name": "", "_owner_channel": "  "}) == ""
+
+
+class TestIsDead:
+    def test_status_column_wins(self):
+        """状态列更具体：状态=死亡 时，是否封户 不填也算死亡。"""
+        from huguan_dashboard import is_dead
+        assert is_dead({"status_name": "死亡", "_dead_flag": ""}) is True
+
+    def test_dead_flag_fallback(self):
+        from huguan_dashboard import is_dead
+        assert is_dead({"status_name": "", "_dead_flag": "是"}) is True
+
+    def test_alive(self):
+        from huguan_dashboard import is_dead
+        assert is_dead({"status_name": "存活", "_dead_flag": ""}) is False
+        assert is_dead({"status_name": "", "_dead_flag": "否"}) is False
