@@ -1129,12 +1129,12 @@ app.register_blueprint(huguan_dashboard_bp)
 - [ ] **Step 7: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 45 passed）
+Expected: PASS（聚焦 ≥ 52 passed：Task 1–4 实测 42 条 + 本任务 7 条 + 审查修复 3 条）
 
 - [ ] **Step 8: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量累计预期 469 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 476 passed，不得低于上一任务实测值）
 
 - [ ] **Step 9: 提交**
 
@@ -1600,9 +1600,14 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 60 passed）
+Expected: PASS（聚焦 ≥ 67 passed：上一任务实测 52 条 + 本任务 15 条）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 跑全量测试确认无回归**
+
+Run: `cd py && python -m pytest tests/ -q`
+Expected: PASS（全量 ≥ 491 passed，不得低于上一任务实测值）
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add py/huguan_dashboard.py py/tests/test_huguan_dashboard.py
@@ -1977,12 +1982,12 @@ def _write_background(service, conf, rows):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 71 passed）
+Expected: PASS（聚焦 ≥ 78 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量累计预期 495 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 502 passed，不得低于上一任务实测值）
 
 - [ ] **Step 7: 提交**
 
@@ -2335,12 +2340,12 @@ def _huguan_owner_channel(user_id, platform, account_id, new_owner_id):
 - [ ] **Step 6: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 80 passed）
+Expected: PASS（聚焦 ≥ 87 passed）
 
 - [ ] **Step 7: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量累计预期 504 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 511 passed，不得低于上一任务实测值）
 
 - [ ] **Step 8: 提交**
 
@@ -2554,12 +2559,12 @@ def _huguan_owner_channel(uid, account_id, new_owner_id):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 85 passed）
+Expected: PASS（聚焦 ≥ 92 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量累计预期 509 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 516 passed，不得低于上一任务实测值）
 
 - [ ] **Step 7: 提交**
 
