@@ -329,7 +329,7 @@ body：`{"platform": "gg"|"tt", "dry_run": true}` / `{"platform": ..., "dry_run"
 统一口径（MCC / 大MCC / BC / 渠道 / 状态 / 归属都适用）：
 
 - **唯一命中才落库**；命中 0 条或 ≥2 条 → 警告，该列不落库，该行其余列照常。
-- 状态（GG K 列 / TT I 列）解析时按**该账户的 owner** 作用域查 `account_statuses(name, owner_id)`；查不到则在该 owner 下 `INSERT` 新建（对照 `main.py:4922-4931` 的现有做法）。
+- 状态（GG K 列 / TT I 列）解析时按**该账户的 owner + 平台**双作用域查 `account_statuses(name, owner_id, platform)`；查不到则在该 owner 的**该平台**下 `INSERT` 新建。**必须带平台**：`account_statuses.platform` 默认 `'gg'`（`database.py:153`），唯一约束是 `(name, platform)`（`database.py:1225`），状态下拉也按平台过滤（`main.py:6059` `/api/statuses/list`）—— 不写平台会让 TT 同步新建的状态落进 gg 命名空间，**TT 下拉里看不见、反而出现在 GG 下拉里**。既有两种写法可对照：GG 侧靠默认值吃 `'gg'`（`main.py:4042/4184/4944/5068`），TT 侧显式写 `'tt'`（`main.py:6085`、`tt_accounts_routes.py:69`）。
 - `是否封户`（GG B）与 `状态`（GG K）都能表达状态，**冲突时 K 列为准**（更具体）；`is_dead = (K == "死亡") or (B in ("是",))`，实际落库时由最终状态反推 `death_date`。TT 的 `是否回收`（B）与 `状态`（I）同理。
 
 ---
