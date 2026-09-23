@@ -711,6 +711,31 @@ class TestResolvers:
         assert resolve_status_id(db, "待优化", uid, "tt") == sid_tt
         db.close()
 
+    def test_resolve_status_id_pins_name_then_platform_argument_order(self, client):
+        """`resolve_status_id` 的第 1 / 第 4 个实参必须分别是 name / platform。
+
+        name 与 platform 被调换时，查重会变成 `WHERE name='gg' AND platform='A'`
+        —— 「A」(gg) 这个已存在的状态查不中，于是**静默新建一行**（或直接撞
+        `UNIQUE(name, platform)`），把账户的状态挂到一个刚造出来的行上，平台命名空间
+        也被污染（TT 的状态落进 gg 下拉）。两条状态的名字刻意取平台代号，让顺序错位
+        必然查不中；`uid` 是 int 也顺带挡住 owner_id / platform 互换那种写法。
+        """
+        from huguan_dashboard import resolve_status_id
+        db = database.get_db()
+        uid = _seed(db, "_r6", "赵六")
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) "
+                   "VALUES('A', ?, 'gg')", (uid,))
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) "
+                   "VALUES('B', ?, 'tt')", (uid,))
+        db.commit()
+        id_a = db.execute("SELECT id FROM account_statuses WHERE name='A'").fetchone()["id"]
+        id_b = db.execute("SELECT id FROM account_statuses WHERE name='B'").fetchone()["id"]
+        assert resolve_status_id(db, "A", uid, "gg") == id_a
+        assert resolve_status_id(db, "B", uid, "tt") == id_b
+        # 两条都在且被复用：实参错位会多出一行（或直接 IntegrityError）
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 2
+        db.close()
+
 
 class TestBuildDiff:
     def _prepare(self, client):
@@ -1073,4 +1098,112 @@ class TestBuildDiff:
         new_diff = build_diff(db, [dict(parse_row(["", "", "CLR-NEW"], "gg"), row=3)], "gg")
         assert new_diff["to_create"][0].get("clears") is None
         assert new_diff["summary"]["clears"] == 0
+        db.close()
+
+    def test_to_create_path_is_read_only_with_new_status_name(self, client):
+        """新建账户 + 系统里没有的状态名 ⇒ dry_run 只读也必须守住这条路径。
+
+        I1（dry_run 不改库）在 `build_diff` 里有两处 `_collect_updates(...,
+        create_missing=False)`（`to_create` 一处、`to_update` 一处），但原先只有更新
+        路径被钉住：删掉 `to_update` 那处的开关会红 3 条，删掉 `to_create` 这处的
+        **81 条全绿** —— 那个 Critical 级修复只覆盖了一半。对照行：库里没有 `N1-NEW`，
+        必然走 to_create 分支；K 列（GG 状态列，index 10）写的名字系统里不存在 ⇒
+        该走 `pending_status`，且此刻（含调用方收尾 commit 之后）都不得建行。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, _, _ = self._prepare(client)
+        rows = [dict(parse_row(["", "", "N1-NEW", "", "", "", "张三", "", "", "", "全新状态N1"],
+                               "gg"), row=2)]
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 0
+        diff = build_diff(db, rows, "gg")
+        db.commit()      # 调用方正常收尾的提交：不该让任何东西冒出来
+        assert db.execute("SELECT COUNT(*) AS n FROM account_statuses").fetchone()["n"] == 0
+        assert len(diff["to_create"]) == 1
+        assert diff["to_create"][0]["pending_status"] == "全新状态N1"
+        db.close()
+
+    def test_clears_ignores_columns_that_were_already_blank(self, client):
+        """`clears` 必须取自 `changed`，不能取自 `fields`。
+
+        表里空着、库里**也**空着的文本列：它在 `fields` 里（值为 `""`），但不构成任何
+        真实变更、已被 `_same_as_existing` 过滤掉。取 `fields` 会把这些「本来就空」的列
+        也算进「将清空」，让确认弹窗**虚报**清空规模（户管会以为自己要丢数据）。
+        对照构造：库里 acquired_date / timezone 本来就是 `""`，表里 A / I 列也空 ⇒
+        两列都不该进 clears。为让该行真的产出一条 to_update，K 列写一个系统里没有的
+        状态名（pending 也算真实变更）。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "SRC-1", u1, acquired_date="", timezone="")
+        rows = [dict(parse_row(["", "", "SRC-1", "", "", "", "张三", "", "", "", "全新状态SRC"],
+                               "gg"), row=2)]
+        diff = build_diff(db, rows, "gg")
+        assert len(diff["to_update"]) == 1          # 非空，下面的断言才有意义
+        item = diff["to_update"][0]
+        assert item["pending_status"] == "全新状态SRC"
+        assert item["fields"] == {}                 # 两列都是空对空，无真实变更
+        assert item["clears"] == []                 # 取 `fields` 会误报这两列
+        assert diff["summary"]["clears"] == 0
+        db.close()
+
+    def test_tt_clears_are_sorted_not_in_field_order(self, client):
+        """TT 的 `clears` 必须是字典序，不是 `_PLAIN_TEXT_FIELDS` 的插入序。
+
+        GG 的 `_PLAIN_TEXT_FIELDS["gg"]` 恰好是 `("acquired_date", "timezone")`，
+        插入序 = 字典序，所以把 `sorted()` 改成 `list()` 在 GG 上永远是绿的。TT 的插入序
+        是 `(acquired_date, country, timezone, consumption, remark)`，与字典序不同 ——
+        必须用 TT 造一条**多列同时被清空**的用例才钉得住。列下标以 COLUMN_SPEC 为准：
+        A=0 acquired_date、E=4 country、H=7 timezone、J=9 consumption、M=12 remark。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_tt_account(db, "CLR-TT", u1, acquired_date="2026-01-01", country="US",
+                         timezone="Asia/Shanghai", consumption="100", remark="备注")
+        row = [""] * 13
+        row[2] = "CLR-TT"                # C 列账户ID（定位键走 advertiser_id）
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        assert len(diff["to_update"]) == 1
+        assert diff["to_update"][0]["clears"] == [
+            "acquired_date", "consumption", "country", "remark", "timezone"]
+        assert diff["summary"]["clears"] == 5
+        db.close()
+
+    def test_existing_status_lands_in_fields_with_no_pending(self, client):
+        """系统里**已有**该状态名 ⇒ 落成 `fields["status_id"]`，`pending_status` 为 None。
+
+        这是同步里最常见的档（状态名系统里已有），但此前经 `build_diff` 零覆盖：删掉
+        `_collect_updates` 里的 `out["status_id"] = sid` 全绿 81 条，而该行被删掉后
+        「已有状态」这一档就整条失效（field 丢失 → 无变更 → 该行不进 to_update）。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "EX-1", u1, acquired_date="")
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) "
+                   "VALUES('已有状态', ?, 'gg')", (u1,))
+        db.commit()
+        sid = db.execute("SELECT id FROM account_statuses WHERE name='已有状态'"
+                         ).fetchone()["id"]
+        rows = [dict(parse_row(["", "", "EX-1", "", "", "", "张三", "", "", "", "已有状态"],
+                               "gg"), row=2)]
+        diff = build_diff(db, rows, "gg")
+        assert len(diff["to_update"]) == 1
+        item = diff["to_update"][0]
+        assert item["fields"]["status_id"] == sid
+        assert item["pending_status"] is None
+        db.close()
+
+    def test_blank_owner_row_produces_no_warning(self, client):
+        """运营列与重新分配列**都空**的表行，不得产生任何警告（尤其归属相关的噪音）。
+
+        `if want_owner_name:` 是空归属的短路；改成 `if True:` 时每个空白归属的行都会多出
+        一条 `运营「」无法识别，已跳过归属变更` 的噪音警告（`resolve_owner_id("")` 返回
+        None）。`test_blank_owner_keeps_existing_owner` 只断言 `owner_changes == []`，
+        不看 warnings，钉不住这条不变量。该行其余列全空、账户已存在且未软删，所以
+        正常情况下它是**干净**的：任何 warning 都属噪音。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, _ = self._prepare(client)
+        _seed_account(db, "OWN-5", u1)
+        diff = build_diff(db, [dict(parse_row(["", "", "OWN-5"], "gg"), row=2)], "gg")
+        assert diff["warnings"] == []
         db.close()

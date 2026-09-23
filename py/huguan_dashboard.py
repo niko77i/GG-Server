@@ -369,8 +369,9 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         if existing is None:
             db_values = _collect_updates(db, platform, p, want_owner_id, row_no, warnings,
                                          create_missing=False)
-            # 先摘掉合成键再入报告：db_values 会被 apply_diff 直接拼 INSERT 列名，
-            # 带上下划线开头的键会变成非法 SQL。
+            # 只摘 `_pending_status` 这一个合成键（它由报告层的 `pending_status` 字段承载）。
+            # `_is_dead` **故意保留在 db_values 里**，别顺手一起 pop —— apply_diff 会
+            # 自己 pop 它去同步 death_date；在这里摘掉会让新建账户的死亡标记静默丢失。
             pending = db_values.pop("_pending_status", None)
             to_create.append({
                 "row": row_no,
