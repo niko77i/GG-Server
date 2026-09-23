@@ -2128,6 +2128,32 @@ class TestCollectRowsForPush:
         assert collect_rows_for_push(db, "gg", ["NOPE"]) == []
         db.close()
 
+    def test_blank_display_name_falls_back_to_username(self, client):
+        """运营的 display_name 是空串时，运营列写 username 而不是留空。
+
+        仓库既有一致的写法是 Python 侧 `display_name or username`（main.py:4427/6738/6997）。
+        SQL 里 `COALESCE(display_name, username, '')` 只回退 NULL，**漏掉空串**这一支 ——
+        会把有归属的账户在表里写成「运营留空」。故两边都用 NULLIF 挡一层。
+        """
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_blankgg", "")
+        _seed_account(db, "P-BLANK", u1)
+        rows = collect_rows_for_push(db, "gg", ["P-BLANK"])
+        assert rows[0]["cells"]["G"] == "_push_blankgg"
+        db.close()
+
+    def test_tt_blank_display_name_falls_back_to_username(self, client):
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_blanktt", "")
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, owner_id) "
+                   "VALUES('TP-BLANK','TP-BLANK',?)", (u1,))
+        db.commit()
+        rows = collect_rows_for_push(db, "tt", ["TP-BLANK"])
+        assert rows[0]["cells"]["G"] == "_push_blanktt"
+        db.close()
+
     def test_tt_rows(self, client):
         from huguan_dashboard import collect_rows_for_push
         db = database.get_db()
@@ -2233,7 +2259,7 @@ Expected: FAIL — `ImportError: cannot import name 'collect_rows_for_push'`
 _GG_ROW_SQL = """
 SELECT a.account_id, a.acquired_date, a.death_date, a.timezone,
        m.name AS mcc_name, pm.name AS parent_mcc_name,
-       ag.name AS agent_name, COALESCE(u.display_name, u.username, '') AS owner_name,
+       ag.name AS agent_name, COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
        s.name AS status_name
 FROM accounts a
 LEFT JOIN mcc m ON a.mcc_id = m.id
@@ -2247,7 +2273,7 @@ _TT_ROW_SQL = """
 SELECT a.advertiser_id AS account_id, a.acquired_date, a.death_date, a.country,
        a.timezone, a.consumption, a.remark,
        b.name AS bc_name, ag.name AS agent_name,
-       COALESCE(u.display_name, u.username, '') AS owner_name,
+       COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
        s.name AS status_name
 FROM tt_accounts a
 LEFT JOIN tt_bcs b ON a.bc_id = b.id
@@ -2399,7 +2425,7 @@ def _huguan_owner_channel(user_id, platform, account_id, new_owner_id):
             conf = hd.get_platform_config(db, user_id, platform)
             if not conf["spreadsheet_id"] or not conf["sheet_name"]:
                 return
-            r = db.execute("SELECT COALESCE(display_name, username, '') AS n "
+            r = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username, '') AS n "
                            "FROM users WHERE id=?", (new_owner_id,)).fetchone()
             name = (r["n"] if r else "").strip()
         finally:
@@ -2423,12 +2449,12 @@ def _huguan_owner_channel(user_id, platform, account_id, new_owner_id):
 - [ ] **Step 6: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 88 passed）
+Expected: PASS（聚焦 ≥ 90 passed）
 
 - [ ] **Step 7: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量 ≥ 512 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 514 passed，不得低于上一任务实测值）
 
 - [ ] **Step 8: 提交**
 
@@ -2603,7 +2629,7 @@ def _huguan_owner_channel(uid, account_id, new_owner_id):
             conf = hd.get_platform_config(db, uid, "tt")
             if not conf["spreadsheet_id"] or not conf["sheet_name"]:
                 return
-            r = db.execute("SELECT COALESCE(display_name, username, '') AS n "
+            r = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username, '') AS n "
                            "FROM users WHERE id=?", (new_owner_id,)).fetchone()
             name = (r["n"] if r else "").strip()
         finally:
@@ -2642,12 +2668,12 @@ def _huguan_owner_channel(uid, account_id, new_owner_id):
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 93 passed）
+Expected: PASS（聚焦 ≥ 95 passed）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量 ≥ 517 passed，不得低于上一任务实测值）
+Expected: PASS（全量 ≥ 519 passed，不得低于上一任务实测值）
 
 - [ ] **Step 7: 提交**
 
