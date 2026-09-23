@@ -521,6 +521,39 @@ def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) ->
     return {"appended": len(rows)}
 
 
+def col_index(letter: str) -> int:
+    """列字母 → 0 基下标：'A' → 0、'C' → 2。"""
+    return ord(letter.strip().upper()) - 65
+
+
+def col_letter(idx: int) -> str:
+    """0 基下标 → 列字母：0 → 'A'、13 → 'N'。"""
+    return chr(65 + idx)
+
+
+def merge_ranges(cols: list) -> list:
+    """把列字母集合合并成连续区间。
+
+    ['A','B','C','D','F','G','H','I','J','K'] → ['A:D','F:K']   # E 是唯一断口
+
+    用于「一次写多列但必须绕开公式列」的场景：非连续处断开，
+    中间被跳过的列（如 GG 的 E）绝不落进任何区间，从而不被清掉。
+    """
+    idx = sorted({col_index(c) for c in cols})
+    if not idx:
+        return []
+    out = []
+    start = prev = idx[0]
+    for i in idx[1:]:
+        if i == prev + 1:
+            prev = i
+            continue
+        out.append(f"{col_letter(start)}:{col_letter(prev)}")
+        start = prev = i
+    out.append(f"{col_letter(start)}:{col_letter(prev)}")
+    return out
+
+
 def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: str) -> list[list]:
     """通用读取 Google Sheet 指定范围的值。
 
