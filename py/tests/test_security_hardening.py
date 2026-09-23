@@ -27,6 +27,20 @@ def _mk_account(db, owner_id, account_id, name="测试账户"):
     db.commit()
 
 
+def _mk_fb_pixel_bm(db, owner_id, bm_id, name="像素BM"):
+    """建一条像素BM（像素的归属由其父表 `fb_pixel_bms.owner_id` 决定），返回其 id。"""
+    db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES(?,?,?)", (name, bm_id, owner_id))
+    db.commit()
+    return db.execute("SELECT id FROM fb_pixel_bms WHERE bm_id=?", (bm_id,)).fetchone()["id"]
+
+
+def _mk_fb_pixel(db, pixel_bm_id, pixel_id, name="像素"):
+    """在指定像素BM下建一条像素（`fb_pixels.pixel_bm_id` 外键非空）。"""
+    db.execute("INSERT INTO fb_pixels(pixel_bm_id, pixel_name, pixel_id) VALUES(?,?,?)",
+               (pixel_bm_id, name, pixel_id))
+    db.commit()
+
+
 def _data_root():
     """复刻 py/main.py 的 _DATA_ROOT（非 frozen：os.path.dirname(_current_dir)，_current_dir = py/）。
 
@@ -238,3 +252,32 @@ class TestB1GgWriteOwnership:
         aid = self._mk_owned_account(client, owner_uid, "GG-B1-5")
         resp = client.post("/api/accounts/batch-update", json={"ids": [aid], "field": "timezone", "value": "UTC+9"}, headers=att)
         assert resp.status_code == 403
+
+
+class TestB2FbPixelsIsolation:
+    def test_regular_fb_user_sees_only_own_pixels(self, client):
+        hdr, u1 = _create_user(client, "_b2_u1", role="user", platform="fb")
+        _, u2 = _create_user(client, "_b2_u2", role="user", platform="fb")
+        db = database.get_db()
+        pbm1 = _mk_fb_pixel_bm(db, u1, "PBM-B2-1", "U1的像素BM")
+        pbm2 = _mk_fb_pixel_bm(db, u2, "PBM-B2-2", "U2的像素BM")
+        _mk_fb_pixel(db, pbm1, "PX-B2-1", "U1的像素")
+        _mk_fb_pixel(db, pbm2, "PX-B2-2", "U2的像素")
+        db.close()
+        resp = client.get("/api/fb/pixels/list?size=50", headers=hdr)
+        ids = {p["pixel_id"] for p in resp.get_json()["items"]}
+        assert ids == {"PX-B2-1"}      # 只含自己，不含 U2 的像素（对照行必需）
+
+    def test_developer_still_sees_all_pixels(self, client):
+        _, u1 = _create_user(client, "_b2_d_u1", role="user", platform="fb")
+        _, u2 = _create_user(client, "_b2_d_u2", role="user", platform="fb")
+        db = database.get_db()
+        pbm1 = _mk_fb_pixel_bm(db, u1, "PBM-B2D-1", "D-U1的BM")
+        pbm2 = _mk_fb_pixel_bm(db, u2, "PBM-B2D-2", "D-U2的BM")
+        _mk_fb_pixel(db, pbm1, "PX-B2D-1", "D-U1像素")
+        _mk_fb_pixel(db, pbm2, "PX-B2D-2", "D-U2像素")
+        db.close()
+        dev, _ = _create_user(client, "_b2_d_dev", role="developer", platform="fb")
+        resp = client.get("/api/fb/pixels/list?size=50", headers=dev)
+        ids = {p["pixel_id"] for p in resp.get_json()["items"]}
+        assert ids == {"PX-B2D-1", "PX-B2D-2"}

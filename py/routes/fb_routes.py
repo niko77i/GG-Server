@@ -934,11 +934,16 @@ def list_all_pixels():
     params = []
     uid = get_uid()
     role = _get_role(db, uid)
-    # 仅跨用户角色可用 owner_id 收窄；非跨用户角色维持既有查询条件不变（像素归属由父表 fb_pixel_bms 决定）
-    owner_filter = (request.args.get('owner_id') or '').strip() if role in CROSS_USER_ROLES else ''
-    if owner_filter:
+    cross_user = role in CROSS_USER_ROLES
+    # 跨用户角色可用 owner_id 收窄；非跨用户角色强制只看自己的像素（像素归属由父表 fb_pixel_bms.owner_id 决定）
+    owner_filter = (request.args.get('owner_id') or '').strip() if cross_user else ''
+    if cross_user:
+        if owner_filter:
+            where.append("p.pixel_bm_id IN (SELECT id FROM fb_pixel_bms WHERE owner_id = ?)")
+            params.append(owner_filter)
+    else:
         where.append("p.pixel_bm_id IN (SELECT id FROM fb_pixel_bms WHERE owner_id = ?)")
-        params.append(owner_filter)
+        params.append(uid)
     if search:
         where.append("(p.pixel_name LIKE ? OR p.pixel_id LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])
