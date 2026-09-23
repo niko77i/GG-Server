@@ -362,11 +362,19 @@ class TestPlatformUsersEndpoint:
 
         注意这里用 `?platform=tt` 而**不是**调用者自身的 gg —— 否则即使
         `_get_effective_platform()` 完全忽略查询参数，本用例也会通过。
+
+        两个夹具各配一个**本平台**账户：接口只列「名下有未删除账户」的人。
+        若给 `_hgpu_gg` 不配账户（或配成 TT 账户），`_hgpu_gg not in names` 就会被
+        账户过滤代为满足 —— 平台隔离一旦被破坏也不会红，那就成了空断言。
         """
         hg, _ = _huguan(client, "_hgpu_hg")  # users.platform == 'gg'
         db = database.get_db()
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_gg','x','user','gg')")
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_tt','x','user','tt')")
+        gg_id = db.execute("SELECT id FROM users WHERE username='_hgpu_gg'").fetchone()["id"]
+        tt_id = db.execute("SELECT id FROM users WHERE username='_hgpu_tt'").fetchone()["id"]
+        db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES('GG夹具户','_hgpu_gg_acc',?)", (gg_id,))
+        db.execute("INSERT INTO tt_accounts(name, advertiser_id, owner_id) VALUES('TT夹具户','_hgpu_tt_acc',?)", (tt_id,))
         db.commit()
         db.close()
         resp = client.get("/api/platform/users?platform=tt", headers=hg)
@@ -381,11 +389,18 @@ class TestPlatformUsersEndpoint:
         `_hgpu_dev` 故意插成 platform='tt'：调用者只查 platform='gg'，因此该行
         **只能**经 developer 分支出现。若把它插成 'gg'，它会被 `platform = ?`
         命中，删掉 `OR role = 'developer'` 断言也不会红 —— 那就成了空断言。
+
+        两个夹具都配 **GG**（`accounts`）账户 —— 查的是 gg 面板，接口按有效平台选表，
+        配错表或干脆不配，两条断言都会被账户过滤代为满足，同样失去守卫力。
         """
         hg, _ = _huguan(client, "_hgpu_hg2")
         db = database.get_db()
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_dev','x','developer','tt')")
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_hid','x','hidden','gg')")
+        dev_id = db.execute("SELECT id FROM users WHERE username='_hgpu_dev'").fetchone()["id"]
+        hid_id = db.execute("SELECT id FROM users WHERE username='_hgpu_hid'").fetchone()["id"]
+        db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES('dev夹具户','_hgpu_dev_acc',?)", (dev_id,))
+        db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES('hid夹具户','_hgpu_hid_acc',?)", (hid_id,))
         db.commit()
         db.close()
         resp = client.get("/api/platform/users?platform=gg", headers=hg)
@@ -399,10 +414,16 @@ class TestPlatformUsersEndpoint:
 
         本接口只挂 @jwt_required()，不像 /api/tt/users、/api/fb/users 那样挂平台
         装饰器，因此这条隔离属性只能靠本用例守护。
+
+        两个夹具各配**本平台**账户（plain 配 GG、leak 配 TT）：接口只列「名下有未删除
+        账户」的人，不配的话 `_hgpu_leak not in names` 会被账户过滤代为满足。
         """
-        u, _ = _create_user(client, "_hgpu_plain", role="user", platform="gg")
+        u, plain_id = _create_user(client, "_hgpu_plain", role="user", platform="gg")
         db = database.get_db()
         db.execute("INSERT INTO users(username, password, role, platform) VALUES('_hgpu_leak','x','user','tt')")
+        leak_id = db.execute("SELECT id FROM users WHERE username='_hgpu_leak'").fetchone()["id"]
+        db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES('plain夹具户','_hgpu_plain_acc',?)", (plain_id,))
+        db.execute("INSERT INTO tt_accounts(name, advertiser_id, owner_id) VALUES('leak夹具户','_hgpu_leak_acc',?)", (leak_id,))
         db.commit()
         db.close()
         resp = client.get("/api/platform/users?platform=tt", headers=u)
@@ -412,6 +433,76 @@ class TestPlatformUsersEndpoint:
         # 正向断言：调用者自己（platform='gg'）必须在结果里。否则若接口返回空列表，
         # 上面那条负面断言也会通过 —— 那就成了空断言。
         assert "_hgpu_plain" in names
+
+
+    def test_excludes_users_without_accounts(self, client):
+        """新口径：非户管用户在该平台 0 户时，不出现在下拉里。"""
+        hg, _ = _huguan(client, "_hgpu_hg3")
+        _, with_acc = _create_user(client, "_hgpu_with", role="user", platform="gg")
+        _, without_acc = _create_user(client, "_hgpu_without", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES('有户','_hgpu_with_acc',?)", (with_acc,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        assert resp.status_code == 200
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert "_hgpu_with" in names
+        assert "_hgpu_without" not in names
+        assert without_acc  # 夹具确实建出来了（避免上面那条负面断言因夹具不存在而恒真）
+
+    def test_deleted_account_does_not_count(self, client):
+        """新口径：「有账户」看的是**未删除**的户 —— 只剩软删除户的人同样被排除。
+
+        守卫 `a.deleted_at IS NULL`：把它删掉，本用例必红。
+        """
+        hg, _ = _huguan(client, "_hgpu_hg4")
+        _, uid = _create_user(client, "_hgpu_deleted", role="user", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO accounts(name, account_id, owner_id, deleted_at) "
+                   "VALUES('已删除户','_hgpu_del_acc',?, datetime('now','localtime'))", (uid,))
+        db.commit()
+        db.close()
+        resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        assert resp.status_code == 200
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert "_hgpu_deleted" not in names
+
+    def test_huguan_exempt_even_without_accounts(self, client):
+        """新口径：户管豁免 —— 自己在该平台 0 户也仍列出（户管管理所有户）。
+
+        守卫 `u.role = 'huguan' OR ...`：把它删掉，本用例必红。
+        """
+        hg, _ = _huguan(client, "_hgpu_hg_exempt")
+        resp = client.get("/api/platform/users?platform=gg", headers=hg)
+        assert resp.status_code == 200
+        names = {u["username"] for u in resp.get_json()["users"]}
+        assert "_hgpu_hg_exempt" in names
+
+    def test_account_table_follows_effective_platform(self, client):
+        """新口径：账户表按**有效平台**选 —— 只持 GG 户的人不进 tt 面板下拉，反之亦然。
+
+        两个夹具都用 **developer**：developer 经 `OR role = 'developer'` 必然通过基础
+        平台过滤，因此「在不在结果里」**只由账户表的选择决定** —— 把任一方向的映射弄反，
+        本用例都会红。
+
+        切勿改用普通 user 做夹具：他们会先被 `platform = ?` 挡掉，断言退化成恒真
+        （作者初版即犯此错，靠变异测试才发现）。
+        """
+        hg, _ = _huguan(client, "_hgpu_hg5")
+        _, gg_only = _create_user(client, "_hgpu_ggonly", role="developer", platform="gg")
+        _, tt_only = _create_user(client, "_hgpu_ttonly", role="developer", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES('只GG户','_hgpu_ggonly_acc',?)", (gg_only,))
+        db.execute("INSERT INTO tt_accounts(name, advertiser_id, owner_id) VALUES('只TT户','_hgpu_ttonly_acc',?)", (tt_only,))
+        db.commit()
+        db.close()
+        gg = {u["username"] for u in client.get("/api/platform/users?platform=gg", headers=hg).get_json()["users"]}
+        tt = {u["username"] for u in client.get("/api/platform/users?platform=tt", headers=hg).get_json()["users"]}
+        assert "_hgpu_ggonly" in gg, "只持 GG 户的人必须出现在 gg 面板"
+        assert "_hgpu_ggonly" not in tt, "只持 GG 户的人不该出现在 tt 面板（表选对了才会被排除）"
+        assert "_hgpu_ttonly" in tt, "只持 TT 户的人必须出现在 tt 面板"
+        assert "_hgpu_ttonly" not in gg, "只持 TT 户的人不该出现在 gg 面板（表选对了才会被排除）"
 
 
 def _mk_account(db, owner_id, account_id, name="测试账户"):
