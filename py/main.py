@@ -6013,20 +6013,33 @@ def _get_effective_platform():
     return (user or {}).get("platform", "gg")
 
 
+# 有效平台 → 该平台的账户表。表名无法用占位符参数化，故走白名单映射：
+# 用户输入进不了这个字典的键，拼接出来的表名只可能是这三个之一。
+ACCOUNT_TABLE_BY_PLATFORM = {"gg": "accounts", "fb": "fb_accounts", "tt": "tt_accounts"}
+
+
 @app.route("/api/platform/users", methods=["GET"])
 @jwt_required()
 def platform_users():
-    """当前有效平台下的用户列表，供账户面板的「全部用户」筛选下拉使用。
+    """当前有效平台下的用户列表，供账户面板的「归属人」筛选下拉使用。
 
-    口径与既有的 /api/tt/users、/api/fb/users 完全一致：
-        (platform = <有效平台> OR role = 'developer') AND role != 'hidden'
+    只列出**在该平台有未删除账户**的用户 —— 选中一个名下无户的人必然得到空表，
+    这种选项没有筛选价值。
+
+    户管（huguan）豁免：户管管理所有户，本人在该平台可能一个户都没有，仍恒列出。
+
+    「有无账户」口径 = 该平台账户表里 `deleted_at IS NULL` 的行，与
+    /api/accounts/list 等既有查询一致；软删除的户不算数。
     """
     platform = _get_effective_platform()
+    table = ACCOUNT_TABLE_BY_PLATFORM.get(platform, "accounts")  # 未知平台回退 gg，与 _get_effective_platform 的缺省一致
     db = _yt_db()
     rows = db.execute(
-        "SELECT id, username, display_name, platform FROM users "
-        "WHERE (platform = ? OR role = 'developer') AND role != 'hidden' "
-        "ORDER BY display_name, username",
+        "SELECT u.id, u.username, u.display_name, u.platform FROM users u "
+        "WHERE (u.platform = ? OR u.role = 'developer') AND u.role != 'hidden' "
+        "  AND (u.role = 'huguan' OR EXISTS ("
+        f"      SELECT 1 FROM {table} a WHERE a.owner_id = u.id AND a.deleted_at IS NULL)) "
+        "ORDER BY u.display_name, u.username",
         (platform,)
     ).fetchall()
     return jsonify({"success": True, "users": [dict(r) for r in rows]})
