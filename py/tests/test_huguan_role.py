@@ -1052,11 +1052,13 @@ class TestGgAccountOwnership:
         assert acc["owner_id"] == u1
 
     def test_regular_user_owner_id_ignored_on_reassign(self, client):
-        """回归：普通用户传 owner_id 不能把账户转给别人。
+        """回归（B-1，2026-09-23 安全加固后）：普通用户传 owner_id 不能越权转移他人账户。
 
-        reassign 的 `owner_id` 分支与 create 的**互相独立**（两处 `target_owner` 计算），
-        只测 create 会让漏改这里的情况全绿。本用例即为此设的守卫：账户原属 u1，
-        普通用户 caller 传 `owner_id=u1` 时应转给 caller 自己，而不是留在 u1 名下。
+        账户原属 u1，普通用户 caller 传 `owner_id=u1` 发起 reassign —— 该请求在
+        `target_owner` 逻辑之前即被归属校验拦截，返回 403，账户归属保持不变。
+        即 owner_id 入参不再有越权转移路径（此前会 200 且账户归 caller，正是 B-1 堵掉的缺口）。
+
+        reassign 跨用户角色的 `owner_id` 语义由 `test_huguan_reassigns_to_target_user` 守护。
         """
         _, u1 = _create_user(client, "_ggown_u5", role="user")
         hdr, me = _create_user(client, "_ggown_u6", role="user")
@@ -1065,11 +1067,11 @@ class TestGgAccountOwnership:
         aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-OWN-5'").fetchone()["id"]
         db.close()
         resp = client.put(f"/api/accounts/{aid}/reassign", json={"owner_id": u1}, headers=hdr)
-        assert resp.status_code == 200
+        assert resp.status_code == 403
         db = database.get_db()
         owner = db.execute("SELECT owner_id FROM accounts WHERE id=?", (aid,)).fetchone()["owner_id"]
         db.close()
-        assert owner == me
+        assert owner == u1
 
 
 def _mk_tt_account(db, owner_id, adv_id, name="TT账户"):
