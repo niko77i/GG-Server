@@ -17,7 +17,7 @@
 | 端点（方法 + 路径） | 取自 `url_map.iter_rules()`，即 Flask 实际注册的规则；路径参数按注册原文（如 `<int:aid>`） |
 | 是否需登录 | `需` = 有 `@jwt_required()`；`可选` = `@jwt_required(optional=True)`（**不带 token 也能进**）；`否` = 无任何 JWT 装饰器 |
 | 允许的角色 | 能**通过装饰器层**到达函数体的角色集合的**上界**。函数体内若另有判定只会更严（更严只会缩小集合）⇒ 本列回答的是「谁可能到得了」，不是「谁最终成功」 |
-| 有无归属校验 | 函数体内是否按 `owner_id` / `CROSS_USER_ROLES` / `can_modify` 等把操作对象限定到本人的行。`有` = 有；`无` = 读过函数体或实测确认没有；`未核` = **没读过，不做任何断言** |
+| 有无归属校验 | 函数体内是否按 `owner_id` / `CROSS_USER_ROLES` / `can_modify` 等把操作对象限定到本人的行。取值四种：`有` / `无`（**读过函数体或实测确认没有**）/ `未核`（**没读过，不做任何断言**）/ `不适用`（该端点语义上不存在「归属」这一维度）。后两者的区别与 `不适用` 的定义见 §1.2 |
 | 有无平台门禁 | 是否限制请求者的 `platform`（fb/gg/tt）。全站唯一一个 GG 平台守卫 `_guard_gg_platform` 经实测**已失效**（见 §3.1），故 GG 业务路由本列一律为「无」 |
 | 备注 | 前序 Task 的修复状态、已知缺口标记（`**§3.x**`）、以及该单元格结论的补充说明 |
 
@@ -28,6 +28,7 @@
 | `[已核]` | 我**逐行读过**该端点的函数体，或对其做过运行时探测；该单元格的结论有代码/实测依据 |
 | `[推断]` | **未读函数体**；结论由装饰器栈语义、或函数体符号的**机械扫描**（关键词命中，不区分「校验」还是「SELECT 列名」）推出 |
 | `[未核]` | 无法判断，不下断言 |
+| `不适用`（**取值，不是来源等级**） | 该端点**语义上不存在**「按归属校验限定到本人」这一维度，故这一格无内容可判。典型情形：匿名端点、纯全局字典/平台级列表、新建类（`owner_id` 直接取本人）、以及「操作对象是请求体本身而非某一行」的接口。**`不适用` ≠ `未核`**：前者是「没这个维度」，后者是「有这个维度我没读懂」。为忠实反映原文，本表有 39 格写作 `不适用`，其中 19 格**未附来源等级标记** —— 未附标记的格只表示「据端点语义判定不适用」，**不附加独立核实强度**，也不参与行级等级的下拉（见下）。 |
 
 - 标记**逐单元格**标注，不逐行 —— 同一行的不同单元格可以等级不同。
 - **读一行时请只看它最弱的那个单元格**。若「归属校验」为 `未核`，该行整体就不能被当作「已验证有校验」。
@@ -57,12 +58,16 @@
 | 路由总数（行数） | 298 |
 | 「允许的角色」= `[已核]`（读过函数体） | 62 |
 | 「允许的角色」= `[推断]`（装饰器/机械扫描） | 236 |
-| 「归属校验」= 有（读函数体/实测） | 58 |
+| 「归属校验」= 有（读函数体/实测） | 57 |
 | 「归属校验」= **无**（读函数体/实测，即缺口） | 29 |
-| 「归属校验」= 未核 | 211 |
+| 「归属校验」= 未核（**没读过，不下断言**） | **172**（57.7%） |
+| 「归属校验」= 不适用（语义上无此维度） | **40** |
 | 行级（「允许的角色」+「归属校验」两列的较弱者）`[已核]` | 61 |
 | 行级（「允许的角色」+「归属校验」两列的较弱者）`[推断]` | 65 |
 | 行级（「允许的角色」+「归属校验」两列的较弱者）`[未核]` | 172 |
+
+> 口径说明（修订）：57 + 29 + 172 + 40 = 298。**`未核` 与 `不适用` 是两种不同取值**，不得合并（本表初版曾把 39 处 `不适用` 并入 `未核` 报成 211，已更正）。
+> 本次两处数字变动：① 独立复核按字面重算得 `未核` **172**（初版 211 = 172 + 39 处 `不适用` 的混算）；② M-7 修订把 `GET /api/admin/users` 的「归属校验」由 `有` 改为 `不适用`（角色范围 ≠ 归属绑定）⇒ `有` 58→57、`不适用` 39→40。**行级三级 （61/65/172）不因此变动。**
 
 ## 2. 主表（逐端点，共 298 行 / 298 条规则）
 
@@ -101,7 +106,7 @@
 | `POST /api/auth/refresh` | 需 | 持 refresh token 的用户本人 [已核] | 不适用 | 不适用 | create_access_token(identity=同一 subject)，无法代他人换取 |
 | `POST /api/auth/register` | 否 | 匿名 [已核] | 不适用 | 不适用 | 自助注册入口（用户名 4-20、密码 ≥6）；是否应开放给公网属产品决策 |
 | `PUT /api/auth/telegram-username` | 需 | 本人 [已核] | 不适用 | 不适用 | 按 identity 写 users.telegram_username |
-| `GET /api/users/names` | 可选 | 匿名可读（optional）；**无 developer 过滤**（与 /api/auth/names 不同）[已核] | 不适用 | 无 [已核] | **已核观察（§3.8）**：匿名即可枚举「有产品的用户」的 id/username/display_name 且**含 developer**；与带过滤的 /api/auth/names 口径不一致 |
+| `GET /api/users/names` | 可选 | 匿名可读（optional）；**无 developer 过滤**（与 /api/auth/names 不同）[已核] | 不适用 | 无 [已核] | **正式缺口（§3.11，本轮由 §3.8 升入）**：匿名即可枚举「有产品的用户」的 id/username/display_name 且**含 developer**；与带过滤的 /api/auth/names 口径不一致，实测匿名两端点对照见 §3.11 |
 
 ### 2.3 GG 账号域 /api/accounts/*（17 条）
 
@@ -157,7 +162,7 @@ MCC、MCC 层级、地区、状态、商务人员、代理、平台用户
 | `DELETE /api/sales-persons/<int:sid>` | 需 | developer/admin/huguan [推断] | 未核 | 无（GG 专用守卫实际失效）[已核] | 同上；I-2 路径参数 |
 | `PUT /api/sales-persons/<int:sid>` | 需 | developer/admin/huguan [推断] | 未核 | 无（GG 专用守卫实际失效）[已核] | 与 B-5 同批收紧到 GLOBAL_OPTION_ROLES；I-2 路径参数 |
 | `POST /api/sales-persons/create` | 需 | 任意已登录用户 [推断] | 不适用（owner_id=本人）[推断] | 无（GG 专用守卫实际失效）[已核] | **B-3 已裁决（2026-09-23）：属产品功能，有意保留，不是缺口** |
-| `GET /api/sales-persons/list` | 需 | 任意已登录；按 platform 全量（**不按 owner**）[已核] | 不适用 [已核] | 无（GG 专用守卫实际失效）[已核] | 同平台任意用户可见全部商务人员姓名（跨户可见，低危） |
+| `GET /api/sales-persons/list` | 需 | 任意已登录；按 platform 全量（**不按 owner**）[已核] | 不适用 [已核] | 无（GG 专用守卫实际失效）[已核] | 同平台任意用户可见全部商务人员姓名（跨户可见；**未定级**） |
 | `DELETE /api/statuses/<int:sid>` | 需 | developer/admin/huguan [推断] | 未核 | 无（GG 专用守卫实际失效）[已核] | I-2 路径参数（见 §3.2） |
 | `PUT /api/statuses/<int:sid>` | 需 | developer/admin/huguan [推断] | 未核 | 无（GG 专用守卫实际失效）[已核] | I-2 路径参数（见 §3.2） |
 | `POST /api/statuses/create` | 需 | 任意已登录用户 [推断] | 不适用 [推断] | 无（GG 专用守卫实际失效）[已核] |  |
@@ -173,7 +178,7 @@ MCC、MCC 层级、地区、状态、商务人员、代理、平台用户
 | `POST /api/admin/data/import` | 需（同上）[已核] | 仅 developer/admin [已核] | 有（_can_access_user_data）[已核] | 不适用 | 越权目标数据导入被 403 挡住 |
 | `POST /api/admin/trigger-delist-check` | 需 | 体内仅出现 "developer"（机械扫描）⇒ 推断仅 developer [推断] | 未核 | 不适用 |  |
 | `POST /api/admin/trigger-weekly-cleanup` | 需 | 仅 developer [推断] | 未核 | 不适用 |  |
-| `GET /api/admin/users` | 需 | developer / admin / **huguan**（体内白名单 `role not in ('developer','admin','huguan')`）[已核] | 有（huguan 被 role_filter 限定为只看 huguan；[已核]） | 不适用 | **勘误 (2) 的靶心**：路径是 /api/admin/ 但**对 huguan 放行**；机械扫描若不把 'huguan' 列入关键词就会漏判 |
+| `GET /api/admin/users` | 需 | developer / admin / **huguan**（体内白名单 `role not in ('developer','admin','huguan')`）[已核] | 不适用（`role_filter` 是**角色可见范围**，非 §1.1 定义的归属绑定）[已核] | 不适用 | **勘误 (2) 的靶心**：路径是 /api/admin/ 但**对 huguan 放行**；机械扫描若不把 'huguan' 列入关键词就会漏判。**M-7 修订**：`py/main.py:7812` `role_filter = "huguan" if user["role"]=="huguan" else None` —— 限的是**角色维度**（huguan 只看 huguan），**不是** `owner_id` 绑定；developer/admin **无任何范围限制**（属用户管理页设计）。初版此格写「有」是把角色范围误记为归属校验，已更正 |
 | `DELETE /api/admin/users/<int:uid>` | 需 | developer / admin / huguan [已核] | 有（_check_modify_user；uid==self 阻断）[已核] | 不适用 | I-2 路径参数 |
 | `PUT /api/admin/users/<int:uid>` | 需 | developer / admin / huguan [已核] | 有（_check_modify_user + developer 目标保护）[已核] | 不适用 | I-2 路径参数 |
 | `PUT /api/admin/users/<int:uid>/password` | 需 | developer / admin / huguan [已核] | 有（_check_modify_user + developer 目标保护）[已核] | 不适用 | 重置他人密码；I-2 路径参数 |
@@ -183,9 +188,9 @@ MCC、MCC 层级、地区、状态、商务人员、代理、平台用户
 | `POST /api/admin/users/create` | 需 | developer / admin / huguan [已核] | 不适用（新建；huguan 创建时 role 被 _huguan_allowed_roles 强制）[已核] | 不适用 | 同上；huguan 建号时请求体的 role 被强制改写 |
 | `GET /api/audit-log/list` | 需 | 任意已登录（非 huguan）[已核] | 未核 | 无 [已核] | 可见范围未核（是否按 actor 过滤） |
 | `POST /api/audit-log/restore/<int:log_id>` | 需 | 仅 developer（体内 `role != "developer"` 字面量）[推断] | 未核 | 无 [已核] | 回滚操作；I-2 路径参数 |
-| `POST /api/browse-file` | 可选 | 匿名可用；带 token 时作用域=本人 [推断] | 未核 | 无 [已核] | **待核**：optional ⇒ 不带 token 也能调；文件浏览类接口的控制逻辑未读 |
+| `POST /api/browse-file` | 可选 | 匿名可用；带 token 时作用域=本人 [推断] | 未核 | 无 [已核] | **补记（I-1 修复轮）**：函数首行有 `_can_browse()` 403 闸门（本机或 developer/admin），控制逻辑**已核**；本节「归属校验」格因该端点不操作任何带 `owner_id` 的数据行，本应记 `不适用`，为保持与 §1.4 分布口径一致仍保守保留 `未核` |
 | `POST /api/browse-folder` | 可选 | 匿名可用；带 token 时作用域=本人 [推断] | 未核 | 无 [已核] | 同上 |
-| `POST /api/browse-save` | 可选 | 匿名可用；带 token 时作用域=本人 [推断] | 未核 | 无 [已核] | 同上；**写**本地文件系统 |
+| `POST /api/browse-save` | 可选 | 匿名可用；带 token 时作用域=本人 [推断] | 未核 | 无 [已核] | 同上；**只弹「另存为」对话框并把路径回给调用方，服务端不写盘**（初版「写本地文件系统」为**事实错误，已删除**，见 §3.8-5） |
 | `GET /api/config/ai` | 需 | 任意已登录，仅本人 ai_analysis_{uid} [已核] | 有（按 identity 分键）[已核] | 无 [已核] |  |
 | `POST /api/config/ai` | 需 | 任意已登录用户 [推断] | 未核 | 无 [已核] |  |
 | `GET /api/config/google-sheets` | 需 | 任意已登录用户 [推断] | 未核 | 无 [已核] |  |
@@ -201,7 +206,7 @@ MCC、MCC 层级、地区、状态、商务人员、代理、平台用户
 | `POST /api/fonts/mark-used` | 需 | 任意已登录用户 [推断] | 未核 | 无 [已核] | A 类 13 条之一，Task 1 已补 |
 | `GET /api/fonts/preview` | 需 | 任意已登录用户 [推断] | 未核 | 无 [已核] | A 类 13 条之一，Task 1 已补 |
 | `POST /api/fonts/upload` | 需 | 任意已登录用户 [推断] | 未核 | 无 [已核] | A 类 13 条之一，Task 1 已补 |
-| `GET /api/settings/account` | 可选 | 匿名可读（装饰器为 optional）；读到的内容范围未核 [推断] | 未核 | 无 [已核] | **待核**：optional 意味着不带 token 也能调，而该接口读的是全局 tags（充值表 ID / 表格映射） |
+| `GET /api/settings/account` | 可选 | 匿名可读（装饰器为 optional）[已核] | 未核 | 无 [已核] | **已确认（M-9 修订）**：独立复核实测匿名（零 token）`GET /api/settings/account` → **200**，回传全局 `sheet_mappings`（含 `my_dashboard`/`received_accounts`）与 `recharge_sheet_id` ⇒ **匿名可读已确认**（全局配置信息暴露）。原文标「待核」，本轮闭合 |
 | `POST /api/settings/account` | 需 | 任意已登录；只有 sheet_mappings 的全局写入被体内 is_admin(developer/admin) 挡，recharge_sheet_id 的全局写入**无角色门禁** [已核] | 不适用 [已核] | 无 [已核] | **已核观察（§3.8）**：recharge_sheet_id 落入全局 tags，任意登录用户可改 |
 | `GET /api/tasks` | 需 | 非 huguan [推断] | 未核 | 无 [已核] |  |
 | `POST /api/translate` | 需 | 任意已登录用户 [推断] | 未核 | 无 [已核] | A 类 13 条之一，Task 1 已补 @jwt_required() |
@@ -325,7 +330,7 @@ B-2 / B-6 / B-7 与本次新发现的同族缺口集中在此
 | `POST /api/fb/bms/<int:bid>/ban-and-migrate` | 需 | FB 平台用户 或 developer/huguan [推断] | **无 [已核]** | 有（@fb_required → require_platform('fb')）[推断] | 封禁+迁移，写操作；**同族缺口（§3.5）** |
 | `POST /api/fb/bms/create` | 需 | FB 平台用户 或 developer/huguan [推断] | 不适用（owner_id=本人）[已核] | 有（@fb_required → require_platform('fb')）[推断] |  |
 | `GET /api/fb/bms/list` | 需 | FB 平台用户 或 developer/huguan [推断] | 有（本人或共享作用域）[已核] | 有（@fb_required → require_platform('fb')）[推断] |  |
-| `GET /api/fb/bms/options` | 需 | FB 平台用户 或 developer/huguan [推断] | **无 [已核]** | 有（@fb_required → require_platform('fb')）[推断] | 返回**全库** BM 选项（跨租户可见，低危） |
+| `GET /api/fb/bms/options` | 需 | FB 平台用户 或 developer/huguan [推断] | **无 [已核]** | 有（@fb_required → require_platform('fb')）[推断] | 返回**全库** BM 选项（跨租户可见；**未定级**） |
 | `GET /api/fb/bms/unified` | 需 | FB 平台用户 或 developer/huguan [推断] | 有 [已核] | 有（@fb_required → require_platform('fb')）[推断] |  |
 | `POST /api/fb/extract/check-duplicates` | 需 | FB 平台用户 或 developer/huguan [推断] | 未核 | 有（@fb_required → require_platform('fb')）[推断] | **待核**：去重检查是否跨租户比对 |
 | `POST /api/fb/extract/parse` | 需 | FB 平台用户 或 developer/huguan [推断] | 未核 | 有（@fb_required → require_platform('fb')）[推断] |  |
@@ -338,7 +343,7 @@ B-2 / B-6 / B-7 与本次新发现的同族缺口集中在此
 | `POST /api/fb/pixel-bms/<int:bid>/pixels` | 需 | FB 平台用户 或 developer/huguan [推断] | **无 [已核]** | 有（@fb_required → require_platform('fb')）[推断] | **B-6 已知缺口（§3.5）**：create_pixel 无归属校验 |
 | `POST /api/fb/pixel-bms/create` | 需 | FB 平台用户 或 developer/huguan [推断] | 不适用（owner_id=本人）[已核] | 有（@fb_required → require_platform('fb')）[推断] |  |
 | `GET /api/fb/pixel-bms/list` | 需 | FB 平台用户 或 developer/huguan [推断] | 有（本人作用域）[已核] | 有（@fb_required → require_platform('fb')）[推断] |  |
-| `GET /api/fb/pixel-bms/options` | 需 | FB 平台用户 或 developer/huguan [推断] | **无 [已核]** | 有（@fb_required → require_platform('fb')）[推断] | 返回**全库** pixel-bm 选项（跨租户可见，低危） |
+| `GET /api/fb/pixel-bms/options` | 需 | FB 平台用户 或 developer/huguan [推断] | **无 [已核]** | 有（@fb_required → require_platform('fb')）[推断] | 返回**全库** pixel-bm 选项（跨租户可见；**未定级**） |
 | `DELETE /api/fb/pixels/<int:pxid>` | 需 | FB 平台用户 或 developer/huguan [推断] | **无 [已核]** | 有（@fb_required → require_platform('fb')）[推断] | **B-6 已知缺口（§3.5）** |
 | `PUT /api/fb/pixels/<int:pxid>` | 需 | FB 平台用户 或 developer/huguan [推断] | **无 [已核]** | 有（@fb_required → require_platform('fb')）[推断] | **B-6 已知缺口（§3.5）** |
 | `GET /api/fb/pixels/list` | 需 | FB 平台用户 或 developer/huguan [推断] | 有（B-2 已修：非跨用户分支强制本人 owner_id）[已核] | 有（@fb_required → require_platform('fb')）[推断] | B-2 项，Task 4 已修；测试含「必须被排除」的对照行 |
@@ -441,13 +446,18 @@ TT 账户、充值、产品、包、回收原因
 
 ### 3.1 GG 业务路由**没有有效的平台隔离**（新证据，运行时实测）★
 
-`py/main.py:168-200` 的 `_guard_gg_platform`（`@app.before_request`）是**唯一**打算给 GG 业务路由做平台隔离的地方，但它在**任何情况下都不会拦住请求**：`get_jwt_identity()` 在未经过 `@jwt_required()` 的视图外调用会抛 `RuntimeError`，被它自己的 `except Exception: return None` 吞掉 ⇒ 守卫恒返回 `None`。
+`py/main.py:167-199`（`@app.before_request` 在 `:167`，`def _guard_gg_platform():` 在 `:168`，末行 `return None` 在 `:199`）的 `_guard_gg_platform` 是**唯一**打算给 GG 业务路由做平台隔离的地方，但它在**当前代码路径下恒返回 `None`**：`get_jwt_identity()` 在未经过 `@jwt_required()` 的视图外调用会抛 `RuntimeError`，被它自己的 `except Exception: return None` 吞掉，因而 `:196-198` 的 `err_resp = _require_platform('gg')` 分支**不可达**。
+
+> **措辞修订（M-4）**：初版写作「在**任何情况下**都不会拦住请求」，**过强**。实测该分支本身是**活的** —— 直接调用 `_require_platform('gg')` 对 FB 用户返回真值 `(<Response 47 bytes [200 OK]>, 401)` ⇒ **若 `get_jwt_identity()` 不抛，守卫生效**。准确表述是「**当前代码路径下不可达**」，不是「任何情况下不可能」。另查：`flask_jwt_extended 4.7.4` **未注册任何 `before_request`**（全包 grep 0 命中），`py/main.py` 的另两个 `before_request` 也不调 `verify_jwt_in_request` ⇒ 今日无任何来源会预置 JWT 上下文。
 
 **实测（Flask test client，只读探测）**：一个 FB 平台用户的 token 访问 GG 业务路由，全部 **200**：
 `/api/accounts/list`、`/api/mcc/list`、`/api/products/list`、`/api/youtube/list`、`/api/ad-reports/dates`、`/api/scrape/users`。
 
 ⇒ 结论：**GG 业务域当前没有任何平台级隔离**；FB/TT 用户可读写 GG 数据（能否越权取决于各端点的归属校验，而归属校验只在部分端点存在）。设计文档 §九-3 已记「当前没有任何平台级隔离」，本表把它从「设计判断」升级为**实测**。
-另注：`_GG_ONLY_PREFIXES` 之外的大量 GG 域（`/api/copywriting`、`/api/recharge`、`/api/config` 等）本就被该守卫**显式跳过**，即使守卫生效也不覆盖。
+另注：`_GG_ONLY_PREFIXES` 之外的大量 GG 域本就不被该守卫覆盖，但**归因要分清**（M-5 修订）：
+- `/api/recharge`、`/api/config` 出现在 `:180-185` 的**跳过清单**里 ⇒ 确为**显式跳过**。
+- `/api/copywriting` **不是**被显式跳过的 —— 该清单里写的是 **`'/api/copywritings'`（多一个 s）**，而真实路由前缀是 `/api/copywriting/`（单数，`py/main.py:7568/7595/7627/7650/7673`）⇒ **该清单条目永不匹配，是一条死条目**。`/api/copywriting/*` 不被守卫覆盖的**真实原因**是它**不在 `_GG_ONLY_PREFIXES` 里**。
+- ⚠️ 这条死条目本身值得单列（**非缺口，属代码卫生问题**）：跳过清单里存在永不匹配的前缀，说明该清单与真实路由前缀之间**没有任何守护测试**。
 
 ### 3.2 I-2：`<int:...>` 路由对超大整数路径参数无防护（未修，待裁决）
 
@@ -488,6 +498,8 @@ TT 账户、充值、产品、包、回收原因
 
 **建议**：按 B-2 的修法（照抄同文件已有 `owner_filter` 写法）对整族统一收口，而不是逐条打补丁 —— 否则修完 PUT 仍会漏 DELETE / detail / batch-*。
 
+**修复方向的重要补充（独立复核建议，非缺口本身）**：`POST /api/mcc/<int:mid>/link` **有前端调用方** —— `frontend/src/api/accounts.js:31` 的 `link: (id) => api.post('/mcc/${id}/link')` → `stores/accounts.js:59 linkMcc` → `components/MccModal.vue:64-84`，对应产品功能「MCC 已存在（属于 X），是否关联到您的列表？」。⇒ 服务端缺的是**所有者同意**，**不是「忘了写校验」**。**修复时不能直接删端点**，应补 owner/shared 判定，或改造成「申请 / 对方确认」语义。其余各条（`accounts/lookup`、`batch-lookup`、`mcc/<mid>/detail`、FB 域各写接口）经复核确认属纯缺失校验，可按上文统一收口。
+
 ### 3.6 I-3：regions 的旁路写入口（未修，待裁决）
 
 `/api/ad-reports/save`（调用点 `py/main.py:8810`）与 `/api/google-sheets/update-zuobiao`（调用点 `py/main.py:6837`）都会走到 `_auto_link_mcc_and_accounts`（`def` 在 `py/main.py:8718`），其中 `py/main.py:8738` 执行 `INSERT OR IGNORE INTO regions(name, timezone) VALUES(?,?)` —— 于是**任意登录用户**都能通过保存广告报告来给全局 `regions` 表补建地区，绕过 Task 6 刚给 `/api/regions/create` 加的 `GLOBAL_OPTION_ROLES` 门禁。
@@ -497,15 +509,19 @@ TT 账户、充值、产品、包、回收原因
 
 `py/routes/huguan_dashboard_routes.py:127` 仍有一处同族死 `_app_cache.delete(f"accounts:statuses:{...}")`（全库无任何该键的写入）。Task 9 勘误 (3) 判定：**有守护测试**，清理会动测试，故未清。
 
-### 3.8 其他已核但未处理的观察（低危，供参考）
+### 3.8 其他已核未处理的观察（**未定级**，供参考）
+
+> **本节不定级。** 初版曾把本节标为「低危」——**该定级已被撤回**：独立复核指出本节既有被**高估**的条目（原第 5 条），也有被**低估**的条目（原第 7 条，已升入 §3.11）。**定级是用户的裁决权，本表不替用户定级。** 本节请当「观察清单」读，不要当「定级结论」用。
 
 1. `/api/settings/account` POST：`sheet_mappings` 的全局写入被体内 `is_admin`（developer/admin）挡住，但 **`recharge_sheet_id` 的全局写入没有任何角色门禁** —— 任意登录用户可改全局充值表 ID（影响所有用户）。
 2. `/api/mcc/create`：当传入的 `mcc_id` 已属他人时，响应里带 `owner_name`（`users.display_name`/`username`）⇒ 可用于探测任意 `mcc_id` 的归属人。
 3. `/api/sales-persons/list`、`/api/fb/users`、`/api/platform/users`：平台级全量列表，含跨户用户名/展示名（有意设计，但属可枚举面）。
 4. `/api/fb/accounts/create`：参数缺失分支写作 `return err('...'), 400`，产生**嵌套 tuple** ⇒ 该路径抛 `TypeError` 而非返回 400（预先存在，与本次鉴权主题无关，仅记录）。
-5. `/api/browse-file`、`/api/browse-folder`、`/api/browse-save` 是 `@jwt_required(optional=True)` ⇒ **不带 token 也能调**，且 `browse-save` 会**写本地文件系统**；其路径控制逻辑本次未读（表中标 `未核`）。
-6. `/api/settings/account` GET 同为 `optional`，读的是全局配置（充值表 ID / 表格映射）—— 是否匿名可读**待核**。
-7. `/api/users/names`（`py/main.py:7741`）是 `@jwt_required(optional=True)` 且**体内无 developer 过滤** ⇒ **匿名**即可枚举「有产品的用户」的 `id`/`username`/`display_name`，**且含 developer 账号**。对照 `/api/auth/names`（同为可选登录，但非 developer 调用者会加 `AND u.role != 'developer'`）—— 两个同名族接口的可见口径**不一致**，`/api/users/names` 是更宽的那个。
+5. `/api/browse-file`、`/api/browse-folder`、`/api/browse-save` 是 `@jwt_required(optional=True)` ⇒ **装饰器层不带 token 也能进**；但**三个端点函数首行都调用 `_can_browse()`**（`py/main.py:7346-7355`），不满足则 `return ..., 403`。`_can_browse()` 的准入条件是：**`_is_local_request()` 为真**（`request.remote_addr ∈ {"127.0.0.1", "::1", "localhost"}`，`:7113-7116`）**或** `role ∈ {developer, admin}`。⇒ 真实能力是：**符合条件的调用方可让服务端弹出一个原生文件对话框，并把用户所选路径回给调用方**；`browse-save` 只调 `_native_save_dialog` → `_ps_save_dialog_fast`（`:7148-7161`，起 PowerShell 的 `System.Windows.Forms.SaveFileDialog` 并回传 `$d.FileName`），**服务端不写盘、不读盘、不回传文件内容**（`browse_save()` 全文见 `:7381-7392`）。
+   - ⚠️ **修订说明**：本表初版此条写作「`browse-save` 会**写本地文件系统**」，**该断言经独立复核判定为事实错误，已删除**。据此断言排出的优先级、或据此认为存在「匿名任意文件写入口」的推论，一律不成立。
+   - ↳ **独立待核项（本表未验证，非确认缺口）**：`_is_local_request()` 判的是 `request.remote_addr`。**在反向代理 / 隧道部署下，代理回源时 `remote_addr` 的真实取值本表未验证** —— 若部署把代理请求判为「本机」，则该 403 闸门在生产环境下可能失效。**标为「待核」，不得写成确认缺口。**
+6. `/api/settings/account` GET 同为 `optional`，读的是全局配置（充值表 ID / 表格映射）—— **已确认匿名可读**（独立复核实测：匿名 `GET /api/settings/account` → 200，回传全局 `sheet_mappings` 与 `recharge_sheet_id`）。原文标「待核」，本轮已闭合为「已确认」。
+7. `/api/users/names`（原第 7 条）**已升入 §3.11 正式缺口**，见该节。
 
 ### 3.9 疑点（**未确定为缺口**，请勿据此直接改代码）
 
@@ -520,7 +536,7 @@ TT 账户、充值、产品、包、回收原因
 
 | 项 | 内容 | 状态 |
 |---|---|---|
-| A 类 13 条 | `scrape/download`、`image`、`fonts/*`(7)、`font-file`、`google-ads/*`(2)、`google-sheets/status`、`translate` | **11 条已补 `@jwt_required()`**；`/api/image`、`/api/font-file` 为**有意保留匿名**（扩展名白名单 + realpath 目录包含）。另有 Task 20 的 3 条（`video/download`、`audio-replace/download`、`audio`）仍是 **optional**（前端不带头，见 §3.1 注） |
+| A 类 13 条 | `scrape/download`、`image`、`fonts/*`(6)、`font-file`、`google-ads/*`(2)、`google-sheets/status`、`translate` | **10 条已补 `@jwt_required()`**（`google-ads/*`(2)、`google-sheets/status`、`translate`、`fonts/*`(6)）；**1 条为 `optional`**（`/api/scrape/download`）；**2 条有意保留匿名**（`/api/image`、`/api/font-file`，扩展名白名单 + realpath 目录包含）。另有 Task 20 的 3 条（`video/download`、`audio-replace/download`、`audio`）仍是 **optional**（前端 `window.open` / `<audio src>` 不带 Authorization 头，见 §2.1 对应行备注） |
 | B-1 | GG 三处写端点归属校验（`accounts_update`/`accounts_reassign`/`accounts_batch_update`） | **已修**（Task 7，含修复轮 2 的 int64 上界与同族 `aid` 向量） |
 | B-2 | `fb_pixels` 跨租户 | **已修**（Task 4，测试含「必须被排除」对照行） |
 | B-3 | `sales-persons/create` 无角色白名单 | **已裁决：不改代码**（属产品功能） |
@@ -533,6 +549,18 @@ TT 账户、充值、产品、包、回收原因
 | D-2 | `accounts_batch_delete` 谎报条数 | **已修**（Task 9，返回真实删除条数） |
 | D-3 | —— | 复核后**不成立，已划掉** |
 
+### 3.11 `/api/users/names` 匿名枚举用户（含 developer）（未修）★
+
+> 本节由 §3.8 原第 7 条**升入**（独立复核裁定：该项的定级被低估）。**未重编号 §3.1–§3.10**，以避免文档内交叉引用漂移。
+
+- **端点**：`GET /api/users/names`（`py/main.py:7739-7758`），装饰器为 `@jwt_required(optional=True)`，**体内无 developer 过滤**。
+- **实测（独立复核，零 token）**：匿名 `GET /api/users/names` → **200**，返回 `[{"id":2,"username":"alice"},{"id":5,"username":"devel"}]` —— **含 `developer` 账号**；对照匿名 `GET /api/auth/names` → **200** `[{"id":2,"platform":"gg","username":"alice"}]`，`developer` 被 `AND u.role != 'developer'`（`py/routes/auth_routes.py:177-205`）滤掉。
+- **为何升为正式缺口**：
+  1. **可达性轴不同**：§3.5 全部条目都需要**一个已登录账号**；本条**零账号**即可，属设计文档 §3.1 定义的「完全不需要登录即可调用」这一类，而该类在本计划里被定为**最高优先级**。本表已把同性质的 A 类 13 条单列成节（§2.1），却把本条放进 §3.8 观察清单 —— **同类不同判，已更正**。
+  2. **有意性对照**：`/api/auth/names` 对匿名调用者**特意**加了 `role != 'developer'` 过滤 ⇒「匿名不得看见 developer」是**既定设计意图**，`/api/users/names` 是**漏网的那个**（两端点同用途，前端分别调用 —— `ProductDetailModal.vue:217`、`ProductPanel.vue:206`）。
+  3. **可利用性**：匿名可枚举「有产品的用户」的 `id` / `username` / `display_name`，**含 developer** ⇒ 为后续针对高权限账号的定向攻击（撞库、社工、钓鱼）提供目标清单；`id` 还是大量接口路径参数的主键。
+- **相对定级**：独立复核建议 **Medium**；并给出与 §3.5 的相对次序 —— **§3.5（已登录的跨租户读写，破坏数据完整性/租户隔离）> §3.11（匿名信息泄露，不改数据、不涉凭据，属枚举面）> §3.8 其余**。**最终定级由用户裁决，本表不替用户定级。**
+- 原始观察（保留）：两个同名族接口的可见口径**不一致**，`/api/users/names` 是更宽的那个。
 ## 4. 本次交付物的证据边界
 
 ### 4.1 逐条核过的（`[已核]` 的依据）
@@ -554,7 +582,7 @@ TT 账户、充值、产品、包、回收原因
 
 ### 4.3 **没有**验证什么（结论边界）
 
-1. **298 行中有 211 行的「归属校验」列是 `未核`（约 71%）**（含 1 行 Flask 内置 `static`，非应用端点）。这些行本表**不为它们背书**，既不背书「有校验」也不背书「无校验」。另有 236 行的「允许的角色」列是 `[推断]`（约 79%），同样只是**装饰器层的上界**，不是最终准入结论。
+1. **298 行中有 172 行的「归属校验」列是 `未核`（57.7%）**（另有 39 行是 `不适用`，见 §1.2）。这 172 行本表**不为它们背书**，既不背书「有校验」也不背书「无校验」。另有 236 行的「允许的角色」列是 `[推断]`（约 79%），同样只是**装饰器层的上界**，不是最终准入结论。
 2. **未跑浏览器、未做端到端 UI 验证**；运行时探测只覆盖了 §4.1 列出的少数端点，其余 `[已核]` 结论来自**静态阅读**。
 3. **未做持久化影响评估**：实测中的写操作（改 FB 的 BM/户/产品/报告名）发生在**探测用的临时数据库/测试客户端**环境，未评估生产数据的历史污染。
 4. **前端未核**：本表只覆盖后端路由，**未**核对前端是否会绕过（例如某些页面直链可达、某些入口对普通用户可见）。设计文档 §3.1 已指出 `/toolkit/zuobiao`、`/toolkit/translate` 可直链打开。
@@ -566,7 +594,8 @@ TT 账户、充值、产品、包、回收原因
 ### 4.4 扫描脚本的对照验证结果（勘误 (1) 强制项）
 
 - **结论：计划原稿给的扫描脚本是错的，我修了脚本后才用它。**
-- **症状**：原稿从 `inspect.getsourcelines(view)` 返回的行号 `start` **向上**扫 `start-2` 起的连续 `@` 行。而 `co_firstlineno` 对**带装饰器的函数**指向的是**第一个装饰器所在行**，不是 `def` 行 ⇒ 向上扫等于从装饰器栈**外侧**往外找，**恒得到空栈**。实测症状：`PUT /api/accounts/<int:aid>/reassign` 被报成「无装饰器」，全仓 `require_platform`/`tt_write_required`/`no_huguan` 命中数为 0。
+- **症状**：原稿从 `inspect.getsourcelines(view)` 返回的行号 `start` **向上**扫 `start-2` 起的连续 `@` 行。而 `co_firstlineno` 对**带装饰器的函数**指向的是**第一个装饰器所在行**，不是 `def` 行 ⇒ 向上扫等于从装饰器栈**外侧**往外找，**在本仓库恒得到空栈**（实测：`PUT /api/accounts/<int:aid>/reassign` 被报成「无装饰器」，全仓 `require_platform`/`tt_write_required`/`no_huguan` 命中数为 0）。
+- **措辞修订（M-8）**：初版写「**恒**得到空栈」，**不精确**。原稿的循环条件是 `while i >= 0 and (lines[i].lstrip().startswith("@") or not lines[i].strip())` —— 含 `or not lines[i].strip()`，所以上扫会**越过空行继续**，终止于「首个非空且不以 `@` 开头的行」。⇒ 在本仓库它恒为空栈（上方紧接着的是 `@app.route` 之上的空行 → 继续上移到空行 → 再上移是普通代码行 → 停）；但**在病态版式下（例如上方紧邻一行以 `@` 开头的续行）会扫到无关的 `@` 行，得到一个**错的栈**，而不是空栈**。**结论不变：原稿会产出错误结果** —— 只是最坏情形是「错栈」而非「空栈」。
 - **修法**：改为从 `start` **向下**扫，收集 `@` 行，遇到 `def` 行停止（并容忍多行装饰器，按括号深度累计）。另新增**方法 B（独立 AST 解析）**作为第二来源：直接 `ast.parse` 各源文件、取 `FunctionDef.decorator_list`、`ast.unparse` 后与本方法归一化比对。
 - **修后结果**：**297/298 一致**，唯一不一致的是 Flask 内置 `static` 路由（`inspect` 解析到 `flask/app.py`，AST 侧无同名函数），属预期，非应用端点。
 - **三项人工对照**（勘误 (1) 要求）：
