@@ -321,3 +321,130 @@ class TestIsDead:
         from huguan_dashboard import is_dead
         assert is_dead({"status_name": "存活", "_dead_flag": ""}) is False
         assert is_dead({"status_name": "", "_dead_flag": "否"}) is False
+
+
+# ---------- Task 4: 批量行写入 ----------
+
+class _FakeExec:
+    def __init__(self, recorder, payload):
+        self._recorder = recorder
+        self._payload = payload
+
+    def execute(self):
+        self._recorder.append(self._payload)
+        return self._payload
+
+
+class _FakeValues:
+    def __init__(self, recorder, grid):
+        self._recorder = recorder
+        self._grid = grid
+
+    def get(self, spreadsheetId=None, range=None):
+        self._recorder.append({"op": "get", "range": range})
+        return _FakeExec(self._recorder, {"values": self._grid})
+
+    def batchUpdate(self, spreadsheetId=None, body=None):
+        return _FakeExec(self._recorder, {"op": "batchUpdate", "body": body})
+
+
+class _FakeSheets:
+    def __init__(self, recorder, grid):
+        self._values = _FakeValues(recorder, grid)
+
+    def values(self):
+        return self._values
+
+
+class _FakeService:
+    def __init__(self, grid):
+        self.recorder = []
+        self._sheets = _FakeSheets(self.recorder, grid)
+
+    def spreadsheets(self):
+        return self._sheets
+
+
+def _grid(rows):
+    """rows: [account_id, ...] → C 列在 index 2 的最小网格。"""
+    return [["", "", aid] for aid in rows]
+
+
+class TestUpdateRowsByAccountId:
+    def test_writes_only_listed_columns(self):
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService(_grid(["111", "222"]))
+        res = update_rows_by_account_id(
+            svc, "SS", "看板", [{"account_id": "222", "cells": {"A": "x", "G": "张三"}}]
+        )
+        assert res == {"updated": 1, "not_found": []}
+        batch = [r for r in svc.recorder if r.get("op") == "batchUpdate"]
+        assert len(batch) == 1
+        data = batch[0]["body"]["data"]
+        # A 与 G 不连续 → 两条区间，D~F 中间被跳过的列绝不落进区间
+        assert [d["range"] for d in data] == ["'看板'!A2:A2", "'看板'!G2:G2"]
+        assert data[0]["values"] == [["x"]]
+        assert data[1]["values"] == [["张三"]]
+
+    def test_contiguous_columns_merge_into_one_range(self):
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService(_grid(["111"]))
+        update_rows_by_account_id(
+            svc, "SS", "看板",
+            [{"account_id": "111", "cells": {"A": "1", "B": "2", "C": "3", "D": "4"}}],
+        )
+        data = [r for r in svc.recorder if r.get("op") == "batchUpdate"][0]["body"]["data"]
+        assert len(data) == 1
+        assert data[0]["range"] == "'看板'!A1:D1"
+        assert data[0]["values"] == [["1", "2", "3", "4"]]
+
+    def test_gap_in_cells_splits_into_separate_ranges(self):
+        """cells 里有空洞时区间会断开，而不是补空串。
+
+        这正是「未出现在 cells 里的列一律不碰」的实现保证：merge_ranges 只会把
+        在 cells 里**相邻**的列并成区间，所以 B、C 绝不会被顺带写进去。
+        """
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService(_grid(["111"]))
+        update_rows_by_account_id(
+            svc, "SS", "看板", [{"account_id": "111", "cells": {"A": "1", "D": "4"}}]
+        )
+        data = [r for r in svc.recorder if r.get("op") == "batchUpdate"][0]["body"]["data"]
+        assert [d["range"] for d in data] == ["'看板'!A1:A1", "'看板'!D1:D1"]
+        assert data[0]["values"] == [["1"]]
+        assert data[1]["values"] == [["4"]]
+
+    def test_not_found_reported_not_raised(self):
+        """表里没有这个账户是正常情况（户管的表不必包含所有账户），不能抛。"""
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService(_grid(["111"]))
+        res = update_rows_by_account_id(
+            svc, "SS", "看板",
+            [{"account_id": "111", "cells": {"A": "1"}},
+             {"account_id": "999", "cells": {"A": "2"}}],
+        )
+        assert res["updated"] == 1
+        assert res["not_found"] == ["999"]
+
+    def test_matches_apostrophe_prefixed_key(self):
+        """定位时要剥掉 ' 前缀：表里存的可能是强制文本形式。"""
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService([["", "", "'111"]])
+        res = update_rows_by_account_id(
+            svc, "SS", "看板", [{"account_id": "111", "cells": {"A": "1"}}]
+        )
+        assert res == {"updated": 1, "not_found": []}
+
+    def test_key_column_read_range_is_minimal(self):
+        """只读 A:C 找键，不读整表。"""
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService(_grid(["111"]))
+        update_rows_by_account_id(svc, "SS", "看板", [{"account_id": "111", "cells": {"A": "1"}}])
+        gets = [r for r in svc.recorder if r.get("op") == "get"]
+        assert gets[0]["range"] == "'看板'!A:C"
+
+    def test_empty_rows_is_noop(self):
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService(_grid(["111"]))
+        assert update_rows_by_account_id(svc, "SS", "看板", []) == {"updated": 0, "not_found": []}
+        assert svc.recorder == []

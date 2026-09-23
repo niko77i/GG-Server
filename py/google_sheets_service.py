@@ -639,6 +639,70 @@ def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
     return {"updated": 1}
 
 
+def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
+                              rows: list, key_col: str = "C") -> dict:
+    """按「账户ID 列」定位行，一次写多列；未出现在 cells 里的列一律不碰。
+
+    与 update_cell_by_account_id 的区别：那个写单列、按 B 列定位、并假定
+    「我的看板」的 8 列布局；这个写多列、列位置可配、且用区间合并绕开公式列。
+
+    Args:
+        rows: [{"account_id": "123", "cells": {"A": "2026-09-23", "G": "张三"}}]
+              cells 的键是列字母。只有相邻列会并成区间，空洞处断开，
+              因此没出现在 cells 里的列绝不会被写到（公式列靠这个保命）。
+        key_col: 账户ID 所在列字母。
+
+    Returns:
+        {"updated": n, "not_found": ["<account_id>", ...]}
+        表里找不到该账户不算错误 —— 户管的表不必包含所有账户。
+    """
+    import logging
+    log = logging.getLogger("gg-server")
+
+    if not rows:
+        return {"updated": 0, "not_found": []}
+
+    key_i = col_index(key_col)
+    grid = read_sheet_values(service, spreadsheet_id, sheet_name, f"A:{key_col}")
+
+    row_of = {}
+    for i, r in enumerate(grid):
+        if len(r) > key_i:
+            v = (r[key_i] or "").strip().lstrip("'").strip()
+            if v and v not in row_of:
+                row_of[v] = i + 1  # 1-indexed
+
+    updated, not_found = 0, []
+    for item in rows:
+        aid = (item.get("account_id") or "").strip()
+        cells = item.get("cells") or {}
+        row_num = row_of.get(aid)
+        if row_num is None:
+            not_found.append(aid)
+            continue
+
+        data = []
+        for rng in merge_ranges(list(cells.keys())):
+            first, last = rng.split(":")
+            start, end = col_index(first), col_index(last)
+            data.append({
+                "range": f"'{sheet_name}'!{first}{row_num}:{last}{row_num}",
+                "values": [[cells.get(col_letter(c), "") for c in range(start, end + 1)]],
+            })
+
+        try:
+            service.spreadsheets().values().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"valueInputOption": "USER_ENTERED", "data": data},
+            ).execute()
+            updated += 1
+        except Exception as e:
+            raise GoogleSheetsServiceError(f"批量更新行失败 account_id={aid}: {e}") from e
+
+    log.info("update_rows_by_account_id: 更新 %d 行，未找到 %d 行", updated, len(not_found))
+    return {"updated": updated, "not_found": not_found}
+
+
 def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
                       report_date: str, records: list) -> dict:
     """将 FB 做表数据写入 Google Sheets。
