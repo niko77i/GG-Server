@@ -522,27 +522,31 @@ class TestDashboardConfig:
         assert client.get("/api/huguan/dashboard").status_code == 401
 
     def test_malformed_body_is_400_not_500(self, client):
-        """畸形 body 必须 400 —— 非 dict body，以及 platform/sheet_name 给非字符串。
+        """畸形 body 必须 400 而不是 500 —— 非 dict body，以及 platform 非法。
 
         这三条以前会 AttributeError 炸成 500。
+        注意 `sheet_name` 给数字**不算**畸形：按全局约束与 spreadsheet_id 一致地
+        `str()` 兜底（见下一条），所以这里只钉 body 结构与 platform 非法两条路径。
         """
         hg, _ = _create_user(client, "_hg_badbody", role="huguan")
-        for payload in ({"platform": 5}, {"spreadsheet_id": 123},
-                        {"platform": "gg", "sheet_name": 5}):
+        for payload in ({"platform": 5}, {"spreadsheet_id": 123}, {"platform": "fb"}):
             resp = client.post("/api/huguan/dashboard", headers=hg, json=payload)
             assert resp.status_code == 400, payload
         assert client.post("/api/huguan/dashboard", headers=hg,
                            json=[1, 2]).status_code == 400
 
-    def test_numeric_spreadsheet_id_is_coerced(self, client):
-        """数字型 spreadsheet_id 不报错，转成字符串存下来。"""
-        hg, _ = _create_user(client, "_hg_numid", role="huguan")
+    def test_numeric_fields_are_coerced_not_500(self, client):
+        """数字型字段一律 `str()` 兜底后按字符串处理，既不 500 也不当畸形拒掉。
+
+        与 spreadsheet_id 同一口径：户管粘进来的表格名/ID 是数字串很常见。
+        """
+        hg, _ = _create_user(client, "_hg_numeric", role="huguan")
         resp = client.post("/api/huguan/dashboard", headers=hg, json={
-            "platform": "gg", "spreadsheet_id": 123456, "sheet_name": "S",
+            "platform": "gg", "spreadsheet_id": 123456, "sheet_name": 5,
         })
         assert resp.status_code == 200
         got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
-        assert got["gg"]["spreadsheet_id"] == "123456"
+        assert got["gg"] == {"spreadsheet_id": "123456", "sheet_name": "5"}
 
     def test_non_dict_platform_entry_is_tolerated(self, client):
         """config 里平台条目是「真值非 dict」时不得抛异常（该表被别处共用）。"""

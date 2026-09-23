@@ -27,6 +27,7 @@
 - **状态解析必须带平台（Task 6 起）**：`resolve_status_id(db, name, owner_id, platform)`。`account_statuses.platform` 默认 `'gg'`、唯一约束是 `(name, platform)`、下拉按平台过滤（`main.py:6059`）—— 漏平台会让 TT 的状态落进 gg 命名空间。
 - **请求体读字段的统一口径（所有 `/api/huguan/*` 端点）**：`data = request.get_json(silent=True)` 后先判 `isinstance(data, dict)`，否则 400；字段一律 `str(... or "")` 兜底再 `.strip()`。**禁止**写 `(data.get(x) or "").strip()` —— 客户端给个数字或 `null` 就会 `AttributeError` 炸成 500（Task 5 审查实测 `{"platform": 5}` / `{"spreadsheet_id": 123}` / `[1,2]` 三种 body 全中）。
 - **同一口径适用于「容器型字段」**：`confirmed` 这类期望 dict 的字段，`data.get(x) or {}` 只能兜住 `None`/`""`/`0`，兜不住真值非 dict（`[1,2]`、`"abc"`）—— 那样会把 `AttributeError` 带到逻辑层炸成 500。必须显式判类型，非 dict 一律 400。判据与上一条相同：**客户端能构造出的畸形 body，只能是 4xx，不能是 5xx**。
+- **「畸形」的边界（避免两种口径打架）**：畸形 = ①body 不是 JSON 对象；②容器型字段的类型不符。**标量字段给数字/`None` 不算畸形** —— 按 `str(... or "")` 兜底后照常走后续校验，该 200 就 200（`sheet_name: 5` → `"5"` 存下来），该 400 才 400（`platform: 5` → `"5"` 不在 `PLATFORMS` 里）。**不要**为了「数字也该拒绝」而对标量字段加 `isinstance(x, str)` 检查，那会与 `test_numeric_fields_are_coerced_not_500` 直接冲突（Task 5 修复时计划里真出现过这对互斥断言，一站一立才收敛）。
 - **测试门禁**：`cd py && python -m pytest tests/ -q`，基线 **424 passed**（2026-09-23 实测；子项目 A 收尾时为 420，其后 `f46007c` 净增 4 条）。每次提交后不得低于此数。
 - **各任务的计数是「累计预期」，为下界而非精确值**：以 `.superpowers/sdd/progress.md` 里记的**上一任务实测值**为准。若实际条数与预期不符，**先核实是计划写错还是实现漏做**：计划写错就改计划（并顺移后续累计值），实现漏做就补实现 —— 不要为了对上数字而删测试或改断言（Task 2 就因计划漏数而多出 1 条）。
 - **前端门禁**：`cd frontend && npm run build` 必须通过。
@@ -978,6 +979,46 @@ class TestDashboardConfig:
 
     def test_requires_jwt(self, client):
         assert client.get("/api/huguan/dashboard").status_code == 401
+
+    def test_malformed_body_is_400_not_500(self, client):
+        """畸形 body 必须 400 而不是 500 —— 非 dict body，以及 platform 非法。
+
+        这三条以前会 AttributeError 炸成 500。
+        注意 `sheet_name` 给数字**不算**畸形：按全局约束与 spreadsheet_id 一致地
+        `str()` 兜底（见下一条），所以这里只钉 body 结构与 platform 非法两条路径。
+        """
+        hg, _ = _create_user(client, "_hg_badbody", role="huguan")
+        for payload in ({"platform": 5}, {"spreadsheet_id": 123}, {"platform": "fb"}):
+            resp = client.post("/api/huguan/dashboard", headers=hg, json=payload)
+            assert resp.status_code == 400, payload
+        assert client.post("/api/huguan/dashboard", headers=hg,
+                           json=[1, 2]).status_code == 400
+
+    def test_numeric_fields_are_coerced_not_500(self, client):
+        """数字型字段一律 `str()` 兜底后按字符串处理，既不 500 也不当畸形拒掉。
+
+        与 spreadsheet_id 同一口径：户管粘进来的表格名/ID 是数字串很常见。
+        """
+        hg, _ = _create_user(client, "_hg_numeric", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "gg", "spreadsheet_id": 123456, "sheet_name": 5,
+        })
+        assert resp.status_code == 200
+        got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert got["gg"] == {"spreadsheet_id": "123456", "sheet_name": "5"}
+
+    def test_non_dict_platform_entry_is_tolerated(self, client):
+        """config 里平台条目是「真值非 dict」时不得抛异常（该表被别处共用）。"""
+        from huguan_dashboard import get_platform_config
+        _, uid = _create_user(client, "_hg_nondict", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", '{"gg": "just-a-string", "tt": null}'))
+        db.commit()
+        empty = {"spreadsheet_id": "", "sheet_name": ""}
+        assert get_platform_config(db, uid, "gg") == empty
+        assert get_platform_config(db, uid, "tt") == empty
+        db.close()
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
