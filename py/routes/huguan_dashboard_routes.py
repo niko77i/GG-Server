@@ -20,16 +20,19 @@ huguan_dashboard_bp = Blueprint("huguan_dashboard", __name__)
 @jwt_required()
 @huguan_required
 def dashboard_config_get():
-    """返回当前户管的看板配置（GG 与 TT 两份）。"""
+    """返回当前户管的看板配置（GG 与 TT 两份）。
+
+    两份都经 `get_platform_config` 归一化后再返回：`config` 表是全仓共用的，
+    平台条目可能是「真值非 dict」，直接透传会让 `config.gg` 变成字符串/数字，
+    破坏 `{"spreadsheet_id","sheet_name"}` 这个响应契约。
+    """
     db = database.get_db()
     try:
-        conf = hd.load_config(db, get_uid())
+        uid = get_uid()
+        conf = {p: hd.get_platform_config(db, uid, p) for p in hd.PLATFORMS}
     finally:
         db.close()
-    return ok({"config": {
-        "gg": conf.get("gg") or {},
-        "tt": conf.get("tt") or {},
-    }})
+    return ok({"config": conf})
 
 
 @huguan_dashboard_bp.route("/api/huguan/dashboard", methods=["POST"])

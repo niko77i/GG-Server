@@ -1019,6 +1019,49 @@ class TestDashboardConfig:
         assert get_platform_config(db, uid, "gg") == empty
         assert get_platform_config(db, uid, "tt") == empty
         db.close()
+
+    def test_non_string_inner_values_are_tolerated(self, client):
+        """平台条目**内层值**不是字符串时也不得抛异常。
+
+        外层判了 dict 不代表里面存的是字符串：`config` 表全仓共用，值可能是数字或列表。
+        `(v or "").strip()` 会 `AttributeError` → 500。
+        """
+        from huguan_dashboard import get_platform_config
+        _, uid = _create_user(client, "_hg_inner", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    '{"gg": {"spreadsheet_id": 123, "sheet_name": ["x"]}}'))
+        db.commit()
+        got = get_platform_config(db, uid, "gg")
+        assert got["spreadsheet_id"] == "123"
+        assert isinstance(got["sheet_name"], str)   # 关键是不抛异常
+        db.close()
+
+    def test_save_config_tolerates_non_string_args(self, client):
+        """save_config 直接收到数字/None 也不能炸（Task 7–9 会直接调它）。"""
+        from huguan_dashboard import get_platform_config, save_config
+        _, uid = _create_user(client, "_hg_savearg", role="huguan")
+        db = database.get_db()
+        save_config(db, uid, "gg", 123, None)
+        assert get_platform_config(db, uid, "gg") == {"spreadsheet_id": "123",
+                                                      "sheet_name": ""}
+        db.close()
+
+    def test_get_normalizes_non_dict_platform_entry(self, client):
+        """`config` 里平台条目是「真值非 dict」时，GET 也要返回结构完整的对象。
+
+        不归一化就会把字符串/数字原样透传，破坏 {"spreadsheet_id","sheet_name"} 契约。
+        """
+        hg, uid = _create_user(client, "_hg_getnorm", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", '{"gg": "just-a-string"}'))
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert got["gg"] == {"spreadsheet_id": "", "sheet_name": ""}
+        assert got["tt"] == {"spreadsheet_id": "", "sheet_name": ""}
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1068,6 +1111,16 @@ def load_config(db, user_id: int) -> dict:
     return {}
 
 
+def _conf_text(value) -> str:
+    """配置值一律转成去空白的字符串。
+
+    不能写 `(value or "").strip()` —— `config` 表是全仓共用的，里面存的可能是数字或
+    列表（真值非 str），`.strip()` 会直接 `AttributeError` 炸成 500。同类兜底先例见
+    本模块 `_text()`（:67）。
+    """
+    return "" if value is None else str(value).strip()
+
+
 def get_platform_config(db, user_id: int, platform: str) -> dict:
     """取某平台的看板配置，永远返回两项（未配置时为空串，调用方无需判 None）。"""
     entry = load_config(db, user_id).get(platform)
@@ -1075,8 +1128,9 @@ def get_platform_config(db, user_id: int, platform: str) -> dict:
     if not isinstance(entry, dict):
         entry = {}
     return {
-        "spreadsheet_id": (entry.get("spreadsheet_id") or "").strip(),
-        "sheet_name": (entry.get("sheet_name") or "").strip(),
+        # 内层值同样不能假设是 str —— 外层判了 dict 不代表里面存的是字符串
+        "spreadsheet_id": _conf_text(entry.get("spreadsheet_id")),
+        "sheet_name": _conf_text(entry.get("sheet_name")),
     }
 
 
@@ -1086,8 +1140,8 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
         raise ValueError(f"不支持的平台: {platform}")
     conf = load_config(db, user_id)
     conf[platform] = {
-        "spreadsheet_id": (spreadsheet_id or "").strip(),
-        "sheet_name": (sheet_name or "").strip(),
+        "spreadsheet_id": _conf_text(spreadsheet_id),
+        "sheet_name": _conf_text(sheet_name),
     }
     db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                (CONFIG_KEY.format(uid=user_id), json.dumps(conf, ensure_ascii=False)))
@@ -1121,16 +1175,19 @@ huguan_dashboard_bp = Blueprint("huguan_dashboard", __name__)
 @jwt_required()
 @huguan_required
 def dashboard_config_get():
-    """返回当前户管的看板配置（GG 与 TT 两份）。"""
+    """返回当前户管的看板配置（GG 与 TT 两份）。
+
+    两份都经 `get_platform_config` 归一化后再返回：`config` 表是全仓共用的，
+    平台条目可能是「真值非 dict」，直接透传会让 `config.gg` 变成字符串/数字，
+    破坏 `{"spreadsheet_id","sheet_name"}` 这个响应契约。
+    """
     db = database.get_db()
     try:
-        conf = hd.load_config(db, get_uid())
+        uid = get_uid()
+        conf = {p: hd.get_platform_config(db, uid, p) for p in hd.PLATFORMS}
     finally:
         db.close()
-    return ok({"config": {
-        "gg": conf.get("gg") or {},
-        "tt": conf.get("tt") or {},
-    }})
+    return ok({"config": conf})
 
 
 @huguan_dashboard_bp.route("/api/huguan/dashboard", methods=["POST"])

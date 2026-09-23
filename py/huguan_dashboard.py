@@ -158,14 +158,26 @@ def load_config(db, user_id: int) -> dict:
     return {}
 
 
+def _conf_text(value) -> str:
+    """配置值一律转成去空白的字符串。
+
+    不能写 `(value or "").strip()` —— `config` 表是全仓共用的，里面存的可能是数字或
+    列表（真值非 str），`.strip()` 会直接 `AttributeError` 炸成 500。同类兜底先例见
+    本模块 `_text()`。
+    """
+    return "" if value is None else str(value).strip()
+
+
 def get_platform_config(db, user_id: int, platform: str) -> dict:
     """取某平台的看板配置，永远返回两项（未配置时为空串，调用方无需判 None）。"""
     entry = load_config(db, user_id).get(platform)
+    # config 表被其它功能共用，平台条目可能是「真值非 dict」；不判类型会 AttributeError
     if not isinstance(entry, dict):
         entry = {}
     return {
-        "spreadsheet_id": (entry.get("spreadsheet_id") or "").strip(),
-        "sheet_name": (entry.get("sheet_name") or "").strip(),
+        # 内层值同样不能假设是 str —— 外层判了 dict 不代表里面存的是字符串
+        "spreadsheet_id": _conf_text(entry.get("spreadsheet_id")),
+        "sheet_name": _conf_text(entry.get("sheet_name")),
     }
 
 
@@ -175,8 +187,8 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
         raise ValueError(f"不支持的平台: {platform}")
     conf = load_config(db, user_id)
     conf[platform] = {
-        "spreadsheet_id": (spreadsheet_id or "").strip(),
-        "sheet_name": (sheet_name or "").strip(),
+        "spreadsheet_id": _conf_text(spreadsheet_id),
+        "sheet_name": _conf_text(sheet_name),
     }
     db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                (CONFIG_KEY.format(uid=user_id), json.dumps(conf, ensure_ascii=False)))

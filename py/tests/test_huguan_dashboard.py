@@ -524,8 +524,10 @@ class TestDashboardConfig:
     def test_malformed_body_is_400_not_500(self, client):
         """畸形 body 必须 400 而不是 500 —— 非 dict body，以及 platform 非法。
 
-        这三条以前会 AttributeError 炸成 500。
-        注意 `sheet_name` 给数字**不算**畸形：按全局约束与 spreadsheet_id 一致地
+        循环里三条 payload 只有 `{"platform": 5}` 以前会 `AttributeError` 炸成 500；
+        `{"spreadsheet_id": 123}`（缺 platform 键，旧代码 `(None or "")` 已得 `""`）与
+        `{"platform": "fb"}` 从来就是 400。断言都不变，只是别把注释读成「三条都曾 500」。
+        另注意 `sheet_name` 给数字**不算**畸形：按全局约束与 spreadsheet_id 一致地
         `str()` 兜底（见下一条），所以这里只钉 body 结构与 platform 非法两条路径。
         """
         hg, _ = _create_user(client, "_hg_badbody", role="huguan")
@@ -560,3 +562,46 @@ class TestDashboardConfig:
         assert get_platform_config(db, uid, "gg") == empty
         assert get_platform_config(db, uid, "tt") == empty
         db.close()
+
+    def test_non_string_inner_values_are_tolerated(self, client):
+        """平台条目**内层值**不是字符串时也不得抛异常。
+
+        外层判了 dict 不代表里面存的是字符串：`config` 表全仓共用，值可能是数字或列表。
+        `(v or "").strip()` 会 `AttributeError` → 500。
+        """
+        from huguan_dashboard import get_platform_config
+        _, uid = _create_user(client, "_hg_inner", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    '{"gg": {"spreadsheet_id": 123, "sheet_name": ["x"]}}'))
+        db.commit()
+        got = get_platform_config(db, uid, "gg")
+        assert got["spreadsheet_id"] == "123"
+        assert isinstance(got["sheet_name"], str)   # 关键是不抛异常
+        db.close()
+
+    def test_save_config_tolerates_non_string_args(self, client):
+        """save_config 直接收到数字/None 也不能炸（Task 7–9 会直接调它）。"""
+        from huguan_dashboard import get_platform_config, save_config
+        _, uid = _create_user(client, "_hg_savearg", role="huguan")
+        db = database.get_db()
+        save_config(db, uid, "gg", 123, None)
+        assert get_platform_config(db, uid, "gg") == {"spreadsheet_id": "123",
+                                                      "sheet_name": ""}
+        db.close()
+
+    def test_get_normalizes_non_dict_platform_entry(self, client):
+        """`config` 里平台条目是「真值非 dict」时，GET 也要返回结构完整的对象。
+
+        不归一化就会把字符串/数字原样透传，破坏 {"spreadsheet_id","sheet_name"} 契约。
+        """
+        hg, uid = _create_user(client, "_hg_getnorm", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", '{"gg": "just-a-string"}'))
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert got["gg"] == {"spreadsheet_id": "", "sheet_name": ""}
+        assert got["tt"] == {"spreadsheet_id": "", "sheet_name": ""}
