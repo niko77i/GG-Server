@@ -1495,11 +1495,13 @@ def _mark_font_used(font_id: str):
 
 
 @app.route("/api/fonts/list", methods=["GET"])
+@jwt_required()
 def fonts_list():
     """返回所有可用字体（系统 + 用户导入）。"""
     return jsonify({"success": True, "fonts": _scan_fonts_dir()})
 
 @app.route("/api/fonts/mark-used", methods=["POST"])
+@jwt_required()
 def fonts_mark_used():
     """标记字体为最近使用。"""
     data = request.get_json(silent=True) or {}
@@ -1512,6 +1514,7 @@ def fonts_mark_used():
 
 
 @app.route("/api/fonts/preview", methods=["GET"])
+@jwt_required()
 def fonts_preview():
     """生成字体预览图片 — 排版精美的字体标本卡。"""
     font_id = request.args.get("font", "simhei")
@@ -1566,6 +1569,7 @@ def fonts_preview():
 
 
 @app.route("/api/fonts/file/<font_id>", methods=["GET"])
+@jwt_required()
 def fonts_file(font_id):
     """将字体文件作为 Web 字体提供（供前端 CSS @font-face 使用）。"""
     font_path = _find_font_path(font_id)
@@ -1602,6 +1606,7 @@ def _find_font_path(font_id: str) -> str | None:
 
 
 @app.route("/api/fonts/import", methods=["POST"])
+@jwt_required()
 def fonts_import():
     """导入字体文件到 fonts/ 目录。"""
     if not _is_local_request():
@@ -1641,6 +1646,7 @@ def fonts_import():
 
 
 @app.route("/api/fonts/upload", methods=["POST"])
+@jwt_required()
 def fonts_upload():
     """上传字体文件（不限制本机）。"""
     os.makedirs(_FONTS_DIR, exist_ok=True)
@@ -7344,6 +7350,7 @@ _GOOGLE_ADS_CONFIG = {
 
 
 @app.route("/api/google-ads/accounts", methods=["POST"])
+@jwt_required()
 def google_ads_accounts():
     """获取可访问的子账户列表。"""
     try:
@@ -7365,6 +7372,7 @@ def google_ads_accounts():
 
 
 @app.route("/api/google-ads/report", methods=["POST"])
+@jwt_required()
 def google_ads_report():
     """拉取广告系列报告。"""
     try:
@@ -7437,6 +7445,7 @@ def _sync_sheets_background(sync_fn, on_fail_fn):
 
 
 @app.route("/api/google-sheets/status", methods=["GET"])
+@jwt_required()
 def google_sheets_status():
     """检查 Google Sheets API 配置状态（服务账号）。"""
     try:
@@ -7635,6 +7644,7 @@ def copywriting_batch_edit():
 # ---------- 翻译 API ----------
 
 @app.route("/api/translate", methods=["POST"])
+@jwt_required()
 def translate_text():
     """Google 翻译，基于 deep-translator。"""
     data = request.get_json(silent=True) or {}
