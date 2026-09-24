@@ -1,11 +1,12 @@
 """TikTok 平台 API 路由 — 产品管理 / BC管理 / 投放对象 / 掉包检测 / 素材关联"""
 import json
+import os
 import re
 
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
-from .decorators import tt_required, tt_write_required, no_huguan, reject_huguan
+from .decorators import tt_required, tt_write_required, no_huguan, reject_huguan, require_platform
 
 tt_bp = Blueprint('tt', __name__)
 
@@ -497,6 +498,7 @@ def delete_package(pkg_id):
     if denied:
         return denied
     db.execute("DELETE FROM tt_delist_checks WHERE package_id=?", (pkg_id,))
+    db.execute("DELETE FROM tt_delist_notifications WHERE package_id=?", (pkg_id,))
     db.execute("DELETE FROM tt_packages WHERE id=?", (pkg_id,))
     db.commit()
     return ok()
@@ -523,12 +525,96 @@ def batch_delete_packages():
             return denied
     placeholders = ",".join(["?"] * len(ids))
     db.execute(f"DELETE FROM tt_delist_checks WHERE package_id IN ({placeholders})", ids)
+    db.execute(f"DELETE FROM tt_delist_notifications WHERE package_id IN ({placeholders})", ids)
     db.execute(f"DELETE FROM tt_packages WHERE id IN ({placeholders})", ids)
     db.commit()
     return ok({'deleted': len(ids)})
 
 
 # ==================== 掉包检测（仅跑包 type='package'） ====================
+
+# TT Telegram 机器人配置（独立于 GG 的 telegram 节点）
+_TT_TG_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "config", "config.json")
+_TT_TG_LOCAL_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "config", "config.local.json")
+
+
+def _load_tt_telegram_config() -> dict:
+    """读取 TT 独立 Telegram 机器人配置（tt_telegram 节点）。
+
+    config.local.json 覆盖 config.json（与 main.py 深合并口径一致）。
+    每次调用重新读取，便于运行期改配置无需重启。
+    """
+    cfg = {}
+    for path in (_TT_TG_CONFIG_PATH, _TT_TG_LOCAL_PATH):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        node = data.get("tt_telegram") or {}
+        if isinstance(node, dict):
+            cfg.update({k: v for k, v in node.items() if v})
+    return cfg
+
+
+def send_tt_delist_notifications(db, pkgs, title: str = "TT-Server") -> int:
+    """按产品分组发送 TT 掉包 Telegram 群组通知。
+
+    Args:
+        db: 数据库连接
+        pkgs: 掉包包字典列表，每项含 product_id, product_name, series_name
+        title: 消息标题前缀
+
+    Returns:
+        实际发送的通知条数（配置缺失或发送失败均为 0）
+    """
+    cfg = _load_tt_telegram_config()
+    if not (cfg.get("bot_token") and cfg.get("chat_id") and pkgs):
+        return 0
+
+    import telegram_sender as _tg_sender
+    tg_config = _tg_sender._TelegramConfig(
+        bot_token=cfg.get("bot_token", ""),
+        chat_id=cfg.get("chat_id", ""),
+        parse_mode=cfg.get("parse_mode", "HTML"),
+    )
+
+    # 按 product_id 分组（dict 保持插入顺序）
+    groups = {}
+    for pkg in pkgs:
+        groups.setdefault(pkg.get("product_id"), []).append(pkg)
+
+    sent = 0
+    for pid, group_pkgs in groups.items():
+        product_name = group_pkgs[0].get("product_name", "") if group_pkgs else ""
+        series_names = []
+        for pkg in group_pkgs:
+            sn = (pkg.get("series_name") or "").strip()
+            if sn and sn not in series_names:
+                series_names.append(sn)
+
+        # 在跑人员从 tt_product_runners 独立表取（非 GG 的 runner_ids JSON 列）
+        usernames = []
+        if pid is not None:
+            rows = db.execute(
+                "SELECT u.telegram_username FROM tt_product_runners pr "
+                "JOIN users u ON u.id = pr.user_id "
+                "WHERE pr.product_id = ? AND u.telegram_username IS NOT NULL "
+                "AND u.telegram_username != ''",
+                (pid,)
+            ).fetchall()
+            usernames = [r["telegram_username"] for r in rows]
+
+        if _tg_sender.send_product_delist_notification(
+                tg_config, product_name, series_names, usernames, title=title):
+            sent += 1
+
+    return sent
+
 
 @tt_bp.route('/api/tt/products/<int:pid>/check-delist', methods=['POST'])
 @jwt_required()
@@ -543,9 +629,12 @@ def check_delist(pid):
     if denied:
         return denied
 
+    # 只检测正常状态的跑包（口径与 GG 手动检测一致）：
+    # 已掉包/暂停/没事件/拒登的包不检测，也不会触发 Telegram 通知
     pkgs = db.execute(
         "SELECT id, package_name, series_name, url FROM tt_packages "
-        "WHERE product_id=? AND type='package' AND url != ''",
+        "WHERE product_id=? AND type='package' AND url != '' "
+        "AND (status IS NULL OR status='' OR status='0' OR status='normal')",
         (pid,)
     ).fetchall()
     if not pkgs:
@@ -555,12 +644,29 @@ def check_delist(pid):
     results = delist_checker.check_product_packages(pid, pkg_list, None)
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    dropped = []
     for r in results:
         db.execute(
             "INSERT OR REPLACE INTO tt_delist_checks(package_id, is_delisted, checked_at) "
             "VALUES(?, ?, ?)",
             (r["package_id"], 1 if r["is_delisted"] else 0, now))
     db.commit()
+
+    # 检测到掉包 → TT 机器人群组通知（按产品聚合，@在跑人员）
+    if any(r["is_delisted"] for r in results):
+        prod = db.execute(
+            "SELECT product_name FROM tt_products WHERE id=?", (pid,)
+        ).fetchone()
+        pname = prod["product_name"] if prod else ""
+        dropped = [
+            {"product_id": pid, "product_name": pname, "series_name": p.get("series_name", "")}
+            for p, r in zip(pkg_list, results) if r["is_delisted"]
+        ]
+        try:
+            send_tt_delist_notifications(db, dropped)
+        except Exception as e:  # 通知失败不影响检测结果返回
+            print(f"[TT-Telegram] 发送异常: {e}")
+
     return ok({'results': results})
 
 
@@ -595,6 +701,161 @@ def delist_status():
     rows = db.execute(base_sql + where + "ORDER BY dc.checked_at DESC", params).fetchall()
     delisted = [dict(r) for r in rows]
     return ok({'delisted_packages': delisted})
+
+
+@tt_bp.route('/api/tt/delist/pending', methods=['GET'])
+@jwt_required()
+def delist_pending():
+    """获取当前用户待处理的 TT 掉包通知列表（按产品聚合）。
+
+    返回两种类型的通知：
+    - type='first': 首次通知（该包尚未弹出过）
+    - type='reminder': 提醒通知（已关闭超过 3 分钟且未处理）
+
+    可见性与 delist_status 一致：跨用户角色看全部，其余按 owner_id 或在跑人员。
+    """
+    import datetime
+    db = get_db()
+    uid = get_uid()
+
+    # 平台闸门与 /api/tt/products/delist-status（@tt_required）完全一致：
+    # 非 TT 平台用户（含 GG/FB 的 admin）不受理。区别在于这里静默返回空，
+    # 不抛 403 —— 本接口被前端每 30s 轮询，抛错会在浏览器留下持续报错噪声。
+    # developer / 户管 属 PLATFORM_SWITCH_ROLES 直接放行，户管不命中任何
+    # TT 产品 → 天然返回空。
+    if require_platform('tt') is not None:
+        return ok({'notifications': []})
+
+    role = _get_role(db, uid)
+
+    base_sql = (
+        "SELECT dc.package_id, dc.is_delisted, dc.checked_at, "
+        "pkg.product_id, pkg.series_name, pkg.package_name, pkg.url, pkg.status AS pkg_status, "
+        "prod.product_name, "
+        "dn.first_notified, dn.dismissed_at, dn.reminder_count "
+        "FROM tt_delist_checks dc "
+        "JOIN tt_packages pkg ON dc.package_id = pkg.id "
+        "JOIN tt_products prod ON pkg.product_id = prod.id "
+        "LEFT JOIN tt_delist_notifications dn ON dc.package_id = dn.package_id AND dn.user_id = ? "
+        "WHERE dc.is_delisted = 1 "
+        "AND pkg.type = 'package' "  # 与两处检测口径一致：掉包只针对跑包，PWA 不通知
+        "AND (pkg.status IS NULL OR pkg.status = '' OR pkg.status = '0' "
+        "     OR pkg.status NOT IN ('dropped', 'paused')) "
+        "AND (prod.status IS NULL OR prod.status = '' OR prod.status = 'active') "
+        "AND (prod.is_archived IS NULL OR prod.is_archived = 0) "
+    )
+    if role in ('developer', 'admin'):
+        params = [uid]
+    else:
+        base_sql += (
+            "AND (prod.owner_id = ? OR pkg.product_id IN "
+            "(SELECT product_id FROM tt_product_runners WHERE user_id=?)) "
+        )
+        params = [uid, uid, uid]
+
+    rows = db.execute(base_sql + "ORDER BY dc.checked_at DESC", params).fetchall()
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    pkg_notifications = []
+    for r in rows:
+        d = dict(r)
+        pkg_status = (d.get("pkg_status") or "").strip()
+        if pkg_status == "dropped":
+            continue  # 已标记为掉包的不需要通知
+
+        first_notified = d.get("first_notified") or 0
+        dismissed_at = d.get("dismissed_at")
+
+        if not first_notified:
+            pkg_notifications.append({
+                "product_id": d["product_id"],
+                "product_name": d["product_name"],
+                "series_name": d["series_name"] or "",
+                "package_id": d["package_id"],
+                "type": "first",
+                "reminder_count": 0,
+            })
+        elif dismissed_at:
+            try:
+                dismissed_dt = datetime.datetime.fromisoformat(dismissed_at)
+                if dismissed_dt.tzinfo is None:
+                    dismissed_dt = dismissed_dt.replace(tzinfo=datetime.timezone.utc)
+                if (now - dismissed_dt).total_seconds() >= 180:  # 3 分钟
+                    pkg_notifications.append({
+                        "product_id": d["product_id"],
+                        "product_name": d["product_name"],
+                        "series_name": d["series_name"] or "",
+                        "package_id": d["package_id"],
+                        "type": "reminder",
+                        "reminder_count": d.get("reminder_count", 0),
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    # 按 product_id 聚合（dict 保持插入顺序）
+    groups = {}
+    for n in pkg_notifications:
+        pid = n["product_id"]
+        g = groups.setdefault(pid, {
+            "product_id": pid,
+            "product_name": n["product_name"],
+            "series_names": [],
+            "package_ids": [],
+            "type": n["type"],
+            "reminder_count": 0,
+            "platform": "tt",
+        })
+        sn = (n["series_name"] or "").strip()
+        if sn and sn not in g["series_names"]:
+            g["series_names"].append(sn)
+        if n["package_id"] not in g["package_ids"]:
+            g["package_ids"].append(n["package_id"])
+        if n["type"] == "first":
+            g["type"] = "first"  # first 优先于 reminder
+        if n["reminder_count"] > g["reminder_count"]:
+            g["reminder_count"] = n["reminder_count"]
+
+    return ok({'notifications': list(groups.values())})
+
+
+@tt_bp.route('/api/tt/delist/dismiss', methods=['POST'])
+@jwt_required()
+def delist_dismiss():
+    """记录用户关闭 TT 掉包通知的时间（支持批量 package_ids）。"""
+    import datetime
+    uid = get_uid()
+    data = parse_body()
+    package_ids = data.get("package_ids")
+    if not package_ids:
+        package_id = data.get("package_id")
+        if package_id:
+            package_ids = [package_id]
+    if not package_ids:
+        return err("缺少 package_ids", 400)
+    if not isinstance(package_ids, list):
+        package_ids = [package_ids]
+
+    db = get_db()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    for package_id in package_ids:
+        existing = db.execute(
+            "SELECT id FROM tt_delist_notifications WHERE package_id=? AND user_id=?",
+            (package_id, uid)
+        ).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE tt_delist_notifications SET dismissed_at=?, "
+                "reminder_count=reminder_count+1 WHERE package_id=? AND user_id=?",
+                (now, package_id, uid)
+            )
+        else:
+            db.execute(
+                "INSERT INTO tt_delist_notifications(package_id, user_id, first_notified, dismissed_at, reminder_count) "
+                "VALUES(?, ?, 1, ?, 0)",
+                (package_id, uid, now)
+            )
+    db.commit()
+    return ok()
 
 
 # ==================== 合并 / 粘贴解析 / 素材 / 用户 ====================

@@ -67,6 +67,7 @@ function typeIcon(type) {
   switch (type) {
     case 'video': return '🎬'
     case 'delist': return '🔍'
+    case 'tt-delist': return '🔍'
     case 'cleanup': return '🧹'
     default: return '📋'
   }

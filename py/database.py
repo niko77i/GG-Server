@@ -745,6 +745,18 @@ def _ensure_schema(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_tt_delist_checks_package ON tt_delist_checks(package_id);
 
+        -- 掉包通知状态表（TT 平台，按用户跟踪通知/关闭/提醒状态）
+        CREATE TABLE IF NOT EXISTS tt_delist_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            first_notified INTEGER DEFAULT 0,
+            dismissed_at TEXT,
+            reminder_count INTEGER DEFAULT 0,
+            UNIQUE(package_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_delist_notif_user ON tt_delist_notifications(user_id);
+
         CREATE TABLE IF NOT EXISTS tt_product_assets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL REFERENCES tt_products(id),

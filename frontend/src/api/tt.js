@@ -27,6 +27,8 @@ export const ttApi = {
   // 掉包检测
   checkDelist(productId) { return client.post(`/tt/products/${productId}/check-delist`) },
   delistStatus() { return client.get('/tt/products/delist-status') },
+  getPendingDelist() { return client.get('/tt/delist/pending') },
+  dismissDelist(packageIds) { return client.post('/tt/delist/dismiss', { package_ids: packageIds }) },
 
   // 粘贴解析
   importText(data) { return client.post('/tt/products/import-text', data) },

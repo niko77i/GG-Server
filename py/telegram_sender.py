@@ -46,13 +46,14 @@ def _build_mentions(usernames: list[str]) -> str:
     return " ".join(f"@{u}" for u in usernames)
 
 
-def _build_product_message(product_name: str, series_names: list[str], usernames: list[str]) -> str:
+def _build_product_message(product_name: str, series_names: list[str], usernames: list[str], title: str = "GG-Server") -> str:
     """构建产品级掉包通知消息正文（HTML 格式）。
 
     Args:
         product_name: 产品名称
         series_names: 掉包系列名列表（已去重）
         usernames: Telegram 用户名列表（不带 @ 前缀）
+        title: 通知标题前缀（默认 GG-Server，TT 传 TT-Server）
 
     Returns:
         HTML 格式的通知消息
@@ -61,7 +62,7 @@ def _build_product_message(product_name: str, series_names: list[str], usernames
     mentions = _build_mentions(usernames)
 
     lines = [
-        "<b>【GG-Server 掉包通知】</b>",
+        f"<b>【{title} 掉包通知】</b>",
     ]
     if mentions:
         lines.append("")
@@ -86,6 +87,7 @@ def send_product_delist_notification(
     product_name: str,
     series_names: list[str],
     usernames: list[str],
+    title: str = "GG-Server",
 ) -> bool:
     """发送产品级掉包通知到 Telegram 群组。
 
@@ -94,6 +96,7 @@ def send_product_delist_notification(
         product_name: 产品名称
         series_names: 掉包系列名列表
         usernames: Telegram 用户名列表（不带 @ 前缀），空列表表示不 @任何人
+        title: 通知标题前缀（默认 GG-Server，TT 传 TT-Server）
 
     Returns:
         True 表示发送成功，False 表示失败
@@ -101,7 +104,7 @@ def send_product_delist_notification(
     if not config.bot_token or not config.chat_id:
         return False
 
-    text = _build_product_message(product_name, series_names, usernames)
+    text = _build_product_message(product_name, series_names, usernames, title)
 
     payload = {
         "chat_id": config.chat_id,

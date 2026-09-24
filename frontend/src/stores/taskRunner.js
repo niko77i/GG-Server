@@ -59,7 +59,7 @@ export const useTaskStore = defineStore('taskRunner', {
 
     /**
      * 注册一个新任务
-     * @param {'video'|'delist'|'cleanup'} type
+     * @param {'video'|'delist'|'tt-delist'|'cleanup'} type
      * @param {string} label
      * @param {string|null} backendTaskId - 后端返回的 task_id
      * @returns {number} store 内部 id

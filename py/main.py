@@ -8122,6 +8122,7 @@ def admin_delete_user(uid):
         conn.execute("UPDATE account_mcc_history SET changed_by = NULL WHERE changed_by = ?", (uid,))
         conn.execute("DELETE FROM audit_log WHERE user_id = ?", (uid,))
         conn.execute("DELETE FROM delist_notifications WHERE user_id = ?", (uid,))
+        conn.execute("DELETE FROM tt_delist_notifications WHERE user_id = ?", (uid,))
         # 现在可以安全删除用户
         conn.execute("DELETE FROM users WHERE id = ?", (uid,))
         conn.commit()
@@ -8656,6 +8657,124 @@ def _start_delist_scheduler():
     t.start()
 
 
+def _run_tt_delist_check_once():
+    """立即执行一次 TT 掉包检测，返回 {total, delisted, results}。
+
+    与 GG 的 _run_delist_check_once 对齐，但只针对 tt_packages（type='package'），
+    且不发 Email，仅发 TT 独立机器人的 Telegram 通知。
+    """
+    import delist_checker as _delist_checker
+
+    db = database.get_db()
+    results = []
+    try:
+        rows = db.execute("""
+            SELECT pkg.id AS package_id, pkg.product_id, pkg.url, pkg.package_name,
+                   pkg.series_name, prod.product_name
+            FROM tt_packages pkg
+            JOIN tt_products prod ON pkg.product_id = prod.id
+            WHERE pkg.type = 'package'
+              AND (pkg.status IS NULL OR pkg.status = '' OR pkg.status = '0')
+              AND (prod.status IS NULL OR prod.status = '' OR prod.status = 'active')
+              AND pkg.url IS NOT NULL AND pkg.url != ''
+              AND (prod.is_archived IS NULL OR prod.is_archived = 0)
+        """).fetchall()
+
+        if not rows:
+            return {"total": 0, "delisted": 0, "results": []}
+
+        pkgs = [dict(r) for r in rows]
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        delisted_list = []
+        newly_delisted_list = []  # 本轮新发现的掉包（只发一次 Telegram）
+
+        # 并行 HTTP 检测（IO 密集型，最多 10 并发）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        max_workers = min(len(pkgs), 10)
+        proxy_pool = _build_delist_proxy_pool()
+
+        def _check_one(pkg):
+            url = (pkg.get("url") or "").strip()
+            if not url:
+                return None
+            is_delisted, error = _delist_checker.check_url_delisted(url, proxy_pool)
+            return (pkg, is_delisted, error)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_check_one, pkg): pkg for pkg in pkgs}
+            checked = []
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    checked.append(result)
+
+        # HTTP 检测全部完成后统一写 DB，避免长时间持有 SQLite 写锁
+        for pkg, is_delisted, error in checked:
+            was_delisted = False
+            if is_delisted:
+                prev = db.execute(
+                    "SELECT is_delisted FROM tt_delist_checks WHERE package_id=?",
+                    (pkg["package_id"],)
+                ).fetchone()
+                was_delisted = prev is not None and prev["is_delisted"] == 1
+
+            db.execute(
+                "INSERT OR REPLACE INTO tt_delist_checks(package_id, is_delisted, checked_at) "
+                "VALUES(?, ?, ?)",
+                (pkg["package_id"], 1 if is_delisted else 0, now)
+            )
+            results.append({
+                "package_id": pkg["package_id"],
+                "product_id": pkg["product_id"],
+                "package_name": pkg.get("package_name", ""),
+                "is_delisted": is_delisted,
+                "error": error,
+            })
+            if is_delisted:
+                delisted_list.append(pkg)
+                if not was_delisted:
+                    newly_delisted_list.append(pkg)
+
+        db.commit()
+
+        if delisted_list:
+            log.info(f"TT 掉包检测完成: {len(pkgs)} 个包, {len(delisted_list)} 个掉包")
+            # --- Telegram 群组通知（TT 独立机器人，按产品聚合，仅发本轮新掉包）---
+            if newly_delisted_list:
+                try:
+                    from routes.tt_routes import send_tt_delist_notifications
+                    send_tt_delist_notifications(db, newly_delisted_list)
+                except Exception as e:
+                    log.warning(f"TT Telegram 通知发送失败: {e}")
+
+        return {"total": len(pkgs), "delisted": len(delisted_list), "results": results}
+    except Exception as e:
+        log.error(f"TT 掉包检测出错: {e}")
+        raise
+    finally:
+        db.close()
+
+
+def _start_tt_delist_scheduler():
+    """启动 TT 掉包检测定时任务：每小时执行一次，异常自动恢复。"""
+
+    def _loop():
+        while True:
+            _time.sleep(3600)  # 1 小时
+            try:
+                _run_tt_delist_check_once()
+            except Exception as e:
+                log.warning(f"TT 掉包定时检测出错（将自动重试）: {e}")
+                _time.sleep(60)
+                try:
+                    _run_tt_delist_check_once()
+                except Exception as e2:
+                    log.error(f"TT 掉包检测重试仍失败: {e2}")
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+
+
 # ============================================================
 #  定时任务手动触发 API（仅 developer 可调用）
 # ============================================================
@@ -8685,6 +8804,21 @@ def admin_trigger_delist_check():
         return jsonify(success=False, error="Permission denied"), 403
     try:
         result = _run_delist_check_once()
+        return jsonify(success=True, **result)
+    except Exception as e:
+        return jsonify(success=False, error=str(e)), 500
+
+
+@app.route("/api/admin/trigger-tt-delist-check", methods=["POST"])
+@jwt_required()
+def admin_trigger_tt_delist_check():
+    """手动触发 TT 掉包检测任务。"""
+    user_id = int(get_jwt_identity())
+    user = auth.get_user_by_id(user_id)
+    if not user or user["role"] != "developer":
+        return jsonify(success=False, error="Permission denied"), 403
+    try:
+        result = _run_tt_delist_check_once()
         return jsonify(success=True, **result)
     except Exception as e:
         return jsonify(success=False, error=str(e)), 500
@@ -10495,6 +10629,7 @@ if __name__ == "__main__":
     port = 5001
     _start_weekly_cleanup()
     _start_delist_scheduler()
+    _start_tt_delist_scheduler()
     # 预初始化数据库（在请求到达前完成所有迁移，避免并发DDL锁冲突）
     print("正在初始化数据库...")
     database.get_db().close()

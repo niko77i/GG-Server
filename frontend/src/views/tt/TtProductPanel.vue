@@ -103,7 +103,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { ttApi } from '../../api/tt'
 import TtProductCard from '../../components/TtProductCard.vue'
@@ -112,6 +113,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import client from '../../api/client'
 
 const auth = useAuthStore()
+const route = useRoute()
+const router = useRouter()
 const items = ref([]); const loading = ref(false)
 const page = ref(1); const size = ref(5); const total = ref(0)
 const search = ref(''); const filterStatus = ref('active'); const filterRegion = ref('')
@@ -231,5 +234,35 @@ async function loadCustomName() {
   try { const r = await client.get('/auth/custom-name'); customName.value = r.custom_name || '' } catch(e) { customName.value = '' }
 }
 
-onMounted(() => { loadOptions(); loadData(); loadCustomName() })
+// ---------- 掉包通知点击跳转后，滚动到对应包并高亮（与 GG ProductPanel 口径一致） ----------
+async function scrollToHighlightedPackage() {
+  const raw = route.query.highlight_pkgs || route.query.highlight_pkg || ''
+  const pkgIds = String(raw).split(',').filter(Boolean)
+  if (!pkgIds.length) return
+  router.replace({ query: {} })  // 清除 query，避免后续重复滚动
+  await nextTick()
+  let scrolled = false
+  for (const pkgId of pkgIds) {
+    const el = document.getElementById('pkg-' + pkgId)
+    if (!el) continue
+    if (!scrolled) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      scrolled = true
+    }
+    el.style.boxShadow = '0 0 0 3px #ef4444'
+    el.style.transition = 'box-shadow 0.3s'
+    setTimeout(() => { el.style.boxShadow = '' }, 2000)
+  }
+}
+
+// 已在产品页时点击通知（路由 query 变化），同样滚动
+watch(() => route.query.highlight_pkgs, () => { scrollToHighlightedPackage() })
+
+onMounted(async () => {
+  await loadOptions()
+  await loadData()
+  loadCustomName()
+  // 数据加载完成后再滚动，确保目标包已渲染
+  scrollToHighlightedPackage()
+})
 </script>

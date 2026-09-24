@@ -40,6 +40,40 @@
         </div>
       </el-card>
 
+      <!-- TT 掉包检测 -->
+      <el-card shadow="never" class="task-card" :class="{ running: ttDelistRunning }">
+        <div class="task-header">
+          <div class="task-icon">🔍</div>
+          <div class="task-info">
+            <div class="task-name">TT 掉包检测</div>
+            <div class="task-desc">检测所有正常 TT 产品的跑包链接是否掉包，并通过 TT 机器人（Telegram）通知在跑人员</div>
+            <div class="task-meta">
+              <el-tag size="small" type="info">自动频率：每小时</el-tag>
+              <el-tag size="small" type="success">独立机器人：TT-Server</el-tag>
+            </div>
+          </div>
+          <div class="task-action">
+            <el-button type="primary" :loading="ttDelistRunning" :disabled="ttDelistRunning" @click="triggerTtDelist">
+              {{ ttDelistRunning ? '检测中...' : '立即执行' }}
+            </el-button>
+          </div>
+        </div>
+        <div v-if="ttDelistResult !== null" class="task-result" :class="ttDelistResult.success ? 'success' : 'error'">
+          <template v-if="ttDelistResult.success">
+            ✅ 检测完成：共 <strong>{{ ttDelistResult.total }}</strong> 个包，
+            发现 <strong :style="{ color: ttDelistResult.delisted > 0 ? '#ef4444' : '#10b981' }">{{ ttDelistResult.delisted }}</strong> 个掉包
+            <div v-if="ttDelistResult.delisted > 0" style="margin-top:8px;">
+              <div v-for="r in ttDelistResult.results.filter(x => x.is_delisted)" :key="r.package_id" class="delisted-item">
+                ⚠️ {{ r.package_name }} (产品 #{{ r.product_id }})
+              </div>
+            </div>
+          </template>
+          <template v-else>
+            ❌ 检测失败：{{ ttDelistResult.error }}
+          </template>
+        </div>
+      </el-card>
+
       <!-- 每周清理 -->
       <el-card shadow="never" class="task-card" :class="{ running: cleanupRunning }">
         <div class="task-header">
@@ -84,6 +118,9 @@ onMounted(() => {
     if (t.type === 'delist' && t.status === 'completed' && t.result) {
       delistResult.value = { success: true, ...t.result }
     }
+    if (t.type === 'tt-delist' && t.status === 'completed' && t.result) {
+      ttDelistResult.value = { success: true, ...t.result }
+    }
     if (t.type === 'cleanup' && t.status === 'completed' && t.result) {
       cleanupResult.value = { success: true, ...t.result }
     }
@@ -118,6 +155,37 @@ async function triggerDelist() {
     ElMessage.error('掉包检测失败：' + msg)
   } finally {
     delistRunning.value = false
+  }
+}
+
+// TT 掉包检测
+const ttDelistRunning = ref(false)
+const ttDelistResult = ref(null)
+
+async function triggerTtDelist() {
+  ttDelistRunning.value = true
+  ttDelistResult.value = null
+  const innerId = taskStore.addTask('tt-delist', 'TT 掉包检测', null)
+  try {
+    const res = await adminApi.triggerTtDelistCheck()
+    taskStore.updateTask(innerId, {
+      status: 'completed', progress: 1,
+      message: `共${res.total}包，${res.delisted}掉包`,
+      result: res,
+      finishedAt: Date.now(),
+    })
+    ttDelistResult.value = { success: true, ...res }
+    ElMessage.success(`TT 掉包检测完成：${res.total} 个包，${res.delisted} 个掉包`)
+    window.dispatchEvent(new CustomEvent('delist-check-completed'))
+  } catch (e) {
+    const msg = e?.response?.data?.error || e.message || '未知错误'
+    taskStore.updateTask(innerId, {
+      status: 'error', message: msg, finishedAt: Date.now(),
+    })
+    ttDelistResult.value = { success: false, error: msg }
+    ElMessage.error('TT 掉包检测失败：' + msg)
+  } finally {
+    ttDelistRunning.value = false
   }
 }
 

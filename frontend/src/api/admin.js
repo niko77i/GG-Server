@@ -30,5 +30,8 @@ export const adminApi = {
   },
   triggerDelistCheck() {
     return api.post('/admin/trigger-delist-check')
+  },
+  triggerTtDelistCheck() {
+    return api.post('/admin/trigger-tt-delist-check')
   }
 }
