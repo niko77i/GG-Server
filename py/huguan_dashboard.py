@@ -401,6 +401,13 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
                 "from": existing.get("owner_display") or existing.get("owner_username") or "",
                 "to": want_owner_name,
                 "to_owner_id": want_owner_id,
+                # 规格 §7.2 规则 1：通道列非空时压过当前归属列。`via` 让户管看见
+                # 「为什么这个人被改了」——否则规则与眼前这条变更对不上。
+                # 稳定 token（不是中文列头）：列头改名/加平台都不影响接口契约，
+                # 中文文字由前端按平台映射（GG 重新分配 / TT 换绑情况）。
+                "via": ("owner_channel"
+                        if (p.get("_owner_channel") or "").strip()
+                        else "owner_name"),
             })
 
         # 归属变更后，状态/渠道等要按新 owner 作用域解析

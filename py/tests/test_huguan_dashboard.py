@@ -2283,3 +2283,143 @@ class TestTTTriggerPoints:
         assert upstream == {"9990000001", "9990000003", "9990000004"}, upstream
         assert "9990000009" not in upstream     # 看板外 id 不得进 id 集合
         assert "9990000002" not in upstream     # 他人软删户不得进 id 集合
+
+
+# ---------- Task 13: 归属变更来源 via + 户管专用归属人端点 ----------
+
+class TestOwnerChangeVia:
+    """归属变更项的 `via` 键：标明这次变更是由表里**哪一列**触发的。
+
+    用户裁定用稳定 token（不是中文列头）：列头改名 / 新增平台 / 前端要做分支统计
+    这三种未来场景都不破坏接口契约（设计文档 §6-1）。GG 与 TT 共用同一对 token，
+    故 TT 那两条断言必须与 GG 逐字相同 —— 谁把 token 改成平台相关（写成列头文字
+    如「重新分配」/「换绑情况」）都会红。
+    """
+
+    def _prepare(self, client):
+        db = database.get_db()
+        u1 = _seed(db, "_via_zhang", "张三")
+        u2 = _seed(db, "_via_li", "李四")
+        return db, u1, u2
+
+    def test_gg_owner_name_column_gives_owner_name_token(self, client):
+        """只有「运营」(G) 有值 ⇒ `via == "owner_name"`。"""
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, u2 = self._prepare(client)
+        _seed_account(db, "VIA-GG-1", u1)
+        # G 列(index 6)=李四、H 列(index 7) 空 —— 触发者是当前归属列
+        row = ["", "", "VIA-GG-1", "", "", "", "李四", ""]
+        item = build_diff(db, [dict(parse_row(row, "gg"), row=2)], "gg")["owner_changes"][0]
+        assert item["to_owner_id"] == u2
+        assert item["via"] == "owner_name"
+        db.close()
+
+    def test_gg_channel_column_gives_owner_channel_token(self, client):
+        """「重新分配」(H) 有值 ⇒ `via == "owner_channel"`（通道压过运营，规则 1）。"""
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, u2 = self._prepare(client)
+        _seed_account(db, "VIA-GG-2", u1)
+        # G=张三（与库内一致）、H=李四 ⇒ 触发者只能是通道列
+        row = ["", "", "VIA-GG-2", "", "", "", "张三", "李四"]
+        item = build_diff(db, [dict(parse_row(row, "gg"), row=2)], "gg")["owner_changes"][0]
+        assert item["to_owner_id"] == u2
+        assert item["via"] == "owner_channel"
+        db.close()
+
+    def test_tt_uses_the_same_tokens_as_gg(self, client):
+        """TT 的换绑(接户运营 L 列) 给出**与 GG 同 token**：token 不随平台变。
+
+        前端按平台各自映射中文（GG 重新分配 / TT 换绑情况），token 两侧一致才能只
+        维护一张映射表。TT 的列下标：G=6 接户运营、L=11 换绑情况。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, u2 = self._prepare(client)
+        _seed_tt_account(db, "VIA-TT-1", u1)
+        _seed_tt_account(db, "VIA-TT-2", u1)
+        row_name = [""] * 13
+        row_name[2], row_name[6] = "VIA-TT-1", "李四"          # 只填接户运营
+        row_chan = [""] * 13
+        row_chan[2], row_chan[6], row_chan[11] = "VIA-TT-2", "张三", "李四"
+        diff = build_diff(db, [
+            dict(parse_row(row_name, "tt"), row=2),
+            dict(parse_row(row_chan, "tt"), row=3),
+        ], "tt")
+        by_aid = {i["account_id"]: i for i in diff["owner_changes"]}
+        assert by_aid["VIA-TT-1"]["to_owner_id"] == u2
+        assert by_aid["VIA-TT-1"]["via"] == "owner_name"
+        assert by_aid["VIA-TT-2"]["via"] == "owner_channel"
+        db.close()
+
+    def test_existing_six_keys_are_unchanged(self, client):
+        """回归：`via` 是**纯增量** —— 既有 6 个键仍在、值一个字都没变。
+
+        键集断言用等号而不是子集：既钉住 6 个旧键没丢，也钉住没有夹带别的键。
+        """
+        from huguan_dashboard import build_diff, parse_row
+        db, u1, u2 = self._prepare(client)
+        existing_id = _seed_account(db, "VIA-REG", u1)
+        row = ["", "", "VIA-REG", "", "", "", "张三", "李四"]
+        item = build_diff(db, [dict(parse_row(row, "gg"), row=2)], "gg")["owner_changes"][0]
+        assert set(item) == {"row", "account_id", "existing_id", "from", "to",
+                             "to_owner_id", "via"}
+        assert item["row"] == 2
+        assert item["account_id"] == "VIA-REG"
+        assert item["existing_id"] == existing_id
+        assert item["from"] == "张三"
+        assert item["to"] == "李四"
+        assert item["to_owner_id"] == u2
+        db.close()
+
+
+class TestOwnerOptionsEndpoint:
+    """「改归属」下拉的专用数据源 `/api/huguan/dashboard/owner-options`（设计文档 §2）。
+
+    它与 `/api/platform/users` 各服务一个场景：那个服务**筛选**（只列该平台有未删除
+    账户的人，选项才有筛选价值），本端点服务**编辑**（必须全量）。否则户管没法把一个
+    GG 户转给一个只在 TT 有户的合法用户 —— 那个人根本不出现在下拉里。
+    """
+
+    _URL = "/api/huguan/dashboard/owner-options"
+
+    def test_huguan_gets_all_users_including_account_less(self, client):
+        """户管调用 → 200，且列表包含「在该平台没有任何账户」的用户（缺口的回归钉）。"""
+        hg, _ = _create_user(client, "_oo_hg", role="huguan", platform="gg")
+        db = database.get_db()
+        # 平台是 tt 且名下**一个户都没有**：按平台 + 有无账户过滤的老端点必然漏掉他
+        no_acc = _seed(db, "_oo_noacc", "无户用户", role="user", platform="tt")
+        db.close()
+        resp = client.get(self._URL, headers=hg)
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["success"] is True
+        by_id = {u["id"]: u for u in body["users"]}
+        assert no_acc in by_id, "无账户的用户必须出现在「改归属」下拉里"
+        # 返回形状与 /api/platform/users 逐字段一致，前端可无缝换源
+        assert set(by_id[no_acc]) == {"id", "username", "display_name", "platform"}
+        assert by_id[no_acc]["username"] == "_oo_noacc"
+        assert by_id[no_acc]["display_name"] == "无户用户"
+        assert by_id[no_acc]["platform"] == "tt"
+
+    def test_non_huguan_gets_403(self, client):
+        """与蓝图里既有 4 个端点同款门禁：仅户管可达。"""
+        for role in ("user", "viewer", "admin", "developer"):
+            h, _ = _create_user(client, f"_oo_no_{role}", role=role)
+            assert client.get(self._URL, headers=h).status_code == 403, role
+
+    def test_viewer_and_hidden_are_excluded(self, client):
+        """`viewer`（只读角色）与 `hidden`（被停用）都不得出现在结果里。
+
+        hidden 用户无法登录（auth.login_user 直接拒），故只入库造行、不建 token。
+        `normal` 是对照行：非 viewer/hidden 必须照常列出，否则「排除」测试在
+        出错把所有人都滤掉时也会绿。
+        """
+        hg, _ = _create_user(client, "_oo_hg2", role="huguan")
+        db = database.get_db()
+        viewer = _seed(db, "_oo_viewer", "只读", role="viewer")
+        hidden = _seed(db, "_oo_hidden", "停用", role="hidden")
+        normal = _seed(db, "_oo_normal", "正常", role="user")
+        db.close()
+        ids = {u["id"] for u in client.get(self._URL, headers=hg).get_json()["users"]}
+        assert viewer not in ids
+        assert hidden not in ids
+        assert normal in ids

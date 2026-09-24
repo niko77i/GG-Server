@@ -174,6 +174,34 @@ def dashboard_push():
                           "not_found": res["not_found"]}})
 
 
+@huguan_dashboard_bp.route("/api/huguan/dashboard/owner-options", methods=["GET"])
+@jwt_required()
+@huguan_required
+def dashboard_owner_options():
+    """「户归属」下拉的数据源：可以直接把户转给他的**全部**用户。
+
+    与 `/api/platform/users` 的分工（父设计 §9.2 的更正）：
+    - `/api/platform/users` 服务**筛选**（「归属人」筛选器）——只列该平台有未删除
+      账户的人，选中一个名下无户的人必然得到空表，这种选项没有筛选价值；
+    - 本端点服务**编辑**（改归属）——必须全量，否则户管没法把 GG 账户转给一个
+      只在 TT 有户的合法用户（实测缺口）。
+    两者都保留，各有各的用途，不要互相替代。
+
+    排除 `viewer`（只读角色，转给它在业务上无意义，用户已裁定）与 `hidden`
+    （被停用、无法登录）。**不按平台过滤**：这是「转给谁」的真实全集。
+    """
+    db = database.get_db()
+    try:
+        rows = db.execute(
+            "SELECT id, username, display_name, platform FROM users "
+            "WHERE role NOT IN ('viewer', 'hidden') "
+            "ORDER BY display_name, username"
+        ).fetchall()
+    finally:
+        db.close()
+    return ok({"users": [dict(r) for r in rows]})
+
+
 def _write_background(service, conf, rows):
     """后台写表；失败只记日志，不影响同步接口的返回（对照 main.py:5006 的做法）。"""
     import logging
