@@ -393,8 +393,8 @@ const hdConfigured = computed(() => !!(hdForm.value.spreadsheet_id && hdForm.val
 │ ║ └──────────────────────────────────────────────────────────────────────────┘║ │
 │ ║ ┌ el-table :data="d.owner_changes" size="small" ───────────────────────────┐║ │
 │ ║ │ [☐] │ 表行  │ 账户ID        │ 原归属 → 新归属        │ 来源        │      │║ │
-│ ║ │ [☐] │ 第12行│ 123-456-7890  │ 张三   → 李四          │ 重新分配列  │      │║ │
-│ ║ │ [☐] │ 第31行│ 987-654-3210  │ (未分配) → 王五        │ 运营列      │      │║ │
+│ ║ │ [☐] │ 第12行│ 123-456-7890  │ 张三   → 李四          │ 重新分配    │      │║ │
+│ ║ │ [☐] │ 第31行│ 987-654-3210  │ (未分配) → 王五        │ 运营        │      │║ │
 │ ║ └──────────────────────────────────────────────────────────────────────────┘║ │
 │ ╚═════════════════════════════════════════════════════════════════════════════╝ │
 │                                                                                 │
@@ -468,7 +468,7 @@ const hdConfigured = computed(() => !!(hdForm.value.spreadsheet_id && hdForm.val
 | 归属变更表 | `el-table` | `:data="d.owner_changes"` `size="small"` `row-key="account_id"` `@selection-change` |
 | 表行标签 | `el-table-column` + `el-tag` | `size="small"` `type="info"` `effect="plain"`，内容 `第 {row} 行` |
 | 「原 → 新」 | 三列：`原归属` / `→` / `新归属` | 中间列 `width="40"` `align="center"`，内容 `→`（`aria-hidden="true"`）；新归属 `font-weight:600;color:#7c3aed` |
-| `来源` 列 | `el-table-column` | 见 §9-3：需要后端补 `via` 字段，缺省时该列不渲染 |
+| `来源` 列 | `el-table-column` | `width="110"`；值取自后端已补的 `owner_changes[i].via`（§9-3，commit `f1dc79d`）。**必须按平台映射，不得渲染裸 token**；未知 token 渲染 `—`。映射表见下 |
 | 清空区块 | `el-alert` | `type="error"` `show-icon` `:closable="false"` |
 | 清空表 | `el-table` | `:data="clearing.slice(0, 20)"`；字段名渲染为一组 `el-tag type="danger" effect="plain" size="small"` |
 | 展开全部 | `el-button` | `link` `type="primary"`，文案 `展开全部`，点击后 `clearingExpanded = true`（取消 20 行封顶） |
@@ -478,6 +478,29 @@ const hdConfigured = computed(() => !!(hdForm.value.spreadsheet_id && hdForm.val
 | 跳过/警告 | `el-collapse` + `el-collapse-item` | `:title` 用插槽以塞入计数 `el-tag` |
 | 底部左侧计数 | 普通 `span` | `font-size:12px;color:#6b7280;` |
 | 底部按钮 | `el-button` | 确认按钮 `:type="confirmType"`、`:disabled="selectedCount === 0"` |
+
+**`来源` 列的值映射（后端增量落地后新增，必须实现）**
+
+`owner_changes[i].via` 是**稳定 token**、不是给人看的文字（2026-09-24 用户裁定：token 在「列头改名 / 新增平台 / 前端按它做分支或统计」三种未来场景下都不破坏接口契约，中文文字会）。前端必须按当前看板平台映射：
+
+| `via` | GG 平台显示 | TT 平台显示 |
+|---|---|---|
+| `owner_channel` | `重新分配` | `换绑情况` |
+| `owner_name` | `运营` | `接户运营` |
+| 未知值 | `—` | `—` |
+
+```js
+// 四个中文名必须与 py/huguan_dashboard.py 的 COLUMN_SPEC 表头（:24-56）逐字一致：
+// 户管要拿这个词去自己的表里找到那一列。多一个字（如「重新分配列」）他就找不到。
+const VIA_LABELS = {
+  gg: { owner_channel: '重新分配', owner_name: '运营' },
+  tt: { owner_channel: '换绑情况', owner_name: '接户运营' },
+}
+// 未知 token 渲染 —，不渲染裸 token：将来后端加 token 时不会把内部标识泄到界面。
+const viaLabel = (via) => VIA_LABELS[平台]?.[via] ?? '—'
+```
+
+**为什么是这两个 token、以及为什么中文不带「列」字**：`via` 的判定依据是合成字段 `p["_owner_channel"]` 是否非空（通道列 GG `H` / TT `L` 压过当前归属列 GG `G`/TT `G`）——这是用户定的核心规则「表里运营列和重新分配列不一致，就以表里的重新分配为准」。不标出来，户管就无法把这条规则和眼前这条变更对上。
 
 **`confirmType` 规则**（动态着色，只在真正不可逆时报警）：
 
@@ -969,7 +992,7 @@ const ownerOptionMap = computed(() => Object.fromEntries(ownerOptions.value.map(
 |---|---|---|---|
 | **1** | **两个方向的按钮命名**：计划/规格用「🔄 同步到看板」+「⬇️ 从看板同步」（两个词都含「同步」+「看板」，只有介词不同，且后果不对称）。本文改为「🔄 刷新到看板」+「⬇️ 从表同步到系统」。 | 采用本文的一对（动词错开 + 方向词紧贴动词） | 沿用计划原文；或第三套命名 |
 | **2** | **归属变更成功 toast 的准确性**：计划基线写「归属已变更，系统已把新归属写进看板的「重新分配」列」。但 §6.3 规定未配置看板时**静默跳过**这次回写——这句在未配置时是假话。 | 删掉后半句，只报「归属已变更为「X」」；或加「如果配置了户管看板，…」四字兜底。**彻底修法**是 `reassign` 返回体带一个「是否回写了看板」的布尔，但那是 `py/main.py` / `py/routes/tt_accounts_routes.py` 的改动，超出 Task 11 的文件清单。 | 保留原文案（接受未配置时的一句不准确提示） |
-| **3** | **归属变更的「来源」列**：本文在 ① 区块设计了 `来源` 列（`重新分配` 列 / `运营` 列），让户管看到「为什么这个人被改了」。但 `owner_changes[i]` 里没有这个信息——`build_diff`（`plans:1951-1958`）只带 `row / account_id / existing_id / from / to / to_owner_id`。 | 在后端 `owner_changes` 项里补一个 `via` 字段（`"重新分配"` / `"运营"`，从 `p["_owner_channel"]` 取）。这是**给已实现的 `py/huguan_dashboard.py` 加字段**，纯增量、不改既有键。**若你不同意**，本文的 ① 区块会去掉 `来源` 列，`el-table` 变 4 列。 | 不加该列 |
+| **3** | **归属变更的「来源」列**：本文在 ① 区块设计了 `来源` 列（`重新分配` 列 / `运营` 列），让户管看到「为什么这个人被改了」。但 `owner_changes[i]` 里没有这个信息——`build_diff`（`plans:1951-1958`）只带 `row / account_id / existing_id / from / to / to_owner_id`。 | 在后端 `owner_changes` 项里补一个 `via` 字段（**原提案**中文取值 `"重新分配"` / `"运营"`，从 `p["_owner_channel"]` 取）。这是**给已实现的 `py/huguan_dashboard.py` 加字段**，纯增量、不改既有键。**✅ 已落地**（2026-09-24，commit `f1dc79d`）。**⚠ 取值提案已变**：用户裁定 `via` 改用**稳定 token** `"owner_channel"` / `"owner_name"`，中文由前端按平台映射（见 §4.5 的映射表）——本节原提案的中文取值 `"重新分配"` / `"运营"` **作废，勿照此实现**。 | **加该列**（2026-09-24 用户裁定） |
 | **4** | **`GET /platform/users` 语义不匹配**：它是为「筛选」设计的（只列有账户的用户 + developer + huguan，`main.py:6273-6280`），而「改归属」需要全量用户。后果：给一个 GG 账户换到「只在 TT 有户的人」名下时会失败——那个人不在列表里。规格 §9.2 说「复用」，本文照做并设计出「未知归属」态兜底。 | 保持复用 + 前端兜底（本文 §5.4）。**彻底修法**是加 `?scope=all` 参数或新端点，属后端改动。 | 现在就修后端；或先上线看实际有多少户管踩到 |
 | **5** | **卡片用 `el-form` 还是手写 label**：计划 Task 10 用 `<el-form label-width="120px">`。但**同页的兄弟卡片**（`SettingsPanel.vue:73-79`）用的是「手写 `div` 标签 + flex 行」——插入一个 `el-form` 会让新卡看起来不像亲生的。 | 手写 label + flex，与兄弟卡逐字节一致 | 保留 `el-form`（与计划一致，但与同页视觉不一致） |
 | **6** | **工作表下拉的宽度**：计划把 `el-select` 放在 flex 行里与「📋 读取工作表」并排（`style="flex:1;"`），会让两者挤在一行。 | 「工作表名」独占一行，`width:100%`（兄弟卡片的 Sheet 映射块就是这个形态） | 保留计划的一行两人布局 |

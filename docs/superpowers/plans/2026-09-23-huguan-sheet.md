@@ -3365,7 +3365,7 @@ git commit -m "feat: 户管看板 TT 回写接入与 TT 跨用户归属转移"
    | `owner_channel` | 重新分配 | 换绑情况 |
    | `owner_name` | 运营 | 接户运营 |
 
-   四个中文名与 `py/huguan_dashboard.py:25-56` 的 `COLUMNS` 表头逐字一致。**兜底**：未知 token
+   四个中文名与 `py/huguan_dashboard.py:24-56` 的 `COLUMN_SPEC` 表头逐字一致。**兜底**：未知 token
    渲染 `—` 而不是裸 token，避免将来加 token 时把内部标识泄到界面。（设计文档 §1.4）
 
 2. `frontend/src/api/huguan.js` 除四个既有方法外，还要加一个 `ownerOptions()`，打到

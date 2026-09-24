@@ -85,7 +85,7 @@
 | `owner_channel` | 重新分配 | 换绑情况 |
 | `owner_name` | 运营 | 接户运营 |
 
-四个中文名与 `py/huguan_dashboard.py:25-56` 的 `COLUMNS` 表头逐字一致。前端已有的平台切换逻辑（设计文档 §3.4/§4.7）直接复用；**兜底**：未知 token 渲染为 `—` 而不是裸 token，避免将来加 token 时把内部标识泄到界面。
+四个中文名与 `py/huguan_dashboard.py:24-56` 的 `COLUMN_SPEC` 表头逐字一致。前端已有的平台切换逻辑（设计文档 §3.4/§4.7）直接复用；**兜底**：未知 token 渲染为 `—` 而不是裸 token，避免将来加 token 时把内部标识泄到界面。
 
 ### 1.5 涉及文件与测试
 
