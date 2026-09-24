@@ -298,3 +298,126 @@ class TestCheckUrlDelistedWithProxy:
         assert is_delisted is False
         assert error == "代理池为空"
         mock_get.assert_not_called()
+
+
+# ============================================================
+# 测试限流 / 服务端异常 → 判定未知（429/5xx）
+# ============================================================
+
+class TestIndeterminateStatus:
+    """429/5xx 既不是 404（掉包）也不是正常页面，必须判为「未知」。
+
+    实测依据：App Store 对掉包链接返回 404，被限流时返回 429，
+    两者响应体同为 2383 字节，只能靠状态码区分。旧逻辑只认 404，
+    会把 429 当成「正常」，从而抹掉上一轮正确的掉包记录。
+    """
+
+    def _resp(self, status, text=""):
+        m = MagicMock()
+        m.status_code = status
+        m.text = text
+        return m
+
+    def test_429_direct_returns_none(self):
+        """直连遇 429 → is_delisted 为 None，error 带状态码。"""
+        from delist_checker import check_url_delisted
+
+        with patch("delist_checker.requests.get", return_value=self._resp(429, "Too Many Requests")):
+            is_delisted, error = check_url_delisted("https://apps.apple.com/vn/app/id6813542964")
+
+        assert is_delisted is None
+        assert "429" in error
+
+    def test_503_direct_returns_none(self):
+        """直连遇 503 → 同样判为未知。"""
+        from delist_checker import check_url_delisted
+
+        with patch("delist_checker.requests.get", return_value=self._resp(503)):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is None
+        assert "503" in error
+
+    def test_404_still_true(self):
+        """404 不受影响，仍判掉包。"""
+        from delist_checker import check_url_delisted
+
+        with patch("delist_checker.requests.get", return_value=self._resp(404)):
+            is_delisted, error = check_url_delisted("https://apps.apple.com/vn/app/id6813542964")
+
+        assert is_delisted is True
+        assert error == ""
+
+    def test_200_normal_still_false(self):
+        """正常页面不受影响，仍判未掉包。"""
+        from delist_checker import check_url_delisted
+
+        with patch("delist_checker.requests.get", return_value=self._resp(200, "App page")):
+            is_delisted, error = check_url_delisted("https://apps.apple.com/vn/app/id6804355336")
+
+        assert is_delisted is False
+        assert error == ""
+
+    def test_timeout_still_false_not_none(self):
+        """超时仍返回 False（既有不变量：代理/网络失败绝不判掉包，也不改判未知）。"""
+        from delist_checker import check_url_delisted
+
+        with patch("delist_checker.requests.get", side_effect=requests.Timeout("timed out")):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is False
+        assert error != ""
+
+    def test_proxy_retries_to_next_after_429(self):
+        """第一个代理 429，第二个代理 200 → 最终判正常，且请求了两次。"""
+        from delist_checker import check_url_delisted
+        from proxy_pool import ProxyPool
+
+        pool = ProxyPool([
+            {"ip": "1.2.3.1", "port": 801, "username": "u", "password": "p"},
+            {"ip": "1.2.3.2", "port": 802, "username": "u", "password": "p"},
+        ], max_retries=2)
+
+        with patch("delist_checker.requests.get",
+                   side_effect=[self._resp(429), self._resp(200, "App page")]) as mock_get:
+            is_delisted, error = check_url_delisted("https://apps.apple.com/vn/app/id6804355336", pool)
+
+        assert is_delisted is False
+        assert error == ""
+        assert mock_get.call_count == 2
+
+    def test_all_proxies_429_returns_none(self):
+        """所有代理都 429 → 判为未知，不判掉包也不判正常。"""
+        from delist_checker import check_url_delisted
+        from proxy_pool import ProxyPool
+
+        pool = ProxyPool([
+            {"ip": "1.2.3.1", "port": 801, "username": "u", "password": "p"},
+            {"ip": "1.2.3.2", "port": 802, "username": "u", "password": "p"},
+        ], max_retries=2)
+
+        with patch("delist_checker.requests.get", return_value=self._resp(429)):
+            is_delisted, error = check_url_delisted("https://apps.apple.com/vn/app/id6813542964", pool)
+
+        assert is_delisted is None
+        assert "429" in error
+
+    def test_request_and_judge_raises_on_429(self):
+        """_request_and_judge 遇 429 抛 DelistIndeterminate。"""
+        from delist_checker import _request_and_judge, DelistIndeterminate
+
+        with patch("delist_checker.requests.get", return_value=self._resp(429)):
+            with pytest.raises(DelistIndeterminate):
+                _request_and_judge("https://apps.apple.com/vn/app/id6813542964", None)
+
+    def test_check_product_packages_passes_none_through(self):
+        """批量检测把未知态原样透传。"""
+        from delist_checker import check_product_packages
+
+        with patch("delist_checker.check_url_delisted", return_value=(None, "HTTP 429 限流，判定未知")):
+            results = check_product_packages(1, [
+                {"id": 7, "url": "https://apps.apple.com/vn/app/id6813542964", "package_name": ""},
+            ])
+
+        assert results[0]["is_delisted"] is None
+        assert "429" in results[0]["error"]

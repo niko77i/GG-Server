@@ -1,11 +1,11 @@
-"""Google Play 掉包检测模块。
+"""Google Play / App Store 掉包检测模块。
 
-通过 HTTP 请求 Google Play 链接，判断应用是否已被下架。
+通过 HTTP 请求应用商店链接，判断应用是否已被下架。
 """
 
 import requests
 
-# Google Play 移动端 User-Agent
+# 移动端 User-Agent（Google Play 与 App Store 通用）
 _USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -19,15 +19,32 @@ _DELISTED_PATTERNS = [
     "We're sorry, the requested URL was not found",
 ]
 
+# 可重试的异常状态码：既不是 404（掉包），也不是正常页面（限流 / 服务端异常），
+# 命中时本次无法判定，交由调用方换代理重试。
+# 实测依据：App Store 对掉包链接返回 404，被限流时返回 429，两者响应体同为
+# 2383 字节，只能靠状态码区分；旧逻辑只认 404，会把 429 当成「正常」，
+# 进而用 INSERT OR REPLACE 抹掉上一轮正确的掉包记录。
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
 _TIMEOUT = 15  # 请求超时秒数
+
+
+class DelistIndeterminate(Exception):
+    """响应状态既非 404 也非正常页面（429/5xx），本次判定结果未知。
+
+    调用方应保留上一轮判定结果，不得当作「正常」写入。
+    """
 
 
 def _request_and_judge(url: str, proxies: dict | None) -> tuple[bool, str]:
     """发请求并判掉包；网络异常直接抛出，由调用方处理。
 
     Args:
-        url: Google Play 应用链接
+        url: 应用商店链接（Google Play 或 App Store）
         proxies: requests 的 proxies 参数，None 表示直连
+
+    Raises:
+        DelistIndeterminate: 状态码属于 _RETRYABLE_STATUS，本次无法判定
     """
     resp = requests.get(
         url,
@@ -41,7 +58,11 @@ def _request_and_judge(url: str, proxies: dict | None) -> tuple[bool, str]:
     if resp.status_code == 404:
         return True, ""
 
-    # 2. 检查页面内容关键词
+    # 2. 限流 / 服务端异常：结果未知，抛出让调用方换代理重试
+    if resp.status_code in _RETRYABLE_STATUS:
+        raise DelistIndeterminate(f"HTTP {resp.status_code}")
+
+    # 3. 检查页面内容关键词
     text_lower = resp.text.lower()
     for pattern in _DELISTED_PATTERNS:
         if pattern.lower() in text_lower:
@@ -50,24 +71,28 @@ def _request_and_judge(url: str, proxies: dict | None) -> tuple[bool, str]:
     return False, ""
 
 
-def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool, str]:
-    """检测单个 Google Play URL 是否已掉包。
+def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool | None, str]:
+    """检测单个应用链接是否已掉包。
 
     Args:
-        url: Google Play 应用链接
+        url: 应用商店链接（Google Play 或 App Store）
         proxy_pool: ProxyPool 实例；None 时走原直连逻辑
 
     Returns:
-        (is_delisted, error): is_delisted=True 表示已掉包，
-        error 为错误信息（正常为空字符串）
+        (is_delisted, error)：
+          True  → 已掉包
+          False → 正常（含网络/代理失败：既有不变量「失败绝不判掉包」）
+          None  → 判定未知（限流或服务端异常且重试耗尽），调用方应保留上一次判定结果
     """
     if not url or not url.strip():
         return False, ""
 
-    # 无代理池：直连，行为与历史版本一致
+    # 无代理池：直连，行为与历史版本一致（新增：限流/服务端异常返回「未知」）
     if proxy_pool is None:
         try:
             return _request_and_judge(url, None)
+        except DelistIndeterminate as e:
+            return None, f"{e} 限流或服务端异常，判定未知"
         except requests.Timeout:
             return False, "请求超时"
         except requests.ConnectionError:
@@ -81,6 +106,7 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool, str]:
 
     tried = set()
     last_error = ""
+    last_indeterminate = ""
     for _ in range(proxy_pool.max_retries):
         proxy = proxy_pool.next(exclude=tried)
         if proxy is None:
@@ -88,6 +114,8 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool, str]:
         tried.add((proxy["ip"], proxy["port"]))
         try:
             return _request_and_judge(url, proxy_pool.to_requests(proxy))
+        except DelistIndeterminate as e:
+            last_indeterminate = f"{e} @ {proxy['ip']}:{proxy['port']}"
         except requests.Timeout:
             last_error = f"代理超时 {proxy['ip']}:{proxy['port']}"
         except requests.ConnectionError:
@@ -95,6 +123,9 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool, str]:
         except Exception as e:
             last_error = f"代理异常 {proxy['ip']}:{proxy['port']}: {e}"
 
+    # 出现过限流/服务端异常 → 整体判为未知（保守：既不算掉包也不算正常）
+    if last_indeterminate:
+        return None, f"代理响应异常（限流/服务端）: {last_indeterminate}"
     return False, f"代理全部失败: {last_error}"
 
 
@@ -107,7 +138,8 @@ def check_product_packages(product_id: int, packages: list[dict], proxy_pool=Non
         proxy_pool: ProxyPool 实例；None 时直连
 
     Returns:
-        检测结果列表，每个元素包含 package_id, is_delisted, error
+        检测结果列表，每个元素包含 package_id, is_delisted, error。
+        is_delisted 为 True/False/None（None 表示判定未知）。函数只做透传。
     """
     results = []
     for pkg in packages:
