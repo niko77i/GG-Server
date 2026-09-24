@@ -1528,3 +1528,109 @@ class TestLegacyIllegalNameIsNotSelfLocked:
         assert r2.status_code == 400, (
             f"改成另一个非法显示名居然放行了：{r2.status_code} {r2.get_json()}"
         )
+
+
+class TestSentinelIsAHardGate:
+    """哨兵（`scrape_dn_history.user_id = auth._DN_SENTINEL_UID`）必须是**硬闸**，
+    而不是「一个很大的序号」。
+
+    为什么（2026-09-24，code-review 第 6 轮第 1 条，用户裁定「改判据」）：
+    哨兵的两个用途都是「这个名字的归属**事后无法判定** ⇒ 一律拒」——
+    ① 迁移时跨用户先后不可还原的歧义名；② 迁移时磁盘上不属于任何存活用户的目录名
+    （升级**之前**就已删掉的用户留下的，既无 users 行也来不及写墓碑）。
+    若哨兵只按序号参与比较（`seq > others[k]`），它在迁移那一刻拿到的是当时的最大 id，
+    此后任何真实用户再释放一次同名（新 id 更大）就**赢过它** ⇒ 阻断静默失效。
+    """
+
+    def test_sentinel_blocks_even_after_a_later_release(self, app, client):
+        """承重：哨兵行在前（序号小）、我的释放行在后（序号大）⇒ 仍必须拒。
+
+        反向的写法（哨兵在后）测不出问题：那时按序号比较也恰好是拒，
+        与「硬闸」在行为上不可区分 —— 会得到一条永远绿的假腿。
+        """
+        N = "_sg_n"
+        db = database.get_db()
+        try:
+            uid = db.execute(
+                "INSERT INTO users(username, password) VALUES('_sg_u','x')").lastrowid
+            # 哨兵**先**插 ⇒ 它的 id 比后面那条小
+            db.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)",
+                       (auth._DN_SENTINEL_UID, N))
+            # 对照腿的前置：此刻我没有释放行，本来就不该给我
+            assert N not in auth._dn_released_keys(db, uid)
+
+            db.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)", (uid, N))
+            # 对照行：同一批写入里一个**没有**哨兵的名字
+            db.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)",
+                       (uid, "_sg_ok"))
+            db.commit()
+
+            keys = auth._dn_released_keys(db, uid)
+            assert N not in keys, (
+                f"哨兵被后来的更大序号顶掉了 —— 硬闸失效，{N!r} 又变成可认领"
+            )
+            assert "_sg_ok" in keys, (
+                f"整条函数被一刀切冻住了（连没有哨兵的名字也不给）：{keys!r}"
+            )
+        finally:
+            db.close()
+
+
+class TestOutOfRootLegacyNameMatchesReadPath:
+    """越界的**存量** `display_name` 上，`auth._dir_name_of` 必须与读路径
+    `main._scrape_dn_for` 求值一致（2026-09-24，code-review 第 6 轮第 2 条）。
+
+    不一致时的症状：真实目录是 `user_<id>`（读路径退化的结果），而改名时记下的
+    「释放名」是原样的越界串 ⇒ 该用户改名离开后，真实目录**永不进**
+    own_keys/hist_keys ⇒ 判据 3 永久拒其认领（产物在盘上、应用内无恢复路径）。
+
+    写入关闸（`_fs_name_error`）只挡新数据，库里的历史值仍可能是越界的 ——
+    故必须有一条**用过 L-7 豁免的真实形态**的用例，而不是只比对两个纯函数。
+    `_seed_raw_user` 直接 INSERT，绕过关口，正是为了造出这种值。
+    """
+
+    UID_FOR_PURE = 98
+
+    def test_dir_name_of_degenerates_like_scrape_dn_for(self):
+        """纯函数腿：两者对同一个越界值必须给出同一个名字。"""
+        for bad in ("..\\..\\_or_e\\pwn", "../_or_e/pwn", "D:/abs/_or_e/pwn"):
+            user = {"username": bad, "display_name": "", "role": "user"}
+            assert auth._dir_name_of(self.UID_FOR_PURE, bad, "") == \
+                _scrape_dn_for(user, self.UID_FOR_PURE), (
+                f"{bad!r} 上两个求值函数不一致："
+                f"auth={auth._dir_name_of(self.UID_FOR_PURE, bad, '')!r} "
+                f"main={_scrape_dn_for(user, self.UID_FOR_PURE)!r}"
+            )
+            assert auth._dir_name_of(self.UID_FOR_PURE, bad, "") == \
+                f"user_{self.UID_FOR_PURE}"
+
+    def test_legacy_out_of_root_name_release_records_real_directory(self, client):
+        """承重腿（真实形态）：越界存量名用户改名离开时，记下的必须是**真实目录名**。
+
+        这是「产物在盘上但应用内无恢复路径」那条用户可见后果的收口点：
+        记错名字 ⇒ 当事人永远取不回自己的目录。
+        """
+        uid = _seed_raw_user("_or_u", "..\\..\\_or_esc\\pwn")
+        real_dn = f"user_{uid}"
+        # 前置：夹具确实造出了越界值（否则本用例在测空气）
+        assert auth._dir_name_of(uid, "_or_u", "..\\..\\_or_esc\\pwn") == real_dn, (
+            "夹具前提不成立：种子值没有越界（或退化没生效）"
+        )
+
+        r = client.put("/api/auth/profile", json={"display_name": "_or_out"},
+                       headers=_token_for(uid))
+        assert r.status_code == 200, f"越界存量名用户改名被拒：{r.status_code} {r.get_json()}"
+
+        db = database.get_db()
+        try:
+            released = [row[0] for row in db.execute(
+                "SELECT dn FROM scrape_dn_history WHERE user_id = ?", (uid,)).fetchall()]
+        finally:
+            db.close()
+        assert real_dn in released, (
+            f"释放名记的不是真实目录名 ⇒ 当事人取不回自己的产物。"
+            f"记下的={released!r}，真实目录={real_dn!r}"
+        )
+        assert "..\\..\\_or_esc\\pwn" not in released, (
+            f"越界串被原样记进了释放名（永远匹配不到任何真实目录）：{released!r}"
+        )

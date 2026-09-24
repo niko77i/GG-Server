@@ -794,7 +794,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [TT 同步「是否回收」列驱动状态变更](docs/superpowers/specs/2026-09-22-tt-sync-recycle-status-design.md)
 - [TT 掉包通知（独立机器人）](docs/superpowers/specs/2026-09-24-tt-delist-notification-design.md)
 - [全站鉴权加固与既有缺陷收口](docs/superpowers/specs/2026-09-23-security-hardening-design.md)
-- [下载签名按需签发 + scrape 产物归属校验](docs/superpowers/specs/2026-09-24-ondemand-download-signing-design.md)（含 §0.9：code-review 第 3 轮逐条处置；§0.10：曾用目录名认领 + 存量非法名豁免，及第 5 轮审查处置；§0.11：三条裁定落地 —— 换表 + last-writer-wins、墓碑表、并发改名 500→400）
+- [下载签名按需签发 + scrape 产物归属校验](docs/superpowers/specs/2026-09-24-ondemand-download-signing-design.md)（含 §0.9：code-review 第 3 轮逐条处置；§0.10：曾用目录名认领 + 存量非法名豁免，及第 5 轮审查处置；§0.11：三条裁定落地 —— 换表 + last-writer-wins、墓碑表、并发改名 500→400；§0.12：第 6 轮两条裁定落地 —— 哨兵硬闸 + 无主目录补墓碑、越界退化同步进 `_dir_name_of`）
 - [TT 支持苹果（App Store）包链接 + 掉包判定加固](docs/superpowers/specs/2026-09-24-tt-appstore-package-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
@@ -821,7 +821,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 | `sales_persons` | 商务字典 | 共享 |
 | `regions` | 地区字典 | 共享 |
 | `scrape_cache` | 爬取缓存 | 共享 |
-| `scrape_dn_history` | 爬取目录名历史 + **墓碑**（曾用名认领判据，LWW） | 按名字判归属 |
+| `scrape_dn_history` | 爬取目录名历史 + **墓碑** + **哨兵硬闸**（曾用名认领判据，LWW）；**无外键、刻意不进删用户清理** | 按名字判归属 |
 | `import_history` | 导入历史 | user_id 隔离 |
 | `video_history` | 视频生成历史 | user_id 隔离 |
 | `video_tasks` | 视频任务追踪（DB 持久化） | 共享 |
@@ -882,6 +882,18 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 > 会让 `TestDeletedUserDirectoryIsTombstoned::test_directory_of_deleted_user_is_not_reclaimable`
 > **恰好 1 红**（同组的对照腿保持绿）。回归测试见
 > `py/tests/test_scrape_ownership.py::TestDeletedUserDirectoryIsTombstoned`。
+>
+> ⚠️ **`user_id = auth._DN_SENTINEL_UID`（= 0）的行是「硬闸」，不是「一个很大的序号」。**
+> 该语义下的名字**无条件**不可被认领（`auth._dn_released_keys` 用独立 `blocked` 集合剔除，
+> 不参与序号比较）。两个写入点：① 迁移时**跨用户先后无法还原**的歧义名
+> （`database._migrate_scrape_dn_history`）；② 迁移时**磁盘上不属于任何存活用户**的目录名
+> （`database._tombstone_orphan_scrape_dirs`，一次性、独立标记
+> `tombstoned_orphan_scrape_dirs`，作为 `_migrate_if_needed` 第 6 步）。
+> 把哨兵改成「参与序号比较」会被后来者更大的 id 顶掉、阻断静默失效（变异 m17 恰好 1 红）。
+> 扫盘的判据**必须**与认领判据复用同一对函数（`auth._dir_name_of` + `auth._dn_key`）——
+> 口径不一致会把**自己人**的目录误判成无主、永久封掉他的名字（变异 m21 恰好 1 红）。
+> 回归测试见 `py/tests/test_scrape_dn_history_migration.py::TestOrphanScrapeDirsAreTombstoned`
+> 与 `py/tests/test_scrape_ownership.py::TestSentinelIsAHardGate`。
 
 ## 启动方式
 

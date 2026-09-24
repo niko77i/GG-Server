@@ -7,6 +7,12 @@ from flask_jwt_extended import create_access_token, create_refresh_token
 
 import database
 
+# `scrape_dn_history.user_id` 的哨兵值 —— 见 `_dn_released_keys`。
+# 该表**无外键**，故 user_id 不是真实用户 id 的取值必须自己约定；0 是安全的哨兵
+# （users.id 是 AUTOINCREMENT，从 1 起）。哨兵行 = 「这个名字的归属无法判定 ⇒ 一律拒」。
+# 写入点：`database._migrate_scrape_dn_history`（歧义名 + 磁盘上无主的目录名）。
+_DN_SENTINEL_UID = 0
+
 # ---------------------------------------------------------------------------
 # 用户可控字符串会变成**文件系统标识**
 # ---------------------------------------------------------------------------
@@ -69,16 +75,44 @@ def _effective_dn(username, display_name) -> str:
     return (display_name or username or "").strip()
 
 
+def _dn_within_root(name: str) -> bool:
+    """名字拼进爬取根后是否仍留在根内（含等于）。
+
+    与 `main._is_within` 同一套判据（两边都先 realpath 归一化），本模块不能 import
+    main（循环依赖），故本地实现一份。必须带 `+ os.sep`，不能用裸 startswith ——
+    否则 `alice2` 会被 `alice` 前缀放行（本仓库确实同时存在 alice / alice2 两个目录）。
+    """
+    root = os.path.realpath(_scrape_root())
+    try:
+        p = os.path.realpath(os.path.join(root, name))
+    except (ValueError, OSError):
+        return False
+    return p == root or p.startswith(root + os.sep)
+
+
 def _dir_name_of(uid, username, display_name) -> str:
     """某一行的**实际爬取目录名** —— 即 _scrape_dn_for 真正会用的那一个。
 
-    与 _effective_dn 的差别只有一处：两者都空时退化成 `user_<id>`。
-    判重必须用本函数而不是 _effective_dn —— 否则 `user_<id>` 这个兜底
-    命名空间**整个不在比较空间里**（code-review 第 3 轮 M3，实测：
-    注册 `username = "user_2"` 或把 display_name 设成 `user_2`，都能与
-    2 号用户的兜底目录撞名而判重放行）。
+    与 _effective_dn 的差别有两处，**两处都是为了与 _scrape_dn_for 对齐**：
+      1. 两者都空时退化成 `user_<id>`。判重必须覆盖这个兜底命名空间 —— 否则它
+         **整个不在比较空间里**（code-review 第 3 轮 M3，实测：注册
+         `username = "user_2"` 或把 display_name 设成 `user_2`，都能与 2 号用户的
+         兜底目录撞名而判重放行）。
+      2. 推导结果**越出爬取根**时同样退化为 `user_<id>`（2026-09-24，code-review
+         第 6 轮第 2 条）：`_scrape_dn_for` 早有这一步结构兜底，本函数此前**没有**
+         ⇒ 两者对越界的存量 `display_name`（如 `..\\..\\_x`）给出**不同的名字**：
+         真实目录是 `user_<id>`，而改名时记下的「释放名」是原样的越界串。后果是该
+         用户改名离开后，真实目录**永不进** own_keys/hist_keys ⇒ 判据 3 永久拒其
+         认领（产物在盘上、应用内无恢复路径）。附带：这类用户与「名字恰好是
+         `user_<id>`」的新用户**在真实磁盘上共用同一目录**，而判重看不见 —— 本函数
+         退化后这条漏判重一并堵上。
+    写入关闸（`_fs_name_error`）只挡新数据，**库里的历史值仍可能是越界的**，
+    故这里按结构兜住而不是假定数据干净。
     """
-    return _effective_dn(username, display_name) or f"user_{uid}"
+    name = _effective_dn(username, display_name)
+    if name and not _dn_within_root(name):
+        name = ""
+    return name or f"user_{uid}"
 
 
 def _dn_key(name: str) -> str:
@@ -141,17 +175,30 @@ def _dn_released_keys(conn, uid) -> set:
     这件事本身就证明接手时目录里没有 P 的东西）。P 认领则 1 > 3 不成立 ⇒ 拒，
     而目录里装的是 Q 的产物，拒得正确。见
     TestFormerNameBelongsToLastHolder 的两条腿（放行 + 对照行）。
+
+    ⚠️ **哨兵行（`user_id = _DN_SENTINEL_UID`）无条件阻断**，不参与序号比较
+    （2026-09-24，code-review 第 6 轮第 1 条，用户裁定「改判据」）：哨兵代表
+    「这个名字的归属**事后无法判定**」，用途有两处 —— 迁移时跨用户先后不可还原的
+    歧义名，以及迁移时磁盘上「不属于任何存活用户」的目录名（升级**之前**就已删掉的
+    用户留下的，既无 users 行也来不及写墓碑）。若哨兵只按序号参与比较，它在迁移那
+    一刻拿到的是当时的最大 id，此后任何真实用户再释放一次同名（新 id 更大）就**赢过
+    它** ⇒ 阻断失效。故哨兵必须是硬闸，而不是一个序号。
+    哨兵**不进** `mine` 也不进 `others`：它不是某个用户的释放记录。
     """
-    mine, others = {}, {}
+    mine, others, blocked = {}, {}, set()
     for r in conn.execute(
             "SELECT user_id, dn, MAX(id) AS seq FROM scrape_dn_history "
             "GROUP BY user_id, dn").fetchall():
         key = _dn_key(r["dn"])
+        if r["user_id"] == _DN_SENTINEL_UID:
+            blocked.add(key)
+            continue
         bucket = mine if r["user_id"] == uid else others
         prev = bucket.get(key)
         if prev is None or r["seq"] > prev:
             bucket[key] = r["seq"]
-    return {k for k, seq in mine.items() if k not in others or seq > others[k]}
+    return {k for k, seq in mine.items()
+            if k not in blocked and (k not in others or seq > others[k])}
 
 
 def directory_name_error(uid, username=None, display_name=None):
@@ -233,6 +280,13 @@ def directory_name_error(uid, username=None, display_name=None):
         return err
 
     eff = _effective_dn(username, display_name)
+    if eff and not _dn_within_root(eff):
+        # 越界值 ⇒ _scrape_dn_for 退化为 user_<id>（只属于自己），**不占任何共享名字** ——
+        # 与下面「两个都空」同一档。L-7 的字符豁免可能放行这种**存量**值（它只豁免
+        # 「与库里现值严格相等」的字段），故这里必须与 _scrape_dn_for 对齐，
+        # 否则 key 会是一个永远匹配不到任何真实目录的越界串（判据 3 恒不触发），
+        # 而当事人真实目录 user_<id> 又不在 own_keys 里 —— 正是第 6 轮第 2 条。
+        eff = ""
     if not eff:
         # 两个都空 ⇒ _scrape_dn_for 退化成 user_<id>，不占任何共享名字；
         # others 里同样解析为空的行各自退化成**自己的** user_<id>，互不相同。

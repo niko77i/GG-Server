@@ -18,6 +18,7 @@
 这样走的是生产代码的**同一条路径**，且不依赖任何手抄的 DDL。
 """
 import os
+import shutil
 
 import pytest
 
@@ -148,3 +149,124 @@ def test_migration_is_idempotent(db):
 
     assert before == after, f"迁移不幂等：行数 {before} → {after}"
     assert _hist(conn, uid_p) == ["_mg_old1", "_mg_old2"]
+
+
+def _sentinel_rows(conn, dn):
+    """该名字上的**哨兵**行数（必须限定 user_id：表里同时装着真实用户的释放行）。"""
+    return conn.execute(
+        "SELECT COUNT(*) FROM scrape_dn_history WHERE user_id = ? AND dn = ?",
+        (auth._DN_SENTINEL_UID, dn)).fetchone()[0]
+
+
+class TestOrphanScrapeDirsAreTombstoned:
+    """磁盘上「不属于任何存活用户」的爬取目录，迁移时必须补哨兵墓碑。
+
+    挡的是哪一档（2026-09-24，code-review 第 6 轮第 1 条，用户裁定「改判据」）：
+    `scrape_dn_history` 上线**之前**就已删掉的用户，既没有 users 行、也没来得及写
+    墓碑行 —— 他的目录留在盘上却**完全无主**，`_dn_released_keys` 看不见它，于是
+    「曾用名含该目录名」的人可以认领并读到产物。补一行哨兵即可让该名字永久不可认领。
+
+    ⚠️ `_scrape_root()` 指向**真实**的 `temp/scraped_images`（测试没有把它隔离到 tmp），
+    故本类**只**对自己造的、名字唯一可控的目录做断言；对真实残留目录（如仓库里
+    遗留的 `alice`/`alice2`）不置一词 —— 断言别的东西会被环境污染成假绿/假红。
+    """
+
+    @pytest.fixture
+    def root(self):
+        """真实爬取根 + 一个用完就删的临时子目录名。"""
+        r = auth._scrape_root()
+        name = "_orph_tb_probe"
+        path = os.path.join(r, name)
+        shutil.rmtree(path, ignore_errors=True)
+        yield r, name, path
+        shutil.rmtree(path, ignore_errors=True)
+
+    def _rerun(self, conn):
+        """把「一次性」标记清掉，好让本用例能重复触发扫描。"""
+        conn.execute("DELETE FROM config WHERE key='tombstoned_orphan_scrape_dirs'")
+        conn.commit()
+
+    def test_orphan_dir_gets_sentinel_and_cannot_be_claimed(self, db, root):
+        """承重：无主目录 ⇒ 补哨兵 ⇒ 曾用名含它的人认领不到（而这是产物读路径）。"""
+        conn = db
+        r, name, path = root
+        os.makedirs(path, exist_ok=True)
+        # 造一个「曾用名含该目录名」的存活用户：没有哨兵时他会认领到该目录
+        uid_v = conn.execute(
+            "INSERT INTO users(username, password) VALUES('_orph_v', 'x')").lastrowid
+        conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)", (uid_v, name))
+        conn.commit()
+        # 夹具前提：此刻还没有哨兵，且该名**确实**判给了 V —— 否则下面的「拒」
+        # 可能来自别的原因（比如名字压根没进判据），断言就成了假绿。
+        assert _sentinel_rows(conn, name) == 0
+        assert name in auth._dn_released_keys(conn, uid_v), (
+            "夹具前提不成立：扫描前该名字没判给 V，本用例测不到「哨兵把它挡下来」"
+        )
+
+        self._rerun(conn)
+        database._tombstone_orphan_scrape_dirs(conn)
+
+        assert _sentinel_rows(conn, name) == 1, "无主目录没被补哨兵墓碑"
+        assert name not in auth._dn_released_keys(conn, uid_v), (
+            "补了哨兵却仍能被认领 —— 哨兵没有真正硬闸（产物读路径仍然敞开）"
+        )
+
+    def test_live_users_directory_is_not_tombstoned(self, db, root):
+        """对照腿：**有主**的目录一个哨兵都不补（否则会误伤活人自己的产物）。
+
+        少了这条，把扫描写成「根下每个目录都补哨兵」也会让上面那条绿 ——
+        而那样做会让所有用户都取不回自己的产物。
+        """
+        conn = db
+        r, name, path = root
+        os.makedirs(path, exist_ok=True)
+        # 让**存活用户**的真实目录名恰好等于这个名字
+        uid_live = conn.execute(
+            "INSERT INTO users(username, password, display_name) VALUES(?, 'x', ?)",
+            ("_orph_live", name)).lastrowid
+        conn.commit()
+        assert auth._dir_name_of(uid_live, "_orph_live", name) == name, (
+            "夹具前提不成立：存活用户的实际目录名与磁盘上的目录不一致"
+        )
+
+        self._rerun(conn)
+        database._tombstone_orphan_scrape_dirs(conn)
+
+        assert _sentinel_rows(conn, name) == 0, (
+            "把活人自己的目录也补了哨兵 —— 该用户从此取不回自己的产物"
+        )
+
+    def test_scan_is_one_shot(self, db, root):
+        """标记必须在，否则每次进程启动都全量扫一遍根目录并重复插哨兵。"""
+        conn = db
+        r, name, path = root
+        os.makedirs(path, exist_ok=True)
+        conn.execute("DELETE FROM config WHERE key='tombstoned_orphan_scrape_dirs'")
+        conn.commit()
+
+        database._tombstone_orphan_scrape_dirs(conn)
+        assert _sentinel_rows(conn, name) == 1
+        mark = conn.execute("SELECT value FROM config "
+                            "WHERE key='tombstoned_orphan_scrape_dirs'").fetchone()
+        assert mark is not None and mark[0] == "1", f"标记没写上：{mark}"
+
+        database._tombstone_orphan_scrape_dirs(conn)
+        assert _sentinel_rows(conn, name) == 1, "扫描不幂等：同一个目录被补了多次哨兵"
+
+    def test_scan_is_wired_into_migration(self, db, root):
+        """接线腿：扫描必须真的挂在迁移入口上。
+
+        上面三条都是**直调函数** —— 把 `_migrate_if_needed` 里那一行调用删掉，
+        它们照样全绿，而线上再也不会补墓碑、整个保护静默消失。
+        """
+        conn = db
+        _r, name, path = root
+        os.makedirs(path, exist_ok=True)
+        conn.execute("DELETE FROM config WHERE key='tombstoned_orphan_scrape_dirs'")
+        conn.commit()
+
+        database._migrate_if_needed(conn)
+
+        assert _sentinel_rows(conn, name) == 1, (
+            "迁移入口没有再调用无主目录扫描 —— 接线断了，墓碑永远不会补"
+        )

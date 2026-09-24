@@ -1486,10 +1486,15 @@ def _migrate_scrape_dn_history(conn: sqlite3.Connection):
     读**自己**的曾用名读不出来只是自己不再认领，fail-closed。
 
     ⚠️ 但**跨用户**的先后无论如何都还原不出来（JSON 里没有时间戳，只剩「谁用过」），
-    所以「被 ≥2 人的历史同时提到」的名字一律插一行 user_id=0 的哨兵 ⇒ 谁也不判给他。
-    猜一个顺序的风险是**误放**（先释放的人反倒成了最后持有者 ⇒ 认领到别人的产物目录），
-    比误拒严重得多。代价：存量数据的 last-writer-wins 提升是**单向**的，只对升级之后
-    发生的改名生效。见 test_scrape_dn_history_migration.py。
+    所以「被 ≥2 人的历史同时提到」的名字一律插一行哨兵（`auth._DN_SENTINEL_UID`）
+    ⇒ 谁也不判给他。猜一个顺序的风险是**误放**（先释放的人反倒成了最后持有者 ⇒
+    认领到别人的产物目录），比误拒严重得多。代价：存量数据的 last-writer-wins 提升
+    是**单向**的，只对升级之后发生的改名生效。见 test_scrape_dn_history_migration.py。
+
+    ⚠️ 哨兵是**硬闸**（无条件阻断该名字的认领），不是「一个很大的序号」——
+    2026-09-24 code-review 第 6 轮第 1 条：若哨兵只按序号参与比较，它在迁移那一刻
+    拿到的是当时的最大 id，此后任何真实用户再释放一次同名（新 id 更大）就赢过它，
+    阻断失效。见 `auth._dn_released_keys`。
 
     失败处理：本函数由 _migrate_if_needed 调用，而后者**每个请求**都跑 ⇒ 异常绝不能
     逃出去打死 get_db()（那会让整个服务 500）。故整体 try/except：失败则回滚且**不**
@@ -1515,6 +1520,10 @@ def _migrate_scrape_dn_history(conn: sqlite3.Connection):
         return
 
     try:
+        # 延迟导入：auth 顶层 `import database`，模块级会成环。放在 try 之内 ——
+        # 本函数的契约是「异常绝不逃出去打死 get_db()」，import 失败也算异常。
+        import auth
+
         pending = []           # [(user_id, dn)]
         seen_users = {}        # 归一键 → 用过它的 user_id 集合（判跨用户歧义）
         for row in conn.execute(
@@ -1552,8 +1561,8 @@ def _migrate_scrape_dn_history(conn: sqlite3.Connection):
                 sentinel.add(dn_key)
         for uid, dn in pending:
             if os.path.normcase(dn) in sentinel:   # 与 auth._dn_key 同一口径
-                conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(0, ?)",
-                             (dn,))
+                conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)",
+                             (auth._DN_SENTINEL_UID, dn))
 
         conn.execute("ALTER TABLE users DROP COLUMN prev_scrape_dns")
         conn.execute("INSERT OR REPLACE INTO config(key,value) "
@@ -1561,6 +1570,67 @@ def _migrate_scrape_dn_history(conn: sqlite3.Connection):
         conn.commit()
     except Exception as e:
         print(f"[Migrate] scrape_dn_history 迁移失败（不回滚标记，下次重试）：{e}")
+        conn.rollback()
+
+
+def _tombstone_orphan_scrape_dirs(conn: sqlite3.Connection):
+    """给「磁盘上不属于任何存活用户」的爬取目录补哨兵墓碑（一次性，独立标记）。
+
+    为什么需要它（2026-09-24，code-review 第 6 轮第 1 条，独立复现后由用户裁定）：
+    墓碑只在**删除发生的当下**由 `admin_delete_user` 写入。**升级之前**就已删掉的用户，
+    既无 users 行（无从取 `main._scrape_dn_for`），也永远不会有墓碑行 —— 他们留在磁盘上
+    的目录名，在认领判据里等同「无人用过」。于是任何曾用名恰好等于该目录名的人，按
+    last-writer-wins 就能认领它、读到**那些已删用户**的产物（正是判据 3 声称要挡的
+    「无主目录」那一档）。
+
+    为什么不能只靠 `_dn_released_keys` 的哨兵硬闸：硬闸解决的是「哨兵被后来者的更大
+    序号顶掉」，而这里的问题是**根本没有哨兵行**。故必须扫一次盘补上。
+
+    为什么必须**一次性**：之后再无从分辨「无主的目录」与「当前用户还没爬过的目录」——
+    未来的删除都会自己写墓碑。故本函数只做一次（独立标记），而不是每次启动都扫。
+
+    ⚠️ 扫描口径必须与认领判据**同一个函数**（`auth._dir_name_of` + `auth._dn_key`）：
+    口径若不一致（例如漏了越界退化、或漏了大小写归一），就会把**自己人的**目录误判成
+    无主、把他的名字永久封掉。这是本函数唯一的危险方向，故宁可直接复用而不另写一份。
+    """
+    done = conn.execute(
+        "SELECT value FROM config WHERE key='tombstoned_orphan_scrape_dirs'").fetchone()
+    if done:
+        return
+
+    try:
+        # 延迟导入（auth 顶层 import database）+ 放进 try：本函数的契约是
+        # 「异常绝不逃出去打死 get_db()」，import 失败也算异常。
+        import auth
+
+        live = {auth._dn_key(auth._dir_name_of(r["id"], r["username"], r["display_name"]))
+                for r in conn.execute(
+                    "SELECT id, username, display_name FROM users").fetchall()}
+        root = auth._scrape_root()
+        try:
+            entries = os.listdir(root)
+        except OSError:
+            entries = []
+
+        added = 0
+        for name in entries:
+            if name == "ai":
+                continue          # 爬取根下的特殊子目录（main.scrape_packages 同样跳过）
+            if not os.path.isdir(os.path.join(root, name)):
+                continue          # 根下的文件不是爬取目录
+            if auth._dn_key(name) in live:
+                continue          # 仍有主，不是无主目录
+            conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)",
+                         (auth._DN_SENTINEL_UID, name))
+            added += 1
+
+        conn.execute("INSERT OR REPLACE INTO config(key,value) "
+                     "VALUES('tombstoned_orphan_scrape_dirs','1')")
+        conn.commit()
+        if added:
+            print(f"[Migrate] 已为 {added} 个无主爬取目录补哨兵墓碑（其名字不再可被认领）")
+    except Exception as e:
+        print(f"[Migrate] 无主爬取目录扫描失败（不打标记，下次重试）：{e}")
         conn.rollback()
 
 
@@ -1645,6 +1715,8 @@ def _migrate_if_needed(conn: sqlite3.Connection):
     _migrate_options_tables(conn)
     # 5. users.prev_scrape_dns（JSON）→ scrape_dn_history 表，并删掉旧列
     _migrate_scrape_dn_history(conn)
+    # 6. 磁盘上的无主爬取目录 → 补哨兵墓碑（独立标记，见函数 docstring）
+    _tombstone_orphan_scrape_dirs(conn)
     _cleanup_old_option_columns(conn)
 
     conn.commit()
