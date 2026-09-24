@@ -123,10 +123,15 @@ class TestAClassLoggedIn:
 
 
 class TestAClassFileWhitelist:
-    def test_scrape_download_rejects_path_outside_scrape_dir(self, client, auth_headers):
-        # 白名单外目录（系统目录）必须被拒，且不能被匿名打包
-        resp = client.get("/api/scrape/download?path=C:\\Windows", headers=auth_headers)
-        assert resp.status_code in (403, 404)
+    def test_scrape_download_rejects_path_outside_scrape_dir(self, client, dev_headers):
+        # 白名单外目录（系统目录）必须被拒。
+        # 用 developer 穿过归属层，且断言收紧为 **恰为 404**：归属层拒人是 403，
+        # 若这里仍写 `in (403, 404)`，归属层就能满足断言 ⇒ 白名单层失去保护（整段
+        # 删掉仍全绿）。C:\Windows 确实存在，故 404 只可能来自白名单这一层。
+        resp = client.get("/api/scrape/download?path=C:\\Windows", headers=dev_headers)
+        assert resp.status_code == 404, (
+            f"白名单层未生效：得到 {resp.status_code}（403 来自归属层，不构成本层证据）"
+        )
 
     def test_scrape_download_requires_existing_dir(self, client, dev_headers):
         # 本类钉的是**白名单/存在性层**。归属校验（普通用户对他人目录恒 403）已于

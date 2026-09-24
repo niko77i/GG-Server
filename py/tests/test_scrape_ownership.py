@@ -231,6 +231,91 @@ class TestFrontDoorDownload:
 
 
 # ===========================================================================
+# 包名本身也是越权通道：归属收窄只看得见 save_dir，而签发的是 pkg_dir
+# ===========================================================================
+class TestPackageNameIsNotATraversalVector:
+    """`pkg_name` 来自 `?id=`，`extract_package_name`（utils.py:4）原样返回捕获组，
+    **未经清洗**。而 `/api/scrape` 签发的 URL 指向 `pkg_dir = join(save_dir, pkg_name)`
+    —— 归属收窄只校验 `save_dir` ⇒ 包名可穿则归属校验整条失效。
+
+    这不是推演，是 2026-09-24 的运行时实测（修复前，真实 5001）：
+    bob 传 `?id=../_rv_alice/TravPkg` → **200**，拿到为 alice 的包签发的合法签名，
+    匿名 GET 之 → **200 / 121 字节**；`?id=D:/.../AbsPkg` 还在 `_SCRAPE_DEFAULT_DIR`
+    之外真的建出了目录。⇒ 本类是该越权面的承重测试。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_pn_residue(self):
+        """本类必须自清。
+
+        这些用例**刻意**把「有问题的包名」喂进端点。闸门正常时它们全部 400、什么都不建；
+        但一旦闸门被人拆掉（例如变异验证 M6），分支就会走到底并**真的建出目录** ——
+        2026-09-24 实测：M6 那一轮在真实 `scraped_images/` 里留下了 `_pn_bob/sub/dir`
+        和 `_pn_bob/a/b`。测试污染生产数据目录比测试不绿更糟，故进出各扫一次。
+        """
+        def _sweep():
+            if os.path.isdir(_SCRAPE_DEFAULT_DIR):
+                for name in os.listdir(_SCRAPE_DEFAULT_DIR):
+                    if name.startswith("_pn_"):
+                        shutil.rmtree(os.path.join(_SCRAPE_DEFAULT_DIR, name), ignore_errors=True)
+            shutil.rmtree(os.path.join(_SCRAPE_DEFAULT_DIR, "..", "_pn_outside"),
+                          ignore_errors=True)
+
+        _sweep()
+        yield
+        _sweep()
+
+    @pytest.mark.parametrize("bad", [
+        "../_pn_alice/TravPkg",       # 正斜杠上跳
+        "..\\_pn_alice\\TravPkg",     # 反斜杠上跳（本仓库历史上只防 / 不防 \）
+        "..",                         # 上跳到 save_dir 本身
+        ".",                          # join 后退化为 save_dir，等于签了父目录
+        "C:/Windows",                 # 盘符绝对路径，join 会整条丢弃 save_dir
+        "sub/dir",                    # 普通子路径也不该当包名
+        "a\\b",                       # 单个反斜杠
+    ])
+    def test_traversal_package_name_rejected(self, client, bad):
+        bob, _ = _create_user(client, "_pn_bob")
+        r = client.post("/api/scrape",
+                        json={"url": f"https://play.google.com/store/apps/details?id={bad}"},
+                        headers=bob)
+        assert r.status_code == 400, (
+            f"包名 {bad!r} 得到 {r.status_code} —— 越权通道未堵，响应={r.get_json()}"
+        )
+        assert "download_url" not in (r.get_json() or {}), (
+            f"包名 {bad!r} 被拒后仍下发了 download_url"
+        )
+
+    def test_legit_package_name_still_works(self, client, scrape_dirs):
+        """对照行：正常包名必须放行 —— 否则上一条把功能整体禁掉也能全绿。"""
+        bob, _ = _create_user(client, "_pn_bob2")
+        scrape_dirs("_pn_bob2", "com.example.legit")
+        r = client.post("/api/scrape",
+                        json={"url": _play_url("com.example.legit")}, headers=bob)
+        assert r.status_code == 200, f"正常包名被误伤：{r.status_code} {r.get_json()}"
+
+    def test_absolute_escape_creates_no_directory(self, client):
+        """承重：绝对路径包名**不得**在 _SCRAPE_DEFAULT_DIR 之外建出任何目录。
+
+        修复前这里会真的 `makedirs` 成功（实测），故不能只断言状态码 —— 必须断言
+        文件系统结果，否则「返回 400 但目录已建」仍会绿。
+        """
+        bob, _ = _create_user(client, "_pn_bob3")
+        parent = os.path.join(_SCRAPE_DEFAULT_DIR, "..", "_pn_outside")
+        target = os.path.join(parent, "AbsPkg")
+        try:
+            r = client.post("/api/scrape",
+                            json={"url": _play_url(target.replace("\\", "/"))},
+                            headers=bob)
+            assert r.status_code == 400, f"绝对路径包名得到 {r.status_code}"
+            assert not os.path.isdir(target), (
+                f"目录被建到了白名单之外：{target}"
+            )
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+
+# ===========================================================================
 # 签名路径仍然可用（不得因收口把功能打死）
 # ===========================================================================
 class TestSignedPathUnaffected:

@@ -541,7 +541,31 @@ def scrape():
         return jsonify({"success": False, "error": str(e)}), 400
 
     # 2. 创建保存目录
+    #
+    # ⚠️ 包名必须是一个**纯名称**。上面「收窄二」只看得见 save_dir，而下面签发的
+    # URL 指向的是 pkg_dir = join(save_dir, pkg_name) —— 若 pkg_name 可含 `..`、
+    # 分隔符或盘符，归属校验就被整条绕过。
+    # extract_package_name 的返回值**未经清洗**（utils.py 直接返回 `[?&]id=([^&#]+)`
+    # 的捕获组），故必须在此把关。运行时实测（2026-09-24，修复前）：
+    #   bob 传 `?id=../_rv_alice/TravPkg` → 200，拿到为 alice 的包签发的合法签名，
+    #   匿名 GET 之 → 200/121 字节；`?id=D:/.../AbsPkg` 还真的在 _SCRAPE_DEFAULT_DIR
+    #   之外建出了目录。
+    if (not pkg_name or pkg_name in (".", "..")
+            or "/" in pkg_name or "\\" in pkg_name or ":" in pkg_name
+            or "\x00" in pkg_name):
+        return jsonify({"success": False, "error": "包名不合法：不得包含路径分隔符"}), 400
+
     pkg_dir = os.path.join(save_dir, pkg_name)
+    # 纵深防御：字符闸门之上再复核一次**落地路径**。
+    #
+    # ⚠️ 如实说明：**这一层当前没有任何测试能区分它**。变异验证（2026-09-24）把本行
+    # 改为 `if False and ...` 后，本类 9 条用例**仍全绿** —— 因为上面那道字符闸门
+    # 对"阻止 join 逃逸"已是完备的（Windows 上 join 视作绝对路径的三种形态
+    # `C:` / `\` / `/` 都含被拦字符；POSIX 上只有 `/`）。
+    # 保留它的唯一理由是抗未来重构：万一有人从上面那道闸门里删掉某个字符，
+    # 这里还能兜住。**不要把它当成已被验证的防线**，也不要在此处写声称已被测试的注释。
+    if not _is_within(pkg_dir, save_dir):
+        return jsonify({"success": False, "error": "包名不合法：越出保存目录"}), 400
     # 两个出口（缓存分支 / 正常分支）共用的签名下载 URL。
     # ⚠️ 此处签发的 URL **必须**只可能指向调用者自己有权访问的目录 —— 上面 save_dir
     # 的「收窄二」就是为此。签名路径上没有身份可校验，签发侧是唯一关口。

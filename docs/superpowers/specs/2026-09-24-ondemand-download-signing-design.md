@@ -35,8 +35,10 @@ bob 传 save_dir = alice 的目录 → POST /api/scrape → 200
 bob 用该签名 GET /api/scrape/download（不带 token）→ 200，120 字节
 ```
 
-⇒ 归属必须在**签发侧**（`save_dir`）堵死。正门那道校验的价值是「挡住直接带 token 的读取」，
+⇒ 归属必须在**签发侧**堵死。正门那道校验的价值是「挡住直接带 token 的读取」，
 不是本次收口的主力 —— 这一点重方案（只加新端点 + 正门）漏了。
+
+**但收窄 `save_dir` 一条并不足够 —— 见 §0.4，那是本次交付的一次返工。**
 
 ### 0.2 TTL 取舍
 
@@ -51,6 +53,9 @@ bob 用该签名 GET /api/scrape/download（不带 token）→ 200，120 字节
 
 ### 0.3 验收结果（2026-09-24 实测）
 
+> ⚠️ 本节数字是**首次提交（`8f824db`）当时**的，之后因 §0.4 的返工已刷新 ——
+> 最新为 **693 passed, 0 failed**（`test_scrape_ownership.py` 由 15 例增至 24 例）。
+
 - 全量套件 **684 passed, 0 failed**（新增 `py/tests/test_scrape_ownership.py` 15 例）
 - 变异验证 5/5 全部实测转红后回滚：M1 侧门 `if False` → 2 红；M2 正门 `if False` → 3 红；
   M3 `_is_within` 退化为裸 `startswith` → 2 红；M4 角色集加入 `huguan` → 2 红；M5 `ttl=300` → 1 红
@@ -58,11 +63,79 @@ bob 用该签名 GET /api/scrape/download（不带 token）→ 200，120 字节
   / `allows_dir_inside_scrape_root`）改用 `dev_headers` 穿过归属层，断言逐字不变 ——
   该类的职责是钉**白名单层**，归属层由新文件承重
 
-### 0.4 未随本次交付的（明确记录）
+**运行时实测（真实 5001，非 test client）**：修复前一轮 10/10 PASS（正门匿名 401、普通用户读他人
+403、前缀陷阱 403、自己的包 200、developer 跨用户 200、侧门 403 且不漏签名、签名闭环 200、
+TTL 实测 86399s）；§0.4 返工后又跑了一轮 10/10 PASS。
+
+### 0.4 返工：`save_dir` 收窄被 `pkg_name` 整条绕过（2026-09-24 同日发现并修复）
+
+**这是一次真实的返工，不是补充说明。** 上面 0.1 的论证在 `pkg_name` 这条路径上不成立，
+而我是先提交（`8f824db`）、后来经 `/code-review` 才发现 —— 当时的设计文档已把
+「归属在签发侧堵死」当作既成事实写下，属于把未验证的推论写成了结论。
+
+**缺陷**：`/api/scrape` 里真正被签名的不是 `save_dir`，而是
+
+```python
+pkg_dir = os.path.join(save_dir, pkg_name)      # main.py:544
+_scrape_dl = _signed_download_url("/api/scrape/download", pkg_dir)
+```
+
+而 `pkg_name` 来自 `extract_package_name(url)`（`utils.py:4`），实现是
+`re.search(r"[?&]id=([^&#]+)")` 的捕获组 **原样返回、未经任何清洗** ——
+`/`、`\`、`:`、`..` 全部放行。收窄二只看 `save_dir`，于是 pkg_name 成了侧门的正门。
+
+**运行时实证（修复前，真实 5001，由本会话独立复现 5/5）**：
+
+| 请求 | 结果 |
+|---|---|
+| bob（普通用户）省略 `save_dir`，`?id=../_rv_alice/TravPkg` | **200**，响应含 `download_url`，其 `path=...\_rv_bob\../_rv_alice/TravPkg` |
+| 匿名 GET 上面这个签名（不带 token） | **200 / 121 字节** —— alice 的包被完整取走 |
+| `?id=D:/.../temp/_rv_abs_escape/AbsPkg` | 在 `_SCRAPE_DEFAULT_DIR` **之外**真的建出了目录（收窄一也一并绕过） |
+
+**修复**（`py/main.py`，纯增量 +24/−0）：在签发之前加两道闸门 ——
+
+1. **字符闸门**：`pkg_name` 不得为空、不得是 `.` / `..`、不得含 `/`、`\`、`:`、NUL ⇒ 400
+2. **落地复核**：`_is_within(pkg_dir, save_dir)` ⇒ 400
+
+**修复后实测**（同一探针，真实 5001）：上跳包名 / 反斜杠变体 / 绝对路径 → 全 400，
+白名单外不再建目录；对照行（正常包名 200、签名闭环匿名 200、正门 bob 读 alice 403）全部保留。**10/10 PASS**。
+
+#### 关于第 2 道闸门，如实记录：当前没有测试能区分它
+
+变异验证把第 2 行改为 `if False and ...` 后，本类 9 条用例**仍全绿**（M7）——
+因为第 1 道字符闸门对「阻止 `os.path.join` 逃逸」已是完备的：
+Windows 上 `join` 视作绝对路径的三种形态（`C:` / `\` / `/`）全都含被拦字符，POSIX 上只有 `/`。
+
+保留它**只为抗未来重构**（万一有人从第 1 道闸门里删掉某个字符）。**不得把它当成已被验证的防线** ——
+这一句也已逐字写进 `main.py` 的代码注释，避免下一个人重蹈「把推论写成结论」。
+
+### 0.5 测试污染教训（同日）
+
+`TestPackageNameIsNotATraversalVector` 会**刻意**把有问题的包名喂进端点。闸门正常时全部 400、
+什么都不建；但**闸门被拆掉的那一轮（M6 变异验证），分支会走到底并真的建出目录** ——
+2026-09-24 实测在真实 `temp/scraped_images/` 里留下了 `_pn_bob/sub/dir`、`_pn_bob/a/b`。
+
+⇒ 该类已加 autouse fixture，进出各扫一次 `_pn_*`。
+**测试污染生产数据目录比测试不绿更糟**，负向用例必须自清。
+
+### 0.6 未随本次交付的（明确记录）
 
 - 前端**未做任何改动**，dist 无需为此重建（上一轮的 dist 重建已在裁决 1 中完成）
 - video/audio 两条端点的跨用户读**维持现状**（无 `user_id` 列，按设计即全局共享）—— 见 §1.3
 - `_find_font_path` 反斜杠穿越仍未处置（独立议题）
+
+#### `/code-review` 的遗留发现（用户 2026-09-24 裁定「本轮不做」）
+
+只修了 HIGH 那条（§0.4）。以下 6 条已报告、**未修**，不在本文件范围内，留待另行裁定：
+
+| # | 级别 | 问题 |
+|---|---|---|
+| 2 | MEDIUM | `test_scrape_download_rejects_path_outside_scrape_dir` 的 `in (403, 404)` 曾被归属层的 403 满足 ⇒ 白名单层失去保护。**已在本轮修复**（改 `dev_headers` + 收紧为 `== 404`） |
+| 3 | MEDIUM | `/api/video/download`、`/api/audio-replace/download` 仍无归属校验。审查者指出本文件「全局共享产物库」的前提与产物实际落点（`scraped_images/<dn>/<pkg>/ai/*.mp4`）不符，实测 bob 能下 alice 的视频 ⇒ **§1.3 的非目标理由需要重新评估** |
+| 4 | LOW | TTL 统一 24h，而服务端请求日志会落盘含 `sig` 的完整 query ⇒ 叠加第 3 条等于「日志泄漏 → 24h 匿名能力」 |
+| 5 | LOW | `_scrape_dn_for` 的 `requested_dn` 校验漏 Windows 盘符相对名：`user_dn=C:` 也通过，`_scrape_dir_for` 返回 `"C:"`（实测 `isdir` 为真），developer/admin 可列出 `_SCRAPE_DEFAULT_DIR` 之外的目录 |
+| 6 | LOW | `int(app.config.get("JWT_ACCESS_TOKEN_EXPIRES", 86400))` 与该键的 int/秒形态强耦合：键缺失时回退值不等于 JWT-Extended 的真实缺省（15min），「锚定 JWT 寿命」落空；若被设为 `timedelta` 则抛 TypeError ⇒ 全部下载 URL 下发 500 |
+| 7 | LOW | `scrape_upload_images` 仍手抄 dn 推导，与 §0「dn 推导唯一来源」的承诺不符（当前靠巧合一致，改一处即「写得到、下不了」） |
 
 ---
 
