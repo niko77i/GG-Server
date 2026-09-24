@@ -187,7 +187,24 @@ class TestOrphanScrapeDirsAreTombstoned:
         conn.commit()
 
     def test_orphan_dir_gets_sentinel_and_cannot_be_claimed(self, db, root):
-        """承重：无主目录 ⇒ 补哨兵 ⇒ 曾用名含它的人认领不到（而这是产物读路径）。"""
+        """承重：无主目录 ⇒ 补哨兵 ⇒ 曾用名含它的人认领不到（而这是产物读路径）。
+
+        ⚠️ **本条同时钉住一个被接受的代价**（code-review 第 6 轮收口第 1 条，详见
+        设计文档 §0.12「两裁定的相互作用」）：V 在这里的形态 = 「**存活**用户，曾释放过
+        该名，目录还在盘上」—— 即「我自己的旧目录」。哨兵把它一并封掉，于是 V 改不回
+        原名、旧目录里的产物在盘上却取不回（MEDIUM-1 的症状）。
+
+        为什么**必须**接受：本用例的 V 与「攻击者」在数据上**完全同形** —— 攻击者要拿到
+        该名，前提正是他**也**有一行同名释放记录（否则判据 3「目录已占用」直接拒，除
+         `own_keys`/`hist_keys` 两条豁免外无路可走，见 `auth.directory_name_error:355`）。
+        于是任何「把 `scrape_dn_history` 里出现过的名字排除在扫描之外」的写法，都会**恰好
+        放过每一条可被利用的名字** ⇒ 扫描退化成空操作、缺口原样复活。
+        两档不可区分（被删用户升级前没有行，与「只有我一行」在表上长得一样），
+        按本项目一贯的 fail-closed（误放 > 误拒）取「封」。
+
+        代价的实际规模：扫描**只跑一次**，故只影响「本次上线**之前**就已改名、且想改回去」
+        的用户；live 库扫描时 `scrape_dn_history` 为 **0 行**（实测），即当前 **0 人**受影响。
+        """
         conn = db
         r, name, path = root
         os.makedirs(path, exist_ok=True)
@@ -209,6 +226,28 @@ class TestOrphanScrapeDirsAreTombstoned:
         assert _sentinel_rows(conn, name) == 1, "无主目录没被补哨兵墓碑"
         assert name not in auth._dn_released_keys(conn, uid_v), (
             "补了哨兵却仍能被认领 —— 哨兵没有真正硬闸（产物读路径仍然敞开）"
+        )
+
+    def test_missing_scrape_root_does_not_consume_the_one_shot(self, db, tmp_path,
+                                                              monkeypatch):
+        """承重：爬取根**不存在**时不得写一次性标记。
+
+        否则升级时「先起服务、后拷爬取目录」（或全新部署首次 get_db() 早于建目录）
+        会把唯一的一次机会空转掉，此后补上的目录再也补不上哨兵 —— 缺口原样复活。
+        这与函数自称的「不打标记，下次重试」是同一个契约（code-review 第 6 轮收口第 2 条）。
+        """
+        conn = db
+        monkeypatch.setattr(auth, "_scrape_root",
+                            lambda: str(tmp_path / "_no_such_scrape_root"))
+        conn.execute("DELETE FROM config WHERE key='tombstoned_orphan_scrape_dirs'")
+        conn.commit()
+
+        database._tombstone_orphan_scrape_dirs(conn)
+
+        mark = conn.execute("SELECT value FROM config "
+                            "WHERE key='tombstoned_orphan_scrape_dirs'").fetchone()
+        assert mark is None, (
+            "爬取根不存在却把一次性标记用掉了 —— 之后目录补上也不会再扫，墓碑永远缺席"
         )
 
     def test_live_users_directory_is_not_tombstoned(self, db, root):

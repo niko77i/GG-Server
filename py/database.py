@@ -1603,14 +1603,21 @@ def _tombstone_orphan_scrape_dirs(conn: sqlite3.Connection):
         # 「异常绝不逃出去打死 get_db()」，import 失败也算异常。
         import auth
 
+        root = auth._scrape_root()
+        # ⚠️ 根**不存在**时绝不能打标记（2026-09-24，code-review 第 6 轮收口第 2 条）：
+        # 升级时若「先起服务、后拷爬取目录」，或全新部署的首次 get_db() 早于目录创建，
+        # 这一次空转就会把**唯一**的一次机会永久用掉（本函数由 config 标记守卫，
+        # 成功即不再扫），此后补上的目录再也补不上哨兵 —— 缺口原样复活。
+        # 不打标记 = 下次连接重试。刻意**不打印**：真·全新部署下根会长期不存在，
+        # 而 _migrate_if_needed 每个请求都跑，一行日志会把输出淹掉。
+        # 根存在却**读不出来**（权限等）走外层 except：打印 + 不打标记 + 重试。
+        if not os.path.isdir(root):
+            return
+
         live = {auth._dn_key(auth._dir_name_of(r["id"], r["username"], r["display_name"]))
                 for r in conn.execute(
                     "SELECT id, username, display_name FROM users").fetchall()}
-        root = auth._scrape_root()
-        try:
-            entries = os.listdir(root)
-        except OSError:
-            entries = []
+        entries = os.listdir(root)
 
         added = 0
         for name in entries:

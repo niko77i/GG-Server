@@ -908,6 +908,13 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 > 口径不一致会把**自己人**的目录误判成无主、永久封掉他的名字（变异 m21 恰好 1 红）。
 > 回归测试见 `py/tests/test_scrape_dn_history_migration.py::TestOrphanScrapeDirsAreTombstoned`
 > 与 `py/tests/test_scrape_ownership.py::TestSentinelIsAHardGate`。
+>
+> ⚠️ **别把「已有释放行的名字排除出扫盘」当成修 bug**（code-review 第 6 轮收口 1 曾在
+> 这个方向上给了修法，已被否）。攻击者要越过判据 3 占用某名字，前提**正是**他有一行同名
+> 释放记录（`own_keys` 只有自己的当前目录名 + username 派生名，越不过去）⇒ 按该方向修会
+> **恰好放过每一条可被利用的名字**、保护退化成空操作。代价是「上线前已改名者的旧目录
+> 认领路」被一并封掉（实测 live **0 人**受影响，见 `docs/.../2026-09-24-ondemand-download-signing-design.md` §0.12 收口 1）。
+> 该代价已写进 `test_orphan_dir_gets_sentinel_and_cannot_be_claimed` 的 docstring。
 
 ## 启动方式
 
