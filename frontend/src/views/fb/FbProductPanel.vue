@@ -322,7 +322,8 @@ async function refreshOptions() {
 
 async function openCreate() {
   editingId.value = null
-  Object.assign(form, { product_name:'', kpi:'', region:'', status:'active', sales_person_id:null, agency_ratio:0, bm_ids:[], runner_ids:[] })
+  // 在跑人员默认预填创建者，可自行取消勾选（保存时不再强制追加）
+  Object.assign(form, { product_name:'', kpi:'', region:'', status:'active', sales_person_id:null, agency_ratio:0, bm_ids:[], runner_ids: (auth.user && auth.user.id != null) ? [auth.user.id] : [] })
   formLines.value = []
   pixelFilterQuery.value = ''
   await refreshOptions()
@@ -340,7 +341,7 @@ async function openEdit(row) {
 
 async function handleSave() {
   if (!form.product_name) return ElMessage.warning('请输入产品名')
-  if (!editingId.value && auth.user && !form.runner_ids.includes(auth.user.id)) form.runner_ids.push(auth.user.id)
+  // 在跑人员不再强制追加创建者：openCreate 已预填，用户可自行取消勾选（可以是空）
   saving.value = true
   try {
     // 地区：如果是手动输入的新地区，自动创建

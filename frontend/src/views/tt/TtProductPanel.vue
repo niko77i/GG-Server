@@ -158,7 +158,8 @@ async function refreshOptions() {
 
 async function openCreate() {
   editingId.value = null
-  Object.assign(form, { product_name:'', kpi:'', region:'', status:'active', bc_id:null, sales_person_id:null, agency_ratio:null, customer:'', runner_ids:[] })
+  // 在跑人员默认预填创建者，可自行取消勾选（保存时不再强制追加）
+  Object.assign(form, { product_name:'', kpi:'', region:'', status:'active', bc_id:null, sales_person_id:null, agency_ratio:null, customer:'', runner_ids: (auth.user && auth.user.id != null) ? [auth.user.id] : [] })
   await refreshOptions()
   dialogVisible.value = true
 }
@@ -179,7 +180,7 @@ async function openEdit(id) {
 async function handleSave() {
   if (!form.product_name) return ElMessage.warning('请输入产品名')
   form.agency_ratio = Number(form.agency_ratio) || 0
-  if (!editingId.value && auth.user && !form.runner_ids.includes(auth.user.id)) form.runner_ids.push(auth.user.id)
+  // 在跑人员不再强制追加创建者：openCreate 已预填，用户可自行取消勾选（可以是空）
   saving.value = true
   try {
     if (form.region && !regionOptions.value.some(r => r.name === form.region)) {
