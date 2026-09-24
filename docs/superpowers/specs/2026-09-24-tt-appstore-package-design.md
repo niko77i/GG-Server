@@ -275,3 +275,37 @@ App Store 链接带地区段（`/vn/`、`/us/`…），**同一个 app 可能越
 - 本文档需登记到 `AGENTS.md` 的「设计文档索引」
 - TT 掉包通知与产品管理的描述需补充「支持 App Store 链接」
 - `delist_checker.py` 的判定口径变化（新增「判定未知」态）需在 AGENTS.md 的「包掉包自动检测与通知」处说明
+
+## 12. 追补：同族缺陷收口（2026-09-24 用户裁定）
+
+实现期间在审查环节又发现两处与 §2.3「无法判定被写成正常、抹掉正确记录」**同一缺陷家族**的缺陷，
+经用户裁定**一并收口**，纳入原 Task 3 范围：
+
+### 12.1 空 url 也归为「未知」
+
+`check_product_packages`（`delist_checker.py:152-158`）对空 url 返回 `is_delisted=False`（=「正常」），
+经消费方无条件写库后同样会抹掉上一轮正确的掉包记录。
+
+**可达性已证实（仅 GG）**：
+
+| 路径 | `url != ''` 过滤 | 是否可达 |
+|------|-----------------|---------|
+| GG 手动检测取包 SQL（`main.py:3619-3622`） | **无** | **可达** |
+| GG 定时（`main.py:8645`）、TT 定时（`main.py:8811`）、TT 手动（`tt_routes.py:635`） | 有 | 不可达 |
+
+且 GG 加包端点（`main.py:3401-3414`）**只要求包名、不要求 url**，故空 url 包可被创建；
+`products_update_package` 还可把既有包的 url 清空，使既有掉包记录随后被抹。
+
+**处置**：`check_url_delisted("")` 与 `check_product_packages` 的空 url 分支
+统一由 `False` 改判 `None`（模块契约统一为「无法判定 → `None`」），消费方据此不写库。
+两个钉住旧行为的既有测试（`test_empty_url_returns_false`、`test_skips_packages_without_url`）
+**改断言并注明语义变更，不删除**。
+
+### 12.2 `update_package` 的 url 语义收口
+
+`tt_routes.py:484-489` 的 `updates.get('url') or existing['url']` 把「本次没传 url」
+与「本次显式传空串」混同：对存量苹果包 `PUT {"package_name":"","url":""}` 会回落用库里的苹果 url
+而放行，最终落库成「包名与 url 皆空」—— 正是这条校验要拦的形态。
+
+**处置**：先判 key 存在性（`'url' in updates`）再决定用本次值还是库里值。
+「本次没传 url → 回落库里 url」这一既有能力保持不变。

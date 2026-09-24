@@ -699,13 +699,22 @@ git commit -m "feat(tt): 投放对象支持 App Store 链接，苹果包允许�
 ## Task 3: 判定未知时不覆盖既有结果
 
 **Files:**
-- Modify: `py/main.py`（TT 定时循环约 8843-8860、GG 定时循环约 8685-8700、GG 手动循环约 3645-3655）
-- Modify: `py/routes/tt_routes.py`（TT 手动循环约 646-652）
-- Test: `py/tests/test_delist_indeterminate.py`（**新建**）、`py/tests/test_tt_delist_notification.py`（补一条）
+- Modify: `py/main.py`（TT 定时循环约 8843-8872、GG 定时循环约 8680-8709、GG 手动循环约 3644-3651）
+- Modify: `py/routes/tt_routes.py`（TT 手动循环约 648-653、`update_package` 内联校验约 484-489）
+- Modify: `py/delist_checker.py`（空 url 两处判定，见 3e）
+- Modify: `py/tests/test_delist_checker.py`（更新两个钉住旧行为的既有测试，见 3e）
+- Test: `py/tests/test_delist_indeterminate.py`（**新建**）、`py/tests/test_tt_delist_notification.py`（补一条）、`py/tests/test_tt_appstore_package.py`（追加一个类，见 1c）
 
 **Interfaces:**
 - Consumes: Task 1 的 `check_url_delisted` 返回 `bool | None`
 - Produces: 四处消费方语义一致 —— `is_delisted is None` 时**不覆盖** `delist_checks` / `tt_delist_checks` 里的既有行；GG 侧额外把原因写进 `error_msg`
+
+**本任务额外包含两项用户裁定的同族收口**（2026-09-24）：
+- **3e** 空 url 也从「正常」改判「未知」（与 429 同一缺陷家族，且 GG 侧可达）
+- **3f** `update_package` 的 url 语义收口（显式传空 url 不再回落库里 url 而放行）
+
+改这两个既有测试是本任务**唯一**允许修改既有测试的地方；改动方式是**改断言 + 注明语义变更**，
+**不得删除用例**。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -840,17 +849,109 @@ class TestGGSchedulerIndeterminate:
         row = _read_delist_row(pkg_id)
         assert row["is_delisted"] == 1
         assert "429" in row["error_msg"]
+
+
+class TestGGManualCheckEmptyUrl:
+    """空 url 包（GG 可创建）同样不得把既有掉包记录抹成正常。"""
+
+    def test_manual_check_empty_url_keeps_prior_delisted_state(self, client, auth_headers):
+        db = database.get_db()
+        db.execute("INSERT INTO products(product_name, status) VALUES('空url产品','')")
+        db.commit()
+        pid = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        # GG 加包端点不校验 url，所以这种行真实存在
+        db.execute(
+            "INSERT INTO packages(product_id, series_name, package_name, url, status) "
+            "VALUES(?,?,?,?,?)",
+            (pid, "GG系列", "com.a.b", "", ""))
+        db.commit()
+        pkg_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db.close()
+
+        _seed_delisted_row(pkg_id, pid)
+
+        resp = client.post(f"/api/products/{pid}/check-delist", headers=auth_headers)
+
+        assert resp.status_code == 200
+        row = _read_delist_row(pkg_id)
+        assert row["is_delisted"] == 1              # 未被覆盖成 0
+        assert "无法判定" in row["error_msg"]
+
+
+class TestEmptyUrlJudgedIndeterminate:
+    """delist_checker 层：空 url 一律判「未知」，不再判「正常」。"""
+
+    def test_check_url_delisted_empty_url_returns_none(self):
+        from delist_checker import check_url_delisted
+
+        is_delisted, error = check_url_delisted("")
+
+        assert is_delisted is None
+        assert "无法判定" in error
+
+    def test_check_product_packages_empty_url_returns_none(self):
+        from unittest.mock import patch
+        from delist_checker import check_product_packages
+
+        with patch("delist_checker.requests.get") as mock_get:
+            results = check_product_packages(1, [{"id": 1, "url": "", "package_name": "test.a"}])
+
+        mock_get.assert_not_called()                # 空 url 仍不发请求
+        assert results[0]["is_delisted"] is None
+        assert "无法判定" in results[0]["error"]
 ```
+
+**1c.** 追加到 `py/tests/test_tt_appstore_package.py` 末尾（`update_package` 收口的测试）：
+
+```python
+class TestUpdatePackageExplicitEmptyUrl:
+    """显式传空 url 时不得回落库里 url 而放行（否则落库成包名与 url 皆空）。"""
+
+    def _make_apple_pkg(self, client, tt_headers):
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "空url收口产品",
+        }).get_json()["id"]
+        pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": "", "url": APPLE_LIVE,
+        }).get_json()["id"]
+        return pid, pkg_id
+
+    def test_explicit_empty_url_rejected(self, client, tt_headers):
+        _, pkg_id = self._make_apple_pkg(client, tt_headers)
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                          json={"package_name": "", "url": ""})
+
+        assert resp.status_code == 400
+        assert "包名" in resp.get_json()["error"]
+
+    def test_omitting_url_still_allowed(self, client, tt_headers):
+        """没传 url（本次只清包名）仍按库里的苹果 url 放行 —— 既有能力不被削弱。"""
+        _, pkg_id = self._make_apple_pkg(client, tt_headers)
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                          json={"package_name": ""})
+
+        assert resp.status_code == 200
+```
+
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cd py && python -m pytest tests/test_delist_indeterminate.py "tests/test_tt_delist_notification.py::TestTtDelistScheduler::test_indeterminate_does_not_overwrite_existing_delisted" -v`
+Run: `cd py && python -m pytest tests/test_delist_indeterminate.py tests/test_tt_appstore_package.py "tests/test_tt_delist_notification.py::TestTtDelistScheduler::test_indeterminate_does_not_overwrite_existing_delisted" -v`
 
-Expected: FAIL —— `assert 0 == 1`（既有掉包记录被 `1 if None else 0` 覆盖成 0）。
+Expected: FAIL ——
+- `assert 0 == 1`（既有掉包记录被 `1 if None else 0` 覆盖成 0）
+- `TestGGManualCheckEmptyUrl` FAIL（空 url 仍被判「正常」→ 覆盖成 0）
+- `TestEmptyUrlJudgedIndeterminate` 两条 FAIL（现在返回 `False` 而非 `None`）
+- `TestUpdatePackageExplicitEmptyUrl::test_explicit_empty_url_rejected` FAIL（现在返回 200 而非 400）
 
 > GG 侧通知只需 mock 一个函数：`main._send_telegram_notifications(db, pkgs)`（`main.py:8570`）。
 > 邮件没有独立函数，是调度器内联发的，且被 `if delisted_list:` 闸门挡住 ——
 > 判定未知时 `delisted_list` 为空，邮件路径根本不会进入，无需 mock。
+>
+> **注意**：`tests/test_delist_checker.py` 的两个既有测试在这一步**仍应通过**（它们钉的是旧行为），
+> 要到 Step 3 的 3e 才连同实现一起改断言。若你在 Step 2 就把它们改了，那是超前改动。
 
 - [ ] **Step 3: 实现**
 
@@ -980,11 +1081,70 @@ Expected: FAIL —— `assert 0 == 1`（既有掉包记录被 `1 if None else 0`
 
 （该处 `if any(r["is_delisted"] for r in results):` 不变 —— `None` 是 falsy，不会误触发通知。）
 
+**3e. 空 url 也归为「未知」**（同族缺陷收口，用户 2026-09-24 裁定「一并收口」）
+
+理由：`check_product_packages` 现在对空 url 返回 `is_delisted=False`（=「正常」），
+经消费方无条件写库后**同样会抹掉上一轮正确的掉包记录** —— 与 429 是同一个缺陷家族。
+且可达性已证实：GG 手动检测取包 SQL（`main.py:3619-3622`）没有 `url != ''` 过滤，
+而 GG 加包端点（`main.py:3401-3414`）**只要求包名、不要求 url**，所以空 url 包能被创建。
+
+改 `py/delist_checker.py` 两处（模块契约统一为「无法判定 → `None`」）：
+
+```python
+    if not url or not url.strip():
+        return None, "URL 为空，无法判定"
+```
+
+（原为 `return False, ""`，在 `check_url_delisted` 开头。）
+
+```python
+        if not url:
+            results.append({
+                "package_id": pkg_id,
+                "product_id": product_id,
+                "is_delisted": None,
+                "error": "URL 为空，无法判定",
+            })
+            continue
+```
+
+（原为 `"is_delisted": False, "error": ""`，在 `check_product_packages` 循环内。）
+
+**同步更新两个钉住旧行为的既有测试** —— 是**改断言并注明语义变更，不是删除**：
+
+- `tests/test_delist_checker.py` 的 `test_empty_url_returns_false` 改名为
+  `test_empty_url_returns_none`，断言改为 `is_delisted is None` 且 `"无法判定" in error`，
+  docstring 改为「空 URL 无法判定 → 返回 None（调用方不得据此写「正常」）」。
+- `tests/test_delist_checker.py` 的 `test_skips_packages_without_url` 的
+  `assert all(r["is_delisted"] is False for r in results)` 改为 `is None`，
+  保留 `mock_get.assert_not_called()`（空 url 仍不发请求）。
+
+**3f. `update_package` 收口 url 语义**（用户 2026-09-24 裁定「顺手收口」）
+
+`py/routes/tt_routes.py` 的 `update_package` 内联校验里，
+`updates.get('url') or existing['url']` 把「本次没传 url」与「本次显式传空串」混同，
+于是对存量苹果包 `PUT {"package_name": "", "url": ""}` 会回落用库里的苹果 url 而放行，
+最终落库成「包名与 url 皆空」—— 正是这条校验要拦的形态。改成先判 key 存在性：
+
+```python
+    # re-enforce type 规则：package 必须填写包名（App Store 链接除外，与 add_package 语义一致）
+    pkg_type = updates.get('type', existing['type'])
+    if pkg_type == 'package' and 'package_name' in updates and not updates['package_name']:
+        # 本次显式传了 url 就用本次的（空串即「清空」→ 不放行）；
+        # 本次没传 url 才回落库里的 url 判断是不是苹果链接。
+        if 'url' in updates:
+            effective_url = updates['url']
+        else:
+            effective_url = existing['url']
+        if not _is_appstore_url(effective_url):
+            return err('跑包必须填写包名', 400)
+```
+
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cd py && python -m pytest tests/test_delist_indeterminate.py "tests/test_tt_delist_notification.py::TestTtDelistScheduler" -v`
+Run: `cd py && python -m pytest tests/test_delist_indeterminate.py tests/test_delist_checker.py tests/test_tt_appstore_package.py "tests/test_tt_delist_notification.py::TestTtDelistScheduler" -v`
 
-Expected: 全绿。
+Expected: 全绿（含 3e 改过断言的两个既有测试）。
 
 Run: `cd py && python -m pytest tests/ -q`
 
@@ -993,8 +1153,8 @@ Expected: 全绿（`test_delist_api.py` 整文件是注释状态、`test_tt_rout
 - [ ] **Step 5: 提交**
 
 ```bash
-git add py/main.py py/routes/tt_routes.py py/tests/test_delist_indeterminate.py py/tests/test_tt_delist_notification.py
-git commit -m "fix(delist): 判定未知时不覆盖既有掉包记录（GG/TT 共四处消费方）"
+git add py/main.py py/routes/tt_routes.py py/delist_checker.py py/tests/test_delist_checker.py py/tests/test_delist_indeterminate.py py/tests/test_tt_delist_notification.py py/tests/test_tt_appstore_package.py
+git commit -m "fix(delist): 判定未知时不覆盖既有掉包记录，空 url 一并归为未知（GG/TT 共四处消费方）"
 ```
 
 ---
