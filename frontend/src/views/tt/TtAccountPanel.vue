@@ -173,7 +173,7 @@
         <el-table-column v-if="authStore.isHuguan" label="户归属" width="160" align="center">
           <template #header>
             <el-tooltip placement="top"
-              content="这个户归谁管。改这里会把新归属写进看板的「重新分配」列（TT 是「换绑情况」列），等你在看板同步时生效。">
+              content="这个户归谁管。如果配置了户管看板，改这里会把新归属写进看板的「重新分配」列（TT 是「换绑情况」列），等你在看板同步时生效。">
               <span style="cursor:help;">户归属 ⓘ</span>
             </el-tooltip>
           </template>
@@ -275,7 +275,7 @@ import TtAccountSyncModal from '@/components/tt/TtAccountSyncModal.vue'
 import TtRecycleReasonModal from '@/components/tt/TtRecycleReasonModal.vue'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 import { useAuthStore } from '@/stores/auth'
-import { huguanApi } from '@/api/huguan'
+import { useOwnerPicker } from '@/composables/useOwnerPicker'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
@@ -737,56 +737,17 @@ async function doBatchBc(val) {
 
 // ===== 「户归属」列（仅户管可见可编辑）=====
 // 视觉规格：docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md §5
+// 状态 / 水合时机的惰性加载 / 乐观更新均封装在 useOwnerPicker（GG 与 TT 逐字同构，只差 reassign 实现）。
+// authStore 留给列上的 v-if="authStore.isHuguan"（§5.2：非户管整个字段不渲染）。
 const authStore = useAuthStore()
-const ownerOptions = ref([])           // 下拉数据源：全量用户（**编辑**用途）
-const ownerOptionsLoaded = ref(false)  // 请求是否已落定（成功或失败）；落定后不再显示骨架
-const ownerOptionsFailed = ref(false)  // 请求失败：该列所有下拉禁用并提示（§5.6，写操作不许静默失败）
-const ownerPending = ref(new Set())    // 正在提交的行 id，防重入（§5.5）
-const ownerOptionMap = computed(() => Object.fromEntries(ownerOptions.value.map(u => [u.id, u])))
-
-// 数据源必须是户管专用的 owner-options，**不是** /platform/users：后者是给上方「归属人」
-// 筛选器用的，只列**该平台有未删除账户**的用户（那是筛选场景的有意设计，见
-// docs/superpowers/specs/2026-09-23-owner-filter-hide-empty-users-design.md）。拿它当改归属
-// 的选项源，户管就没法把 TT 的户转给一个当前只在 GG 有户的合法用户（实测缺口）。
-// 依据：docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md §2.4
-async function loadOwnerPickerOptions() {
-  if (!authStore.isHuguan) return
-  try {
-    const res = await huguanApi.ownerOptions()
-    ownerOptions.value = res.users || []
-  } catch (e) {
-    ownerOptionsFailed.value = true
-    // 这一列是**写**操作，静默失败会让户管以为改成功了（§5.6）
-    ElMessage.warning('用户列表加载失败，暂时无法修改户归属。')
-  } finally {
-    ownerOptionsLoaded.value = true
-  }
-}
-
-// 变更归属：乐观更新 + 提交期间锁住该格（§5.5）。
-// 「锁定」是必要的，不是保险：连续两次快速改动时 prev 会取到上一次乐观更新的值，
-// 第二次失败就会回滚出一个假值；:disabled 从交互层堵住这条路径。
-async function changeOwner(row, newOwnerId) {
-  const prev = row.owner_id
-  ownerPending.value.add(row.id)
-  row.owner_id = newOwnerId
-  try {
-    await ttAccountsApi.reassign(row.id, { owner_id: newOwnerId })
-    const t = ownerOptions.value.find(u => u.id === newOwnerId)
-    const who = (t && (t.display_name || t.username)) || `用户 #${newOwnerId}`
-    // 不写「系统已把新归属写进看板…」这种陈述句：未配置看板时那次回写是**静默跳过**的
-    // （§6.3），该句在未配置时是假话。本端点不返回「是否回写」，故只能用条件句兜底
-    // （彻底修法＝返回体带布尔，但那是 tt_accounts_routes.py 的改动，不在本任务）。
-    ElMessage.success(`归属已变更为「${who}」。如果配置了户管看板，系统会把新归属写进「换绑情况」列。`)
-  } catch (e) {
-    row.owner_id = prev
-    ElMessage.error(e?.response?.data?.error || '归属变更失败，已还原')
-  } finally {
-    ownerPending.value.delete(row.id)
-  }
-}
-
-onMounted(loadOwnerPickerOptions)
+const {
+  ownerOptions,
+  ownerOptionsLoaded,
+  ownerOptionsFailed,
+  ownerPending,
+  ownerOptionMap,
+  changeOwner
+} = useOwnerPicker(ttAccountsApi.reassign)
 </script>
 
 <style scoped>
