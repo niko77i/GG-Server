@@ -199,7 +199,13 @@ async function checkDelist() {
         ElMessage.warning(`检测到 ${delisted.length} 个包已掉包！`)
         emit('refresh')
       } else if (unknown.length) {
-        ElMessage.warning(`${unknown.length} 个包本轮未能判定（限流或网络异常），已保留上次判定结果`)
+        // 原因来自后端：可能是限流/网络异常，也可能是「URL 为空」这类永久性数据缺失 ——
+        // 不能一律说成网络抖动，否则用户永远不去补 url。
+        const reasons = [...new Set(unknown.map(r => r.error).filter(Boolean))]
+        const detail = reasons.length
+          ? `（${reasons.slice(0, 2).map(s => (s.length > 30 ? s.slice(0, 30) + '…' : s)).join('；')}）`
+          : ''
+        ElMessage.warning(`${unknown.length} 个包本轮未能判定，已保留上次判定结果${detail}`)
       } else {
         ElMessage.success('所有包均正常 ✓')
       }

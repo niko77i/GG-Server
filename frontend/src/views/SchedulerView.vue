@@ -27,7 +27,10 @@
         <div v-if="delistResult !== null" class="task-result" :class="delistResult.success ? 'success' : 'error'">
           <template v-if="delistResult.success">
             ✅ 检测完成：共 <strong>{{ delistResult.total }}</strong> 个包，
-            发现 <strong :style="{ color: delistResult.delisted > 0 ? '#ef4444' : '#10b981' }">{{ delistResult.delisted }}</strong> 个掉包
+            发现 <strong :style="{ color: delistResult.delisted > 0 ? '#ef4444' : (unknownCount(delistResult) > 0 ? '#f59e0b' : '#10b981') }">{{ delistResult.delisted }}</strong> 个掉包
+            <span v-if="unknownCount(delistResult) > 0" style="color:#f59e0b;">
+              ，{{ unknownCount(delistResult) }} 个未判定（已保留上次判定结果）
+            </span>
             <div v-if="delistResult.delisted > 0" style="margin-top:8px;">
               <div v-for="r in delistResult.results.filter(x => x.is_delisted)" :key="r.package_id" class="delisted-item">
                 ⚠️ {{ r.package_name }} (产品 #{{ r.product_id }})
@@ -61,7 +64,10 @@
         <div v-if="ttDelistResult !== null" class="task-result" :class="ttDelistResult.success ? 'success' : 'error'">
           <template v-if="ttDelistResult.success">
             ✅ 检测完成：共 <strong>{{ ttDelistResult.total }}</strong> 个包，
-            发现 <strong :style="{ color: ttDelistResult.delisted > 0 ? '#ef4444' : '#10b981' }">{{ ttDelistResult.delisted }}</strong> 个掉包
+            发现 <strong :style="{ color: ttDelistResult.delisted > 0 ? '#ef4444' : (unknownCount(ttDelistResult) > 0 ? '#f59e0b' : '#10b981') }">{{ ttDelistResult.delisted }}</strong> 个掉包
+            <span v-if="unknownCount(ttDelistResult) > 0" style="color:#f59e0b;">
+              ，{{ unknownCount(ttDelistResult) }} 个未判定（已保留上次判定结果）
+            </span>
             <div v-if="ttDelistResult.delisted > 0" style="margin-top:8px;">
               <div v-for="r in ttDelistResult.results.filter(x => x.is_delisted)" :key="r.package_id" class="delisted-item">
                 ⚠️ {{ r.package_name }} (产品 #{{ r.product_id }})
@@ -112,6 +118,11 @@ import { ElMessage } from 'element-plus'
 
 const taskStore = useTaskStore()
 
+// 未知 = is_delisted 为 null（限流/服务端异常/空 url 等），既不是掉包也不是正常
+function unknownCount(res) {
+  return (res?.results || []).filter(r => r.is_delisted == null).length
+}
+
 // 恢复上次执行结果（切换页面后回来）
 onMounted(() => {
   for (const t of taskStore.visibleTasks) {
@@ -137,14 +148,17 @@ async function triggerDelist() {
   const innerId = taskStore.addTask('delist', '掉包检测', null)
   try {
     const res = await adminApi.triggerDelistCheck()
+    const unk = unknownCount(res)
     taskStore.updateTask(innerId, {
       status: 'completed', progress: 1,
-      message: `共${res.total}包，${res.delisted}掉包`,
+      message: `共${res.total}包，${res.delisted}掉包` + (unk ? `，${unk}未判定` : ''),
       result: res,
       finishedAt: Date.now(),
     })
     delistResult.value = { success: true, ...res }
-    ElMessage.success(`掉包检测完成：${res.total} 个包，${res.delisted} 个掉包`)
+    const summary = `掉包检测完成：${res.total} 个包，${res.delisted} 个掉包` + (unk ? `，${unk} 个未判定` : '')
+    if (unk) ElMessage.warning(summary)
+    else ElMessage.success(summary)
     window.dispatchEvent(new CustomEvent('delist-check-completed'))
   } catch (e) {
     const msg = e?.response?.data?.error || e.message || '未知错误'
@@ -168,14 +182,17 @@ async function triggerTtDelist() {
   const innerId = taskStore.addTask('tt-delist', 'TT 掉包检测', null)
   try {
     const res = await adminApi.triggerTtDelistCheck()
+    const unk = unknownCount(res)
     taskStore.updateTask(innerId, {
       status: 'completed', progress: 1,
-      message: `共${res.total}包，${res.delisted}掉包`,
+      message: `共${res.total}包，${res.delisted}掉包` + (unk ? `，${unk}未判定` : ''),
       result: res,
       finishedAt: Date.now(),
     })
     ttDelistResult.value = { success: true, ...res }
-    ElMessage.success(`TT 掉包检测完成：${res.total} 个包，${res.delisted} 个掉包`)
+    const summary = `TT 掉包检测完成：${res.total} 个包，${res.delisted} 个掉包` + (unk ? `，${unk} 个未判定` : '')
+    if (unk) ElMessage.warning(summary)
+    else ElMessage.success(summary)
     window.dispatchEvent(new CustomEvent('delist-check-completed'))
   } catch (e) {
     const msg = e?.response?.data?.error || e.message || '未知错误'
