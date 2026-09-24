@@ -442,6 +442,16 @@ GG-Server/
 - **定时检测**：后台 daemon 线程每小时自动检测所有正常状态产品的正常状态包
 - **手动检测**：产品名后"是否掉包"按钮，点击立即检测
 - **检测方式**：HTTP 请求 Google Play 链接，通过状态码和页面内容判断（404 / "not found" / "找不到请求的网址"）
+- **判定第三态（未知）**：`is_delisted` 由 `bool` 扩为 **`bool | None`**，`None` = 判定未知。
+  「拿不到判定」的七类一律归为 `None`：HTTP 429/5xx、请求超时、网络连接失败、
+  链接解析失败（畸形 url）、代理池为空、代理全部失败、url 为空。
+  消费方（GG 定时 / GG 手动 / TT 定时 / TT 手动四处）遇 `None` **一律不写库**，
+  保留上一轮判定结果，也不触发掉包通知。
+  反面边界：404 → 掉包、200 正常页 → 正常，**「拿到了判定」的结果不得改判 `None`**。
+  起因：App Store 对掉包链接返回 404，被限流时返回 429，两者响应体同为
+  2383 字节，只能靠状态码区分；旧逻辑只认 404 且无条件 `INSERT OR REPLACE`，
+  会把 429（以及超时/代理失败等）当成正常，抹掉正确的掉包记录。
+  GG 侧同时把原因写入 `delist_checks.error_msg`
 - **首次通知**：检测到掉包后，所有在跑人员收到前端弹窗通知
 - **重复提醒**：关闭弹窗后 3 分钟，若包状态未设为"掉包"则再次弹窗
 - **公平通知**：即使有人已将包状态设为"掉包"，其他在跑人员仍要收到第一次提醒
@@ -597,6 +607,10 @@ YouTube 视频新增频道名（channel name）字段，导入时自动获取频
 - **前端**：`views/tt/` 下 6 个视图（TtView 容器 / TtAccountPanel / TtBcPanel / TtProductPanel / TtDataExtract / TtSettingsPanel）+ `components/TtProductCard.vue`、`TtAddPackageModal.vue`
 - **UI 对齐**：TT 页面视觉与交互对齐 GG（见 `2026-09-18-tt-ui-gg-alignment-design.md`）
 - **数据提取**：TtDataExtract.vue **纯前端**解析（`utils/adsParser.js`），产出 TSV/表格供复制，不写库
+- **投放对象支持 App Store 链接**：苹果包复用 `type='package'`，URL 是
+  `apps.apple.com` / `itunes.apple.com` 时**包名允许留空**（不自动填数字 id），
+  卡片上以灰色 `iOS` 占位展示；安卓包仍强制填写包名。域名判定按解析出的 host
+  全等比较（防 `evil.com/?u=apps.apple.com` 误判）
 - **数据备份**：`GET /api/tt/data/export` 导出 JSON、`POST /api/tt/data/import` 按外键依赖顺序重建（含 ID 重映射）
 - **共享层**：用户 platform 字段、侧边栏切换、路由守卫、选项表（地区 / 商务等）三平台共用
 
