@@ -2,11 +2,25 @@
 import json
 import os
 import re
+import urllib.parse
 
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import tt_required, tt_write_required, no_huguan, reject_huguan, require_platform
+
+# 脏数据解析用的链接正则。两个 pattern 合成一个 alternation，
+# 这样 re.finditer 能按**原文出现顺序**输出，而不是「先排完 Play 再排苹果」，
+# 否则 _guess_series 会拿错行去猜系列名。
+# 苹果链接的查询参数（?pt= / ?ct= / ?l=）是分享/联盟参数，与掉包判定无关，
+# 故意不捕获 —— 去掉后同一个 app 的重复粘贴能被合并去重键识别。
+_PLAY_LINK_RE = r'https?://play\.google\.com/store/apps/details\?id=[\w.&=/\-?%]+'
+# 苹果链接两种真实形状都要匹配：
+#   https://apps.apple.com/vn/app/id6804355336         （无 slug）
+#   https://apps.apple.com/vn/app/densia/id6804355336  （有 slug —— 实测中 200 会跳转到这个形状）
+# slug 必须作为独立路径段可选：写成 `[\w\-]*id\d+` 会跨不过 slug 后的 `/`，导致 slug 形式漏匹配。
+_APPSTORE_LINK_RE = r'https?://(?:apps|itunes)\.apple\.com/(?:[\w\-]+/)?app/(?:[\w\-]+/)?id\d+'
+_LINK_RE = re.compile(f'(?:{_PLAY_LINK_RE})|(?:{_APPSTORE_LINK_RE})')
 
 tt_bp = Blueprint('tt', __name__)
 
@@ -467,10 +481,12 @@ def update_package(pkg_id):
     if 'type' in data:
         updates['type'] = data.get('type', '')
 
-    # re-enforce type 规则：package 必须填写包名（与 add_package 语义一致）
+    # re-enforce type 规则：package 必须填写包名（App Store 链接除外，与 add_package 语义一致）
     pkg_type = updates.get('type', existing['type'])
     if pkg_type == 'package' and 'package_name' in updates and not updates['package_name']:
-        return err('跑包必须填写包名', 400)
+        # 本次没传 url 时，用库里既有的 url 判断是不是苹果链接
+        if not _is_appstore_url(updates.get('url') or existing['url']):
+            return err('跑包必须填写包名', 400)
 
     if not updates:
         return ok()
@@ -932,7 +948,7 @@ def products_merge():
 @tt_required
 @no_huguan
 def import_text():
-    """粘贴文本解析成投放对象列表（第一阶段仅跑包 Google Play 链接）。"""
+    """粘贴文本解析成投放对象列表（支持 Google Play 与 App Store 链接）。"""
     data = parse_body()
     text = (data.get("text") or "").strip()
     prefix = (data.get("prefix") or "").strip()
@@ -940,10 +956,11 @@ def import_text():
     if not text:
         return err('未提供文本内容')
 
-    links = re.findall(r'https?://play\.google\.com/store/apps/details\?id=[\w.&=/\-?%]+', text)
+    links = [m.group(0) for m in _LINK_RE.finditer(text)]
     results = []
     for link in links:
-        pkg = _extract_pkg_from_url(link)
+        # 苹果链接没有安卓包名，也不自动填数字 id（用户裁定：包名留空）
+        pkg = "" if _is_appstore_url(link) else _extract_pkg_from_url(link)
         series = _guess_series(text, link)
         if prefix:
             if not series.startswith(prefix):
@@ -961,6 +978,25 @@ def import_text():
                 series = series + "-" + suffix
         results.append({"type": "package", "series_name": series, "package_name": pkg, "url": link})
     return ok({'parsed': results})
+
+
+# App Store 的两个合法 host（老域名 itunes.apple.com 会跳转到 apps.apple.com）
+_APPSTORE_HOSTS = frozenset({"apps.apple.com", "itunes.apple.com"})
+
+
+def _is_appstore_url(url):
+    """URL 的 host 是否属于 App Store。
+
+    必须解析出 host 后**全等**比较：用子串匹配会让
+    `https://evil.com/?u=apps.apple.com` 这类 URL 误判为苹果链接。
+    """
+    if not url:
+        return False
+    try:
+        host = urllib.parse.urlsplit(str(url).strip()).hostname or ""
+    except ValueError:
+        return False
+    return host.lower() in _APPSTORE_HOSTS
 
 
 def _extract_pkg_from_url(url):
@@ -1421,12 +1457,17 @@ def _get_pkg_product_id(db, pkg_id):
 
 
 def _validate_package(pkg):
-    """校验投放对象：type 必须 package/pwa；跑包必须填写包名。返回 None 或 err 响应。"""
+    """校验投放对象：type 必须 package/pwa；跑包必须填写包名。
+
+    例外：App Store 的投放对象没有安卓包名，URL 是苹果链接时包名允许留空。
+    返回 None 或 err 响应。
+    """
     pkg_type = pkg.get('type', 'package')
     if pkg_type not in ('package', 'pwa'):
         return err('无效的投放对象类型', 400)
     if pkg_type == 'package' and not (pkg.get('package_name') or '').strip():
-        return err('跑包必须填写包名', 400)
+        if not _is_appstore_url(pkg.get('url')):
+            return err('跑包必须填写包名', 400)
     return None
 
 
