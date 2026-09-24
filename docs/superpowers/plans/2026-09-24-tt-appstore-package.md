@@ -1504,15 +1504,29 @@ git commit -m "feat(tt): 前端放行 App Store 链接，苹果包以灰色 iOS 
 在 `### 掉包检测与通知` 一节的**核心逻辑**列表里，`- **检测方式**` 那条之后补一条：
 
 ```markdown
-- **判定第三态（未知）**：HTTP 429/5xx 既不是 404（掉包）也不是正常页面，
-  判为「未知」并换代理重试；重试耗尽后**不写库**，保留上一轮判定结果。
+- **判定第三态（未知）**：`is_delisted` 由 `bool` 扩为 **`bool | None`**，`None` = 判定未知。
+  「拿不到判定」的七类一律归为 `None`：HTTP 429/5xx、请求超时、网络连接失败、
+  链接解析失败（畸形 url）、代理池为空、代理全部失败、url 为空。
+  消费方（GG 定时 / GG 手动 / TT 定时 / TT 手动四处）遇 `None` **一律不写库**，
+  保留上一轮判定结果，也不触发掉包通知。
+  反面边界：404 → 掉包、200 正常页 → 正常，**「拿到了判定」的结果不得改判 `None`**。
   起因：App Store 对掉包链接返回 404，被限流时返回 429，两者响应体同为
-  2383 字节，只能靠状态码区分；旧逻辑只认 404，会把 429 当成正常，
-  用 `INSERT OR REPLACE` 抹掉正确的掉包记录。GG 侧同时把原因写入
-  `delist_checks.error_msg`
+  2383 字节，只能靠状态码区分；旧逻辑只认 404 且无条件 `INSERT OR REPLACE`，
+  会把 429（以及超时/代理失败等）当成正常，抹掉正确的掉包记录。
+  GG 侧同时把原因写入 `delist_checks.error_msg`
 ```
 
-- [ ] **Step 3: 提交**
+- [ ] **Step 3: 登记设计文档索引**（spec §11 要求；项目规则「每次新的文档都要建立索引」）
+
+在 `## 设计文档索引` → `### GG-Server 独立设计文档` 一节的**末尾**追加：
+
+```markdown
+- [TT 支持苹果包链接（App Store）+ 掉包判定加固](docs/superpowers/specs/2026-09-24-tt-appstore-package-design.md)
+```
+
+- [ ] **Step 4: 提交**
+
+逐文件 add（**禁止 `git add -A`**），提交前 `git status` 核对暂存区无并行会话的改动：
 
 ```bash
 git add AGENTS.md
@@ -1535,6 +1549,9 @@ git commit -m "docs: AGENTS.md 补充 TT 支持 App Store 链接与掉包判定�
 - 不新增 `type='ios'`，不改 `tt_packages` 表结构
 - 不改 GG / FB 的录入链路（`AddPackageModal.vue`、`CopyImportModal.vue`、`utils.py:extract_package_name`）
 - 不改 `_guess_series` 的猜名逻辑；苹果链接猜不到时兜底返回空串（与「不自动填」同口径）
-- 不把「超时/连接失败」改判为未知态（维持 `False` + error，既有测试与不变量都不动）
+- ~~不把「超时/连接失败」改判为未知态~~ —— **此项已被 Task 3b 推翻**（用户 2026-09-24 裁定
+  五类「拿不到判定」一并收口）。最终口径：**拿不到判定 → `None`**，涵盖 429/5xx、超时、
+  连接失败、解析失败（畸形 url）、代理池为空、代理全部失败、空 url 共七类。
+  反面仍然成立：**200 正常页面 / 404 掉包页面这类「拿到了判定」的结果一律不得改判 `None`**。
 - 不动 `tt_data_import` 的 JSON 重建逻辑
 - 不修 `tt_routes.py:644` 手动检测走直连（`proxy_pool=None`）这一现状 —— 与 `AGENTS.md` 描述不符，已作为疑问提出，待用户裁定
