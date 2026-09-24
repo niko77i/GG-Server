@@ -3578,21 +3578,50 @@ onMounted(loadHdConfig)
 
 - [ ] **Step 4: TT 设置页加同样的卡片**
 
-在 `frontend/src/views/tt/TtSettingsPanel.vue` 的 sheet 配置卡片（`:124` 的 `v-if="!authStore.isHuguan"`）之后追加同样的卡片，改动三点：
-- `platform: 'gg'` 全部改为 `'tt'`
-- `res.config.gg` 改为 `res.config.tt`
-- 卡片抬头保持「📊 户管看板配置」
+> **⚠ 本步已于 2026-09-24 被用户裁定取代——不要按下面原文复制两份。**
+>
+> 原文让 TT 页「追加同样的卡片，改动三点」，即把约 753 行逐字节复制一份。Task 10 实现完成后的代码审查
+> 把这条列为 Important：这个项目已经**被同一类失败咬过一次**——设计文档 §3.4 的 TT 列清单就是照 GG 结构
+> 改写而来，结果三处事实错误，其中一处（称 `M 列 · 产品信息` 不会被覆盖、实际会被静默覆盖）会直接导致
+> 户管数据丢失。753 行重复里任何后续修正漏改一侧，都会复现同一类漂移。
+>
+> **用户裁定：抽共享组件。** 实际做法见 Step 4'。
+
+- [x] **Step 4'（取代 Step 4）：抽共享组件**
+
+新建 `frontend/src/components/HuguanDashboardCard.vue`，`defineProps({ platform })`（`'gg' | 'tt'`）；
+平台相关的一切从 `props.platform` 派生——`res.config[platform]`、`huguanApi.push(platform)` /
+`sync({ platform, ... })`、`VIA_LABELS[platform]`、`PUSH_COVER[platform]`、`PUSH_SAFE[platform]`，
+以及按平台切词的文案（附加说明行、幸免补充句、按钮平台词）。`FIELD_LABELS` / `WARN_TOKENS` 跨平台共用，保持不分区。
+
+两个设置页各自删掉整块、只留 import + 一行标签，**位置不变**：
+- `SettingsPanel.vue`：`</template>`（`:104`，管理员专属包层）之后、`</el-tab-pane>` 之前 ⇒ `<HuguanDashboardCard platform="gg" />`
+  ——**不要放进那个 `isAdmin || isDeveloper` 的 template 里**，户管既非 admin 也非 developer，放进去就整块不渲染。
+- `tt/TtSettingsPanel.vue`：`</el-card>`（`:164`）之后、`</el-tab-pane>`（`:165`）之前 ⇒ `platform="tt"`。
+- 同时清掉两页里因此变成死代码的 import（`nextTick` / `huguanApi` 等）与只服务该块的局部状态、常量，
+  以及那个多余的 `onMounted(loadHdConfig)`（组件自带）。**只删本块专用的**，pre-existing 代码在用的 import 不许动。
+
+**严格等价搬运**：所有用户可见文案、`setTimeout` 时长、tooltip、默认勾选、错误分支逐字不变。本次搬运**不**顺手修
+审查留下的四条 Minor（`setTimeout(...,100)` 打点、n=0 时的绿字成功态、无差异早退、`WARN_TOKENS` 含 `status_name`）。
 
 - [ ] **Step 5: 构建验证**
 
 Run: `cd frontend && npm run build`
 Expected: 构建成功，无编译错误
 
+**构建证不了「等价搬运」**，故必须另证字符串保全：在 `frontend/dist/assets/SettingsPanel-*.js` 与
+`TtSettingsPanel-*.js` 里 grep 那批特征文案（`户管看板配置`、`重新分配`、`接户运营`、`换绑情况`、
+`这个表格里没有可读的工作表`、`归属变更默认不勾选`、`确认同步`、两个对话框标题）。
+注意这些文案现在应落在**共享组件的 chunk** 里（被两页共同 import），而不是每页一份 ⇒ 命中位置会变，不是回归。
+
 - [ ] **Step 6: 提交**
 
 ```bash
-git add frontend/src/api/huguan.js frontend/src/views/SettingsPanel.vue frontend/src/views/tt/TtSettingsPanel.vue
-git commit -m "feat: 户管看板配置卡片（GG/TT 设置页）"
+git add frontend/src/components/HuguanDashboardCard.vue \
+        frontend/src/api/huguan.js \
+        frontend/src/views/SettingsPanel.vue \
+        frontend/src/views/tt/TtSettingsPanel.vue
+git commit -m "refactor(huguan): 抽 HuguanDashboardCard 共享组件（用户裁定，取代两份逐字复制）"
 ```
 
 ---
