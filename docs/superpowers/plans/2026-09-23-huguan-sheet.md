@@ -1259,7 +1259,7 @@ git commit -m "feat: 户管看板配置读写接口与户管限定装饰器"
   - `resolve_named_id(db, sql: str, params: tuple) -> int | None` — 唯一命中才返回
   - `resolve_status_id(db, name: str, owner_id, platform: str, *, create_missing: bool = True) -> int | None` — 查重键 `(name, platform)`（**不含 owner_id**）；查不到且 `create_missing=False` 时返回 `None`（不建行），`owner_id` 只用于给新建行记「谁先建的」
   - `build_diff(db, parsed_rows: list, platform: str) -> dict` — 返回 `{"to_create": [...], "to_update": [...], "owner_changes": [...], "to_skip": [...], "warnings": [...], "summary": {...}}`
-  - 每个 diff 项都带 `"row"`（表里 1-indexed 行号，供前端回传确认）
+  - 每个 diff 项都带 `"row"`（表里 1-indexed 行号，供报错定位与前端展示）与 `"account_id"`（供前端回传确认，按账户ID 绑定而非行号）
   - 每个 diff 项还带 `"pending_status": str | None` — 该行状态名在系统里尚不存在时的名字。**`build_diff` 绝不建行**（`dry_run` 只读），`INSERT` 推迟到 Task 7 的 `apply_diff`。文本列的新值为空串时，该列名进 `to_update[i]["clears"]`（前端必须显式标注「将清空」）
   - `summary` 额外带 `"clears": int` — 本次将被清空的列总数（首次同步前用它量化影响面）
 
@@ -2122,11 +2122,13 @@ git commit -m "feat: 户管看板差异比对与名称解析（唯一命中才�
 **Interfaces:**
 - Consumes: `build_diff`、`cells_for_row`、`OWNER_CHANNEL_COL`、`OWNER_COL`、`get_platform_config`、`update_rows_by_account_id`、`_text`
 - Produces:
-  - `apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> dict` — `confirmed` 形如 `{"create": [2,5], "update": [7], "owner": [9]}`（值为表里行号）。返回 `{"created": n, "updated": n, "owner_changed": n, "errors": [...]}`
+  - `apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> dict` — `confirmed` 形如 `{"create": ["C-1","C-2"], "update": ["A1"], "owner": ["A2"]}`（值为**账户ID**，不是行号——行号会随表重排漂移）。返回 `{"created": n, "updated": n, "owner_changed": n, "applied_owner_rows": [...], "not_applied": [...], "errors": [...]}`
   - `owner_channel_cells(rows: list, platform: str, value: str) -> list` — 构造只写归属变更通道列的 rows
   - HTTP：`POST /api/huguan/dashboard/sync`
 
 - [ ] **Step 1: 写失败的测试**
+
+> 契约说明：`apply_diff` 的 `confirmed` 按**账户ID** 绑定（`{"create": ["C-1"], ...}`），不是行号。下方测试示例里的 `{"create": [2]}` 之类应读作「账户ID 为该测试 fixture 里的账户」（`C-1` / `OC-1` / `ST-1` …），行号只在 `parse_row(..., row=N)` 的 `row` 字段里出现、供报错定位。实现时以本节 Interfaces 的 `apply_diff` 签名为准。
 
 追加到 `py/tests/test_huguan_dashboard.py`：
 
@@ -2417,20 +2419,23 @@ def owner_channel_cells(rows: list, platform: str, value: str) -> list:
 def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> dict:
     """执行户管确认过的差异（规格 §8.3 步骤 8）。
 
-    confirmed: {"create": [行号...], "update": [行号...], "owner": [行号...]}
-               缺哪个键就完全不执行该类别。
+    confirmed: {"create": [账户ID...], "update": [账户ID...], "owner": [账户ID...]}
+               缺哪个键就完全不执行该类别。按账户ID 匹配，不是行号——行号会随表
+               重排漂移，落库时重新拉表重算 diff 后行位移会静默作用到另一个账户。
     """
     conf = confirmed or {}
     created = updated = owner_changed = 0
     errors = []
     applied_owner_rows = []
+    matched = {"create": set(), "update": set(), "owner": set()}
 
     table = "tt_accounts" if platform == "tt" else "accounts"
     key_field = ACCOUNT_KEY_FIELD[platform]
 
     for item in diff.get("to_create", []):
-        if item["row"] not in conf.get("create", []):
+        if item["account_id"] not in conf.get("create", []):
             continue
+        matched["create"].add(item["account_id"])
         try:
             # db_values 装的是「数据库列名 → 值」（见 build_diff 的 to_create），
             # 与表列字母的 cells 不是一回事，切勿混用。
@@ -2456,8 +2461,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             errors.append({"row": item["row"], "error": str(e)})
 
     for item in diff.get("to_update", []):
-        if item["row"] not in conf.get("update", []):
+        if item["account_id"] not in conf.get("update", []):
             continue
+        matched["update"].add(item["account_id"])
         try:
             fields = dict(item.get("fields") or {})
             is_dead_val = fields.pop("_is_dead", None)
@@ -2469,7 +2475,10 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
                     db, pending, item.get("scope_owner_id"), platform)
             if fields:
                 sets = ", ".join(f"{k}=?" for k in fields)
-                db.execute(f"UPDATE {table} SET {sets}, "
+                # 状态真变了才刷新 status_changed_date（前端「状态变更时间」据此显示）
+                status_refresh = ", status_changed_date=datetime('now','localtime')" \
+                    if "status_id" in fields else ""
+                db.execute(f"UPDATE {table} SET {sets}{status_refresh}, "
                            "updated_at=datetime('now','localtime') WHERE id=?",
                            tuple(fields.values()) + (item["existing_id"],))
             if is_dead_val is not None:
@@ -2479,21 +2488,30 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             errors.append({"row": item["row"], "error": str(e)})
 
     for item in diff.get("owner_changes", []):
-        if item["row"] not in conf.get("owner", []):
+        if item["account_id"] not in conf.get("owner", []):
             continue
+        matched["owner"].add(item["account_id"])
         try:
             db.execute(f"UPDATE {table} SET owner_id=?, "
                        "updated_at=datetime('now','localtime') WHERE id=?",
                        (item["to_owner_id"], item["existing_id"]))
             owner_changed += 1
-            applied_owner_rows.append({"row": item["row"],
-                                       "account_id": item["account_id"]})
+            applied_owner_rows.append({"account_id": item["account_id"],
+                                       "to": item["to"]})
         except Exception as e:
             errors.append({"row": item["row"], "error": str(e)})
 
     db.commit()
+    # 勾了但当前 diff 里没有的账户ID，别静默丢弃——明确回报，让前端知道没生效
+    not_applied = [
+        {"account_id": aid, "category": cat}
+        for cat in ("create", "update", "owner")
+        for aid in conf.get(cat, [])
+        if aid not in matched[cat]
+    ]
     return {"created": created, "updated": updated, "owner_changed": owner_changed,
-            "applied_owner_rows": applied_owner_rows, "errors": errors}
+            "applied_owner_rows": applied_owner_rows, "not_applied": not_applied,
+            "errors": errors}
 
 
 def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:
@@ -2503,12 +2521,13 @@ def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:
         db.execute(f"UPDATE {table} SET death_date=date('now','localtime'), "
                    "status_changed_date=datetime('now','localtime') WHERE id=?", (account_pk,))
     else:
-        db.execute(f"UPDATE {table} SET death_date='' WHERE id=?", (account_pk,))
+        db.execute(f"UPDATE {table} SET death_date='', "
+                   "status_changed_date=datetime('now','localtime') WHERE id=?", (account_pk,))
 ```
 
 - [ ] **Step 4: 实现 sync 端点**
 
-追加到 `py/routes/huguan_dashboard_routes.py`：
+追加到 `py/routes/huguan_dashboard_routes.py`。文件顶部补一行导入（照抄 `py/routes/tt_accounts_routes.py:10`）：`from cache import cache as _app_cache`（清缓存用，见下方 `clear_prefix` / `delete`）。
 
 ```python
 @huguan_dashboard_bp.route("/api/huguan/dashboard/sync", methods=["POST"])
@@ -2549,31 +2568,36 @@ def dashboard_sync():
 
         diff = hd.build_diff(db, parsed_rows, platform)
 
-        if data.get("dry_run", True):
+        # fail-safe：只有显式布尔 False 才落库；缺省/null/"false"(字符串)/0 一律只读
+        if data.get("dry_run") is not False:
             return ok({"diff": diff})
 
-        # confirmed 期望 {"create": [行号], "update": [行号], "owner": [行号]}。
+        # confirmed 期望 {"create": [账户ID], "update": [账户ID], "owner": [账户ID]}。
         # `or {}` 兜不住真值非 dict（[1,2] / "abc"）→ apply_diff 里 conf.get 炸 500；
-        # 值不是数组同样炸（`2 not in 2` → TypeError）。两层都在这里挡住。
+        # 值不是数组同样炸。两层都在这里挡住。
         confirmed = data.get("confirmed")
         if not isinstance(confirmed, dict):
             return err("confirmed 必须是对象", 400)
         for k in ("create", "update", "owner"):
             v = confirmed.get(k)
             if v is not None and not isinstance(v, list):
-                return err(f"confirmed.{k} 必须是行号数组", 400)
+                return err(f"confirmed.{k} 必须是账户ID数组", 400)
 
         result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid)
+
+        # 规格 §8.3 步骤 8：清缓存（账户写入 → 下拉/列表失效；新建状态 → 状态下拉失效）
+        _app_cache.clear_prefix("accounts:agents:")
+        if any(item.get("pending_status") for item in
+               diff.get("to_create", []) + diff.get("to_update", [])):
+            _app_cache.delete(f"accounts:statuses:{uid}")
 
         # 规格 §7.2 规则 3② + 规则 4：应用了归属变更的行，回写运营列并清空变更通道列
         applied = result.pop("applied_owner_rows", [])
         if applied:
             rows = []
             for item in applied:
-                new_owner = next((c["to"] for c in diff["owner_changes"]
-                                  if c["row"] == item["row"]), "")
                 rows.append({"account_id": item["account_id"],
-                             "cells": {hd.OWNER_COL[platform]: new_owner}})
+                             "cells": {hd.OWNER_COL[platform]: item["to"]}})
             _write_background(service, conf, rows)
             _write_background(service, conf,
                               hd.owner_channel_cells(applied, platform, ""))
@@ -2694,7 +2718,7 @@ class TestCollectRowsForPush:
         from huguan_dashboard import collect_rows_for_push
         db = database.get_db()
         u1 = _seed(db, "_push_u2", "李四")
-        db.execute("INSERT INTO tt_bcs(name) VALUES('BC-P')")
+        db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('BC-P','BC-P')")
         db.commit()
         bc = db.execute("SELECT id FROM tt_bcs WHERE name='BC-P'").fetchone()["id"]
         db.execute("INSERT INTO tt_accounts(advertiser_id, name, owner_id, bc_id, country, "
@@ -3074,7 +3098,7 @@ class TestTtReassignCrossUser:
         """owner_id 给 0 不得被当成合法目标。
 
         `"0".isdigit()` 为真，所以必须先 `or ""` 吃掉 —— 否则归属会被设成
-        不存在的用户 0。这一步与 GG 既有写法（main.py:4378-4381）逐字对齐。
+        不存在的用户 0。空 body（`{}`）走的是同一条 `or ""` 路径，故认领流程不受影响。
         """
         hg, hid = _create_user(client, "_tt_rg_zero", role="huguan", platform="tt")
         db = database.get_db()
@@ -3087,6 +3111,42 @@ class TestTtReassignCrossUser:
         assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
                           (aid,)).fetchone()["owner_id"] == hid
         db.close()
+
+    def test_unknown_target_user_is_400_not_500(self, client):
+        """目标用户不存在必须在写库前挡成 400 —— 否则 FK IntegrityError → 500。
+
+        `tt_accounts.owner_id REFERENCES users(id)` 且连接开了 `PRAGMA foreign_keys=ON`。
+        """
+        hg, _ = _create_user(client, "_tt_rg_ghost", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-5", _seed(db, "_tt_rg_gother", "吴十"))
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": 99999999})
+        assert resp.status_code == 400
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
+                          (aid,)).fetchone()["owner_id"] != 99999999
+        db.close()
+
+    def test_non_ascii_digit_owner_id_is_400(self, client):
+        """非 ASCII 数字一律拒 —— `"١٢٣".isdigit()` 为真，不挡会静默变成 123。"""
+        hg, _ = _create_user(client, "_tt_rg_bad", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-6", _seed(db, "_tt_rg_badother", "郑一"))
+        db.close()
+        for bad in ["abc", "١٢٣", "1.5"]:
+            assert client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                              json={"owner_id": bad}).status_code == 400, bad
+
+    def test_oversized_owner_id_is_400(self, client):
+        """超 int64 的值在 sqlite3 参数绑定处抛 OverflowError → 500，须提前挡掉。"""
+        hg, _ = _create_user(client, "_tt_rg_big", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-7", _seed(db, "_tt_rg_bigother", "冯二"))
+        db.close()
+        assert client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": "9" * 25}).status_code == 400
 
 
 class TestTTTriggerPoints:
@@ -3130,7 +3190,7 @@ Expected: FAIL — `test_huguan_can_transfer_to_another_user` 断言 owner_id �
 
 - [ ] **Step 3: 扩展 TT reassign**
 
-修改 `py/routes/tt_accounts_routes.py` 的 `reassign_account`（按**函数名**定位，行号会漂）。**只加一小段，其余逐字节不动**：
+修改 `py/routes/tt_accounts_routes.py` 的 `reassign_account`（按**函数名**定位，行号会漂）。**只加这几段，其余逐字节不动**：
 
 在 `data = parse_body()` 之后（该函数前几行依次是 `db = get_db()` / `uid = get_uid()` / `data = parse_body()`）插入目标归属的计算。
 **注意必须排在 `data = parse_body()` 之后**——下面这段读 `data.get("owner_id")`，插在它前面会直接 `NameError`：
@@ -3138,21 +3198,46 @@ Expected: FAIL — `test_huguan_can_transfer_to_another_user` 断言 owner_id �
 ```python
     # 目标归属：跨用户角色（developer/admin/户管）可用 owner_id 转给指定用户，
     # 其余角色恒为调用者自己（默认路径与改动前逐字节一致）。
-    # `or ""` 不能省：owner_id 给 0 时 `"0".isdigit()` 为真，会把手属设成不存在的用户 0；
-    # 这一步与 GG 的既有写法（main.py:4378-4381）逐字对齐。
+    # `or ""` 不能省：owner_id 给 0 时 `"0".isdigit()` 为真，会被当成合法目标。
     target_owner = uid
     if _get_role(db, uid) in CROSS_USER_ROLES:
         raw_owner = (data.get("owner_id") or "")
-        if str(raw_owner).strip().isdigit():
-            target_owner = int(str(raw_owner).strip())
+        raw_owner_str = str(raw_owner).strip()
+        if raw_owner_str:
+            if not (raw_owner_str.isascii() and raw_owner_str.isdigit()):
+                return err("owner_id 不合法", 400)
+            target_owner = int(raw_owner_str)
+            if target_owner > 2**63 - 1:
+                return err("owner_id 不合法", 400)
 ```
+
+**`isascii()` 不能省**：`"١٢٣".isdigit()`（阿拉伯-印度数字）为真，会静默转成 123。
+
+**目标用户存在性校验**，插在 `existing` 的 404 检查之后、409 检查之前：
+
+```python
+    if target_owner != uid:
+        if not db.execute("SELECT 1 FROM users WHERE id=?", (target_owner,)).fetchone():
+            return err("目标用户不存在", 400)
+```
+
+**这一条是必需的、不是加固**：`tt_accounts.owner_id` 是 `INTEGER REFERENCES users(id)`（`database.py:766`），
+而每次连接都 `PRAGMA foreign_keys=ON`（`database.py:42`）⇒ 指向不存在的用户会在 UPDATE 处抛
+`IntegrityError` → **500**。这是本任务引入的新输入路径，照原样发出去就是新功能自带一条崩溃路径。
+（GG 侧同族写法见 `main.py` 的 `accounts_reassign`，其注释同样记「改为 400」。）
 
 然后把该函数中两处 `uid` 的归属用途替换为 `target_owner`：
 
 - `if int(existing["owner_id"] or 0) == uid:` → `if int(existing["owner_id"] or 0) == target_owner:`
 - `db.execute("UPDATE tt_accounts SET owner_id=?, ...", (uid, aid))` → `(target_owner, aid)`
+- 该处的 409 文案：`target_owner == uid` 时保持「已属于当前用户」，否则用「已属于目标用户」
 
-并把返回文案改为区分两种情况（对照 `main.py:4419-4424`）：
+**不加「归属权限 403」校验（用户已裁定，勿擅自补）**：TT 的批量导入弹窗有「⚠ 他人账户 — 勾选认领」
+这条**已上线**能力（`batch-lookup` 不过滤归属 ⇒ 普通用户看得见也点得动，
+`TtAccountBatchImportModal.vue:520-526` 用空 body 调本端点认领）。补 403 会让它对普通用户整体失效。
+TT 与 GG 在权限维度的这处差异**留给最终整分支审查裁定**，本任务不动。
+
+并把返回文案改为区分两种情况：
 
 ```python
     if target_owner == uid:
@@ -3209,28 +3294,36 @@ def _huguan_owner_channel(uid, account_id, new_owner_id):
         logging.getLogger("gg-server").warning("TT 换绑情况列回写触发失败: %s", e)
 ```
 
-6 处插入点：
+6 处插入点（**行号与端点名均已实测**，`grep -n "@tt_accounts_bp.route"` 可复核）：
 
-| 行号（约） | 端点 | 插入的调用 |
+| 行号 | 端点 | 插入的调用 |
 |---|---|---|
-| `:150` | `POST /api/tt/accounts` | `_huguan_push(uid, [advertiser_id])` |
-| `:410` | `POST /api/tt/accounts/batch` | `_huguan_push(uid, created_ids)` |
-| `:350` | `PUT /api/tt/accounts/<aid>` | `_huguan_push(uid, [existing["advertiser_id"]])` |
-| `:490` | `PUT /api/tt/accounts/<aid>/reassign` | `_huguan_push(uid, [existing["advertiser_id"]])` + `_huguan_owner_channel(uid, existing["advertiser_id"], target_owner)` |
-| `:455` | `POST /api/tt/accounts/batch-update` | `_huguan_push(uid, affected_advertiser_ids)` |
-| `:1050` | `POST /api/tt/accounts/sync-from-sheet` | `_huguan_push(uid, [对应 advertiser_id])` |
+| `:86` | `POST /api/tt/accounts/create` | `_huguan_push(uid, [advertiser_id])` |
+| `:355` | `POST /api/tt/accounts/batch-create` | `_huguan_push(uid, created_ids)` |
+| `:287` | `PUT /api/tt/accounts/<int:aid>` | `_huguan_push(uid, [existing["advertiser_id"]])` |
+| `:466` | `PUT /api/tt/accounts/<int:aid>/reassign` | `_huguan_push(uid, [existing["advertiser_id"]])` + `_huguan_owner_channel(uid, existing["advertiser_id"], target_owner)` |
+| `:419` | `POST /api/tt/accounts/batch-update` | `_huguan_push(uid, affected_advertiser_ids)` |
+| `:995` | `POST /api/tt/accounts/sync-from-sheet` | `_huguan_push(uid, [对应 advertiser_id])` |
+
+**插入点的局部变量名以实际代码为准**（例如 `_huguan_push(uid, [advertiser_id])` 里的 `advertiser_id`
+在 create 端点可能是别的名字，TT 表的主键字段是 `advertiser_id`）；行号仍可能随编辑漂移，
+**一律以 `@tt_accounts_bp.route(...)` 里的端点字符串为锚**。
 
 **不接入**：`:499` 软删、`:536` 恢复、`:553` 永久删 —— 只改 `deleted_at`，不动任何可映射列。
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
-Expected: PASS（聚焦 ≥ 96 passed）
+Run: `cd py && PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_huguan_dashboard.py -q`
+Expected: PASS（聚焦 ≥ 135 passed —— 上一任务实测 126，本任务新增 9 条：7 条 reassign + 2 条触发点。
+**报告里必须写明实测数字**，低于 135 说明有用例没跑起来）
 
 - [ ] **Step 6: 跑全量测试确认无回归**
 
-Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS（全量 ≥ 520 passed，不得低于上一任务实测值）
+Run: `cd py && PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/ -q`
+Expected: PASS（全量 ≥ 602 passed —— 上一任务实测 593 + 本任务 9 条，不得低于上一任务实测值）
+
+**`PYTHONDONTWRITEBYTECODE=1` 不能省**：同秒内生成的两个同字节数变异体不会让 `.pyc` 失效，
+会得到假 GREEN（本项目已踩过）。
 
 - [ ] **Step 7: 提交**
 
@@ -3305,8 +3398,8 @@ export const huguanApi = {
     </el-form-item>
     <el-form-item>
       <el-button type="primary" :loading="hdSaving" @click="saveHdConfig">💾 保存配置</el-button>
-      <el-button :loading="hdPushing" @click="pushHd">🔄 同步到看板</el-button>
-      <el-button :loading="hdSyncing" @click="syncHd">⬇️ 从看板同步</el-button>
+      <el-button :loading="hdPushing" @click="pushHd">🔄 刷新到看板</el-button>
+      <el-button :loading="hdSyncing" @click="syncHd">⬇️ 从表同步到系统</el-button>
     </el-form-item>
   </el-form>
   <el-alert v-if="hdHint" :title="hdHint" type="info" :closable="false" show-icon />
@@ -3369,7 +3462,7 @@ async function pushHd() {
     const r = res.result
     ElMessage.success(`已写入 ${r.updated} 行${r.not_found.length ? `，表里没有 ${r.not_found.length} 个账户` : ''}`)
   } catch (e) {
-    ElMessage.error(e?.response?.data?.error || '同步到看板失败')
+    ElMessage.error(e?.response?.data?.error || '刷新到看板失败')
   } finally { hdPushing.value = false }
 }
 
@@ -3414,7 +3507,7 @@ async function syncHd() {
       hdHint.value = '看板与系统已一致，无需同步'
       return
     }
-    await ElMessageBox.confirm(lines.join('\n'), '确认从看板同步', {
+    await ElMessageBox.confirm(lines.join('\n'), '确认从表同步到系统', {
       confirmButtonText: '确认同步',
       cancelButtonText: '取消',
       customStyle: { whiteSpace: 'pre-line' },
@@ -3423,16 +3516,23 @@ async function syncHd() {
       platform: 'gg',
       dry_run: false,
       confirmed: {
-        create: d.to_create.map(x => x.row),
-        update: d.to_update.map(x => x.row),
-        owner: d.owner_changes.map(x => x.row),
+        create: d.to_create.map(x => x.account_id),
+        update: d.to_update.map(x => x.account_id),
+        owner: d.owner_changes.map(x => x.account_id),
       },
     })
     const r = applied.result
     ElMessage.success(`已应用：新增 ${r.created}，更新 ${r.updated}，归属变更 ${r.owner_changed}`)
+    // 勾了却没落库的行（表已变化、当前 diff 里找不到该账户）：不能只看计数就报成功
+    if (r.not_applied?.length) {
+      const names = r.not_applied.slice(0, 20)
+        .map(x => `${x.account_id}（${x.category}）`).join('、')
+      const more = r.not_applied.length > 20 ? ` 等 ${r.not_applied.length} 条` : ''
+      ElMessage.warning(`以下 ${r.not_applied.length} 行未落库（确认后表已变化）：${names}${more}`)
+    }
     hdHint.value = ''
   } catch (e) {
-    if (e !== 'cancel') ElMessage.error(e?.response?.data?.error || '从看板同步失败')
+    if (e !== 'cancel') ElMessage.error(e?.response?.data?.error || '从表同步到系统失败')
   } finally { hdSyncing.value = false }
 }
 
@@ -3516,7 +3616,14 @@ async function changeOwner(row, newOwnerId) {
   row.owner_id = newOwnerId                       // 乐观更新，失败回滚
   try {
     await accountsApi.reassign(row.id, { owner_id: newOwnerId })
-    ElMessage.success('归属已变更，系统已把新归属写进看板的「重新分配」列')
+    // 不能写「系统已把新归属写进看板的「重新分配」列」——规格 §6.3：未配置看板时
+    // 那次回写是**静默跳过**的，这句在未配置时是假话。本端点不返回「是否回写」，
+    // 所以只能用条件句兜底（彻底修法＝返回体带布尔，但那是 main.py 的改动，不在本任务）。
+    const t = ownerOptions.value.find((u) => u.id === newOwnerId)
+    const who = (t && (t.display_name || t.username)) || `用户 #${newOwnerId}`
+    ElMessage.success(
+      `归属已变更为「${who}」。如果配置了户管看板，新归属会写进「重新分配」列，等你在看板同步时生效`
+    )
   } catch (e) {
     row.owner_id = prev
     ElMessage.error(e?.response?.data?.error || '归属变更失败')
@@ -3530,7 +3637,7 @@ onMounted(loadOwnerOptions)
 
 在 `frontend/src/views/tt/TtAccountPanel.vue` 里加同样的列，改动两点：
 - `accountsApi.reassign` 改为 `ttAccountsApi.reassign`（`frontend/src/api/tt.js:71`）
-- 成功文案里的「重新分配」改为「换绑情况」
+- 成功文案里的「重新分配」改为「换绑情况」（TT 侧户管通道列名，见规格 §3.4；Task 9 的 `_huguan_owner_channel` 写的就是这一列），条件句部分与 GG 逐字一致
 
 - [ ] **Step 4: 构建验证**
 
@@ -3554,7 +3661,9 @@ git commit -m "feat: 账户面板新增户管专属「户归属」列"
 - [ ] **Step 1: 后端全量测试**
 
 Run: `cd py && python -m pytest tests/ -q`
-Expected: PASS，全量总数 ≥ 509（基线 424 + 本计划新增 ≈ 85）
+Expected: PASS，全量 **684 passed**（`7e278e3` 实测；本计划各任务的实测基线依次为 593 → 602 → 684）。
+**不得低于本任务当次的实测基线** —— 本仓库有并行会话在同时加测试，数字只会涨，掉下来就是有回归或被删用例。
+（原计划此处写「≥ 509」，是计划编写时按「基线 424 + 新增 ≈ 85」估的，早已过期，勿再引用。）
 
 - [ ] **Step 2: 前端构建**
 
@@ -3633,5 +3742,5 @@ git commit -m "fix: 代码审查收口"
 - **TT 行字典必须用 `account_id` 作键（Task 2 审查者指出的跨任务交接项）**：`cells_for_row` 一律读 `row["account_id"]`，而 TT 的数据库列名是 `advertiser_id`。Task 8 的 `_TT_ROW_SQL` 已经用 `a.advertiser_id AS account_id` 别名兜住了，**任何新增的 TT 行查询都必须照做** —— 否则 C 列（定位键）会被写成空串，而它正在写入区间 `A:J` 之内，会静默清掉表里的账户ID。
 - **`_dead_flag` 假定 `death_date` 是 str**：`cells_for_row` 对它直接 `.strip()`（未走 `str(...)` 兜底）。SQLite 里该列是 TEXT 且 Task 8 的查询原样取出，故当前无风险；但若将来有调用方传入 `datetime.date`，会抛 `AttributeError`。Task 2 审查者标记为 Minor，未修。
 - **命名遮蔽警告（Task 1 实现者与审查者共同确认）**：既有的 `update_cell_by_account_id` 内部有两个同名符号会遮蔽本计划新增的模块级函数 —— **`:581` 的形参 `col_index`**（遮蔽整个函数体）与 **`:602` 附近的局部变量 `col_letter`**。既有逻辑完全不受影响（该函数把它们当整数用，从不调用新函数），但**在那个函数体内调用新 `col_letter()` / `col_index()` 会静默拿到形参/局部值而非函数**。Task 4 新增的 `update_rows_by_account_id` 是独立函数、不在此列，无需处理；仅当后续需要在旧函数体内复用新工具时才要先改名。
-- **Task 7 的 `confirmed` 结构校验已在计划内补齐（原为此处记录的风险，现已在端点层闭合）**：`confirmed` 载荷直接来自客户端，原写法 `data.get("confirmed") or {}` 只兜得住 `None`/`""`/`0`。已实测两条会炸成 500 的路径：① 外层是真值非 dict（`[1,2]` / `"abc"`）→ `apply_diff` 里 `conf.get` 抛 `AttributeError`；② 值不是数组（`{"create": 2}`）→ `item["row"] not in 2` 抛 `TypeError`。端点现已两层都判、非 dict 或非 list 一律 400，并配 `test_malformed_confirmed_is_400`。**`apply_diff` 内层 item 无需校验** —— 那些 item 由本模块 `build_diff` 产出、不经客户端，唯一的客户端输入就是行号。这条已并入 Global Constraints 的「容器型字段」口径。
+- **Task 7 的 `confirmed` 结构校验已在计划内补齐（原为此处记录的风险，现已在端点层闭合）**：`confirmed` 载荷直接来自客户端，原写法 `data.get("confirmed") or {}` 只兜得住 `None`/`""`/`0`。已实测两条会炸成 500 的路径：① 外层是真值非 dict（`[1,2]` / `"abc"`）→ `apply_diff` 里 `conf.get` 抛 `AttributeError`；② 值不是数组（`{"create": 2}`）→ `item["account_id"] not in 2` 抛 `TypeError`。端点现已两层都判、非 dict 或非 list 一律 400，并配 `test_malformed_confirmed_is_400`。**`apply_diff` 内层 item 无需校验** —— 那些 item 由本模块 `build_diff` 产出、不经客户端，唯一的客户端输入就是账户ID（confirmed 已改按账户ID 绑定，见 Task 7 的 apply_diff 契约）。这条已并入 Global Constraints 的「容器型字段」口径。
 - **警告数基线已从 618 漂到 630，不是新缺陷**：`conftest.py:28` 把 `JWT_SECRET_KEY` 固定成 15 字节的 `"test-secret-key"`，PyJWT 每次 encode/decode 都发 `InsecureKeyLengthWarning`。任何**首次**在测试文件里做 JWT 登录的任务都会抬高全量警告数（Task 5 +12）。已实测对照：未被触碰的 `test_huguan_role.py` 同样产出 289 条同类警告。**判据不是「警告数不变」而是「新增警告是否源自仓库代码」** —— 全部出自 site-packages 的 `jwt/api_jwt.py`，故不修。真正归属方是 conftest 共享 fixture（改成 ≥32 字节可一次清掉全仓），会牵动全套测试，不在本计划范围。
