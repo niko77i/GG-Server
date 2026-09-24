@@ -73,25 +73,34 @@
 |---|---|---|---|
 | B-1 | **GG 三个写端点完全不经归属校验**：`accounts_update` / `accounts_reassign` / `accounts_batch_update` | ☆（户管 Task 18 审查者机械核实：这三处无 `owner_id` 判定，且该任务明确被禁止顺手加） | 任何登录用户可修改 / 转移 / 批量修改**别人的** GG 账户。设计文档 `2026-09-22-huguan-role-design.md` §2.5 已把它记为「既有缺口，本设计不修复」 |
 | B-2 | **`fb_pixels` 列表对非跨用户角色不做租户隔离** | ★（`py/routes/fb_routes.py` 的 `list_all_pixels`：`where = []`，只有 `search` 条件；`owner_id` 收窄仅在 `role in CROSS_USER_ROLES` 时生效） | 普通 `fb` 用户能看到**全库**像素。户管 Task 16b 明确按用户裁决「最小增量」保留此项未修 |
-| B-3 | **`/api/sales-persons/create` 无角色白名单** | ★（实测只有 `@jwt_required()`，无 `GLOBAL_OPTION_ROLES` 判定；插入时用 `_get_effective_platform()` 限定平台） | 设计文档 §3.5 声称这类「设置下拉选项」接口原本有 `is_dev = role in ('developer','admin')` 判断并要改为 `GLOBAL_OPTION_ROLES`，但 `create` 实读**没有**该判断。**待实测确认**：普通 `user` 是否真能创建商务人员；若确实能，属权限缺口；若不能，则属 §3.5 的文档描述不准（该文档需要勘误） |
+| B-3 | ~~`/api/sales-persons/create` 无角色白名单~~ **已裁决：勘误，不改代码（2026-09-23）** | ★（已复核：确实只有 `@jwt_required()` 无角色判定；但前端 5 个页面给普通用户提供「新增商务人员」入口，且插入 `owner_id=自己`，属**产品功能**而非权限缺口） | 户管设计文档 §3.5 声称「原本有 `is_dev` 判断」**描述不准**（create 从未有该判断），需勘误。**不收紧**，避免破坏前端普通用户新增选项功能 |
 | B-4 | **TT 代理（`agents` 表 `platform='tt'`）可被任意登录用户改名 / 删除**：`agents_rename`（PUT `/api/agents/<aid>`）与 `agents_delete`（DELETE 同路径）的存在性检查在 `platform == "tt"` 分支上写作 `SELECT id FROM agents WHERE id=? AND platform='tt'` —— **完全不校验 `owner_id`**，且该分支在 `is_dev` 判断**之前**，所以任何登录用户（连 `viewer` 在内）都能改 / 删他人名下的 TT 代理 | ★（实测代码；并已核对 `git show b1eb46a:py/main.py` —— **分支起点时就是这个形态**，属既有缺口，本分支只是把 `is_dev` 从 `('developer','admin')` 扩到含户管，未改变该分支的行为） | 期望：TT 分支同样做归属校验，非跨用户角色只能操作自己的 TT 代理。**注意**：`platform` 来自查询参数 `request.args.get("platform","")`，所以「传不传 `platform=tt`」决定走哪条分支，核实时要覆盖两种调用形态 |
 
 **B 类需要一并核对的同类项**（实施时逐条扫）：`agents_*` / `statuses_*` / `mcc-levels` / `regions_*` / `sales-persons_*` 这几组「设置下拉选项」接口的角色判定是否都已统一到 `GLOBAL_OPTION_ROLES`。设计文档 §3.5 已注明 `regions_*` 四个接口**当前没有任何角色判断**（任意登录用户可调用），并明确按纯增量原则不在户管需求内收紧——**在本任务内应当收紧**。
+
+> **同类项扫描复核结论（2026-09-23，★已逐组读代码）+ 用户裁决（2026-09-23）**：
+> - **B-5：`regions_*` 全组（create/update/delete）收紧**（唯一确凿越权项）—— `regions` 表**无 `owner_id` 列、是全局表**，任意登录用户可增/改/删全局地区时区。**收紧到 `GLOBAL_OPTION_ROLES`，并同步改前端隐藏普通用户的「新增地区」入口**（涉及 SettingsPanel / FbSettingsPanel / FbProductPanel / TtSettingsPanel / TtProductPanel）。
+> - `agents_create` / `statuses_create` / `sales_persons_create` 三个 create 无白名单 —— **勘误，不收紧**：有 `owner_id` 列、插入 `owner_id=自己`，前端设置/产品面板给普通用户提供入口，属产品功能。
+> - `mcc_levels_create` 无判定但仅 `owner_id=user_id` 自作用域 —— 勘误。
+> - 其余 rename/delete 已统一到 `GLOBAL_OPTION_ROLES`；`agents` 组 rename/delete 因 TT 分支前置（见 B-4）存在绕过 —— **B-4 补漏（TT 分支补 owner 校验）**。
 
 ### 3.3 C 类：非法入参导致 500（健壮性）
 
 | # | 项 | 证据 | 说明 |
 |---|---|---|---|
-| C-1 | `accounts_create` / `accounts_reassign` 收到 `owner_id` 为**阿拉伯-印度数字**（如 `"٣"`）或**不存在的用户**时 → `int()` / 后续查询抛错 → **500** | ☆（最终全分支审查报告，`isdigit()` 对这类字符返回 `True` 但 `int()` 可解析为 `3`，或用户不存在导致后续失败） | 期望：**400** + 明确文案。**实施前先实测复现**，确认具体失败点与文案 |
-| C-2 | `py/auth.py` 的搜索 SQL 缺陷：developer 在「全部」Tab 下搜索时 `base_where` 为空仍拼出 `" AND (...)"` → SQL 语法错误 → **500** | ☆（账本 D1 条目，已上报未答复） | 期望：空 `base_where` 时不拼 `AND`。**实施前先实测复现** |
+| C-1 | `accounts_reassign` 收到**不存在的 `owner_id`**（或触发 FK / 其他异常）时 → 未捕获 `except Exception` → **500** | ★（已复核：`int()` 在 try 之外；try 末尾是 `except Exception as e: return ..., 500`；不存在的用户触发 FK `IntegrityError` 恰好落入该分支） | 期望：**400** + 明确文案 |
+| C-1b | `accounts_create` 收到非法 `owner_id` **不会 500**（走 409 或静默错归属） | ★（已复核：只捕 `sqlite3.IntegrityError → 409`，文档列出的三种输入均非 500） | 原文档把两函数合并称「都 500」**有误**，须按拆分口径处理 |
+| C-2 | `py/auth.py` 的搜索 SQL 缺陷：developer 在「全部」Tab 下搜索时 `base_where` 为空仍拼出 `" AND (...)"` → SQL 语法错误 → **500** | ★（已复核成立。错误形态修正：实际拼出的是 `FROM users AND (username LIKE ? OR display_name LIKE ?)`——`search_clause` 直接接在空 `where_clause` 之后，非文档原写的 `WHERE AND (...)`；同函数内 `search_filter` 变量本可正确处理空 `base_where`，却是死代码，实际用的是 `search_clause`） | 期望：空 `base_where` 时不拼 `AND`。触发条件：仅 `developer` 角色 + 不带 `platform`（全部 Tab）+ 输入搜索词 |
+
+> **C 类复核修正（2026-09-23）**：原文档称阿拉伯-印度数字 `"٣"` 会让 `int()` 抛错 → 500，**不成立**——`int("٣")==3` 不抛错。真正的 500 触发向量是：① **上标数字**（如 `"²"`，`isdigit()` 返回 `True` 但 `int()` 抛 `ValueError`）；② **超大数字串**（超 SQLite 64 位，`int()` 成功但绑定时抛 `sqlite3.OverflowError`）。两种情况下 `int()` 均位于 try 块之前 → 未捕获 → 全局 500 handler 兜底。
 
 ### 3.4 D 类：既有死代码 / 谎报（低优先级）
 
 | # | 项 | 证据 |
 |---|---|---|
-| D-1 | `_app_cache.delete(f"accounts:statuses:{user_id}")` 是**死代码**（缓存键实际带 platform/scope 段，删不掉任何东西） | 账本（户管 Task 6 记） |
+| D-1 | `_app_cache.delete(f"accounts:statuses:{user_id}")` 是**死代码** | ★（已复核成立，理由修正：全库**没有任何** `accounts:statuses` 缓存写入，只有两处 delete；真实原因是「无写入」，非「键带 platform 段」。修复方向是删掉死 delete，而非补齐键段） |
 | D-2 | `accounts_batch_delete` 返回 `deleted: len(ids)`，**不校验实际更新行数**，会谎报条数 | 账本（户管 Task 6 / Task 18 brief 明确「有意不改」） |
-| D-3 | `accounts_list` 的早退路径不关闭请求级数据库连接 | 账本（户管 Task 5 记，属既有结构问题） |
+| ~~D-3~~ | ~~`accounts_list` 的早退路径不关闭请求级数据库连接~~ **已复核不成立，划掉** | ★（已复核：`accounts_list` 在获取连接后到 `close()` 之间无任何提前 return，是直线构建 SQL；且 `@app.after_request` 有 `_close_db` 统一兜底关连接） |
 
 ### 3.5 **已由户管 Task 20 覆盖，不要重复做**
 
@@ -179,7 +188,7 @@
 
 1. **最大风险是 4.2**：把「原本任何人可调」改成「需要登录」，若漏改某个 `<img>` / `window.open` 调用点，表现为**图片/字体/下载静默失效**（浏览器控制台 401），而且后端测试全绿也发现不了。**必须在浏览器里逐个点一遍**。
 2. **不做**：不重构、不统一命名、不动表结构、不改既有错误文案、不引入测试框架。
-3. **`_guard_gg_platform` 本身是否有效**需在本任务中一并验证（★实测：它对未登录请求放行；但**它在 `before_request` 阶段调用 `get_jwt_identity()`，而 JWT 上下文是由路由上的 `@jwt_required()` 建立的**——这个时序是否让该钩子对已登录用户也不生效，**必须用一个真实的跨平台请求实测**，不能只靠读代码。若实测发现该钩子是死代码，那么「GG 专用路由对 FB 用户的平台隔离」是靠别处实现的，需一并查明并补测试）。
+3. **`_guard_gg_platform` 是死代码（已复核实锤，2026-09-23，独立提级）**：`get_jwt_identity()` 在 `before_request` 阶段**必然抛 `RuntimeError`**（flask_jwt_extended 4.7.4：`g._jwt_extended_jwt` 只在路由 `@jwt_required()` 视图分发时写入，`get_jwt_identity()` 取不到即 raise），被钩子自己的 `except Exception: return None` 吞掉 → `_require_platform('gg')`（`py/main.py:196`）**永远不可达**；且 `gg_required` 装饰器（`py/routes/decorators.py`）**全仓库零使用**。结论：**GG 业务路由（`/api/accounts`、`/api/mcc`、`/api/products`、`/api/ad-reports`、`/api/scrape`、`/api/video`、`/api/youtube`）当前没有任何平台级隔离**，只靠登录鉴权 + 归属/角色过滤；`CROSS_USER_ROLES`（developer/admin/huguan）中的 FB 用户访问时 where 退化为 `1=1`，可看到全库跨平台数据。**这比原「怀疑」严重：平台隔离从未生效过。** 原文档九-3 把平台隔离当作「待验证是否失效」的既有防线，实为**从不存在**；可能影响分批优先级（需在实施计划中决定是否把「GG 平台门禁」作为独立修复项）。
 4. **服务监听 `0.0.0.0`**：若部署环境可从不可信网络访问，本任务的 A 类应视为**紧急**。这一条需要你来判断部署现实。
 
 ## 十、建议分批（每批独立可交付、独立可回滚）
@@ -199,8 +208,11 @@
 
 ## 附：证据复核清单（实施第一步就该做）
 
-- [ ] `git log --oneline` 确认户管 Task 20 已合并，3.5 的项不要重复做
-- [ ] 用脚本重新扫描一遍无 `@jwt_required()` 的路由，与 3.1 的表逐条对齐（行号会漂移，按路径 + 函数名比对）
-- [ ] 逐条实测 3.2 的 B-1 / B-3、3.3 的 C-1 / C-2，把「☆」升级为「★」或推翻
-- [ ] 实测 3.4 的 D-1 / D-2 / D-3 是否仍然存在
-- [ ] 实测 `_guard_gg_platform` 是否真的生效（见九-3）
+> **复核状态（2026-09-23，已执行）**：以下除「运行时实测」项外均已由并行只读审计完成，结论已写回正文各条目（☆ 已升级为 ★ 或推翻）。
+
+- [x] `git log --oneline` 确认户管 Task 20 已合并（`0cc21d0` 在日志中），3.5 的项不要重复做
+- [x] 扫描无 `@jwt_required()` 的路由，与 3.1 的表逐条对齐 → **13/13 全部仍无鉴权，0 条已补口**
+- [x] 复核 3.2 的 B-1 / B-3、3.3 的 C-1 / C-2 → B-1/B-3 成立；C-1 拆分为 reassign 成立 + create 不成立；C-2 成立（错误形态修正）
+- [x] 复核 3.4 的 D-1 / D-2 / D-3 → D-1 成立（理由修正）、D-2 成立、D-3 **不成立已划掉**
+- [x] 复核 `_guard_gg_platform` → **死代码实锤**（见九-3，独立提级）
+- [ ] **待运行时实测**（代码层面已定性，仅需跑通确认真实响应）：C-1 上标数字 / 超大数字的 500 文案；跨平台请求实测（FB 用户访问 GG 业务路由）

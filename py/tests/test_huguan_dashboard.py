@@ -4,6 +4,9 @@
 本文件不打真实 Google API：服务层调用一律用桩替换。
 """
 import json
+import sqlite3
+
+import pytest
 
 import database
 
@@ -654,28 +657,46 @@ class TestResolvers:
         assert resolve_owner_id(db, "_r2") == uid
         db.close()
 
-    def test_ambiguous_name_returns_none(self, client):
-        """名称命中 ≥2 条 → None（规格 §8.4：该列不落库）。"""
-        from huguan_dashboard import resolve_owner_id
-        db = database.get_db()
-        _seed(db, "_r3a", "重名")
-        _seed(db, "_r3b", "重名")
-        assert resolve_owner_id(db, "重名") is None
-        db.close()
+    def test_ambiguous_name_is_unconstructable_and_unique_still_resolves(self, client):
+        """⚠️ 前提已变：该状态现在**不可构造**，故改为钉住那个更强的保证。
 
-    def test_username_colliding_with_another_display_name_is_ambiguous(self, client):
-        """甲的 display_name 撞上乙的 username ⇒ 必须判为歧义，不得猜中甲。
-
-        拆成「先查 display_name，查不到再查 username」两条查询时，这里会静默返回
-        `_r5a`（display_name 那条先命中），把账户挂到错误的人名下。写表方向
-        （`COALESCE(NULLIF(display_name,''), username)`）产出的是一个合成名字空间，
-        反向解析必须对称。对照行 `_r5b` 是**必须被算进去的第二个命中**。
+        原用例靠 `_seed` 造两个同名 display_name 的用户，来测 resolve_owner_id 的
+        「命中 ≥2 条 → None」。2026-09-24 加固后 `users.scrape_dn` 生成列
+        （`COALESCE(NULLIF(TRIM(display_name),''), TRIM(username), 'user_'||id)`）
+        加了唯一索引 —— 因为那个值**就是爬取产物目录名**，两人同名 = 两人共用一个
+        目录（跨用户读写的 HIGH 越权）。DB 现在直接拒绝这个状态，故「≥2 档」在该
+        表达式上不可达。这不是把用例删掉：它从"测歧义解析"改成"测歧义已不可能"，
+        并且「≥2 → None」的契约仍由 test_ambiguous_mcc_name_is_warning 实测覆盖
+        （那条确实往 mcc 表里插了两行同名）。
         """
         from huguan_dashboard import resolve_owner_id
         db = database.get_db()
-        _seed(db, "_r5a", "撞名")   # display_name = "撞名"
-        _seed(db, "撞名", "")       # username     = "撞名"（display_name 空 → 回退后也叫"撞名"）
-        assert resolve_owner_id(db, "撞名") is None
+        uid_a = _seed(db, "_r3a", "重名")
+        with pytest.raises(sqlite3.IntegrityError):
+            _seed(db, "_r3b", "重名")
+        # 对照行：唯一命中必须仍然命中**到具体那一行**。只断言 `is not None`
+        # 太弱 —— 换个用户命中（甚至命中 _r3b 的残留）也能蒙过，等于没测到
+        # "唯一约束没有把解析一并打死"这件事（code-review 第 3 轮指出）。
+        assert resolve_owner_id(db, "重名") == uid_a
+        db.close()
+
+    def test_username_colliding_with_another_display_name_is_blocked_by_db(self, client):
+        """跨命名空间撞名（甲的 display_name = 乙的 username）同样被 DB 挡在门外。
+
+        写表方向的合成名字空间 `COALESCE(NULLIF(display_name,''), username)` 与
+        `users.scrape_dn` 的键**同源**（后者多一层 TRIM 与 `user_<id>` 兜底），
+        所以这个撞名被同一个唯一索引拒绝 —— 反向解析再不会遇到这一档歧义。
+
+        对照行：不撞名的 username 必须放行且各自解析正确。
+        """
+        from huguan_dashboard import resolve_owner_id
+        db = database.get_db()
+        uid_a = _seed(db, "_r5a", "撞名")   # display_name = "撞名"
+        with pytest.raises(sqlite3.IntegrityError):
+            _seed(db, "撞名", "")           # username = "撞名" → 回退后同目录名
+        uid_b = _seed(db, "buzhuang", "")   # 对照行：不撞名 → 正常落库
+        assert resolve_owner_id(db, "撞名") == uid_a
+        assert resolve_owner_id(db, "buzhuang") == uid_b
         db.close()
 
     def test_unknown_name_returns_none(self, client):

@@ -423,6 +423,32 @@ def _is_within(child: str, parent: str) -> bool:
     return c == p or c.startswith(p + os.sep)
 
 
+def _safe_upload_name(filename: str) -> str:
+    r"""把客户端提交的文件名收敛为**纯基名**，供拼路径使用；非法则返回 ""。
+
+    werkzeug 的 `FileStorage.filename` 原样携带客户端给的字符串，可含
+    `../` 或 `..\` 分隔符，直接 join 会越出目标目录。2026-09-24 用 Flask
+    test client 实测确认过 3 处（均为加固前基线）：
+
+      /api/fonts/upload        → 200，`temp/_travprobe/x.ttf`（fonts/ 之外）
+      /api/video/upload-music  → 200，`temp/_travprobe/x.mp3`（music/ 之外）
+      /api/audio-replace       → ffmpeg 输出路径归一化后为
+                                 `temp/_travprobe/x_new.mp4`（audio_replace/ 之外）
+
+    刻意**不用** werkzeug 的 `secure_filename`：它会把中文名整段滤掉
+    （`背景音乐.mp3` → `mp3`），砸掉本项目的正常上传 —— 那是把可用功能改坏。
+    这里只做「剥目录成分」这一件事，字符白名单仍交给各端点既有的扩展名校验。
+    所以本函数**不是**通用的安全文件名函数，只保证「结果不含分隔符、不是
+    . / .. 」，不保证字符集合法。
+    """
+    name = (filename or "").replace("\\", "/")
+    name = name.split("/")[-1]          # 剥掉全部目录成分（含 `..\..\` 这类）
+    name = name.strip()
+    if name in ("", ".", ".."):
+        return ""
+    return name
+
+
 def _scrape_dn_for(user: dict | None, user_id: int, requested_dn: str = "") -> str:
     """该用户有权访问的爬取目录名（不含根路径）。
 
@@ -438,6 +464,17 @@ def _scrape_dn_for(user: dict | None, user_id: int, requested_dn: str = "") -> s
     if user:
         own = (user.get("display_name") or user.get("username") or "").strip()
     if not own:
+        own = f"user_{user_id}"
+
+    # own 同样会被拼进路径 —— 对它做与下面 requested_dn **同一套**校验。
+    #
+    # 2026-09-24（code-review 第 2 轮 HIGH）：own 的来源是 display_name / username，
+    # 两者在加固前都没有字符校验，于是 `username = ..\..\_x\pwn` 就能让本函数
+    # 返回越界路径。危害不止写入侧：本函数的三个调用点里，scrape_packages 会
+    # 直接 listdir 这个目录 —— 等于把任意目录的清单读出来。
+    # 写入关口（auth._fs_name_error）已堵住新数据，但**库里的历史值仍可能是越界的**，
+    # 故在此按结构兜住：推导结果一旦越界就退化为 user_<id>，而不是把越界路径交出去。
+    if not _is_within(os.path.join(_SCRAPE_DEFAULT_DIR, own), _SCRAPE_DEFAULT_DIR):
         own = f"user_{user_id}"
 
     dn = requested_dn.strip()
@@ -510,6 +547,10 @@ def scrape():
     save_dir = data.get("save_dir", "").strip()
     user = auth.get_user_by_id(user_id)
     if not save_dir:
+        # 省略 save_dir ⇒ 用自己目录。此处**刻意不再校验一次** —— 该路径由
+        # _scrape_dn_for 推导，而「推导结果必须留在爬取根内」已在那儿收口
+        # （见 _scrape_dn_for 的 own 校验）。加第二道冗余闸门会让两道闸门互相
+        # 掩盖，变异验证时谁也测不出，反而降低可信度。
         save_dir = _scrape_dir_for(user, user_id)
     else:
         # 收窄一（2026-09-24 裁决）：自定义保存路径必须落在 _SCRAPE_DEFAULT_DIR 内，
@@ -558,12 +599,16 @@ def scrape():
     pkg_dir = os.path.join(save_dir, pkg_name)
     # 纵深防御：字符闸门之上再复核一次**落地路径**。
     #
-    # ⚠️ 如实说明：**这一层当前没有任何测试能区分它**。变异验证（2026-09-24）把本行
-    # 改为 `if False and ...` 后，本类 9 条用例**仍全绿** —— 因为上面那道字符闸门
-    # 对"阻止 join 逃逸"已是完备的（Windows 上 join 视作绝对路径的三种形态
-    # `C:` / `\` / `/` 都含被拦字符；POSIX 上只有 `/`）。
-    # 保留它的唯一理由是抗未来重构：万一有人从上面那道闸门里删掉某个字符，
-    # 这里还能兜住。**不要把它当成已被验证的防线**，也不要在此处写声称已被测试的注释。
+    # ⚠️ 这一层拦的不是 join 逃逸 —— 上面那道字符闸门对 join 逃逸已经完备
+    # （Windows 上 join 视作绝对路径的三种形态 `C:` / `\` / `/` 都含被拦字符；
+    # POSIX 上只有 `/`）。变异验证（2026-09-24）把本行改为 `if False and ...` 后
+    # 本类用例确实全绿，一度据此写下了「这层没有用」的注释 —— **那是错的**。
+    #
+    # ⚠️ 它真正拦的是**字符闸门看不见的逃逸**：save_dir 下若有一个指向外部的
+    # junction / symlink 目录（`mklink /J save\LinkPkg outside`，普通用户免提权），
+    # 则 pkg_name = `LinkPkg` 字符全部合法、`join` 也毫无异常，但 realpath 之后
+    # 已在 save_dir 之外 —— 只有 _is_within 能发现（2026-09-24 实测确认）。
+    # 对应用例见 test_scrape_ownership.py::TestJunctionEscape（不支持时 skip）。
     if not _is_within(pkg_dir, save_dir):
         return jsonify({"success": False, "error": "包名不合法：越出保存目录"}), 400
     # 两个出口（缓存分支 / 正常分支）共用的签名下载 URL。
@@ -772,7 +817,9 @@ def scrape_upload_images():
     """上传图片到用户专属目录，用于视频生成。"""
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    dn = (user.get("display_name") or user.get("username") or f"user_{user_id}").strip()
+    # 不手抄 dn 推导：`_scrape_dn_for` 还带一层「推导结果必须留在爬取根内」的
+    # 结构兜底（库里 display_name/username 的历史值可能是越界的），手抄版没有。
+    dn = _scrape_dn_for(user, user_id)
     files = request.files.getlist("files")
     if not files or all(not f.filename for f in files):
         return jsonify({"success": False, "error": "未选择文件"}), 400
@@ -1227,7 +1274,10 @@ def video_upload_music():
     f = request.files.get("file")
     if not f or not f.filename:
         return jsonify({"success": False, "error": "未选择文件"}), 400
-    filename = f.filename
+    # 归一：`f.filename` 可含 `../`，直接 join 会写越 _MUSIC_DIR（实测确认）。
+    filename = _safe_upload_name(f.filename)
+    if not filename:
+        return jsonify({"success": False, "error": "文件名无效"}), 400
     ext = os.path.splitext(filename)[1].lower()
     if ext not in ('.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac', '.mp4'):
         return jsonify({"success": False, "error": "不支持的格式"}), 400
@@ -1293,6 +1343,13 @@ def audio_replace():
     if not audio_file or not audio_file.filename:
         return jsonify({"success": False, "error": "请上传音频源"}), 400
 
+    # 归一后的名字为空（文件名只有 `..\..\` 或纯空白）⇒ 输出会静默变成
+    # `_new.mp4`，两人同时用非法名会互相覆盖。与 /api/video/upload-music、
+    # /api/fonts/upload 的「空 → 400」口径一致。刻意放在建临时文件**之前**。
+    safe_video_name = _safe_upload_name(video_file.filename)
+    if not safe_video_name:
+        return jsonify({"success": False, "error": "原视频文件名非法"}), 400
+
     # 临时目录
     tmp_dir = os.path.join(os.path.dirname(__file__), "..", "temp", "audio_replace")
     os.makedirs(tmp_dir, exist_ok=True)
@@ -1306,8 +1363,11 @@ def audio_replace():
     video_file.save(video_tmp)
     audio_file.save(audio_tmp)
 
-    # 输出文件名：原视频名 + _new
-    base_name = os.path.splitext(video_file.filename)[0]
+    # 输出文件名：原视频名 + _new。
+    # 归一：`video_file.filename` 可含 `../`，拼出的 output_path 会越出 tmp_dir
+    # —— 该路径既进 ffmpeg 的 argv，也进 audio_replace_history 表和签名下载
+    # URL，故必须在此收口（实测确认越界）。
+    base_name = os.path.splitext(safe_video_name)[0]
     output_filename = f"{base_name}_new{video_ext}"
     output_path = os.path.join(tmp_dir, output_filename)
 
@@ -1843,9 +1903,12 @@ def fonts_upload():
     imported = 0
     for f in files:
         if not f.filename: continue
-        ext = os.path.splitext(f.filename)[1].lower()
+        # 先归一再算扩展名：`f.filename` 可含 `../`，直接 join 会写越 _FONTS_DIR。
+        safe = _safe_upload_name(f.filename)
+        if not safe: continue
+        ext = os.path.splitext(safe)[1].lower()
         if ext not in ('.ttf', '.otf', '.ttc', '.woff', '.woff2'): continue
-        dst = os.path.join(_FONTS_DIR, f.filename)
+        dst = os.path.join(_FONTS_DIR, safe)
         if not os.path.isfile(dst):
             f.save(dst)
         imported += 1
@@ -7958,6 +8021,16 @@ def admin_create_user():
         role = "huguan"
     if not username or len(username) < 4 or len(username) > 20:
         return jsonify(success=False, error="Username must be 4-20 characters"), 400
+    # 用户名查重必须**早于**目录名关口：重名用户名是本端点既有的 409 契约
+    # （与 /api/auth/register 一致）。放到闸门后面会被顶成 400，且"目录重名"的
+    # 文案对"用户名已存在"这个真实原因属误导（code-review 第 3 轮指出）。
+    existing = auth.get_user_by_username(username)
+    if existing:
+        return jsonify(success=False, error="Username already exists"), 409
+    # 目录名关口在 auth.create_user 这个唯一关口；此处前置只为给出清楚文案。
+    _name_err = auth.directory_name_error(None, username, display_name)
+    if _name_err:
+        return jsonify(success=False, error=_name_err), 400
     if not password or len(password) < 6:
         return jsonify(success=False, error="Password must be at least 6 characters"), 400
     if role not in allowed:
@@ -7969,9 +8042,6 @@ def admin_create_user():
         my_platform = user.get("platform") or "gg"
         # 兜底：创建者 platform 为存量非法值时按 gg 处理，避免把非法值写进新用户
         platform = my_platform if my_platform in ("gg", "fb", "tt") else "gg"
-    existing = auth.get_user_by_username(username)
-    if existing:
-        return jsonify(success=False, error="Username already exists"), 409
     result = auth.create_user(username, password, role, display_name, created_by=user_id, platform=platform)
     if result:
         return jsonify(success=True, user=result)
@@ -8193,6 +8263,18 @@ def admin_update_user(uid):
         username = username.strip()
         if len(username) < 4 or len(username) > 20:
             return jsonify(success=False, error="用户名需 4-20 个字符"), 400
+    # 与建号路径（admin_create_user 的 `.get("display_name", "").strip()`）对齐。
+    # 不 strip 会让同一输入在两条写路径上判定**相反**：建号 "张三 " 归一出 "张三"
+    # 成功，改名 "张三 " 则被 directory_name_error 的 _fs_name_error「首尾不能有
+    # 空白」拒成 400。见 auth._fs_name_error。
+    if display_name is not None:
+        display_name = display_name.strip()
+    # 目录名关口在 auth.update_user 这个唯一关口；此处前置只为给出清楚文案。
+    # 刻意放在 username 分支**之外** —— 只改 display_name 同样会改变目录名。
+    if username is not None or display_name is not None:
+        _name_err = auth.directory_name_error(uid, username, display_name)
+        if _name_err:
+            return jsonify(success=False, error=_name_err), 400
     # 只有 developer 可以修改 platform
     if platform is not None and user["role"] != "developer":
         return jsonify(success=False, error="仅开发者可修改平台"), 403

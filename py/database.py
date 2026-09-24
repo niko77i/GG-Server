@@ -149,6 +149,78 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "platform", "platform TEXT DEFAULT 'gg'")
+    # 爬取目录名唯一约束（2026-09-24，code-review 第 3 轮 H2）：
+    # users 表此前只有 username 一个唯一索引，display_name 无任何约束，而爬取
+    # 产物目录名 = `display_name or username`。于是 `/api/auth/register` 这种
+    # 开放注册的 check-then-act 在并发下可以插出多个**同名目录**的用户 ——
+    # 实测 8 线程并发 8/8 全部落库同名。应用层的 directory_name_error 是
+    # 「读快照 → 判断 → INSERT」，天生非原子，原子性只能交给 DB。
+    #
+    # scrape_dn 是**生成列**（VIRTUAL，随行计算，不占存储）：
+    #   解析规则必须与 auth._effective_dn / main._scrape_dn_for 一致，
+    #   即 `COALESCE(NULLIF(TRIM(display_name),''), username)`，
+    #   两者都空时退化成 `'user_' || id`（对应 _scrape_dn_for 的兜底）。
+    #   一致性由 test_scrape_ownership.py 的**两条**测试钉住，缺一不可：
+    #     · TestDbGeneratedColumnMatchesPython::test_same_key
+    #       —— 直接比「DB 生成列 vs Python 解析」是否同键（钉 DB 这一腿）
+    #     · TestEffectiveDnMatchesScrapeDnFor
+    #       —— 钉 auth._effective_dn ≡ main._scrape_dn_for（Python 侧内部不自漂）
+    #   ⚠️ 本注释此前只写了 TestEffectiveDnMatchesScrapeDnFor，而那个类当时**根本
+    #   不存在**；补上之后，它又只覆盖了 Python 两个函数之间、**没碰 DB 生成列**
+    #   —— 等于"钉住的"和"这里声称的"始终不是同一件事（code-review 第 3 轮指出）。
+    #   现已补齐，且下一条测试是实打实比对 DB 生成列本身的。
+    #
+    # COLLATE NOCASE 补齐应用层 os.path.normcase 的大小写折叠（NTFS 不区分
+    # 大小写，alice/ALICE 是同一个目录）。NOCASE 只折 ASCII，比 normcase 窄 ——
+    # 在**大小写**这一维上应用层更严，方向 fail-closed，两者不一致时先被应用层拒掉。
+    #
+    # ⚠️ 该"更严"的论断**只覆盖大小写这一维，不覆盖 TRIM 顺序**：`_ensure` 之外
+    # 还存在一处已知差异（由
+    # TestDbGeneratedColumnMatchesPython::test_whitespace_only_display_name_is_a_known_divergence
+    # 记录）：display_name 为**纯空白非空串**（如 "   "）时，Python 侧
+    # `(display_name or username).strip()` 先判 falsy 再 strip ⇒ 得 `user_<id>`；
+    # 而本生成列 `NULLIF(TRIM(display_name),'')` 先 TRIM 再判空 ⇒ 回退 username。
+    # 两者**不同键**。方向仍是 fail-closed（攻击者取某人的 username 时应用层会
+    # 放行、但本列会撞上索引 ⇒ IntegrityError ⇒ 拒绝），**只会误拒、不会漏越权**。
+    # 当前不可触发：两条写路径都已 strip，真实库逐行核对亦无不一致。
+    # 修法未做 —— 统一求值顺序会改变既有目录名语义（`"   "` 的目录会从
+    # `user_<id>` 变成 username），有产物"搬家"风险，属改既有功能逻辑，需裁定。
+    #
+    # 防御：存量若有重名则**跳过**建索引 —— 否则唯一索引创建失败会让**每次连库**
+    # 都抛异常，把整个应用打死（与上面 idx_tt_recycle_reasons_name 同一处理）。
+    if _table_exists(conn, "users"):
+        # ⚠️ 此处**不能**用 _add_column_if_missing：它查的是 PRAGMA table_info，
+        # 而该 PRAGMA **不列出生成列**（生成列在 table_xinfo 里）—— 于是它每次都
+        # 判定"列不存在"→ 重复 ALTER → `duplicate column name: scrape_dn`，
+        # 而 _ensure_columns 每次连库都跑 ⇒ 整个应用当场打死（实测：全量套件
+        # 从 717 passed 掉到 304 failed）。故这里用 table_xinfo 自行判存在性。
+        _cols = [r[1] for r in conn.execute("PRAGMA table_xinfo(users)").fetchall()]
+        if "scrape_dn" not in _cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN scrape_dn TEXT GENERATED ALWAYS AS ("
+                "COALESCE(NULLIF(TRIM(display_name), ''), "
+                "NULLIF(TRIM(username), ''), 'user_' || id)) VIRTUAL")
+        # ⚠️ 重复检测与索引必须用**同一 collation**：生成列默认 BINARY，而索引是
+        # NOCASE（折 ASCII 大小写）。若检测漏了大小写变体（如 `alice` / `Alice`），
+        # BINARY 报"无重复"而建 NOCASE 索引当场抛 IntegrityError —— 该异常从
+        # get_db() 冒出，而 get_db() 在 _before_request 里**每个请求都调**、
+        # 启动预初始化也调 ⇒ 整个服务起不来 / 每个请求 500（实测已复现）。
+        _dup = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM users GROUP BY scrape_dn COLLATE NOCASE "
+            "HAVING COUNT(*) > 1)").fetchone()[0]
+        if _dup:
+            print(f"[Migrate] users 表有 {_dup} 组爬取目录名重复（含大小写变体），"
+                  f"跳过 idx_users_scrape_dn 唯一索引：并发注册/改名的原子性保障缺失，"
+                  f"仅剩应用层闸门。请先清理重名用户。")
+        else:
+            try:
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_scrape_dn "
+                             "ON users(scrape_dn COLLATE NOCASE)")
+            except sqlite3.IntegrityError as exc:
+                # 兜底：即便上面检测与索引口径仍有差（或建索引期间有并发写入），
+                # 也绝不让异常打死 get_db()。此处**不是 fail-open** —— 应用层
+                # directory_name_error 闸门仍在，降级的只是并发原子性。
+                print(f"[Migrate] idx_users_scrape_dn 创建失败（{exc}），仅剩应用层闸门")
     # 选项表外键列（从 TEXT 迁移到 ID 引用）
     _add_column_if_missing(conn, "accounts", "agent_id", "agent_id INTEGER REFERENCES agents(id)")
     _add_column_if_missing(conn, "accounts", "status_id", "status_id INTEGER REFERENCES account_statuses(id)")

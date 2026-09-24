@@ -51,6 +51,11 @@ def auth_register():
     existing = auth.get_user_by_username(username)
     if existing:
         return jsonify(success=False, error="Username already exists"), 409
+    # 目录名关口在 auth 层（唯一写入关口，无法绕过）；此处前置只为给出清楚的
+    # 错误文案 —— 否则用户只会看到「Registration failed」。
+    _err = auth.directory_name_error(None, username, display_name)
+    if _err:
+        return jsonify(success=False, error=_err), 400
     user = auth.register_user(username, password, display_name)
     if not user:
         return jsonify(success=False, error="Registration failed"), 500
@@ -167,6 +172,10 @@ def auth_profile():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     display_name = data.get("display_name", "").strip()
+    # 前置校验只为给出清楚的错误文案；真正的约束在 auth.update_user 里（唯一关口）。
+    _err = auth.directory_name_error(user_id, None, display_name)
+    if _err:
+        return jsonify(success=False, error=_err), 400
     result = auth.update_user(user_id, username=None, display_name=display_name)
     if result:
         return jsonify(success=True, user=result)

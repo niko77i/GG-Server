@@ -100,14 +100,27 @@ _scrape_dl = _signed_download_url("/api/scrape/download", pkg_dir)
 **修复后实测**（同一探针，真实 5001）：上跳包名 / 反斜杠变体 / 绝对路径 → 全 400，
 白名单外不再建目录；对照行（正常包名 200、签名闭环匿名 200、正门 bob 读 alice 403）全部保留。**10/10 PASS**。
 
-#### 关于第 2 道闸门，如实记录：当前没有测试能区分它
+#### 关于第 2 道闸门：**订正** —— 它确实承重（2026-09-24 同日推翻了自己的结论）
 
-变异验证把第 2 行改为 `if False and ...` 后，本类 9 条用例**仍全绿**（M7）——
-因为第 1 道字符闸门对「阻止 `os.path.join` 逃逸」已是完备的：
-Windows 上 `join` 视作绝对路径的三种形态（`C:` / `\` / `/`）全都含被拦字符，POSIX 上只有 `/`。
+> ⚠️ 这一节原本写的是「当前没有测试能区分它，保留只为抗未来重构」。**那个结论是错的**，
+> 已经改掉，原文与本节的差异刻意保留在此，作为「把推论写成结论」的实例。
 
-保留它**只为抗未来重构**（万一有人从第 1 道闸门里删掉某个字符）。**不得把它当成已被验证的防线** ——
-这一句也已逐字写进 `main.py` 的代码注释，避免下一个人重蹈「把推论写成结论」。
+当时的推理：变异验证把第 2 行改为 `if False and ...` 后本类 9 条用例**仍全绿**（M7），
+于是断定第 1 道字符闸门对「阻止 `os.path.join` 逃逸」已是完备的。**这个推理本身没错**
+（Windows 上 `join` 视作绝对路径的三种形态 `C:` / `\` / `/` 都含被拦字符，POSIX 上只有 `/`），
+错的是**从它外推到「这层没有用」** —— 我只检查了 `join` 逃逸这一种逃逸方式。
+
+它真正拦的是**字符闸门看不见的逃逸**：`save_dir` 下若有一个指向外部的
+**junction / symlink** 目录，则
+
+```bat
+mklink /J temp\scraped_images\bob\LinkPkg  <根外目录>   :: 普通用户免提权
+```
+
+`pkg_name = "LinkPkg"` 字符全部合法、`join` 也毫无异常，但 `realpath` 之后已在 `save_dir` 之外。
+`TestJunctionEscape` 三条用例把这一点坐实：把第 2 行短路掉，**该类的用例真的转红**（M6）。
+
+⇒ 代码注释已同步订正（`main.py` 里那一段），并指明对应用例。
 
 ### 0.5 测试污染教训（同日）
 
@@ -124,9 +137,66 @@ Windows 上 `join` 视作绝对路径的三种形态（`C:` / `\` / `/`）全都
 - video/audio 两条端点的跨用户读**维持现状**（无 `user_id` 列，按设计即全局共享）—— 见 §1.3
 - `_find_font_path` 反斜杠穿越仍未处置（独立议题）
 
+### 0.7 第二轮返工：目录名是「用户可控串」（2026-09-24 同日）
+
+> 用户裁定：**「短期止血：锁 display_name + 校验默认路径」**。
+
+§0.4 堵住了 `pkg_name`，但归属的**键**还没审：`_scrape_dn_for` 是
+`display_name or username` —— 直接把用户可控字符串当目录名，而归属校验正建立在这个目录名上。
+于是「能冒名占住别人的目录」= 不需要任何路径穿越就能拿到别人的产物。
+
+三次递进，每次都是**上一次的收口不够**，而每次都由**对照行**抓出（不是靠推演）：
+
+| 轮 | 攻击 | 为什么上一轮挡不住 | 收口位置 |
+|---|---|---|---|
+| ① | bob 改 `display_name` = alice 的目录名 → 不传 `save_dir` 爬取 → 200 + 为 alice 的包签发的合法签名 → 匿名 GET 200/121 字节 | `save_dir` 收窄只管显式传参的分支 | `auth._fs_name_error`（字符闸门） |
+| ② | 只锁 display_name 之后，用 `username = ..\..\_un_e\pwn`（15 字符，通过「4-20 字符」长度闸门）注册 | **同一条通道有两个入口**（`display_name or username`），锁一个等于没锁 | 字符闸门收口成 `_fs_name_error` **一处**，两个入口共用 |
+| ③ | bob 把 `display_name` 设成 alice 的 **username** | 判重只比 `display_name` **这一列**；alice 那列是空的 ⇒ 列上不重名，目录名却相同 | 判重改为比**解析后的目录名**（`_effective_dn`） |
+
+另有一条**不是穿越**的越权：`display_name = "alice."`。
+Windows 目录名尾部点会被**静默剥掉**，实测 `realpath(root/"alice.") == realpath(root/"alice")`、
+往 `alice./` 写文件真的落进 `alice/`。而字符串判重看不出（`"alice." != "alice"`）、
+`_is_within` 也是 True（realpath 归一化后就在根内，**不算逃逸**）——
+**「首尾点」这条规则是唯一挡住它的东西**（`test_trailing_dot_display_name_rejected`）。
+
+**最终收口点**（都写在**唯一**关口，不靠各调用点自觉）：
+
+- `auth._fs_name_error` —— 字符闸门，`username` / `display_name` 共用
+- `auth.directory_name_error` —— 解析后目录名的**唯一性** + **目录占用**；
+  挂在 `create_user` / `update_user` 两个唯一写入关口
+- `main._scrape_dn_for` —— 对 `own` 的越界兜底（原来只校验管理员的 `requested_dn`，漏了 `own`）。
+  这一处的价值在于 `_scrape_dir_for` 有**三个**调用点：写入、下载、列表。
+  只在写入侧补一道，另两处仍靠自觉；而 `scrape_packages` 会直接 `listdir` 推导出的目录
+  —— 越界即**信息泄露**
+- 四处置信路由前置 `directory_name_error` —— 只为给出清楚的错误文案，真正的约束在上面两处
+
+**为什么不需要第二道冗余闸门**：`/api/scrape` 的「省略 `save_dir` 时也校验推导结果」
+（`/code-review` finding #3 的落点建议）**没有采用** —— 该路径由 `_scrape_dn_for` 推导，
+在那里收口即可覆盖全部三个调用点。加第二道冗余闸门会让两道互相掩盖，
+变异验证时谁也测不出，反而降低可信度。
+
+**一处我自己写坏、被对照行抓出的回归**：`display_name_error` 里空值落进了「目录占用」判据
+—— `join(root, "") == root`，而爬取根目录**必然非空**（真实环境有 `ai`/`alice`/`alice2`），
+于是空 `display_name` 被判成「该目录里已有数据」，**把不带显示名的注册整体打死**。
+空值是合法输入（语义 = 回退到 username），必须短路。
+
+**验收**：全量 `717 passed / 0 failed`（改前 693）；
+变异验证 **6/6 承重** —— M1 字符闸门（username 入口）、M2 首尾点、M3 判重退回比列、
+M4 目录占用、M5 `_scrape_dn_for` 的 `own` 兜底、M6 第 2 道闸门（junction），
+每条都把对应用例实测转红。
+
+**已知行为变更**（修复的副作用，需运维知悉）：
+
+1. `username` 新增字符校验 —— 含 `/ \ : NUL`、首尾点/空白的用户名会被拒
+2. **目录已被占用的名字会被拒**：用户被删但 `temp/scraped_images/<名字>/` 还在时，
+   用同名重建账号会被拦（需先清目录或改名）。这是**刻意**的 —— 那正是「无主目录冒名接管」
+3. `display_name` 判重改为比解析后的目录名 ⇒ 设成他人 `username` 也会被拒
+
+---
+
 #### `/code-review` 的遗留发现（用户 2026-09-24 裁定「本轮不做」）
 
-只修了 HIGH 那条（§0.4）。以下 6 条已报告、**未修**，不在本文件范围内，留待另行裁定：
+只修了 HIGH 那条（§0.4）。以下 6 条已报告，**均不在本文件的原始范围内**，留待另行裁定。其中第 2 条已被 §0.4 修复、第 7 条已被 §0.8 修复（表内已标注），其余维持「本轮不做」：
 
 | # | 级别 | 问题 |
 |---|---|---|
@@ -135,7 +205,302 @@ Windows 上 `join` 视作绝对路径的三种形态（`C:` / `\` / `/`）全都
 | 4 | LOW | TTL 统一 24h，而服务端请求日志会落盘含 `sig` 的完整 query ⇒ 叠加第 3 条等于「日志泄漏 → 24h 匿名能力」 |
 | 5 | LOW | `_scrape_dn_for` 的 `requested_dn` 校验漏 Windows 盘符相对名：`user_dn=C:` 也通过，`_scrape_dir_for` 返回 `"C:"`（实测 `isdir` 为真），developer/admin 可列出 `_SCRAPE_DEFAULT_DIR` 之外的目录 |
 | 6 | LOW | `int(app.config.get("JWT_ACCESS_TOKEN_EXPIRES", 86400))` 与该键的 int/秒形态强耦合：键缺失时回退值不等于 JWT-Extended 的真实缺省（15min），「锚定 JWT 寿命」落空；若被设为 `timedelta` 则抛 TypeError ⇒ 全部下载 URL 下发 500 |
-| 7 | LOW | `scrape_upload_images` 仍手抄 dn 推导，与 §0「dn 推导唯一来源」的承诺不符（当前靠巧合一致，改一处即「写得到、下不了」） |
+| 7 | LOW | `scrape_upload_images` 仍手抄 dn 推导，与 §0「dn 推导唯一来源」的承诺不符（当前靠巧合一致，改一处即「写得到、下不了」）。**已在 §0.8 修复**（改用 `_scrape_dn_for`，同时补上了越界兜底） |
+
+---
+
+### 0.8 第三轮返工：H1 大小写折叠 + H2 并发窗口 + 3 个上传端点（2026-09-24 同日）
+
+> 用户裁定：H1+H2 修法 = **「H1 归一变比较 + H2 加 DB 唯一约束」**；
+> 3 个同族越界端点 = **「本轮一并修」**。
+
+§0.7 收口后仍留了两条 HIGH，由**两位独立审查者**分别从不同入口发现并互相印证 ——
+这符合本项目对「判据独立」的要求（同一判据的两种实现不算交叉验证）：
+
+| # | 级别 | 缺陷 | 谁发现 | 为什么 §0.7 的收口没盖住 |
+|---|---|---|---|---|
+| H1 | HIGH | 判重比的是**字符串**，而 NTFS 上 `alice` 与 `ALICE` 是**同一个目录** | 安全审查者（字符串比较 vs realpath 比较）＋ 代码质量审查者（判据 2 与判据 3 标准不一致） | `os.path.realpath` 只在目标**已存在**时才把大小写折到磁盘真值 —— 「目录不存在」这一档因此漏检 |
+| H2 | HIGH | 开放注册的 check-then-act 在并发下能插出多个**同名目录**的用户 | 代码质量审查者 | `directory_name_error` 是「读快照 → 判断 → INSERT」，Python 里天生非原子 |
+
+#### H1 的运行时取证（我自己独立复验，不走审查者的 Flask 客户端路径）
+
+- **文件系统事实层**：`os.path.samefile(root/"ALICE", root/"alice") == True`；
+  透过大写路径**读到**了 alice 的 `secret.png`；写入也落进 alice 目录
+- **闸门层**：把窗口边界钉成三档实测 —— 目录**不存在** → 放行（漏检）、
+  目录**为空** → 放行（漏检）、目录**非空** → 拦下
+
+「目录不存在」档不是边角情况：`_run_weekly_cleanup_once` 会 rmtree **整个**爬取根
+再重建，那一瞬间**全库**都落进这一档 —— **窗口每周重开一次**。这也是把「空目录」
+一并拒掉的理由：否则可以先占名、等对方产出再共享。
+
+#### 修法
+
+| 处 | 改动 |
+|---|---|
+| `auth._dn_key` | `os.path.normcase` 归一 —— POSIX 恒等，Windows 折大小写 |
+| `auth.directory_name_error` 判据 2 | 从「比字符串」改为比 `_dn_key(_dir_name_of(...))`，**含 `user_<id>` 兜底**，排除自己当前的两种写法 |
+| `auth.directory_name_error` 判据 3 | 目录占用同样按 `_dn_key` 归一再比，并排除自己拥有的目录 |
+| `database.py` | 新增 `users.scrape_dn` **生成列** + `CREATE UNIQUE INDEX ... ON users(scrape_dn COLLATE NOCASE)` |
+| `auth.create_user` / `update_user` | `sqlite3.IntegrityError` → `return None`（并发撞索引时给干净的「名字重复」而不是 500） |
+| `auth.create_user` | `display_name.strip()`，与 `update_user` 对齐 |
+| `auth.init_developer` | 两次创建分别判定，**两次都失败时打印明确告警** —— 原实现无条件 print `"created"`，会把「系统已经不可登录」报成成功 |
+
+**为什么 H2 必须落到 DB**：应用层的「读快照 → 判断 → INSERT」在多线程/多进程下
+无法原子（加锁只护得住单进程，而这是常开的多线程服务）。原子性只能交给 DB。
+`COLLATE NOCASE` 只折 ASCII，比 Python 的 `normcase` **窄** ⇒ 应用层更严 =
+fail-closed（两者不一致时先被应用层拒掉），方向是安全的。
+
+#### ⚠️ 订正：H2 的「应用层更严 = fail-closed」只覆盖大小写一维
+
+§0.8 正文写了「`COLLATE NOCASE` 比 `normcase` 窄 ⇒ 应用层更严 = fail-closed」。
+复核时发现这句话**只在一维上成立**，另有一处反向的不一致：
+
+| | `display_name` = `"   "`（纯空白**非空串**）时的解析 |
+|---|---|
+| Python `_scrape_dn_for` | `(display_name or username or "").strip()` —— `"   "` 是 **truthy**，故不回退 username；strip 后成空串 ⇒ `user_<id>` |
+| DB `scrape_dn` 生成列 | `NULLIF(TRIM(display_name),'')` ⇒ TRIM 后为空 ⇒ **回退 username** |
+
+即 Python 是「先判 falsy 再 strip」，DB 是「先 TRIM 再判空」，**求值顺序不同**。
+这一档下应用层闸门与 DB 唯一索引判的**不是同一个键** —— 而 H2 的原子性正是交给
+那个索引的。
+
+**方向仍是 fail-closed**：攻击者取 `display_name` = 某人的 `username` 时，应用层
+**放行**（它以为那个人的目录是 `user_<id>`），但 DB 生成列会撞上 ⇒ `IntegrityError`
+⇒ 拒绝。**只会误拒，不会漏越权**。
+
+**当前不可触发**：`create_user` / `update_user` 都已 strip，新数据产生不了 `"   "`；
+真实 `temp/app.db` 逐行核对（**2026-09-24 快照：24 行**）—— **0 不一致**，也无「TRIM 后为空但原值非空」的行。（此处原写「33 行」：该数字随库变化而失准，故改为带日期的快照表述。）
+
+**未修**：统一求值顺序要改 Python 侧的目录名语义（`"   "` 的用户目录会从
+`user_<id>` 变成 username），有产物「搬家」风险，且属改既有功能逻辑，需裁定。
+已由 `TestDbGeneratedColumnMatchesPython` 的两条用例**如实记录**（一条钉「除该档外
+必须同键」，一条钉「该档的差异仍然存在」）—— 差异消失时后一条会转红，提示删除注释。
+
+
+**为什么 `scrape_dn` 用 `PRAGMA table_xinfo` 判存在性而不是复用
+`_add_column_if_missing`**：该 helper 查的是 `PRAGMA table_info`，而该 PRAGMA
+**不列出生成列**（生成列在 `table_xinfo` 里）—— 于是它每次都判「列不存在」→ 重复
+ALTER → `duplicate column name: scrape_dn`，而 `_ensure_columns` **每次连库都跑**
+⇒ 整个应用当场打死（实测：全量套件从 `717 passed` 掉到 `304 failed`）。
+遵守纯增量原则，把生成列判存在性的局限关在新代码块内，不动共享 helper。
+
+#### 3 个上传端点的路径穿越（用户批准本轮一并修）
+
+`FileStorage.filename` 原样携带客户端字符串，3 处直接 join 进路径。加固前用
+Flask test client **运行时实测**的基线（3/3 确认）：
+
+| 端点 | 基线 | 修复后 |
+|---|---|---|
+| `/api/fonts/upload` | 200，落盘 `temp/_travprobe/x.ttf`（`fonts/` 之外） | 拦住，且中文名对照行仍正常落盘 |
+| `/api/video/upload-music` | 200，落盘 `temp/_travprobe/x.mp3`（`music/` 之外） | 拦住 |
+| `/api/audio-replace` | ffmpeg argv 的输出路径归一化后为 `temp/_travprobe/x_new.mp4` | 留在 `temp/audio_replace/` 内 |
+
+`audio-replace` 的影响面比另两个大：该路径不只进 ffmpeg 的 argv，还进
+`audio_replace_history` 表与**签名下载 URL**。
+
+统一收口在新增的 `main._safe_upload_name`。**刻意不用 werkzeug 的
+`secure_filename`**：它会把中文名整段滤掉（`背景音乐.mp3` → `mp3`），砸掉本项目的
+正常上传 —— 那是把可用功能改坏。故只做「剥目录成分」一件事，字符白名单仍交给各
+端点既有的扩展名校验。三个端点各配**中文名对照行**，专门防这个误修。
+
+#### 其余随本轮一并修
+
+- `admin_update_user` 的 `display_name` 补 `.strip()`，与建号路径对齐。不 strip 会让
+  **同一输入在两条写路径上判定相反**：建号 `"张三 "` 归一出 `"张三"` 成功，改名
+  `"张三 "` 则被 `_fs_name_error` 的「首尾不能有空白」拒成 400
+- `scrape_upload_images` 改用 `_scrape_dn_for`（原为手抄 dn 推导，缺越界兜底）
+  —— 即 §0.7 遗留清单的第 7 条
+
+#### 测试
+
+- `test_scrape_ownership.py` 新增 3 个类：
+  - `TestEffectiveDnMatchesScrapeDnFor` —— 钉住 `auth._effective_dn` ≡
+    `main._scrape_dn_for`。⚠️ `_effective_dn` 与 `database.py` 的两处注释此前都声称
+    「由该类钉住」，而**该类当时并不存在**（code-review 第 3 轮指出：注释在撒谎）。
+    断言分两支写：非空时逐字相同，为空时 `_scrape_dn_for` 必须落进 `user_<id>` 兜底
+  - `TestDirectoryNameCaseInsensitiveCollision` —— H1 的三档窗口各一条 + 对照行
+    （只改**自己**名字的大小写必须放行）
+  - `TestConcurrentDuplicateDirectoryName` —— 8 线程并发注册同名，**分档计数**：
+    断言 `1 created / 7 rejected / 0 error`。宽捕获刻意留着 —— 只 catch
+    `IntegrityError` 的话，其它异常会让线程静默死掉、计数对不上，测试反而可能变绿
+  - `TestDbGeneratedColumnMatchesPython` —— 钉住 **DB 生成列**与 Python 解析
+    **同键**（`test_same_key` 5 档参数化）+ **已知差异**一条（见上面的订正）。
+    ⚠️ 此前 `database.py` 的注释声称一致性「由 `TestEffectiveDnMatchesScrapeDnFor`
+    钉住」，而那个类只比 Python 两个函数之间、**没碰 DB 生成列** —— 该注释
+    已一并订正（注释不得撒谎是本项目 code-review 的固定检查项）
+- `test_huguan_dashboard.py` 的两条用例**前提已被 DB 唯一约束消掉**（它们靠
+  `_seed` 造两个同名 `display_name` 的用户来测 `resolve_owner_id` 的「≥2 → None」）。
+  改写为断言「歧义已不可能构造」+ 唯一命中仍必须命中的对照行。
+  「≥2 → None」的契约**未丢覆盖** —— 仍由 `test_ambiguous_mcc_name_is_warning`
+  实测覆盖（那条确实往 `mcc` 表插了两行同名）
+- 新增 `test_upload_filename_traversal.py` —— 3 端点各一条越界 + 一条对照行，
+  外加 `_safe_upload_name` 自身的边界（`.` / `..` / 空 / 纯目录 → `""`）。
+  穿越用例内置**非空转守卫**：`os.path.relpath` 若不含 `..` 就直接失败，
+  防「目标目录就在自己内部」的用例静默变绿
+
+#### 验收
+
+- **全量 `779 passed / 0 failed`**（本轮改动前 746）
+  - `test_scrape_ownership.py` 68 passed（新增 4 个类 27 条）
+  - `test_huguan_dashboard.py` 145 passed
+  - `test_upload_filename_traversal.py` 7 passed（新文件）
+  - H2 并发用例连续 **5 次**运行稳定（迁移竞态已隔离，见下）
+- 3 个上传端点：修复前基线 3/3 越界 → 修复后 3/3 拦住，中文名对照行全过
+
+#### 已知行为变更（运维知悉）
+
+1. **`display_name` 现在是全局唯一**（不区分大小写，且含 `user_<id>` 兜底命名空间）。
+   若存量库已存在重名，建索引会被**跳过**（防御式：否则唯一索引创建失败会让**每次
+   连库**都抛异常、把应用打死）。此时需人工改名后再重启，索引才会建立
+2. 带**首尾空白**的 `display_name` 在**改名**路径上由 400 变为自动 strip 后成功
+   （建号路径本来就是 strip 后成功，此前两条路径口径相反）
+3. `admin_update_user` 与 `auth.create_user` 在并发撞名时返回 400「用户名重复或
+   更新失败」，而不是 500
+4. 上传文件名中的目录成分被剥掉：`a/b.png` → `b.png`（此前会写到 `a/` 子目录）
+
+#### 本轮**未**处理的（明确记录）
+
+- §0.7 遗留清单里除第 7 条外的其余低危项（#3/#4/#5/#6）维持「用户已裁定本轮不做」
+- `_fs_name_error` 仍只防 `/` 不防 `\` 的**其他**出口（`_find_font_path` 那条独立议题，
+  见 memory 记录）
+
+#### ⚠️ 另一个已知限制（本轮实测发现，未修）
+
+判据 2 只比**他人当前的目录名**，而判据 3 的 `own_keys` 却把自己**两种**写法都排除了
+（当前目录名 + username 派生目录名）—— 两处**不对称**。缺的那一块是：
+**他人 `username` 派生的名字没被预留**，而它在对方清空 `display_name` 时会变成对方的目录名。
+
+实测（`temp/_probe_username_namespace.py`）：
+
+```
+B 取 A 的 username 作 display_name  → 200 放行
+随后 A 清空 display_name            → 400「该名字会与其他用户的爬取目录重名，请换一个」
+```
+
+即 **B 可以抢注 A 的 username，从而永久锁死 A 清空 `display_name` 的能力**
+（A 只能改成别的名字）。而错误文案是误导性的 —— A 看到的「甲名」与「sym_a」
+两个名字毫不相干，它无从知道问题出在自己**未改**的 username 上。
+
+**不是越权**：A、B 不会共用目录（B 占了 `sym_a`，A 清空时被应用层判据 2 拦下，
+DB 根本没参与）。安全方向 fail-closed，属**可用性 + 文案**问题。
+
+**修法方向（未做，待裁定）**：让判据 2 也把「他人 username 派生的名字」纳入预留，
+与 `own_keys` 的处理对称。代价是**变严**：任何人的 `username` 都不再能被别人取作
+`display_name`。这**是**正确行为（那个名字迟早会变成对方的目录名），但属改既有
+功能逻辑 + 会拒掉当前能通过的名字，按本项目规则需先裁定。
+
+**未固化为测试**：本条记录的是一个**待裁定**的行为，把它写成断言等于单方面把现状
+钉成期望行为。故只留探针脚本作证据，不写进 `tests/`。
+
+
+#### ⚠️ 本轮**新发现**的独立缺陷（先于本轮存在，待裁定，未修）
+
+并发场景下 `database.get_db()` 的迁移逻辑存在**非原子 check-then-act**。实测
+（`temp/_probe_migration_race.py`，**3/3 轮全部复现**）：8 线程同时首次连库时
+**6–7 个线程失败**：
+
+```
+duplicate column name: channel_name / sales_person   ← _ensure_columns 的无锁 ALTER
+no such column: "level" / "status"                   ← _cleanup_old_option_columns 的 DROP 竞态
+database is locked                                    ← 写锁竞争（被前两者放大）
+```
+
+**根因已定位（在文件内就能对照）**：
+
+- `_ensure_schema`（`get_db()` 第 45-50 行）**有** `_schema_lock` 双检锁 —— 模式是
+  现成的、正确的
+- `_ensure_columns`（第 53 行）**每次连库都跑**，其中的 `_add_column_if_missing`
+  是「`PRAGMA table_info` 查列 → `ALTER TABLE ADD COLUMN`」，**无锁**
+- 更麻烦的是 `_ensure_columns` 与 `_cleanup_old_option_columns` **互相增删同一列**：
+  后者会把 `products.sales_person` **DROP** 掉（标记置 1 后不再删），前者下次连库
+  又把它加回来 ⇒ 新库上的序列是「加 → 删 → 再加回」
+- **实测真实 `temp/app.db`**：`products.sales_person` **存在**（cleanup 标记已是 `'1'`
+  却仍被加回），`accounts.agent`/`accounts.status`/`mcc.level` 已删 —— 所以**稳态下
+  不触发**，生产当前是**潜在**而非**live**
+
+**触发窗口**：「全新库首次多人同时访问」或「升级带新列后的第一次启动 + 并发请求」。
+稳态下（列都已存在）只做 PRAGMA 读、不 ALTER，故平时不炸；但每次全新部署都可能让
+一部分请求拿到 500。**不是目录名归属问题**，与 H2 只是同族（都是非原子的读-判-写）。
+
+**后果（本轮实测踩到）**：新加的 H2 并发用例被它污染成 flaky —— 第一次跑红
+（7 个线程 `duplicate column name: sales_person`）。已把该用例的预热改为
+**预热到稳态并显式断言该前提**（`products.sales_person` 必须已在），把迁移竞态
+隔离出去；连续 5 次运行 68 passed 稳定。**隔离 ≠ 掩盖** —— 前提一旦失效，用例会
+直接报出来。
+
+<details>
+<summary>为什么「只多调一次 get_db()」不够（踩过的坑）</summary>
+
+第一次的缓解是「主线程连一次库再放线程」。这**反而更糟**：单次调用恰好停在
+「`sales_person` 刚被 cleanup DROP、标记已置」那一档，于是 8 个线程**同时**去
+ALTER ADD 这个已不存在的列 —— 必然 7 个失败。正确做法是**两次**：第二次连库时
+cleanup 已置标记不再删，列被加回并留下 ⇒ 后续连接只读不 ALTER。
+</details>
+
+**未修**：位于 DB 迁移层、与目录名归属无关，**链条已漂离本轮需求**，故不在本轮
+擅自修复 —— 待用户裁定。（修法方向明确且与文件内既有模式一致：把 `_ensure_columns`
+也用 `_schema_lock` 护住；但那要单独设计「加/删互斗」那部分，不是加个锁就完。）
+
+### 0.9 第四轮：code-review 第 3 轮的逐条处置（2026-09-24 同日）
+
+审查对象是本轮加固**本身**（H1/H2/3 个上传端点）。下列每条都**先独立复现、再决定**
+—— 审查员是模型，其结论本身不构成证据。
+
+#### 已修（4 条）
+
+| # | 缺陷 | 复现方式 | 修法 |
+|---|---|---|---|
+| HIGH-1 | `database.py` 的重复检测用 **BINARY**、唯一索引用 **NOCASE**，且建索引无 `try/except` | **运行时复现**：库里存在 `alice` / `Alice` 两条 `scrape_dn` 时，BINARY 检测得 `0`（以为无重复）→ `CREATE UNIQUE INDEX ... COLLATE NOCASE` 抛 `IntegrityError: UNIQUE constraint failed: users.scrape_dn`。该异常从 `get_db()` 冒出，而 `get_db()` 在 `_before_request` **每个请求都调**、启动预初始化也调 ⇒ **服务起不来 / 每个请求 500** | ① 检测改 `GROUP BY scrape_dn COLLATE NOCASE`，与索引同 collation；② 建索引包 `try/except sqlite3.IntegrityError` 兜底；③ 跳过分支改为 `print("[Migrate] ...")` 显式告警（不再静默丢弃原子性保障） |
+| MEDIUM-2 | `/api/admin/users/create` 本轮新加的目录名闸门排在**既有**的 409「用户名已存在」之前 ⇒ 重名用户名被顶成 400 | `git diff` 确认该闸门是本轮新增行，且 409 分支原在其后 | 把 `existing = auth.get_user_by_username(username)` + 409 **上提**到闸门之前，恢复原对外契约 |
+| L-6 | **纯增量违规**：上一轮在 `auth.update_user` 里删掉了既有的 `username = username.strip()`（`git diff` 的 `-` 行），且其原位置在闸门**之后** ⇒ 同一输入建号得 200、改名得 400 | `git diff -- py/auth.py` | 还原该 strip 并**上提**到目录名关口之前（同时消除建号/改名口径相反） |
+| L-4 | `/api/audio-replace` 里 `_safe_upload_name` 返回空时未按错误处理 ⇒ `base_name` 为空、输出静默变成 `_new.mp4`，两人同用非法名会互相覆盖；同族另两个端点都是「空 → 400」 | 读代码 + 与另两端点对照 | 在建临时文件**之前**加空名 400（免得 400 时留垃圾） |
+
+#### 测试质量（2 条，已修）
+
+- **L-1 —— 本轮唯一真正的假绿点**：`test_sequential_duplicate_is_rejected_by_gate`
+  只断言 `create_user(...) is None`。闸门**整个坏掉**时返回值一模一样（闸门放行 →
+  INSERT 撞唯一索引 → `IntegrityError` 被 `create_user` 吞 → 同样 `None`），两条路径
+  无从区分，而 docstring 却声称在测 gate。已补一腿直接问闸门要**判据 2 的原文案**
+  —— DB 唯一索引给不出这句话，故这条断言能真正区分。
+- **L-2**：`test_huguan_dashboard.py` 的对照行 `resolve_owner_id(db, "重名") is not None`
+  太弱（换个用户命中也能蒙过），改为 `== uid_a` 钉到**具体那一行**；函数名同步改为
+  `test_ambiguous_name_is_unconstructable_and_unique_still_resolves`（原名与断言语义已不符）。
+
+#### 明确不改（3 条，附理由）
+
+- **L-3**（`video_ext` / `audio_ext` 取自未过筛的原始文件名）：**探针未能复现 500** ——
+  `.mp4:evil` 这类含 `:` 的后缀在 Windows 上被当作 NTFS **备用数据流**，写入**成功**，
+  既不抛 `OSError` 也不越界；审查员自己也标了「未实测出 500」。按诊断优先原则，
+  无实测证据不动手。
+- **MEDIUM-3**（并发用例的 `except Exception` 过宽）：**不采纳「收窄 + 重试」**。该宽捕获
+  **不是掩盖** —— 它把异常记进 `outcomes["error"]`（含 `type(e).__name__`）并断言
+  `== []`，命中即报红。若收窄成只 catch `sqlite3.IntegrityError`，用例反而会在
+  **迁移竞态**（见上、**尚未裁定**的独立缺陷）命中时直接崩，把本用例与那个待裁定
+  缺陷耦合起来。
+  另：审查员称「§0.8 验收数字『62 passed』与现状 68 不符」—— 实测全文**没有**
+  「62 passed」，§0.8 一直写的是 **68**，此条**不成立**（审查员读的是旧副本）。
+- **L-5**（`ALTER TABLE ... GENERATED ... VIRTUAL` 硬依赖 SQLite ≥ 3.31，
+  `requirements.txt` 未记该下限）：属依赖声明问题，且部署机版本未确证，单独处理。
+
+#### 待用户裁定（2 条行为问题，本轮**未**改）
+
+- **MEDIUM-1 · 改回曾用显示名会被自己的旧目录拦住**：用户显示名曾为 `老王`（目录
+  `temp/scraped_images/老王/` 内已有产物），改名 `老李` 后想改回 `老王` → 判据 3 命中
+  **自己的旧目录** → 400。`own_keys` 只放**当前**目录名与 username 派生名，不含曾用名
+  ⇒ 用户**自己此前的产物永远访问不到，且 UI/admin 都没有恢复路径**。
+  修法（把历史目录名纳入 `own_keys`，或对「目录内文件全属本人」放行）会**放宽**判定
+  = 改既有功能逻辑，按本项目规则需先裁定。
+  **独立复现（我自己跑的，非转述审查员）**：`py/tests/_probe_hist_dn.py`（跑完即留档、
+  不被默认收集）。两腿证据 ——
+  ```
+  [3b] 对照：目录「老李」存在时把显示名**再设一次 老李** -> 200   ← 判据 3 非无差别拒绝
+  [4]  改回曾用名「老王」（自己的旧目录）              -> 400
+       {'error': '该显示名对应的爬取目录已被占用，请换一个'}
+  ```
+- **L-7（潜伏）**：闸门新增**之前**入库的非法名用户（含 `/:\`、首尾点、首尾空白）会被
+  自己的旧值卡死 —— `directory_name_error` 对自己旧名也不放行、`update_user` 同样拦，
+  **没有任何端点能修正**。live 库实测 **0 行**（24 用户），故仅潜伏。修法方向：对自己
+  当前旧值豁免，或给 admin 一条修正通道。
 
 ---
 
