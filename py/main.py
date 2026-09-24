@@ -8251,6 +8251,14 @@ def admin_delete_user(uid):
         conn.execute("UPDATE account_statuses SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE mcc_levels SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE sales_persons SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        # 爬取目录墓碑（2026-09-24，code-review 第 5 轮 Important #2）：把该用户**当前**
+        # 的爬取目录名记进 scrape_dn_history。本函数**不删爬取目录**（产物留在盘上），
+        # 若不记这一行，用户一删他的名字就从认领判据里消失 ⇒ 曾用名含该名的人可以认领
+        # 这个无主目录、读到他的产物（实测复现）。dn 用 _scrape_dn_for 求值，即应用
+        # 实际读写的那个目录名（含存量越界值退化为 user_<id> 的兜底）。
+        # ⚠️ scrape_dn_history **刻意不在上面的清理清单里**：它的行必须活过本次删除，
+        # 否则墓碑失效、本保护静默消失。见 auth.note_scrape_dn_release。
+        auth.note_scrape_dn_release(conn, uid, _scrape_dn_for(target, uid))
         # 现在可以安全删除用户
         conn.execute("DELETE FROM users WHERE id = ?", (uid,))
         conn.commit()

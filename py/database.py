@@ -149,18 +149,12 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "platform", "platform TEXT DEFAULT 'gg'")
-    # 曾用爬取目录名（2026-09-24 MEDIUM-1）：JSON 数组文本，记录该用户**历史上**
-    # 用过的爬取目录名。为什么必须存：改名之后旧目录仍留在磁盘上，而它既不是
-    # 「别人主张的名字」（判据 2 不管这一维）、也不在「我当前的目录名」里，于是
-    # auth.directory_name_error 的判据 3 会把「改回自己的曾用名」一并拒掉 ——
-    # 用户此前在旧目录里的全部产物**永远访问不到**，且没有任何恢复路径
-    # （既不能删目录、也不能手选目录）。本列是判据 3 区分「我的旧名字」与
-    # 「无主目录」的唯一依据。
-    #
-    # 刻意**不参与任何唯一约束**：它是「我历史上占过的名字」的白名单，不决定
-    # 任何一行**当前**占哪个目录；当前占用仍由 scrape_dn 唯一索引裁决。
-    # 解析规则见 auth._dn_history（坏值一律当空，坏值是 fail-closed 方向）。
-    _add_column_if_missing(conn, "users", "prev_scrape_dns", "prev_scrape_dns TEXT DEFAULT ''")
+    # ⚠️ users.prev_scrape_dns（曾用爬取目录名，JSON 文本）已**废弃**：2026-09-24
+    # code-review 第 5 轮把它升级成 scrape_dn_history 表（一行一个名字 + 自增序号），
+    # 并**删除了这个列**（见 _migrate_scrape_dn_history）。此处**绝不能**再
+    # _add_column_if_missing 补它：_ensure_columns 每次连库都跑，补回来 = 迁移刚
+    # DROP 掉的列下一毫秒又出现，且新的写入方（auth.update_user）只写表不写列，
+    # 该列会永远停在迁移那一刻的旧值上，成为一颗定时炸弹。
     # 爬取目录名唯一约束（2026-09-24，code-review 第 3 轮 H2）：
     # users 表此前只有 username 一个唯一索引，display_name 无任何约束，而爬取
     # 产物目录名 = `display_name or username`。于是 `/api/auth/register` 这种
@@ -502,6 +496,23 @@ def _ensure_schema(conn: sqlite3.Connection):
             custom_name TEXT DEFAULT '',
             platform TEXT DEFAULT 'gg'
         );
+
+        -- 爬取目录名历史 + 墓碑（2026-09-24，code-review 第 5 轮 Important #1/#2）
+        -- 取代原先的 users.prev_scrape_dns（JSON 文本，已被本表取代后 DROP）。
+        -- 一行一个名字，id 即**跨用户单调序号** ⇒ 认领判据用 last-writer-wins；
+        -- 名字存在行里 ⇒ 逗号/换行只是普通字符，整类「分隔符串味」缺陷不再存在。
+        -- ⚠️ 刻意**无外键**（故删用户时不会级联消失）：它是**墓碑表**，删用户时写入
+        -- 的行必须活过用户删除，否则「被删用户的爬取目录」会重新变成无主目录、
+        -- 被曾用名持有者认领读到（Important #2）。admin_delete_user 刻意不清理本表。
+        -- 读写见 auth._dn_released_keys（认领）与 auth.update_user（改名时落库）。
+        CREATE TABLE IF NOT EXISTS scrape_dn_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            dn TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_scrape_dn_history_dn ON scrape_dn_history(dn);
+        CREATE INDEX IF NOT EXISTS idx_scrape_dn_history_user ON scrape_dn_history(user_id);
 
         -- 爬取缓存表
         CREATE TABLE IF NOT EXISTS scrape_cache (
@@ -1458,6 +1469,101 @@ def _copy_gg_agents_to_tt(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _migrate_scrape_dn_history(conn: sqlite3.Connection):
+    """一次性迁移：users.prev_scrape_dns（JSON 文本）→ scrape_dn_history 表，随后删掉旧列。
+
+    为什么换存储（2026-09-24，code-review 第 5 轮 Important #1）：
+      · JSON 文本只记录了「谁用过这个名字」，**没有先后顺序**，于是认领判据只能做成
+        「除我之外没人用过」⇒ 一个名字被 ≥2 人先后用过时，**最后持有者**也取不回自己
+        的产物（误拒；用户可见后果与原 MEDIUM-1 缺陷一致：产物在盘上、应用内无恢复
+        路径）。换成表后每行有自增 id 作**跨用户单调序号**，认领改为 last-writer-wins
+        （我的释放序 > 所有他人的释放序），误拒消除，同值仍拒。
+      · 顺带消灭「分隔符串味」整类缺陷：名字存在**行**里，逗号/换行只是普通字符。
+
+    灌入顺序：按每个用户 JSON 数组内的原顺序逐条 INSERT ⇒ 自增 id 递增，与「数组
+    顺序即释放先后」一致（数组由 auth 的追加逻辑维护，新释放的追加在尾部）。
+    坏值（非 JSON / 非数组 / 非字符串项）跳过 —— 与旧读法「坏值当空」方向一致：
+    读**自己**的曾用名读不出来只是自己不再认领，fail-closed。
+
+    ⚠️ 但**跨用户**的先后无论如何都还原不出来（JSON 里没有时间戳，只剩「谁用过」），
+    所以「被 ≥2 人的历史同时提到」的名字一律插一行 user_id=0 的哨兵 ⇒ 谁也不判给他。
+    猜一个顺序的风险是**误放**（先释放的人反倒成了最后持有者 ⇒ 认领到别人的产物目录），
+    比误拒严重得多。代价：存量数据的 last-writer-wins 提升是**单向**的，只对升级之后
+    发生的改名生效。见 test_scrape_dn_history_migration.py。
+
+    失败处理：本函数由 _migrate_if_needed 调用，而后者**每个请求**都跑 ⇒ 异常绝不能
+    逃出去打死 get_db()（那会让整个服务 500）。故整体 try/except：失败则回滚且**不**
+    打标记，下次重试。
+
+    ⚠️ 此处**不**用 `PRAGMA foreign_keys=OFF` 包 DROP COLUMN：SQLite 的 PRAGMA 在
+    事务内是**空操作**，而本函数此前已有 INSERT（事务已开始）—— 写了也只是看着像
+    防护。实测不需要：该列无外键、未被索引/生成列引用，在 foreign_keys=ON 且有子表
+    引用 users(id) 的情况下 DROP 成功且 PRAGMA foreign_key_check 为空。
+    """
+    done = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_scrape_dn_history'"
+    ).fetchone()
+    if done:
+        return
+
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "prev_scrape_dns" not in cols:
+        # 新库：建表时就没有这个列，无事可做
+        conn.execute("INSERT OR REPLACE INTO config(key,value) "
+                     "VALUES('migrated_scrape_dn_history','1')")
+        conn.commit()
+        return
+
+    try:
+        pending = []           # [(user_id, dn)]
+        seen_users = {}        # 归一键 → 用过它的 user_id 集合（判跨用户歧义）
+        for row in conn.execute(
+                "SELECT id, prev_scrape_dns FROM users "
+                "WHERE COALESCE(prev_scrape_dns, '') != ''").fetchall():
+            try:
+                names = json.loads(row["prev_scrape_dns"])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(names, list):
+                continue
+            for n in names:
+                if isinstance(n, str) and n:
+                    pending.append((row["id"], n))
+                    seen_users.setdefault(os.path.normcase(n), set()).add(row["id"])
+
+        for uid, dn in pending:
+            conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)",
+                         (uid, dn))
+
+        # ⚠️ 跨用户先后**无法还原** —— JSON 里没有时间戳，只剩「谁用过」。
+        # 而 last-writer-wins 判据一旦把顺序判反，方向是**误放**：先释放的人反倒
+        # 成了「最后持有者」，于是他能认领那个目录、读到别人留在里面的产物。
+        # 故对「被 ≥2 人的历史同时提到」的名字**谁也不给** —— 插一行 user_id=0 的
+        # 哨兵（0 不是任何真实用户，自增主键从 1 起；同一个 dn 若有多条也只需一条，
+        # 但多插无害，取 MAX(id) 仍是它），它在 LWW 比较里对该名字永远最大 ⇒
+        # 每个真实用户对这一档都退回修复前的「拒」。只被一个人提到过的名字没有
+        # 歧义，仍判给他。
+        # 这让旧数据的修复保持**单向**：只有升级**之后**发生的改名才享受
+        # last-writer-wins。代价是「被多人先后用过」的存量名字仍取不回自己的产物，
+        # 但方向 fail-closed，不会漏读 —— 见设计文档 §0.10。
+        sentinel = set()
+        for dn_key, users in seen_users.items():
+            if len(users) > 1:
+                sentinel.add(dn_key)
+        for uid, dn in pending:
+            if os.path.normcase(dn) in sentinel:   # 与 auth._dn_key 同一口径
+                conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(0, ?)",
+                             (dn,))
+
+        conn.execute("ALTER TABLE users DROP COLUMN prev_scrape_dns")
+        conn.execute("INSERT OR REPLACE INTO config(key,value) "
+                     "VALUES('migrated_scrape_dn_history','1')")
+        conn.commit()
+    except Exception as e:
+        print(f"[Migrate] scrape_dn_history 迁移失败（不回滚标记，下次重试）：{e}")
+        conn.rollback()
+
+
 def _migrate_if_needed(conn: sqlite3.Connection):
     """首次启动时从旧格式导入数据。"""
     root = os.path.dirname(os.path.dirname(_db_path()))
@@ -1537,6 +1643,8 @@ def _migrate_if_needed(conn: sqlite3.Connection):
             conn.rollback()
 
     _migrate_options_tables(conn)
+    # 5. users.prev_scrape_dns（JSON）→ scrape_dn_history 表，并删掉旧列
+    _migrate_scrape_dn_history(conn)
     _cleanup_old_option_columns(conn)
 
     conn.commit()

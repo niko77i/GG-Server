@@ -794,13 +794,13 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [TT 同步「是否回收」列驱动状态变更](docs/superpowers/specs/2026-09-22-tt-sync-recycle-status-design.md)
 - [TT 掉包通知（独立机器人）](docs/superpowers/specs/2026-09-24-tt-delist-notification-design.md)
 - [全站鉴权加固与既有缺陷收口](docs/superpowers/specs/2026-09-23-security-hardening-design.md)
-- [下载签名按需签发 + scrape 产物归属校验](docs/superpowers/specs/2026-09-24-ondemand-download-signing-design.md)（含 §0.9：code-review 第 3 轮逐条处置；§0.10：曾用目录名认领 + 存量非法名豁免，及第 5 轮审查处置与两条待裁定）
+- [下载签名按需签发 + scrape 产物归属校验](docs/superpowers/specs/2026-09-24-ondemand-download-signing-design.md)（含 §0.9：code-review 第 3 轮逐条处置；§0.10：曾用目录名认领 + 存量非法名豁免，及第 5 轮审查处置；§0.11：三条裁定落地 —— 换表 + last-writer-wins、墓碑表、并发改名 500→400）
 - [TT 支持苹果（App Store）包链接 + 掉包判定加固](docs/superpowers/specs/2026-09-24-tt-appstore-package-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
 
-> 共 51 张表：GG 平台 29 张 + FB 平台 11 张 + TT 平台 11 张。字典表（选项表）5 张三平台共用。
+> 共 52 张表：GG 平台 30 张 + FB 平台 11 张 + TT 平台 11 张。字典表（选项表）5 张三平台共用。
 
 ### GG 平台
 | 表名 | 用途 | 隔离方式 |
@@ -821,6 +821,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 | `sales_persons` | 商务字典 | 共享 |
 | `regions` | 地区字典 | 共享 |
 | `scrape_cache` | 爬取缓存 | 共享 |
+| `scrape_dn_history` | 爬取目录名历史 + **墓碑**（曾用名认领判据，LWW） | 按名字判归属 |
 | `import_history` | 导入历史 | user_id 隔离 |
 | `video_history` | 视频生成历史 | user_id 隔离 |
 | `video_tasks` | 视频任务追踪（DB 持久化） | 共享 |
@@ -872,6 +873,15 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 > （`*_product_runners`、`ad_reports` / `fb_ad_reports` 等 NOT NULL 列）。
 > 新增任何带 `user_id` 的表后，务必同步补充清理，回归测试见
 > `py/tests/test_user_delete_and_merge_cleanup.py`。
+>
+> ⚠️ **唯一例外：`scrape_dn_history` 刻意不清理，也刻意不加外键。** 它是**墓碑表** ——
+> 删用户时 `admin_delete_user` 先写入该用户当前的爬取目录名（`auth.note_scrape_dn_release`），
+> 那行必须**活过**本次删除。否则用户一删，他的名字就从认领判据里消失，本该无主的爬取目录
+> 会被「曾用名含该名」的人认领并读到**被删用户**的产物。若有人顺手把这张表加进清理清单，
+> 保护即失效 —— 用变异实测过：加一行 `DELETE FROM scrape_dn_history WHERE user_id = ?`
+> 会让 `TestDeletedUserDirectoryIsTombstoned::test_directory_of_deleted_user_is_not_reclaimable`
+> **恰好 1 红**（同组的对照腿保持绿）。回归测试见
+> `py/tests/test_scrape_ownership.py::TestDeletedUserDirectoryIsTombstoned`。
 
 ## 启动方式
 

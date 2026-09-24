@@ -9,7 +9,6 @@
 于是归属只能在**签发侧**（`POST /api/scrape` 的 `save_dir`）堵死。只测正门不测侧门，
 就等于用一套「攻击者根本不用走那条门」的断言冒充安全 —— 这是本文件存在的理由。
 """
-import json
 import os
 import shutil
 import sqlite3
@@ -936,6 +935,74 @@ class TestConcurrentDuplicateDirectoryName:
         assert auth.create_user(username="_seq_b", password="test123",
                                 role="user", display_name="_seq_same") is None
 
+    def test_rename_collision_returns_none_without_half_write(self, client, monkeypatch):
+        """Important #4（code-review 第 5 轮）：并发**改名**撞唯一索引时逃逸为 500。
+
+        形态：`auth.update_user` 的 `try/except sqlite3.IntegrityError` 原本**只包住
+        `commit()`**，而 SQLite 在 **UPDATE 语句处**就抛（已独立复现）⇒ 该 except 是
+        **死代码**，异常从 UPDATE 直接冒到 Flask ⇒ 500；路由对 `None` 的 400 处理本来
+        就在，只是永远走不到。收口：把 try 上提到覆盖两条会动 `scrape_dn` 的 UPDATE。
+
+        确定性复现（**不赌线程调度**）：把前置闸门换成「一律放行」，以模拟「闸门读到
+        的是过期快照」这一竞态前提 —— `directory_name_error` 本就是 check-then-act、
+        天生非原子。再让两个用户的目录名收敛到同一个值 ⇒ 第二条 UPDATE 撞
+        `idx_users_scrape_dn`。修复前异常从这里冒出，本用例在 assert 处就报
+        IntegrityError；修复后返回 None（路由 400）。
+        """
+        _h1, uid1 = _create_user(client, "_cr_a")
+        _h2, uid2 = _create_user(client, "_cr_b")
+        monkeypatch.setattr(auth, "directory_name_error", lambda *a, **k: None)
+
+        assert auth.update_user(uid1, display_name="_cr_same") is not None, (
+            "第一条不该失败（此时无人占用 _cr_same）"
+        )
+        # 第二条：闸门被绕过，只剩 DB 唯一索引这道兜底 —— 必须**返回 None**，不得抛出
+        assert auth.update_user(uid2, display_name="_cr_same") is None
+
+        # 回滚必须干净：失败的那次不能留下半写状态（username/display_name 都没变）
+        assert auth.get_user_by_id(uid1)["display_name"] == "_cr_same"
+        assert auth.get_user_by_id(uid2)["display_name"] == "", (
+            f"失败的改名留下了半写状态：{auth.get_user_by_id(uid2)['display_name']!r}"
+        )
+
+    def test_concurrent_renames_to_same_name_never_500(self, app, monkeypatch):
+        """同一竞态的**端到端**腿：走真实路由（`PUT /api/auth/profile`）并发改名，
+        断言「恰好 1 个 200、其余 400、**没有任何 5xx**」。
+
+        ⚠️ 闸门在此**刻意**换成一律放行：否则线程可能被前置闸门逐个挡住（那也不会有
+        IntegrityError），断言「没有 5xx」就成了**空气** —— 修复前后一样绿。
+        放开闸门才能保证每个线程都真的走到 UPDATE 那一行。
+        """
+        n = 6
+        heads = [_create_user(app.test_client(), f"_crn_{i}")[0] for i in range(n)]
+        monkeypatch.setattr(auth, "directory_name_error", lambda *a, **k: None)
+
+        codes = []
+        lock = threading.Lock()
+
+        def _rename(h):
+            c = app.test_client()
+            r = c.put("/api/auth/profile", json={"display_name": "_crn_same"}, headers=h)
+            with lock:
+                codes.append(r.status_code)
+
+        threads = [threading.Thread(target=_rename, args=(h,)) for h in heads]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(codes) == n, f"有线程没跑完：{codes}"
+        assert not [c for c in codes if c >= 500], (
+            f"并发改名有请求逃逸为 5xx（唯一索引冲突没被接住）：{sorted(codes)}"
+        )
+        assert codes.count(200) == 1, (
+            f"应恰好 1 个成功（DB 唯一索引兜底），实际 {sorted(codes)}"
+        )
+        assert codes.count(400) == n - 1, (
+            f"其余应干净地 400，实际 {sorted(codes)}"
+        )
+
 
 def _seed_raw_user(username, display_name, role="user", platform="gg"):
     """直接 INSERT 一行 users，返回 id。
@@ -1089,15 +1156,15 @@ class TestFormerDirectoryNameIsReclaimable:
             f"改回曾用名后旧产物仍不可见，等于没修：{pkgs}"
         )
 
-        # 落库侧核对：靠的确实是曾用名列表，而不是判据 3 整体失效。
+        # 落库侧核对：靠的确实是曾用名记录，而不是判据 3 整体失效。
         db = database.get_db()
         try:
-            hist = db.execute("SELECT prev_scrape_dns FROM users WHERE id = ?",
-                              (uid,)).fetchone()[0]
+            hist = [r[0] for r in db.execute(
+                "SELECT dn FROM scrape_dn_history WHERE user_id = ?", (uid,)).fetchall()]
         finally:
             db.close()
-        assert "_hist_old_a" in json.loads(hist), (
-            f"曾用名没落库，改回成功另有原因：prev_scrape_dns={hist!r}"
+        assert "_hist_old_a" in hist, (
+            f"曾用名没落库，改回成功另有原因：scrape_dn_history={hist!r}"
         )
 
     def test_same_former_name_is_still_blocked_for_others(self, client, scrape_dirs):
@@ -1170,10 +1237,15 @@ class TestFormerDirectoryNameIsReclaimable:
         """承重：曾用名里的逗号**不得**被当成分隔符，拆出的子名不能变成我的曾用名。
 
         为什么需要这条：`_fs_name_error` 只挡路径分隔符/冒号/空字符与首尾的点、空白
-        —— **名字中间允许逗号和换行**。若 `prev_scrape_dns` 用逗号或换行拼接（而不是
-        JSON），曾用名 `_j_a,b` 会被读成 `["_j_a", "b"]`，`_j_a` 就平白成了「我的曾用
-        名」。此时只要磁盘上存在一个 `_j_a` 目录（**别人的**残留，例如用户被删而目录
-        还在），判据 3 的「目录占用」保护就会被绕开，我能读到它。
+        —— **名字中间允许逗号和换行**。若曾用名被拼进**任何**分隔符串（逗号、换行、
+        JSON 之外的紧凑格式），曾用名 `_j_a,b` 会被读成 `["_j_a", "b"]`，`_j_a` 就平白
+        成了「我的曾用名」。此时只要磁盘上存在一个 `_j_a` 目录（**别人的**残留，例如
+        用户被删而目录还在），判据 3 的「目录占用」保护就会被绕开，我能读到它。
+
+        ⚠️ 存储已在 2026-09-24 从 `users.prev_scrape_dns`（JSON 文本）换成
+        `scrape_dn_history` 表（**一名字一行**），本用例的原始动因（JSON 序列化）随之
+        消失；保留它是为了钉住「名字被当**不透明整串**处理」这一性质 —— 若哪天有人
+        为了省事又把它拼回一个分隔符列，本用例会立刻转红。
 
         两条腿都必须踩在判据 3 上，各由相反方向承重：
           · 取回**完整**的 `_j_a,b` → 200：目录存在，只有「曾用名被原样保留为**一个**
@@ -1211,43 +1283,176 @@ class TestFormerDirectoryNameIsReclaimable:
             "该名字对应的爬取目录已被占用，请换一个"
         )
 
-    def test_unreadable_other_history_fails_closed(self, client, scrape_dirs):
-        """承重：别人的 `prev_scrape_dns` **非空但解析不出来**时，整体放弃认领。
+class TestFormerNameBelongsToLastHolder:
+    """Important #1（code-review 第 5 轮）：一个名字被 ≥2 人先后用过时，**最后持有者**
+    也取不回自己的产物。
 
-        为什么方向必须是「拒」：读**别人**的历史时「坏值当空」是 **fail-open** ——
-        漏看他用过的名字，就可能认领到一个装着他产物的目录（与读**我自己**历史时
-        的方向恰好相反）。故这条分支要挡在保守的一侧。
+    形态（`temp/_probe_r5_verify.py` 独立复现）：
+      1. P 占空闲名 N（目录还不存在 ⇒ 判据 3 无目录可撞），随即改名离开 —— N 进 P 的曾用名
+      2. Q 合法接手 N（**这一放行本身就证明目录里没有 P 的产物**），产出后改名离开
+      3. Q 想取回 N ⇒ 修复前被拒，而目录 `N` 里**只有 Q 自己的产物**
 
-        形态：A 的曾用名含 `_fc_X` 且 `_fc_X` 目录在盘上；B 的历史被写成非 JSON 坏值
-        （模拟外部改库 / 人工编辑）。若不保守当满，A 会因「B 的历史读出来是空的」而
-        被放行，读到 B 那一侧的历史所暗示的目录。
+    用户可见后果与原缺陷（MEDIUM-1）完全一致：产物在盘上、应用内无恢复路径。
+    修法：曾用名升级为**带全局序号的条目**（`scrape_dn_history.id`，跨用户单调），
+    认领条件从「无他人用过」改为「我的释放序 > 所有他人的释放序」（last-writer-wins），
+    同值一律拒 ⇒ 仍 fail-closed。最后持有者本就能读该目录（认领前它就在自己名下），
+    故不新增任何暴露面。
+
+    本类必须**成对**：只测「最后持有者能取回」而不钉住「先前持有者仍抢不走」，
+    就等于用「谁用过谁就能认领」冒充修复，把「名字被多人用过 ⇒ 目录里可能是别人的
+    产物」整条保护丢掉。
+    """
+
+    @staticmethod
+    def _p_occupies_then_q_takes_over(client, scrape_dirs):
+        """公共夹具：P 先用 N 后离开、Q 接手 N 并产出后离开；返回 h_p/uid_p/h_q/uid_q。
+
+        ⚠️ 中间的每一步 status 都必须断言 —— 少了它，夹具可以因「某步悄悄失败」
+        而把两条腿都测成空气（例如 Q 根本没接手成功，磁盘上就没有 Q 的产物）。
         """
-        h_a, _uid_a = _create_user(client, "_fc_a")
-        uid_b = _seed_raw_user("_fc_b", "_fc_b")
-        BAD = "_fc_X,oops"
+        N = "_lw_N"
+        h_p, uid_p = _create_user(client, "_lw_p")
+        h_q, uid_q = _create_user(client, "_lw_q")
 
-        # 1) A 用 _fc_X 造出产物后改名离开 —— _fc_X 进 A 的曾用名，目录留在盘上
-        assert client.put("/api/auth/profile", json={"display_name": "_fc_X"},
-                          headers=h_a).status_code == 200
-        scrape_dirs("_fc_X", "com.pkg.fc")
-        assert client.put("/api/auth/profile", json={"display_name": "_fc_away"},
-                          headers=h_a).status_code == 200
+        # 1) P 先占 N（目录不存在）再改名离开 —— N 进 P 的曾用名，盘上无 P 的产物
+        r = client.put("/api/auth/profile", json={"display_name": N}, headers=h_p)
+        assert r.status_code == 200, f"P 占用空闲名失败：{r.status_code} {r.get_json()}"
+        r = client.put("/api/auth/profile", json={"display_name": "_lw_Pout"}, headers=h_p)
+        assert r.status_code == 200, f"P 改名离开失败：{r.status_code} {r.get_json()}"
 
-        # 2) 把 B 的历史写成「非空但解析失败」——这正是本分支的前提
-        db = database.get_db()
-        try:
-            db.execute("UPDATE users SET prev_scrape_dns = ? WHERE id = ?", (BAD, uid_b))
-            db.commit()
-        finally:
-            db.close()
-        # 前置断言：夹具确实造出了「非空且解析失败」。少了这条，本用例可以因
-        # 「那个值其实解析得出来」而假绿 —— 那时它测的是空气。
-        assert auth._dn_history(BAD) == [], "夹具没造出坏值（它居然解析得出来）"
+        # 2) Q 合法接手 N（若目录里有 P 的产物，判据 3 会在这里就拒掉），产出后离开
+        r = client.put("/api/auth/profile", json={"display_name": N}, headers=h_q)
+        assert r.status_code == 200, (
+            f"Q 接手空闲名失败（夹具前提不成立：目录里已有别人的东西）："
+            f"{r.status_code} {r.get_json()}"
+        )
+        scrape_dirs(N, "com.pkg.lw")
+        r = client.put("/api/auth/profile", json={"display_name": "_lw_Qout"}, headers=h_q)
+        assert r.status_code == 200, f"Q 改名离开失败：{r.status_code} {r.get_json()}"
+        return h_p, uid_p, h_q, uid_q
 
-        # 3) A 认领 _fc_X —— 必须退回「拒」，而不是因 B 的历史读空而放行
-        r = client.put("/api/auth/profile", json={"display_name": "_fc_X"}, headers=h_a)
+    def test_last_holder_reclaims_own_former_name(self, client, scrape_dirs):
+        h_p, _uid_p, h_q, _uid_q = self._p_occupies_then_q_takes_over(client, scrape_dirs)
+
+        # Q 取回 N —— 目录里**只有 Q 自己的产物**，修复前这里是 400
+        r = client.put("/api/auth/profile", json={"display_name": "_lw_N"}, headers=h_q)
+        assert r.status_code == 200, (
+            f"最后持有者取不回自己的产物目录：Q 认领 _lw_N 返回 {r.status_code} "
+            f"{r.get_json()}"
+        )
+
+        # 用户可见结果：产物必须**真的又列得出来**了（200 只说明闸门放行）
+        pkgs = client.get("/api/scrape/packages", headers=h_q).get_json()["packages"]
+        assert "com.pkg.lw" in [p["name"] for p in pkgs], (
+            f"取回曾用名后产物仍不可见，等于没修：{pkgs}"
+        )
+        # ⚠️ 此处**不**再断言「P 也被拒」：Q 取回成功后它自己就占着 `_lw_N`，
+        # P 的检查会先撞判据 2（与他人**当前**目录名重名）而不是判据 3，断言会
+        # 测到另一条路径上。反方向由下一条测试在「Q 已离开」的夹具下发声。
+
+    def test_earlier_holder_still_cannot_reclaim(self, client, scrape_dirs):
+        """对照行：名字的最后持有者不是**先**用过的那个人 ⇒ 先前持有者仍被拒。
+
+        与上一条共用同一夹具，只把「谁来认领」换成人，两条腿放行/拒绝相反。
+        没有这条，实现退化成「谁用过谁就能认领」时上一条照样绿。
+        """
+        h_p, uid_p, _h_q, _uid_q = self._p_occupies_then_q_takes_over(client, scrape_dirs)
+
+        # P（先前持有者）取回 N —— 目录里是 **Q 的产物**，必须拒
+        r = client.put("/api/auth/profile", json={"display_name": "_lw_N"}, headers=h_p)
         assert r.status_code == 400, (
-            f"别人历史读不出来时居然放行了认领：{r.status_code} {r.get_json()}"
+            f"先前持有者抢到了后来者的产物目录：P 认领 _lw_N 返回 {r.status_code}，"
+            f"而该目录里装的是 Q 的产物"
+        )
+        assert auth.directory_name_error(uid_p, None, "_lw_N") == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        )
+
+
+class TestDeletedUserDirectoryIsTombstoned:
+    """Important #2（code-review 第 5 轮）：被删用户的爬取目录可被「曾用名含该名」的人认领。
+
+    **这一档是我这次改动引入的回归**（`temp/_probe_r5_verify.py` 独立复现）：
+    修复前根本没有曾用名豁免，判据 3 见到盘上存在 `_tb_D` 而它不在 own_keys 里就拒；
+    加了「我历史上用过就算我的」之后，被删的用户连行都没有了 ⇒ 他的名字在
+    `others_keys` 里凭空消失 ⇒ 曾用名含该名的人被放行，读到**被删用户**的产物。
+    按纯增量原则（不得让新增功能使既有保护失效）必须收口。
+
+    形态：
+      1. M 用过 `_tb_D` 后改名离开 ⇒ `_tb_D` 进 M 的曾用名
+      2. V 合法接手 `_tb_D` 并在其下产出
+      3. 删掉 V —— `admin_delete_user` **不删爬取目录**，产物仍在盘上
+      4. M 拿曾用名 `_tb_D` 回来 ⇒ 判据 2 已看不见 V ⇒ **放行**，M 读到 V 的产物
+
+    修法（用户裁定）：删用户时把其**当前目录名**记入 `scrape_dn_history` 作墓碑 ——
+    该表刻意**无外键**，行随用户删除而存活；在 last-writer-wins 规则里它就是
+    「最后释放该名的人」⇒ M 的释放序更小 ⇒ 拒。非破坏性：不动任何人的数据、
+    不删任何目录，只把这一档退回「拒」。
+
+    ⚠️ 代价（已知、刻意接受）：被删用户名下的名字对**其他人**永久关闭认领，即使
+    那个目录里其实什么都没有。方向 fail-closed，且可由 admin 手工删墓碑行解除。
+    """
+
+    def test_directory_of_deleted_user_is_not_reclaimable(self, client, scrape_dirs):
+        h_admin, _ = _create_user(client, "_tb_admin", role="admin")
+        h_m, _uid_m = _create_user(client, "_tb_m")
+        h_v, uid_v = _create_user(client, "_tb_v")
+
+        # 1) M 用过 _tb_D 后改名离开 ⇒ _tb_D 进 M 的曾用名
+        assert client.put("/api/auth/profile", json={"display_name": "_tb_D"},
+                          headers=h_m).status_code == 200
+        assert client.put("/api/auth/profile", json={"display_name": "_tb_Mout"},
+                          headers=h_m).status_code == 200
+
+        # 2) V 合法接手 _tb_D 并在其下产出
+        assert client.put("/api/auth/profile", json={"display_name": "_tb_D"},
+                          headers=h_v).status_code == 200, "V 接手失败，夹具前提不成立"
+        scrape_dirs("_tb_D", "com.pkg.tomb")
+
+        # 3) 删掉 V —— 目录连产物一起留在盘上（admin_delete_user 不删爬取目录）
+        r = client.delete(f"/api/admin/users/{uid_v}", headers=h_admin)
+        assert r.status_code == 200, f"删用户失败：{r.status_code} {r.get_json()}"
+        # 前置断言：夹具必须保持「无主目录」形态，否则本用例测的是别的东西
+        assert os.path.isdir(os.path.join(_SCRAPE_DEFAULT_DIR, "_tb_D")), (
+            "夹具前提不成立：删用户竟把爬取目录一并删了，那就轮不到墓碑表出场"
+        )
+
+        # 4) M 拿曾用名回来 —— 必须退回「拒」，而不是因 V 的行没了就放行
+        r = client.put("/api/auth/profile", json={"display_name": "_tb_D"}, headers=h_m)
+        assert r.status_code == 400, (
+            f"被删用户的目录被曾用名持有者认领走了：M 认领 _tb_D 返回 {r.status_code}，"
+            f"而该目录里装的是已删除用户 V 的产物"
+        )
+        assert auth.directory_name_error(_uid_m, None, "_tb_D") == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        )
+
+    def test_unrelated_deletion_does_not_freeze_others_former_names(self, client, scrape_dirs):
+        """对照行：删用户**只**影响他自己占过的名字，不能把所有人的曾用名认领一起冻住。
+
+        没有这条，上一条的 400 可以由**任何**让 hist_keys 恒空的原因产生（墓碑插入时
+        user_id 串了、或实现改成「有墓碑就全体放弃认领」），主用例照样绿 —— 而 M 自己
+        的产物又回到「盘上有、取不回」的老症状上，等于把 #1 的修复反手打掉。
+        """
+        h_admin, _ = _create_user(client, "_fz_admin", role="admin")
+        h_m, _uid_m = _create_user(client, "_fz_m")
+        _h_w, uid_w = _create_user(client, "_fz_w")
+
+        # M 用过 _fz_F、产出、改名离开 —— 与 _fz_w 的名字毫不相干
+        assert client.put("/api/auth/profile", json={"display_name": "_fz_F"},
+                          headers=h_m).status_code == 200
+        scrape_dirs("_fz_F", "com.pkg.fz")
+        assert client.put("/api/auth/profile", json={"display_name": "_fz_Mout"},
+                          headers=h_m).status_code == 200
+
+        # 另有一个不相干的用户被删（会在墓碑表里多出一行）
+        assert client.delete(f"/api/admin/users/{uid_w}", headers=h_admin).status_code == 200
+
+        # M 取回 _fz_F —— 目录存在，但除 M 外没人用过这个名字 ⇒ 必须放行
+        r = client.put("/api/auth/profile", json={"display_name": "_fz_F"}, headers=h_m)
+        assert r.status_code == 200, (
+            f"删掉一个不相干的用户竟冻住了别人的曾用名认领：M 认领 _fz_F 返回 "
+            f"{r.status_code} {r.get_json()}"
         )
 
 

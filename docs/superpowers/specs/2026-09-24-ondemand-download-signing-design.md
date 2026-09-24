@@ -666,6 +666,178 @@ A: display_name = _lk_X
 
 ---
 
+### 0.11 第六轮：上述三条裁定的落地（2026-09-24 同日）
+
+上一节列的三条「待裁定」已由用户裁定，全部实现。**判据（判据 1/2/3）本身一个字未动** ——
+本轮改的是「曾用名集合从哪来」和「撞唯一索引时怎么收场」。
+
+#### 裁定与实现
+
+| # | 裁定 | 实现 |
+|---|---|---|
+| #1 | **升级为 last-writer-wins** | 曾用名从 `users.prev_scrape_dns`（JSON 文本）迁到新表 `scrape_dn_history`，一行一个名字、`id` 作**跨用户单调序号**。认领条件改为「我的释放序 > 所有他人的释放序」，同值一律拒（仍 fail-closed） |
+| #2 | **建墓碑表** | 同一张 `scrape_dn_history` 兼作墓碑：`admin_delete_user` 先写入该用户**当前**的爬取目录名，再删用户。该表**刻意无外键**、`admin_delete_user` **刻意不清理它**，故墓碑行随用户删除而存活。⚠️ **只覆盖升级之后的删除** —— 见下方「覆盖面边界」 |
+| #4 | **顺手修** | `update_user` 的 `try` 上提到覆盖两条会动 `scrape_dn` 的 UPDATE ⇒ 并发改名撞唯一索引时按代码原意返回 `None` → 路由 400，不再逃逸成 500 |
+
+**#1 为什么必须换存储**：JSON 文本只记录「谁用过这个名字」，**没有先后顺序**，
+于是认领判据只能做成「除我之外没人用过」⇒ 名字被 ≥2 人先后用过时**最后持有者也取不回
+自己的产物**。表存储给每行一个自增 `id`，先后可判。
+顺带消灭「分隔符串味」整类缺陷 —— 名字存在**行**里，逗号/换行只是普通字符。
+
+**#1 的迁移是单向的**：`prev_scrape_dns` 里的 JSON 没有时间戳，**跨用户先后无法还原**。
+按 `users.id` 顺序「猜」的风险方向是**误放**（先释放的人反倒成了「最后持有者」⇒
+认领到别人的产物目录，正是 #2 那一档读路径），远比误拒严重。故对「被 ≥2 人的历史
+同时提到」的名字插一行 `user_id=0` 的**哨兵** ⇒ 谁也赢不了 ⇒ 退回「拒」。
+代价：存量的 LWW 提升只对升级**之后**发生的改名生效。
+
+**#2 的墓碑为什么不能进 `admin_delete_user` 的清理清单**：那行必须**活过**本次删除，
+否则墓碑失效、保护静默消失。已在 `database.py` 建表处、`main.py` 写入处、
+`auth.note_scrape_dn_release` 三处写明（措辞统一为「若顺手把本表加进清理清单，
+这条保护会静默失效」）。已用变异 m16 实测：加一行 `DELETE FROM scrape_dn_history
+WHERE user_id = ?` 会让 #2 主腿**恰好 1 红**（对照腿保持绿）—— 即「静默失效」不成立，
+测试抓得住。
+
+#### ⚠️ #2 的覆盖面边界（写文档时漏了，第六轮 code-review 第 1 条指出）
+
+上述墓碑只在**删除发生的当下**写入。**升级之前就已经被删掉**的用户，既无 `users` 行
+（无从取 `_scrape_dn_for`），也永远不会有墓碑行 —— 他们留在磁盘上的目录名，在认领判据里
+等同于「**无人用过**」。于是任何曾用名恰好等于该目录名的人，按 LWW 就能认领并读到
+**升级前已删用户**的产物。第六轮审查者用实测复现了这一条：
+`PUT /api/auth/profile {"display_name": "<该目录名>"}` → 200，
+`GET /api/scrape/packages` → 能列出该目录下的包。
+
+**这是既有缺口，不是本轮引入的**：改动前的判据（`others_keys` 也只看现存用户）同样
+放行。但本轮文档先前写成「#2 已修」而**没写这个边界**，属不实陈述，已改正。
+
+**为什么不能顺手用迁移补上**：迁移时扫描爬取根、把「不属于任何存活用户的目录名」
+插成墓碑 —— 但 LWW 判据是「我的释放序 > 所有他人的释放序」，墓碑行在迁移那一刻拿到
+当时的**最大** id，此后任何真实用户再释放一次同名就**赢过它**（新 id 更大）⇒ 墓碑被
+顶掉，缺口重新出现。要让「升级前已删用户的目录」**永久**不可认领，必须改判据
+（例如 `user_id = 0` 的哨兵行**无条件**阻断，而不是参与 seq 比较）—— 那属于**改判据**，
+需先裁定。已列入「仍未做」。
+
+#### 迁移
+
+`database._migrate_scrape_dn_history(conn)`：config 键 `migrated_scrape_dn_history` 守卫 →
+列不存在则打标记返回 → 否则两趟搬运（先收集，再按用户顺序 INSERT，再插哨兵）→
+`ALTER TABLE users DROP COLUMN prev_scrape_dns` → 打标记 → commit。
+整体 `try/except` 打印并 rollback，**不打标记**（下次重试）。
+
+两个 DDL 风险已用独立探针先证实，再动生产代码：
+`DROP COLUMN` 在「VIRTUAL 生成列 + `COLLATE NOCASE` 唯一索引 + `foreign_keys=ON`
+且有子表（`accounts` 等）引用 `users(id)`」的组合下**均可行**，`PRAGMA foreign_key_check` 为空。
+（另记：`PRAGMA foreign_keys` 在事务内是空操作，故迁移函数里刻意不写它 —— 写了只是
+「看着像防护」，docstring 里说明了理由与实测依据。）
+
+#### 测试
+
+| 文件 | 结果 |
+|---|---|
+| `py/tests/test_scrape_ownership.py` | **81 passed**（76 − 1 过时 + 6 新增） |
+| `py/tests/test_scrape_dn_history_migration.py` | **4 passed**（新建） |
+
+**新增用例（每条主腿都配对照腿）**：
+
+| 用例 | 钉住什么 |
+|---|---|
+| `TestFormerNameBelongsToLastHolder::test_last_holder_reclaims_own_former_name` | #1：最后持有者须 200，且 `/api/scrape/packages` 里**确实能看到**那个包（不只看状态码） |
+| `…::test_earlier_holder_still_cannot_reclaim` | **对照腿**：先前持有者仍须 400（判据 3 文案）—— 防「一刀切全放行」 |
+| `TestDeletedUserDirectoryIsTombstoned::test_directory_of_deleted_user_is_not_reclaimable` | #2：删用户后其目录不可被曾用名持有者认领（前置断言「目录仍在盘上」） |
+| `…::test_unrelated_deletion_does_not_freeze_others_former_names` | **对照腿**：删无关用户后，我的名字仍能取回 —— 防「一刀切全冻住」 |
+| `TestConcurrentDuplicateDirectoryName::test_rename_collision_returns_none_without_half_write` | #4：返回 `None` 且**无半写状态**（第二人 `display_name` 仍为空串） |
+| `…::test_concurrent_renames_to_same_name_never_500` | #4：6 线程并发改名 ⇒ 无 5xx、恰好 1 个 200、恰 `n−1` 个 400 |
+| `test_scrape_dn_history_migration.py` 全 4 条 | 迁移顺序/坏值跳过/旧列真删/生成列存活；LWW 按序生效；**歧义名谁也不给**（fail-closed）+ 无歧义名对照；幂等（**含「标记必须真的写上」**） |
+
+**`test_unreadable_other_history_fails_closed` 已删除**：它钉的是「读**别人**的
+`prev_scrape_dns` 坏值时保守当满」（第五轮 #6）。存储换表后该分支不存在了
+（`scrape_dn_history.dn` 是 `NOT NULL` 列，没有「非空但解析失败」这一档），
+故用例失去动因。对应变异 m6 一并作废。
+
+**变异验证（m7–m16，10 条，跑完均已还原，`grep -c MUTATION py/{database,auth,main}.py` 均为 0）**：
+
+| 变异 | 结果 |
+|---|---|
+| m7 `except IntegrityError: raise`（≡ 修复前） | **2 红**：两条 #4 用例，无额外 |
+| m8 删掉墓碑写入 | **恰好 1 红**：#2 主腿；**对照腿保持绿** ⇒ 两条用例职责不重叠 |
+| m9 丢掉序号（退回旧判据） | **恰好 1 红**：#1 主腿 |
+| m10 全算别人（`mine` 恒空） | **4 红**（含控制腿）⇒ 能抓住「一刀切全冻住」 |
+| m11 全算我的（谁有过行谁就能认领） | **4 红**（全部保护腿）⇒ 能抓住「一刀切全放行」 |
+| m12 不删旧列 | **1 红** |
+| m13 不写迁移标记 | **1 红**（见下） |
+| m14 不插歧义哨兵 | **1 红** |
+| m15 搬运动序倒 | **2 红** |
+| m16 把墓碑表加进 `admin_delete_user` 的清理清单 | **恰好 1 红**：#2 主腿；**对照腿保持绿** |
+
+#### 自查中抓出的两处「假绿」
+
+1. **「幂等」用例一开始是假绿**：即便删掉写标记那行，第二次调用也会走「列已不存在 ⇒
+   直接返回」而不再搬运，行数照样不变。补上「标记必须真的写上」的断言后，m13 才如期转红。
+2. **迁移的跨用户顺序不可还原**（误放风险，见上）—— 自查时发现原方案按 `users.id`
+   顺序「猜」先后，猜反方向是**误放**。改为插哨兵 + 新增专门用例，m14 钉住。
+
+3. **文档里的一句「断言」也是断言**：我原先在 `AGENTS.md` 写「若有人把墓碑表加进清理清单，
+   这条保护会静默失效、**且无任何测试会转红**」—— 没验证就写下了。m16 实测后是**错的**：
+   测试确实抓得住（恰好 1 红）。已改正。**文档里对代码行为的断言同样受「无对照行的断言
+   不能写」约束**，尤其是否定式断言（「没有测试覆盖」）最容易被想当然。
+
+三条都印证同一条硬规矩：**「无对照行的断言不能写」**（前两条是测试断言=假绿，
+第三条是文档断言=想当然）。
+
+#### 验收
+
+- `py/tests/test_scrape_ownership.py`：**81 passed**（76 − 1 过时 + 6 新增）
+- `py/tests/test_scrape_dn_history_migration.py`：**4 passed**（新建）
+- 全量：**864 passed / 0 failed**（256s）
+  —— ⚠️ 该数是**工作区合并态**，含**并行会话**在途新增/修改的用例
+  （`test_delist_indeterminate.py`、`test_huguan_dashboard.py`、`test_tt_*`、
+  `test_delist_checker.py` 等，非本任务），故不能当成本任务的增量。
+  本任务自身的增量就是上面两行（81 + 4）。
+- `git diff` 口径：本轮只动 `py/auth.py`、`py/database.py`、`py/main.py`（**仅
+  `admin_delete_user` 一处墓碑写入的 hunk** —— 该文件另有并行会话在途的掉包「判定未知」
+  改动，提交时用过滤补丁只暂存本任务的 hunk，见提交说明）、
+  `py/tests/test_scrape_ownership.py`，并新增 `py/tests/test_scrape_dn_history_migration.py`
+- 文档：本文件 §0.11、`AGENTS.md`（索引行 + 表总览 51→52 张 / GG 29→30 张 +
+  「删用户关联清理」下新增墓碑表例外警示）
+
+#### 仍未做（本轮**未**纳入，与上一节同一清单的更新）
+
+- ~~**#1 最后持有者被误拒**~~ —— **已修**（本轮）
+- ~~**#2 被删用户的目录可被认领**~~ —— **已修，但只对升级之后的删除生效**（本轮，墓碑表）；
+  升级前已删的那一档仍在，见下方专条
+- ~~**并发改名逃逸为 500**~~ —— **已修**（本轮 #4）
+- **删用户不清其爬取目录**（#2 的根因之一）：墓碑表只挡住了「被认领读到」，
+  **磁盘无界增长**这个缺口仍在，`admin_delete_user` 仍不删目录。
+- **迁移竞态**：`_ensure_columns` 每次连库都跑却**无锁**，且与 `_cleanup_old_option_columns`
+  互相增删 `products.sales_person`；探针 3/3 轮复现 6–7 线程失败，真实库稳态不触发。
+  **先于本轮存在**、与目录名归属无关的独立缺陷，仍需单独设计「加/删互斗」的修法。
+- **测试隔离到 tmp**：`scrape_dirs` fixture 与相关用例仍直接写**真实** `temp/scraped_images/`
+  （DB 已由 `conftest.py` 的 `app` fixture 重指临时文件，**只有爬取目录没隔离**）。
+  重指 `_SCRAPE_DEFAULT_DIR` / `auth._scrape_root` 会与 `TestScrapeRootIsSingleSourceOfTruth`
+  冲突，属高风险改动，需先裁定。
+- **存量非法名治理**（第 5 轮 #3 的后果）：`username` / `display_name` 里含分隔符但
+  **留在爬取根内**的存量值不受 `_scrape_dn_for` 兜底保护，会让产物落进别名目录、
+  被真实用户当成自己的包列出。live 实测 **0 行**，但需一次性迁移（命中
+  `/ \ : \x00` 的值改写成 `user_<id>` 之类）才算收口。
+- **升级前已删用户的目录仍可被认领**（#2 的覆盖面边界，第六轮 code-review 第 1 条）：
+  见上方「#2 的覆盖面边界」。修法需**改判据**（`user_id = 0` 哨兵无条件阻断），
+  不是补一处写入点 —— 需先裁定。
+- **记「释放」用的求值函数与读路径不一致**（第六轮 code-review 第 2 条）：
+  `auth._dir_name_of`（`py/auth.py:72`）= `display_name or username`（空则 `user_<id>`）；
+  `main._scrape_dn_for`（`py/main.py:453`）**多一步**「推导结果越出爬取根 ⇒ 退化为
+  `user_<id>`」。对**越界**的存量 `display_name`（如 `..\..\_x`，写入关口加固前落库的值），
+  两者给出**不同**的名字：真实目录是 `user_<id>`，而改名时记下的释放名是 `..\..\_x`。
+  后果：该用户改名离开后，其真实目录 `user_<id>` **永不进** `own_keys`/`hist_keys`
+  ⇒ 判据 3 永久拒其认领 ⇒ 产物在盘上、应用内无恢复路径。
+  附带：同一个越界存量用户与「名字恰好是 `user_<id>`」的新用户，在**真实磁盘上共用
+  同一目录**，而 `directory_name_error` 的判重看不见（它用 `_dir_name_of`），漏判重。
+  **先于本轮存在**（改动前的 JSON 存储同样用 `_dir_name_of`）。修法：把 `_scrape_dn_for`
+  的越界退化**同步进** `_dir_name_of`（auth 已有 `_scrape_root()`，可本地实现）——
+  但那会改动**存量值的判重口径**，属行为变更，需先裁定。
+- **`temp/` 清理与 `temp/_.*` gitignore**：探针脚本、变异脚本、`.bak` 库文件长期裸奔在
+  `temp/` 下（仓库既有惯例是留着一批 `temp/_*.py`），未定型。
+
+---
+
 ## 一、需求描述
 
 ### 1.1 背景
