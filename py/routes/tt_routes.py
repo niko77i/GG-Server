@@ -482,8 +482,11 @@ def update_package(pkg_id):
         updates['type'] = data.get('type', '')
 
     # re-enforce type 规则：package 必须填写包名（App Store 链接除外，与 add_package 语义一致）
+    # 用「生效后的」包名判定，而不是看本次是否传了 package_name 这个 key：
+    # 否则只传 url 就能把存量苹果行改成「Play 链接 + 空包名」。
     pkg_type = updates.get('type', existing['type'])
-    if pkg_type == 'package' and 'package_name' in updates and not updates['package_name']:
+    effective_name = updates.get('package_name', existing['package_name'] or '')
+    if pkg_type == 'package' and not effective_name:
         # 本次显式传了 url 就用本次的（空串即「清空」→ 不放行）；
         # 本次没传 url 才回落库里的 url 判断是不是苹果链接。
         if 'url' in updates:

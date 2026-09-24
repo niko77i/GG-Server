@@ -140,6 +140,56 @@ class TestAddPackageViaApi:
                           json={"package_name": ""})
         assert resp.status_code == 400
 
+    def test_put_url_only_cannot_turn_appstore_row_into_play_row(self, client, tt_headers):
+        """只传 url（不带 package_name 键）也不能把存量苹果行改成「Play 链接 + 空包名」。
+
+        守卫若带 `'package_name' in updates` 条件，本请求会绕过整段规则落库，
+        使苹果豁免在 add_package 与 update_package 两条路径上口径分裂。
+        """
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "只传url产品",
+        }).get_json()["id"]
+        pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": "", "url": APPLE_LIVE,
+        }).get_json()["id"]
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                          json={"url": PLAY})
+
+        assert resp.status_code == 400
+        assert "包名" in resp.get_json()["error"]
+
+    def test_put_url_only_still_allowed_for_appstore_to_appstore(self, client, tt_headers):
+        """苹果行只换 url（苹果 → 苹果）仍放行，且包名保持空。"""
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "苹果换苹果产品",
+        }).get_json()["id"]
+        pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": "", "url": APPLE_LIVE,
+        }).get_json()["id"]
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                          json={"url": APPLE_SLUG})
+        assert resp.status_code == 200
+
+        detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+        pkg = detail["packages"][0]
+        assert pkg["url"] == APPLE_SLUG
+        assert pkg["package_name"] == ""
+
+    def test_put_url_only_unchanged_for_play_row_with_name(self, client, tt_headers):
+        """正向对照：安卓行（有包名）只换 Play url 不受影响，仍是 200。"""
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "安卓换url产品",
+        }).get_json()["id"]
+        pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": "com.a.b", "url": PLAY,
+        }).get_json()["id"]
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                          json={"url": "https://play.google.com/store/apps/details?id=com.c.d"})
+        assert resp.status_code == 200
+
 
 class TestImportTextAppstore:
     """脏数据解析：苹果链接要能捞出来，且顺序与原文一致。"""
@@ -152,6 +202,7 @@ class TestImportTextAppstore:
         assert parsed[0]["url"] == APPLE_LIVE
         assert parsed[0]["package_name"] == ""
         assert parsed[0]["type"] == "package"
+        assert parsed[0]["series_name"] == "苹果系列"
 
     def test_parse_slug_form(self, client, tt_headers):
         resp = client.post("/api/tt/products/import-text", headers=tt_headers,
@@ -167,6 +218,7 @@ class TestImportTextAppstore:
         parsed = resp.get_json()["parsed"]
         assert len(parsed) == 1
         assert parsed[0]["url"] == "https://apps.apple.com/vn/app/id6804355336"
+        assert parsed[0]["series_name"] == "带参"
 
     def test_order_follows_source_text_not_pattern(self, client, tt_headers):
         """Play 与苹果交错时，输出顺序必须按原文出现顺序，不能先排完 Play 再排苹果。"""
