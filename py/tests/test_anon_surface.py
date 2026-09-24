@@ -61,14 +61,12 @@ ANON_GET_WHITELIST = frozenset({
     "/api/image",               # main.py:796，扩展名+目录白名单内任意 .png
     "/api/font-file",           # main.py:1681，项目 fonts/ 与系统字体目录内任意字体
     # --- @jwt_required(optional=True)：装饰器层「有鉴权」但匿名放行 ---
+    # 2026-09-24：A 组 4 条（products/list、users/names、auth/names、settings/account GET）
+    # 已收口为强制鉴权，本表不再列出。
     "/api/audio",               # main.py:1106，temp/music/ 下任意文件
     "/api/scrape/download",     # main.py:576，打包 temp/scraped_images/ 下调用方指定的目录
     "/api/video/download",      # main.py:1031
     "/api/audio-replace/download",  # main.py:1212
-    "/api/products/list",       # main.py:2495，runner=mine 匿名时不过滤 owner ⇒ 读全库产品
-    "/api/users/names",         # main.py:7738，无 developer 过滤（与 /api/auth/names 口径不一致）
-    "/api/auth/names",          # routes/auth_routes.py:177
-    "/api/settings/account",    # main.py:6524，匿名读全局配置 + 全局选项字典
 })
 
 # 扫描需要覆盖的 GET 规则数量的下界。若 url_map 遍历/过滤被改坏，本测试会大声失败，

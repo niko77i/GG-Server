@@ -175,7 +175,7 @@ def auth_profile():
 
 # --- 用户名称查询 ---
 @auth_bp.route("/names", methods=["GET"], endpoint="users_names")
-@jwt_required(optional=True)
+@jwt_required()
 def users_names():
     """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。
     非 developer 用户看不到 developer 角色用户。"""

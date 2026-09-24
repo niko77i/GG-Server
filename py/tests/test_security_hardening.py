@@ -497,3 +497,43 @@ class TestD1StatusesSmoke:
         assert resp.status_code == 200
         resp = client.delete(f"/api/statuses/{sid}", headers=dev)
         assert resp.status_code == 200
+
+
+class TestA2AnonymousRejected:
+    """A 组 8 条：零 token 必须 401。
+
+    收口前本组第 1 条会失败 —— 那正是要钉的行为。
+    """
+
+    ANON_CASES = [
+        ("get",  "/api/products/list",    None),
+        ("post", "/api/products/create",  {"product_name": "anon-probe"}),
+        ("get",  "/api/users/names",      None),
+        ("get",  "/api/settings/account", None),
+        ("get",  "/api/auth/names",       None),
+        ("post", "/api/browse-file",      {"path": "x"}),
+        ("post", "/api/browse-save",      {"path": "x"}),
+        ("post", "/api/browse-folder",    {"path": "x"}),
+    ]
+
+    @pytest.mark.parametrize("method,path,payload", ANON_CASES)
+    def test_anonymous_is_rejected(self, client, method, path, payload):
+        fn = getattr(client, method)
+        resp = fn(path, json=payload) if payload is not None else fn(path)
+        assert resp.status_code == 401, (
+            f"{method.upper()} {path} 对匿名请求返回 {resp.status_code}，应为 401"
+        )
+
+    @pytest.mark.parametrize("method,path,payload", ANON_CASES)
+    def test_logged_in_is_not_rejected(self, client, dev_headers, method, path, payload):
+        """承重对照：带 token 时**不得**是 401（证明只挡匿名，没挡已登录）。
+
+        没有这条，「把 8 个端点改成恒 401」也能让上一条全绿 —— 这正是本项目
+        「无对照行的断言 = 假绿」定式。
+        """
+        fn = getattr(client, method)
+        resp = (fn(path, json=payload, headers=dev_headers) if payload is not None
+                else fn(path, headers=dev_headers))
+        assert resp.status_code != 401, (
+            f"{method.upper()} {path} 带 token 仍返回 401 —— 收口过头了"
+        )

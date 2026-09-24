@@ -2493,7 +2493,7 @@ def runner_products():
 
 
 @app.route("/api/products/list", methods=["GET"])
-@jwt_required(optional=True)
+@jwt_required()
 @no_huguan
 def products_list():
     search = request.args.get("search", "").strip()
@@ -2672,7 +2672,7 @@ def products_list():
 
 
 @app.route("/api/products/create", methods=["POST"])
-@jwt_required(optional=True)
+@jwt_required()
 @no_huguan
 def products_create():
     reject = _reject_viewer()
@@ -6523,7 +6523,7 @@ def _save_user_sheet_mappings(user_id: int, mappings: dict) -> None:
     db.close()
 
 @app.route("/api/settings/account", methods=["GET"])
-@jwt_required(optional=True)
+@jwt_required()
 def account_settings_get():
     """返回账户管理相关的可配置项（从新选项表读取）。"""
     db = database.get_db()
@@ -7356,7 +7356,7 @@ def _can_browse():
 
 
 @app.route("/api/browse-file", methods=["POST"])
-@jwt_required(optional=True)
+@jwt_required()
 def browse_file():
     """打开本地文件选择对话框，返回选中路径。"""
     if not _can_browse():
@@ -7379,7 +7379,7 @@ def browse_file():
 
 
 @app.route("/api/browse-save", methods=["POST"])
-@jwt_required(optional=True)
+@jwt_required()
 def browse_save():
     """打开文件保存对话框。"""
     if not _can_browse():
@@ -7393,7 +7393,7 @@ def browse_save():
 
 
 @app.route("/api/browse-folder", methods=["POST"])
-@jwt_required(optional=True)
+@jwt_required()
 def browse_folder():
     """打开文件夹选择对话框。"""
     if not _can_browse():
@@ -7737,7 +7737,7 @@ def translate_text():
 # Auth Routes — 已迁移至 routes/auth_routes.py (Blueprint: /api/auth)
 
 @app.route("/api/users/names", methods=["GET"])
-@jwt_required(optional=True)
+@jwt_required()
 def users_names():
     """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。"""
     db = database.get_db()
