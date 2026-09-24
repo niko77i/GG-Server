@@ -754,7 +754,9 @@ async function audioHistoryClearAll() {
 }
 
 function audioHistoryDownload(item) {
-  window.open(`/api/audio-replace/download?path=${encodeURIComponent(item.output_path)}`, '_blank')
+  // 优先用后端下发的签名 URL；`||` 只是防前端崩的退路 —— 服务端已收口，
+  // 自拼 URL 必然 401，不是可用路径。
+  window.open(item.download_url || `/api/audio-replace/download?path=${encodeURIComponent(item.output_path)}`, '_blank')
 }
 
 onMounted(() => { audioLoadHistory(); loadZbProducts(); scheduleZbMidnightRefresh() })

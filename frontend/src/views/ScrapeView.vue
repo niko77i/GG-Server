@@ -67,10 +67,10 @@ async function startScrape() {
     try {
       // 保存路径已收窄为服务器默认目录（2026-09-24 裁决），前端不再传自定义 save_dir
       const res = await scrapeApi.scrape({ url: links[i], include_ads_images: includeAds.value })
-      results.value[i] = { url: links[i], package_name: res.package_name, image_count: res.image_count, error: '', saved_path: res.saved_path, from_cache: res.from_cache }
+      results.value[i] = { url: links[i], package_name: res.package_name, image_count: res.image_count, error: '', saved_path: res.saved_path, from_cache: res.from_cache, download_url: res.download_url }
       successCount++; totalImages += (res.image_count || 0) + (res.logo ? 1 : 0)
     } catch (e) {
-      results.value[i] = { url: links[i], package_name: '', image_count: 0, error: e.message, saved_path: '' }
+      results.value[i] = { url: links[i], package_name: '', image_count: 0, error: e.message, saved_path: '', download_url: '' }
       failCount++
     }
   }
@@ -84,7 +84,10 @@ async function startScrape() {
 }
 
 function downloadImages(r) {
-  window.open('/api/scrape/download?path=' + encodeURIComponent(r.saved_path), '_blank')
+  // 优先用后端下发的签名 URL；`||` 只是防前端崩的退路 —— 服务端已收口，
+  // 自拼 URL 必然 401，不是可用路径。
+  const target = r.download_url || ('/api/scrape/download?path=' + encodeURIComponent(r.saved_path))
+  window.open(target, '_blank')
 }
 
 function bridgeToVideo(dirPath) {

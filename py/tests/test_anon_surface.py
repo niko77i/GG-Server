@@ -64,9 +64,6 @@ ANON_GET_WHITELIST = frozenset({
     # 2026-09-24：A 组 4 条（products/list、users/names、auth/names、settings/account GET）
     # 已收口为强制鉴权，本表不再列出。
     "/api/audio",               # main.py:1106，temp/music/ 下任意文件
-    "/api/scrape/download",     # main.py:576，打包 temp/scraped_images/ 下调用方指定的目录
-    "/api/video/download",      # main.py:1031
-    "/api/audio-replace/download",  # main.py:1212
 })
 
 # 扫描需要覆盖的 GET 规则数量的下界。若 url_map 遍历/过滤被改坏，本测试会大声失败，

@@ -278,7 +278,7 @@
         <el-progress :percentage="Math.round(progressPct * 100)" />
         <div style="font-size:12px;color:#888;">{{ progressMsg }}</div>
         <div v-if="generatedPaths.length" style="display:flex;flex-wrap:wrap;gap:4px;max-height:120px;overflow-y:auto;margin-top:4px;padding:4px;background:#f9fafb;border-radius:4px;">
-          <el-button v-for="(p, i) in generatedPaths" :key="i" link size="small" type="primary" @click="downloadVideo(p)" style="font-size:11px;">📥 {{ pathBasename(p) }}</el-button>
+          <el-button v-for="(it, i) in generatedPaths" :key="i" link size="small" type="primary" @click="downloadVideo(it.path, it.download_url)" style="font-size:11px;">📥 {{ pathBasename(it.path) }}</el-button>
           <el-button v-if="generatedPaths.length > 1" link size="small" type="info" @click="generatedPaths = []" style="font-size:10px;">清空列表</el-button>
         </div>
       </div>
@@ -358,10 +358,10 @@ async function startScrape() {
     try {
       // 保存路径已收窄为服务器默认目录（2026-09-24 裁决），前端不再传自定义 save_dir
       const res = await scrapeApi.scrape({ url: links[i], include_ads_images: includeAds.value })
-      scrapeResults.value[i] = { url: links[i], package_name: res.package_name, image_count: res.image_count, error: '', saved_path: res.saved_path, from_cache: res.from_cache }
+      scrapeResults.value[i] = { url: links[i], package_name: res.package_name, image_count: res.image_count, error: '', saved_path: res.saved_path, from_cache: res.from_cache, download_url: res.download_url }
       successCount++; totalImages += (res.image_count || 0) + (res.logo ? 1 : 0)
     } catch (e) {
-      scrapeResults.value[i] = { url: links[i], package_name: '', image_count: 0, error: e.message, saved_path: '' }
+      scrapeResults.value[i] = { url: links[i], package_name: '', image_count: 0, error: e.message, saved_path: '', download_url: '' }
       failCount++
     }
   }
@@ -374,7 +374,10 @@ async function startScrape() {
 }
 
 function downloadImages(r) {
-  window.open('/api/scrape/download?path=' + encodeURIComponent(r.saved_path), '_blank')
+  // 优先用后端下发的签名 URL；`||` 只是防前端崩的退路 —— 服务端已收口，
+  // 自拼 URL 必然 401，不是可用路径。
+  const target = r.download_url || ('/api/scrape/download?path=' + encodeURIComponent(r.saved_path))
+  window.open(target, '_blank')
 }
 
 // ========== ② 图片预览 ==========
@@ -647,7 +650,7 @@ onMounted(async () => {
       pollLocalTask(latest)
     } else if (latest.status === 'completed') {
       generating.value = false
-      if (latest.result?.output?.path) generatedPaths.value.push(latest.result.output.path)
+      if (latest.result?.output?.path) generatedPaths.value.push({ path: latest.result.output.path, download_url: latest.result.output.download_url || '' })
       progressMsg.value = latest.message || '✅ 已完成'
       progressPct.value = 1
     } else if (latest.status === 'error') {
@@ -772,7 +775,7 @@ function doGenerate(settings) {
           if (p.status === 'completed') {
             done = true
             generating.value = false
-            if (p.output?.path) generatedPaths.value.push(p.output.path)
+            if (p.output?.path) generatedPaths.value.push({ path: p.output.path, download_url: p.output.download_url || '' })
             progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
             taskStore.updateTask(innerId, {
               status: 'completed', progress: 1,
@@ -823,7 +826,7 @@ function pollLocalTask(latest) {
       })
       if (p.status === 'completed') {
         done = true; generating.value = false
-        if (p.output?.path) generatedPaths.value.push(p.output.path)
+        if (p.output?.path) generatedPaths.value.push({ path: p.output.path, download_url: p.output.download_url || '' })
         progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
         taskStore.updateTask(latest.id, {
           status: 'completed', progress: 1, message: '✅ 完成', result: p, finishedAt: Date.now(),
@@ -849,8 +852,10 @@ function pathBasename(p) {
   const clean = p.replace(/\\/g, '/')
   return clean.split('/').pop() || p
 }
-function downloadVideo(path) {
-  if (path) window.open('/api/video/download?path=' + encodeURIComponent(path), '_blank')
+function downloadVideo(path, url) {
+  // url 是后端下发的签名 URL；`||` 退路仅为防前端崩（服务端已收口，自拼 URL 必然 401）
+  const target = url || (path ? '/api/video/download?path=' + encodeURIComponent(path) : '')
+  if (target) window.open(target, '_blank')
 }
 
 function ensureMp4(p) { if (!p) return p; return p.toLowerCase().endsWith('.mp4') ? p : p + '.mp4' }

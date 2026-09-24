@@ -2263,12 +2263,17 @@ class TestGgProductVideoDomainHuguanDenied:
     # ---------------- 9. 下载路径白名单（D24） ----------------
 
     def test_video_download_rejects_unlisted_path(self, client, tmp_path):
-        """临时文件不在 video_tasks 里 → 404 原文案；插入记录后同一请求 → 200。"""
+        """临时文件不在 video_tasks 里 → 404 原文案；插入记录后同一请求 → 200。
+
+        2026-09-24（B-3）：本端点已收口匿名可达面，**必须带 token**。
+        本测试验的是「路径白名单」，故用普通用户 token 走通鉴权层。
+        """
         from urllib.parse import quote
+        u, _ = _create_user(client, "_t20_dl_unlisted", role="user", platform="gg")
         f = tmp_path / "t20_wl.mp4"
         f.write_bytes(b"fake-video-bytes")
         url = "/api/video/download?path=" + quote(str(f))
-        resp = client.get(url)
+        resp = client.get(url, headers=u)
         assert resp.status_code == 404, "任意路径仍可读文件"
         assert resp.get_json()["error"] == "文件不存在"
 
@@ -2277,17 +2282,21 @@ class TestGgProductVideoDomainHuguanDenied:
                    ("t20-wl-task", "completed", str(f)))
         db.commit()
         db.close()
-        ok = client.get(url)
+        ok = client.get(url, headers=u)
         assert ok.status_code == 200
         assert ok.data == b"fake-video-bytes"
 
     def test_audio_replace_download_rejects_unlisted_path(self, client, tmp_path):
-        """音频替换下载同法：不在 audio_replace_history 里 → 404，插入后 → 200。"""
+        """音频替换下载同法：不在 audio_replace_history 里 → 404，插入后 → 200。
+
+        2026-09-24（B-3）：同上，本端点已收口，需带 token。
+        """
         from urllib.parse import quote
+        u, _ = _create_user(client, "_t20_dl_ar_unlisted", role="user", platform="gg")
         f = tmp_path / "t20_wl_audio.mp4"
         f.write_bytes(b"fake-replaced-bytes")
         url = "/api/audio-replace/download?path=" + quote(str(f))
-        resp = client.get(url)
+        resp = client.get(url, headers=u)
         assert resp.status_code == 404, "任意路径仍可读文件"
         assert resp.get_json()["error"] == "文件不存在"
 
@@ -2296,13 +2305,17 @@ class TestGgProductVideoDomainHuguanDenied:
                    "VALUES(?,?,?,?,?)", ("v.mp4", "a.mp3", "out.mp4", str(f), 1.0))
         db.commit()
         db.close()
-        ok = client.get(url)
+        ok = client.get(url, headers=u)
         assert ok.status_code == 200
         assert ok.data == b"fake-replaced-bytes"
 
     def test_video_download_whitelist_is_exact_match(self, client, tmp_path):
-        """白名单必须**精确相等**：同目录下未登记的同名/邻近文件仍 404。"""
+        """白名单必须**精确相等**：同目录下未登记的同名/邻近文件仍 404。
+
+        2026-09-24（B-3）：本端点已收口，需带 token。
+        """
         from urllib.parse import quote
+        u, _ = _create_user(client, "_t20_dl_exact", role="user", platform="gg")
         listed = tmp_path / "t20_exact.mp4"
         listed.write_bytes(b"listed")
         sibling = tmp_path / "t20_exact_extra.mp4"
@@ -2312,8 +2325,10 @@ class TestGgProductVideoDomainHuguanDenied:
                    ("t20-exact-task", "completed", str(listed)))
         db.commit()
         db.close()
-        assert client.get("/api/video/download?path=" + quote(str(listed))).status_code == 200
-        assert client.get("/api/video/download?path=" + quote(str(sibling))).status_code == 404
+        assert client.get("/api/video/download?path=" + quote(str(listed)),
+                          headers=u).status_code == 200
+        assert client.get("/api/video/download?path=" + quote(str(sibling)),
+                          headers=u).status_code == 404
 
     def test_video_download_rejects_huguan_with_token(self, client, tmp_path):
         """户管带 token 调下载 → 403（前端 window.open 不带 Authorization 头，

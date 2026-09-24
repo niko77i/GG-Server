@@ -22,6 +22,7 @@ from flask_compress import Compress
 from scraper import scrape_images, scrape_logo, ScrapeError
 from resizer import process_image, save_logo, ResizeError
 from utils import extract_package_name, natural_sort_key
+from url_signing import sign_query as _sign_query, verify_query as _verify_query
 from video_processor import VideoTask, VideoError
 from ai_service import get_provider, AIServiceError
 import database
@@ -459,6 +460,9 @@ def scrape():
 
     # 2. 创建保存目录
     pkg_dir = os.path.join(save_dir, pkg_name)
+    # 两个出口（缓存分支 / 正常分支）共用的签名下载 URL
+    _scrape_dl = ("/api/scrape/download?"
+                  + _sign_query("/api/scrape/download", pkg_dir, app.config["JWT_SECRET_KEY"]))
 
     # 检查是否已有本地文件，有则直接返回（跳过爬取）
     if os.path.isdir(pkg_dir):
@@ -492,6 +496,7 @@ def scrape():
                 "success": True,
                 "package_name": pkg_name,
                 "saved_path": pkg_dir,
+                "download_url": _scrape_dl,
                 "image_count": len(results),
                 "images": results,
                 "logo": logo,
@@ -507,6 +512,7 @@ def scrape():
         "success": True,
         "package_name": pkg_name,
         "saved_path": pkg_dir,
+        "download_url": _scrape_dl,
     }
 
     # ---- 3a. Logo 爬取（始终执行） ----
@@ -579,6 +585,11 @@ def scrape():
 def scrape_download():
     """将爬取的图片目录打包为 zip 下载。"""
     path = request.args.get("path", "").strip()
+    # 鉴权闸门**先于**路径校验：本端点是 @jwt_required(optional=True)，
+    # 匿名扫描请求不带 query（path=""），若先走 `not path` 则返回 404 ——
+    # 非 401 ⇒ 端点仍留在匿名可达面，test_anon_surface 的双向断言不成立。
+    if not _download_authorized("/api/scrape/download", path):
+        return jsonify({"success": False, "error": "未授权：需要登录或有效的下载签名"}), 401
     if not path or not os.path.isdir(path):
         return jsonify({"success": False, "error": "目录不存在"}), 404
     # 白名单：只允许 _SCRAPE_DEFAULT_DIR 内的目录打包（路径穿越防护）
@@ -774,6 +785,29 @@ def _is_safe_music_path(path: str) -> bool:
     except (ValueError, OSError):
         return False
     return real == allowed_real or real.startswith(allowed_real + os.sep)
+
+
+def _download_authorized(endpoint: str, path: str) -> bool:
+    """产物下载端点的统一鉴权：合法 JWT **或** 未过期签名，二者其一即可。
+
+    - 有合法 JWT ⇒ 放行（保持既有「登录即可下载」语义，本次不改归属模型）
+    - 无 JWT ⇒ 必须有有效签名，否则 False（调用方返回 401）
+
+    注意：本函数**不判定归属**。`video_tasks` / `audio_replace_history`
+    无用户字段，产物在设计上是全局共享的。
+    """
+    # ⚠️ 必须判返回值，**不能**靠 try/except：
+    # 本端点是 @jwt_required(optional=True)，无 token 时 get_jwt_identity() 返回 None
+    # 而**不抛异常** —— 写成 try: get_jwt_identity(); return True 会变成匿名全放行。
+    if get_jwt_identity() is not None:
+        return True
+    return _verify_query(
+        endpoint,
+        path,
+        request.args.get("exp", ""),
+        request.args.get("sig", ""),
+        app.config["JWT_SECRET_KEY"],
+    )
 
 
 def _is_safe_path(path: str) -> bool:
@@ -973,6 +1007,11 @@ def video_progress():
                 _out = None
                 if db_task.get("output_path"):
                     _out = {"path": db_task["output_path"]}
+                    _out["download_url"] = (
+                        "/api/video/download?"
+                        + _sign_query("/api/video/download", db_task["output_path"],
+                                      app.config["JWT_SECRET_KEY"])
+                    )
                 return jsonify({
                     "task_id": db_task["task_id"],
                     "status": db_task["status"],
@@ -993,7 +1032,16 @@ def video_progress():
         "message": task.message,
     }
     if task.status == "completed":
-        resp["output"] = task.result()
+        # 注意：task.result() 返回的是内部对象的引用，**不可原地修改**，
+        # 否则会给 video_tasks 里的 _result 永久加上 download_url（含过期 exp），
+        # 污染后续轮询。必须构造新 dict。
+        _res = dict(task.result())
+        _p = _res.get("path", "")
+        if _p:
+            _res["download_url"] = ("/api/video/download?"
+                                    + _sign_query("/api/video/download", _p,
+                                                  app.config["JWT_SECRET_KEY"]))
+        resp["output"] = _res
     elif task.status == "error":
         resp["error"] = task.message
     return jsonify(resp)
@@ -1034,6 +1082,8 @@ def list_active_tasks():
 def video_download():
     """下载已生成的视频文件。path 必须精确命中 video_tasks.output_path（产物在案）。"""
     path = request.args.get("path", "").strip()
+    if not _download_authorized("/api/video/download", path):
+        return jsonify({"success": False, "error": "未授权：需要登录或有效的下载签名"}), 401
     if not path:
         return jsonify({"success": False, "error": "文件不存在"}), 404
     db = database.get_db()
@@ -1195,7 +1245,9 @@ def audio_replace():
             "success": True,
             "output": output_filename,
             "size_mb": size_mb,
-            "download_url": f"/api/audio-replace/download?path={quote(output_path)}",
+            "download_url": ("/api/audio-replace/download?"
+                             + _sign_query("/api/audio-replace/download", output_path,
+                                           app.config["JWT_SECRET_KEY"])),
         })
     except FileNotFoundError:
         import traceback
@@ -1215,6 +1267,8 @@ def audio_replace():
 def audio_replace_download():
     """下载替换音频后的视频文件。path 必须精确命中 audio_replace_history.output_path。"""
     path = request.args.get("path", "").strip()
+    if not _download_authorized("/api/audio-replace/download", path):
+        return jsonify({"success": False, "error": "未授权：需要登录或有效的下载签名"}), 401
     if not path:
         return jsonify({"success": False, "error": "文件不存在"}), 404
     db = database.get_db()
@@ -1244,6 +1298,9 @@ def audio_replace_history_list():
             "audio_name": r["audio_name"],
             "output_name": r["output_name"],
             "output_path": r["output_path"],
+            "download_url": ("/api/audio-replace/download?"
+                             + _sign_query("/api/audio-replace/download", r["output_path"],
+                                           app.config["JWT_SECRET_KEY"])),
             "size_mb": r["size_mb"],
             "created_at": r["created_at"],
             "file_exists": os.path.isfile(r["output_path"]),

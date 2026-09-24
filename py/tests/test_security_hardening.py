@@ -613,3 +613,40 @@ class TestFontFileWhitelistMinimized:
             f"合成非具名字体 unlisted_font.ttf 返回 {resp_other.status_code}，应为 403 —— "
             "白名单没有真正最小化，同目录下任意字体仍可读"
         )
+
+
+class TestB3DownloadsRequireAuthOrSignature:
+    """B-3 三条：匿名（无 token、无签名）必须 401；带 token 必须非 401。"""
+
+    CASES = [
+        ("/api/scrape/download",       {"path": "whatever"}),
+        ("/api/video/download",        {"path": "whatever"}),
+        ("/api/audio-replace/download", {"path": "whatever"}),
+    ]
+
+    @pytest.mark.parametrize("path,args", CASES)
+    def test_anonymous_without_signature_rejected(self, client, path, args):
+        resp = client.get(path, query_string=args)
+        assert resp.status_code == 401, (
+            f"{path} 匿名且无签名返回 {resp.status_code}，应为 401"
+        )
+
+    @pytest.mark.parametrize("path,args", CASES)
+    def test_garbage_signature_rejected(self, client, path, args):
+        """伪造签名必须被拒（承重：证明验签真的在跑）。"""
+        resp = client.get(path, query_string={**args, "exp": "9999999999", "sig": "deadbeef"})
+        assert resp.status_code == 401, (
+            f"{path} 伪造签名返回 {resp.status_code}，应为 401"
+        )
+
+    @pytest.mark.parametrize("path,args", CASES)
+    def test_logged_in_is_not_401(self, client, dev_headers, path, args):
+        """承重对照：带 token **不得** 401（证明只挡匿名，没挡已登录）。
+
+        注意断言是「非 401」而非「200」—— path 不存在时应为 404，
+        那也是合法结果（鉴权已通过，业务层说文件不存在）。
+        """
+        resp = client.get(path, query_string=args, headers=dev_headers)
+        assert resp.status_code != 401, (
+            f"{path} 带 token 仍返回 401 —— 收口过头了"
+        )

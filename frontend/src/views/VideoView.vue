@@ -279,6 +279,7 @@ const fonts = ref([])
 const progressMsg = ref('')
 const progressPct = ref(0)
 const generatedPath = ref('')
+const generatedDownloadUrl = ref('')
 const generating = ref(false)
 let pollTimer = null
 let pollAborted = false
@@ -336,6 +337,7 @@ onMounted(async () => {
     } else if (latest.status === 'completed') {
       generating.value = false
       generatedPath.value = latest.result?.output?.path || ''
+      generatedDownloadUrl.value = latest.result?.output?.download_url || ''
       progressMsg.value = latest.message || '✅ 已完成'
       progressPct.value = 1
     } else if (latest.status === 'error') {
@@ -627,6 +629,7 @@ function doGenerate(settings) {
             done = true
             generating.value = false
             generatedPath.value = p.output?.path || ''
+            generatedDownloadUrl.value = p.output?.download_url || ''
             progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
             taskStore.updateTask(innerId, {
               status: 'completed', progress: 1,
@@ -686,6 +689,7 @@ function pollLocalTask(latest) {
         done = true
         generating.value = false
         generatedPath.value = p.output?.path || ''
+        generatedDownloadUrl.value = p.output?.download_url || ''
         progressMsg.value = '✅ 完成: ' + (p.output?.path || '')
         taskStore.updateTask(latest.id, {
           status: 'completed', progress: 1,
@@ -714,9 +718,11 @@ function pollLocalTask(latest) {
 }
 
 function downloadVideo() {
-  if (generatedPath.value) {
-    window.open('/api/video/download?path=' + encodeURIComponent(generatedPath.value), '_blank')
-  }
+  const p = generatedPath.value
+  if (!p) return
+  // generatedDownloadUrl 是后端下发的签名 URL；`||` 退路仅为防前端崩
+  // （服务端已收口，自拼 URL 必然 401）
+  window.open(generatedDownloadUrl.value || ('/api/video/download?path=' + encodeURIComponent(p)), '_blank')
 }
 
 async function autoSaveHistory() {
