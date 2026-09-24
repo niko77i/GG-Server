@@ -397,6 +397,79 @@ def _get_ffmpeg_path() -> str:
     return "ffmpeg"
 
 
+# ---------- 爬取产物：目录名解析与归属 ----------
+#
+# 以下三个函数是「爬取目录归属」的**唯一来源**。列表侧（scrape_packages）、
+# 写入侧（/api/scrape 的 save_dir）、下载侧（/api/scrape/download）三处必须共用，
+# 否则两侧角色集一旦分叉，就会出现「列表看得到、下载点不动」或反向的越权。
+
+# 可跨用户访问爬取产物的角色。
+# ⚠️ 必须与 scrape_packages 的既有判据一致。刻意**不含** huguan —— 尽管
+# routes/helpers.py 的 CROSS_USER_ROLES 含它，但爬取产物的既有判据不含，
+# 不得在这里擅自扩大（扩大 = 给 huguan 开新的越权面）。
+_SCRAPE_CROSS_USER_ROLES = ("developer", "admin")
+
+
+def _is_within(child: str, parent: str) -> bool:
+    """child 是否在 parent 之内（含等于）。两边都先 realpath 归一化。
+
+    必须带 `+ os.sep`，不能用裸 startswith —— 否则 `alice2` 会被 `alice` 前缀放行。
+    本仓库确实同时存在 alice / alice2 两个用户目录，该陷阱是现成的。
+    """
+    try:
+        c, p = os.path.realpath(child), os.path.realpath(parent)
+    except (ValueError, OSError):
+        return False
+    return c == p or c.startswith(p + os.sep)
+
+
+def _scrape_dn_for(user: dict | None, user_id: int, requested_dn: str = "") -> str:
+    """该用户有权访问的爬取目录名（不含根路径）。
+
+    管理员（_SCRAPE_CROSS_USER_ROLES）可显式指定 requested_dn 访问他人目录，
+    与 scrape_packages 的 `if user_dn and is_admin` 分支同源。
+
+    requested_dn 会被拼进路径，故拒绝分隔符与 `..` —— 否则 `user_dn=../..`
+    可把 user_dir 越出 _SCRAPE_DEFAULT_DIR。实测该越界当前被「必须是含 .png
+    的目录」过滤挡住、取不到数据，但这是「碰巧没数据」而非「结构上防住」，
+    所以在此按结构防住。
+    """
+    own = ""
+    if user:
+        own = (user.get("display_name") or user.get("username") or "").strip()
+    if not own:
+        own = f"user_{user_id}"
+
+    dn = requested_dn.strip()
+    if dn and user and user["role"] in _SCRAPE_CROSS_USER_ROLES:
+        if dn not in (".", "..") and os.sep not in dn and "/" not in dn:
+            return dn
+    return own
+
+
+def _scrape_dir_for(user: dict | None, user_id: int, requested_dn: str = "") -> str:
+    """该用户有权访问的爬取目录**绝对路径**。"""
+    return os.path.join(_SCRAPE_DEFAULT_DIR, _scrape_dn_for(user, user_id, requested_dn))
+
+
+def _signed_download_url(endpoint: str, path: str) -> str:
+    """为 path 签发一个该端点的短时效下载 URL。
+
+    TTL 取**与应用自身的 JWT 有效期一致**（默认 24h）。理由：签名 URL 本就是
+    JWT 在「浏览器原生请求」场景下的替身（`<img src>` / `window.open` 等无法
+    附加 Authorization 头），让它不比它所替代的 JWT 活得更久是自然边界。
+
+    为什么不取更短的 300s：签名由列表/请求响应一次性下发，前端**没有任何重签
+    路径**，面板停留超时后点下载必然 401 —— 这是可感知的功能缺陷，不是理论风险。
+    归属既已在**签发侧**堵住（只有自己有权访问的目录才会被签发），转发的危害
+    面就收敛为「单个包的只读」，由 TTL 兜底即可。
+
+    读取 app.config 的时机在**调用时**（不在模块加载时固化），以便测试注入。
+    """
+    ttl = int(app.config.get("JWT_ACCESS_TOKEN_EXPIRES", 86400))
+    return endpoint + "?" + _sign_query(endpoint, path, app.config["JWT_SECRET_KEY"], ttl=ttl)
+
+
 # ---------- 前端页面 ----------
 
 @app.route("/")
@@ -435,17 +508,26 @@ def scrape():
 
     url = data.get("url", "").strip()
     save_dir = data.get("save_dir", "").strip()
+    user = auth.get_user_by_id(user_id)
     if not save_dir:
-        user = auth.get_user_by_id(user_id)
-        dn = (user.get("display_name") or user.get("username") or f"user_{user_id}").strip()
-        save_dir = os.path.join(_SCRAPE_DEFAULT_DIR, dn)
+        save_dir = _scrape_dir_for(user, user_id)
     else:
-        # 收窄（2026-09-24 裁决）：自定义保存路径必须落在 _SCRAPE_DEFAULT_DIR 内，
+        # 收窄一（2026-09-24 裁决）：自定义保存路径必须落在 _SCRAPE_DEFAULT_DIR 内，
         # 与 scrape_download 的目录白名单自洽，堵「登录用户写任意目录」
-        real = os.path.realpath(save_dir)
-        scrape_real = os.path.realpath(_SCRAPE_DEFAULT_DIR)
-        if not (real == scrape_real or real.startswith(scrape_real + os.sep)):
+        if not _is_within(save_dir, _SCRAPE_DEFAULT_DIR):
             return jsonify({"success": False, "error": "保存路径必须在默认目录内"}), 400
+        # 收窄二（2026-09-24，B-3 侧门）：还必须是**该用户有权访问的**目录。
+        #
+        # ⚠️ 这一条不能省 —— 本端点会为 pkg_dir 签发下载 URL（见下方 _scrape_dl），
+        # 而 **签名路径上没有身份可校验**（浏览器原生请求不带 Authorization）。
+        # 若此处不校验归属，bob 只要传 save_dir=alice 的目录、并让包命中缓存分支，
+        # 就能拿到「为 alice 的包签发的合法签名」，随后畅通无阻地下载 ——
+        # 届时在 /api/scrape/download 里加多少归属校验都是摆设（攻击者不走那道门）。
+        # 归属必须在**签发侧**堵死：签名只可能为自己的目录签发，签名本身即证明
+        # 「签发时持有者有权」。管理员按 _SCRAPE_CROSS_USER_ROLES 放行。
+        if not (_is_within(save_dir, _scrape_dir_for(user, user_id))
+                or (user and user["role"] in _SCRAPE_CROSS_USER_ROLES)):
+            return jsonify({"success": False, "error": "保存路径必须是自己的目录"}), 403
     # 新增参数：是否按 Google Ads 规格放大图片（默认 true，向后兼容）
     include_ads_images = data.get("include_ads_images", True)
 
@@ -460,9 +542,10 @@ def scrape():
 
     # 2. 创建保存目录
     pkg_dir = os.path.join(save_dir, pkg_name)
-    # 两个出口（缓存分支 / 正常分支）共用的签名下载 URL
-    _scrape_dl = ("/api/scrape/download?"
-                  + _sign_query("/api/scrape/download", pkg_dir, app.config["JWT_SECRET_KEY"]))
+    # 两个出口（缓存分支 / 正常分支）共用的签名下载 URL。
+    # ⚠️ 此处签发的 URL **必须**只可能指向调用者自己有权访问的目录 —— 上面 save_dir
+    # 的「收窄二」就是为此。签名路径上没有身份可校验，签发侧是唯一关口。
+    _scrape_dl = _signed_download_url("/api/scrape/download", pkg_dir)
 
     # 检查是否已有本地文件，有则直接返回（跳过爬取）
     if os.path.isdir(pkg_dir):
@@ -590,6 +673,18 @@ def scrape_download():
     # 非 401 ⇒ 端点仍留在匿名可达面，test_anon_surface 的双向断言不成立。
     if not _download_authorized("/api/scrape/download", path):
         return jsonify({"success": False, "error": "未授权：需要登录或有效的下载签名"}), 401
+    # 归属校验：**有身份时才做**。放在存在性检查之前，使非属主无论目录是否存在
+    # 都恒得 403 —— 否则 404/403 的差异会变成一个「该目录是否存在」的探测器。
+    #
+    # 无身份（= 走签名路径）时不做：签名只可能为本人有权访问的目录签发（见
+    # /api/scrape 的 save_dir 收窄二），签名本身即证明签发时持有者有权。若签发侧
+    # 那条收窄被去掉，此处就是一个敞开的越权面 —— 两处必须同时成立。
+    if get_jwt_identity() is not None:
+        _uid = int(get_jwt_identity())
+        _user = auth.get_user_by_id(_uid)
+        if not (_is_within(path, _scrape_dir_for(_user, _uid))
+                or (_user and _user["role"] in _SCRAPE_CROSS_USER_ROLES)):
+            return jsonify({"success": False, "error": "无权访问他人的爬取包"}), 403
     if not path or not os.path.isdir(path):
         return jsonify({"success": False, "error": "目录不存在"}), 404
     # 白名单：只允许 _SCRAPE_DEFAULT_DIR 内的目录打包（路径穿越防护）
@@ -619,13 +714,9 @@ def scrape_packages():
     """列出已爬取包。管理员可传 user_dn 查看其他用户的包。"""
     user_id = int(get_jwt_identity())
     user = auth.get_user_by_id(user_id)
-    is_admin = user and user["role"] in ("developer", "admin")
-    user_dn = request.args.get("user_dn", "").strip()
-    if user_dn and is_admin:
-        dn = user_dn
-    else:
-        dn = (user.get("display_name") or user.get("username") or f"user_{user_id}").strip()
-    user_dir = os.path.join(_SCRAPE_DEFAULT_DIR, dn)
+    # dn 推导搬去 _scrape_dn_for()：与 /api/scrape 的写入门、/api/scrape/download 的
+    # 下载门共用同一份判据（只搬运，未改判据；管理员分支语义与原先等价）。
+    user_dir = _scrape_dir_for(user, user_id, request.args.get("user_dn", ""))
     packages = []
     if os.path.isdir(user_dir):
         for name in sorted(os.listdir(user_dir)):
@@ -1007,11 +1098,8 @@ def video_progress():
                 _out = None
                 if db_task.get("output_path"):
                     _out = {"path": db_task["output_path"]}
-                    _out["download_url"] = (
-                        "/api/video/download?"
-                        + _sign_query("/api/video/download", db_task["output_path"],
-                                      app.config["JWT_SECRET_KEY"])
-                    )
+                    _out["download_url"] = _signed_download_url(
+                        "/api/video/download", db_task["output_path"])
                 return jsonify({
                     "task_id": db_task["task_id"],
                     "status": db_task["status"],
@@ -1038,9 +1126,7 @@ def video_progress():
         _res = dict(task.result())
         _p = _res.get("path", "")
         if _p:
-            _res["download_url"] = ("/api/video/download?"
-                                    + _sign_query("/api/video/download", _p,
-                                                  app.config["JWT_SECRET_KEY"]))
+            _res["download_url"] = _signed_download_url("/api/video/download", _p)
         resp["output"] = _res
     elif task.status == "error":
         resp["error"] = task.message
@@ -1245,9 +1331,7 @@ def audio_replace():
             "success": True,
             "output": output_filename,
             "size_mb": size_mb,
-            "download_url": ("/api/audio-replace/download?"
-                             + _sign_query("/api/audio-replace/download", output_path,
-                                           app.config["JWT_SECRET_KEY"])),
+            "download_url": _signed_download_url("/api/audio-replace/download", output_path),
         })
     except FileNotFoundError:
         import traceback
@@ -1298,9 +1382,7 @@ def audio_replace_history_list():
             "audio_name": r["audio_name"],
             "output_name": r["output_name"],
             "output_path": r["output_path"],
-            "download_url": ("/api/audio-replace/download?"
-                             + _sign_query("/api/audio-replace/download", r["output_path"],
-                                           app.config["JWT_SECRET_KEY"])),
+            "download_url": _signed_download_url("/api/audio-replace/download", r["output_path"]),
             "size_mb": r["size_mb"],
             "created_at": r["created_at"],
             "file_exists": os.path.isfile(r["output_path"]),

@@ -128,8 +128,11 @@ class TestAClassFileWhitelist:
         resp = client.get("/api/scrape/download?path=C:\\Windows", headers=auth_headers)
         assert resp.status_code in (403, 404)
 
-    def test_scrape_download_requires_existing_dir(self, client, auth_headers):
-        resp = client.get("/api/scrape/download?path=C:\\nonexistent\\dir", headers=auth_headers)
+    def test_scrape_download_requires_existing_dir(self, client, dev_headers):
+        # 本类钉的是**白名单/存在性层**。归属校验（普通用户对他人目录恒 403）已于
+        # 2026-09-24 插在此层之前，故这里用 developer 身份穿过归属层，让断言仍落在
+        # 本层语义上；普通用户在归属层的 403 由 test_scrape_ownership.py 承重。
+        resp = client.get("/api/scrape/download?path=C:\\nonexistent\\dir", headers=dev_headers)
         assert resp.status_code == 404
 
     def test_font_file_rejects_non_font_file(self, client, auth_headers):
@@ -149,12 +152,13 @@ class TestAClassFileWhitelist:
         resp = client.get("/api/image?path=C:\\Windows\\win.ini")
         assert resp.status_code == 404
 
-    def test_scrape_download_allows_dir_inside_scrape_root(self, client, auth_headers):
+    def test_scrape_download_allows_dir_inside_scrape_root(self, client, dev_headers):
         # 对照组：_SCRAPE_DEFAULT_DIR 内的目录仍可下载（白名单不能误伤合法产出）
+        # 用 developer 穿过归属层的原因同上：本类钉白名单，不钉归属。
         target = os.path.join(_data_root(), "temp", "scraped_images", "pkg_probe")
         os.makedirs(target, exist_ok=True)
         try:
-            resp = client.get(f"/api/scrape/download?path={target}", headers=auth_headers)
+            resp = client.get(f"/api/scrape/download?path={target}", headers=dev_headers)
             assert resp.status_code == 200
         finally:
             shutil.rmtree(target, ignore_errors=True)
