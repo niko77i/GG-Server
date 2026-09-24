@@ -661,15 +661,18 @@ class TestB3DownloadsRequireAuthOrSignature:
         端点串写错、编码方式不同），**签名 URL 会全线 401 而上面三条依然全绿**
         —— 这是典型的假绿：功能完全不可用，测试却零信号。
 
-        断言「非 401」而非 200：`whatever` 路径不存在，业务层应回 404。
+        断言**精确等于 404**（而非「非 401」）：`whatever` 路径不存在，三个端点
+        过闸后都确定性走到 `not os.path.isfile(path)` 分支回 404。写成「非 401」
+        会漏掉两类假绿——验签抛异常变 500、以及意外返回 200——两者都会被放过。
         """
         from url_signing import sign_query
 
         qs = sign_query(path, "whatever", app.config["JWT_SECRET_KEY"])
         resp = client.get(path + "?" + qs)
-        assert resp.status_code != 401, (
-            f"{path} 拒绝了自己签发的 URL（{resp.status_code}）—— "
-            f"签发侧与校验侧的约定不一致。query={qs}"
+        assert resp.status_code == 404, (
+            f"{path} 对合法签名的响应是 {resp.status_code}，期望 404（闸门放行后"
+            f"撞不存在的文件）—— 401/403 说明签发侧与校验侧约定不一致；"
+            f"500 说明验签抛了异常；200 说明放行了不该放行的请求。query={qs}"
         )
 
     def test_signature_is_bound_to_its_endpoint_at_route_level(self, client, app):

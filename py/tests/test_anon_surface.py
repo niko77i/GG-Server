@@ -53,17 +53,18 @@ import pytest
 # ---------------------------------------------------------------------------
 ANON_GET_WHITELIST = frozenset({
     # --- 非 API：前端外壳与静态资源 ---
-    "/",                        # SPA 首页（main.py:401）
+    "/",                        # SPA 首页（main.py:402）
     "/<path:filename>",         # Flask 内置 static（static_url_path=""）⇒ 整个前端 bundle
-    "/favicon.ico",             # main.py:73，返回 204 空体
+    "/favicon.ico",             # main.py:74，返回 204 空体
     # --- 无 @jwt_required 的 API ---
-    "/api/health",              # main.py:422
-    "/api/image",               # main.py:796，扩展名+目录白名单内任意 .png
-    "/api/font-file",           # main.py:1681，项目 fonts/ 与系统字体目录内任意字体
+    "/api/health",              # main.py:423
+    "/api/image",               # main.py:830，扩展名+目录白名单内任意 .png
+    "/api/font-file",           # main.py:1749，收窄后仅：项目 fonts/ 内 + 4 个具名系统字体
+                                #（simhei/msyh/simsun/arial）。系统字体目录内的**其余**
+                                # 字体已被 b48502e 拒绝，不再是「任意字体」。
     # --- @jwt_required(optional=True)：装饰器层「有鉴权」但匿名放行 ---
-    # 2026-09-24：A 组 4 条（products/list、users/names、auth/names、settings/account GET）
-    # 已收口为强制鉴权，本表不再列出。
-    "/api/audio",               # main.py:1106，temp/music/ 下任意文件
+    # 2026-09-24：A 组 8 条已收口为强制鉴权（其中 4 条原在本表内，故本表 14→10）。
+    "/api/audio",               # main.py:1156，temp/music/ 下任意文件
 })
 
 # 扫描需要覆盖的 GET 规则数量的下界。若 url_map 遍历/过滤被改坏，本测试会大声失败，
