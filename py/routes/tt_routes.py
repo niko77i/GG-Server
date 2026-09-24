@@ -14,7 +14,9 @@ from .decorators import tt_required, tt_write_required, no_huguan, reject_huguan
 # 否则 _guess_series 会拿错行去猜系列名。
 # 苹果链接的查询参数（?pt= / ?ct= / ?l=）是分享/联盟参数，与掉包判定无关，
 # 故意不捕获 —— 去掉后同一个 app 的重复粘贴能被合并去重键识别。
-_PLAY_LINK_RE = r'https?://play\.google\.com/store/apps/details\?id=[\w.&=/\-?%]+'
+# 同样加 `(?i:...)`：手填侧对 Play 链接根本不校验 host（有包名即放行），
+# 故 `https://PLAY.GOOGLE.COM/...` 手填能落库、粘贴导入却漏匹配 —— 与苹果侧同型分裂。
+_PLAY_LINK_RE = r'(?i:https?://play\.google\.com/store/apps/details\?id=[\w.&=/\-?%]+)'
 # 苹果链接两种真实形状都要匹配：
 #   https://apps.apple.com/vn/app/id6804355336         （无 slug）
 #   https://apps.apple.com/vn/app/densia/id6804355336  （有 slug —— 实测中 200 会跳转到这个形状）
@@ -441,15 +443,18 @@ def add_package(pid):
     if denied:
         return denied
     data = parse_body()
-    pkg_type = data.get('type', 'package')
-    series_name = data.get('series_name', '').strip()
-    package_name = data.get('package_name', '').strip()
-    url = data.get('url', '').strip()
-    status = data.get('status', '')
 
+    # 校验必须看到原始值，且要赶在下面 `.strip()` 之前 —— 非字符串字段
+    # （数字/数组/对象）直接 strip 会抛 AttributeError → 500。
     err_resp = _validate_package(data)
     if err_resp:
         return err_resp
+
+    pkg_type = data.get('type', 'package')
+    series_name = (data.get('series_name') or '').strip()
+    package_name = (data.get('package_name') or '').strip()
+    url = (data.get('url') or '').strip()
+    status = data.get('status', '')
 
     try:
         db.execute(
@@ -482,9 +487,13 @@ def update_package(pkg_id):
 
     # 只覆盖请求 JSON 中实际出现的 key，未传字段保留原值（避免部分更新清空其它字段）
     updates = {}
+    # 同 `add_package`：非字符串字段要先拦下，否则下面 `.strip()` 抛 AttributeError → 500。
+    type_err = _check_pkg_text_types(data)
+    if type_err:
+        return type_err
     for key in ('series_name', 'package_name', 'url'):
         if key in data:
-            updates[key] = data.get(key, '').strip()
+            updates[key] = (data.get(key) or '').strip()
     if 'status' in data:
         updates['status'] = data.get('status', '')
     if 'type' in data:
@@ -689,7 +698,8 @@ def check_delist(pid):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dropped = []
     for r in results:
-        # 判定未知（限流/服务端异常）：不写库，保留上一轮判定结果
+        # 判定未知（非 200/404：403 反爬、410、429、任意 5xx、超时、代理失败…）：
+        # 不写库，保留上一轮判定结果
         if r["is_delisted"] is None:
             continue
         db.execute(
@@ -1494,6 +1504,27 @@ def _get_pkg_product_id(db, pkg_id):
     return row['product_id'] if row else None
 
 
+# 投放对象的三个文本字段：客户端传数字/数组/对象时，入口处的 `.strip()`
+# 会抛 AttributeError → 500。统一在这里表驱动地拦下。
+_PKG_TEXT_FIELDS = (
+    ('series_name', '系列名'),
+    ('package_name', '包名'),
+    ('url', '链接'),
+)
+
+
+def _check_pkg_text_types(pkg):
+    """三个文本字段必须为字符串或 None；None 视同未填写（保持既有语义）。
+
+    只做类型闸门，不做业务校验 —— 部分更新（如只改 series_name）也要能过。
+    """
+    for key, label in _PKG_TEXT_FIELDS:
+        val = pkg.get(key)
+        if val is not None and not isinstance(val, str):
+            return err(f'{label}格式不正确', 400)
+    return None
+
+
 def _validate_package(pkg):
     """校验投放对象：type 必须 package/pwa；跑包必须填写包名。
 
@@ -1503,7 +1534,11 @@ def _validate_package(pkg):
     pkg_type = pkg.get('type', 'package')
     if pkg_type not in ('package', 'pwa'):
         return err('无效的投放对象类型', 400)
-    if pkg_type == 'package' and not (pkg.get('package_name') or '').strip():
+    type_err = _check_pkg_text_types(pkg)
+    if type_err:
+        return type_err
+    pkg_name = pkg.get('package_name')
+    if pkg_type == 'package' and not (pkg_name or '').strip():
         if not _is_appstore_url(pkg.get('url')):
             return err('跑包必须填写包名', 400)
     return None

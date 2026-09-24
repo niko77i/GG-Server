@@ -8693,7 +8693,8 @@ def _run_delist_check_once():
         # HTTP 检测全部完成后，再统一写 DB。
         # 避免在慢网络请求期间持有 SQLite 写锁（写锁只占用下面这段纯内存/DB 循环的极短时间）。
         for pkg, is_delisted, error in checked:
-            # 判定未知（限流/服务端异常）：不覆盖既有判定，只把原因写进 error_msg。
+            # 判定未知（非 200/404：403 反爬、410、429、任意 5xx、超时、代理失败…）：
+            # 不覆盖既有判定，只把原因写进 error_msg。
             # 不能走 INSERT OR REPLACE —— 那会把上一轮正确的 is_delisted=1 抹成 0。
             if is_delisted is None:
                 db.execute(
@@ -8873,7 +8874,8 @@ def _run_tt_delist_check_once():
 
         # HTTP 检测全部完成后统一写 DB，避免长时间持有 SQLite 写锁
         for pkg, is_delisted, error in checked:
-            # 判定未知（限流/服务端异常）：不写库，保留上一轮判定结果。
+            # 判定未知（非 200/404：403 反爬、410、429、任意 5xx、超时、代理失败…）：
+            # 不写库，保留上一轮判定结果。
             # 旧逻辑用 `1 if is_delisted else 0` 无条件覆盖，429 会把正确的掉包记录抹成 0。
             # tt_delist_checks 无 error_msg 列，原因只通过下面的 results 返回体暴露。
             if is_delisted is None:

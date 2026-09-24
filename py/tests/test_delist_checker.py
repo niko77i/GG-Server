@@ -259,6 +259,31 @@ class TestCheckUrlDelistedWithProxy:
         assert "代理" in error
         assert mock_get.call_count == 2
 
+    def test_mixed_failure_prefers_indeterminate_reason(self):
+        """混合失败（一次超时 + 一次 429）→ 仍判未知，原因取「拿不到判定」那条。
+
+        `last_indeterminate` 优先于 `last_error`：两者对用户的含义不同 ——
+        「限流/反爬」等一会儿可重试，「代理连不上」要换代理。若被后者盖掉，
+        用户会朝错误方向排查。
+        """
+        from delist_checker import check_url_delisted
+
+        pool = self._make_pool(2)
+
+        mock_429 = MagicMock()
+        mock_429.status_code = 429
+        mock_429.text = ""
+
+        with patch("delist_checker.requests.get",
+                   side_effect=[requests.Timeout("slow"), mock_429]):
+            is_delisted, error = check_url_delisted(
+                "https://play.google.com/store/apps/details?id=test.a", pool
+            )
+
+        assert is_delisted is None
+        assert "代理响应异常" in error
+        assert "429" in error
+
     def test_judges_delisted_through_proxy(self):
         """通过代理请求成功，404 判定为掉包，且请求携带 proxies。"""
         from delist_checker import check_url_delisted

@@ -128,9 +128,12 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool | None, str]:
         except Exception as e:
             last_error = f"代理异常 {proxy['ip']}:{proxy['port']}: {e}"
 
-    # 出现过限流/服务端异常 → 整体判为未知（保守：既不算掉包也不算正常）
+    # 出现过「拿不到判定」的响应 → 整体判为未知（保守：既不算掉包也不算正常）。
+    # 文案不再写死「限流/服务端」：新口径下非 200/404 一律未知，走这条最多的是
+    # 403 反爬，写窄了会把用户往「等一会儿重试」的方向误导。具体状态码在
+    # last_indeterminate 里（形如 `HTTP 403 @ 1.2.3.4:8080`），原样带出即可。
     if last_indeterminate:
-        return None, f"代理响应异常（限流/服务端）: {last_indeterminate}"
+        return None, f"代理响应异常，无法判定: {last_indeterminate}"
     return None, f"代理全部失败: {last_error}，无法判定"
 
 

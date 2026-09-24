@@ -70,9 +70,17 @@ class TestValidatePackage:
     def _call(self, **pkg):
         return tt_routes._validate_package(pkg)
 
+    @staticmethod
+    def _reject(resp):
+        """拒绝分支返回 `err()` 的元组 (Response, code) —— 取 (状态码, error)。"""
+        assert resp is not None, "期望被拒绝，实际放行"
+        body, code = resp
+        return code, body.get_json()["error"]
+
     def test_play_empty_name_rejected(self):
-        resp = self._call(type="package", package_name="", url=PLAY)
-        assert resp is not None
+        assert self._reject(
+            self._call(type="package", package_name="", url=PLAY)
+        ) == (400, "跑包必须填写包名")
 
     def test_play_with_name_ok(self):
         assert self._call(type="package", package_name="com.a.b", url=PLAY) is None
@@ -87,11 +95,38 @@ class TestValidatePackage:
         assert self._call(type="pwa", package_name="", url="") is None
 
     def test_invalid_type_rejected(self):
-        assert self._call(type="ios", package_name="x", url=APPLE_LIVE) is not None
+        assert self._reject(
+            self._call(type="ios", package_name="x", url=APPLE_LIVE)
+        ) == (400, "无效的投放对象类型")
 
     def test_play_empty_name_and_empty_url_rejected(self):
         """URL 缺失时不得因为「可能以后填苹果链接」而放行。"""
-        assert self._call(type="package", package_name="", url="") is not None
+        assert self._reject(
+            self._call(type="package", package_name="", url="")
+        ) == (400, "跑包必须填写包名")
+
+    @pytest.mark.parametrize("bad", [123, 1.5, ["com.a.b"], {"n": "com.a.b"}, True])
+    def test_non_string_package_name_rejected_not_500(self, bad):
+        """非字符串包名必须 400，不得因 `(pkg_name or '').strip()` 抛 AttributeError → 500。"""
+        assert self._reject(
+            self._call(type="package", package_name=bad, url=PLAY)
+        ) == (400, "包名格式不正确")
+
+    @pytest.mark.parametrize("field", ["url", "series_name"])
+    @pytest.mark.parametrize("bad", [123, ["x"], {"n": "x"}])
+    def test_non_string_other_text_fields_rejected_not_500(self, field, bad):
+        """url / series_name 同型：入口 `.strip()` 之前就要拦下，不能 500。
+
+        这两个字段此前只在写库前被 `.strip()`，非字符串会直接抛 AttributeError。
+        """
+        assert self._reject(
+            self._call(type="package", package_name="com.a.b", **{field: bad})
+        ) == (400, {"url": "链接格式不正确", "series_name": "系列名格式不正确"}[field])
+
+    def test_none_package_name_still_treated_as_empty(self):
+        """None 视同未填写（保持既有语义）：苹果链接放行、Play 仍拒绝。"""
+        assert self._call(type="package", package_name=None, url=APPLE_LIVE) is None
+        assert self._call(type="package", package_name=None, url=PLAY) is not None
 
 
 class TestAddPackageViaApi:
@@ -122,6 +157,72 @@ class TestAddPackageViaApi:
         })
         assert resp.status_code == 400
         assert "包名" in resp.get_json()["error"]
+
+    def test_non_string_package_name_rejected_not_500(self, client, tt_headers):
+        """端到端：非字符串包名走接口也必须 400，不能 500。"""
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "非字符串包名产品",
+        }).get_json()["id"]
+
+        resp = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": 123, "url": PLAY,
+        })
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "包名格式不正确"
+
+    @pytest.mark.parametrize("field,label", [("url", "链接"), ("series_name", "系列名")])
+    def test_add_package_non_string_other_field_rejected_not_500(
+        self, client, tt_headers, field, label
+    ):
+        """端到端：url / series_name 传数字也走 400，不能因入口 `.strip()` 抛 500。"""
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "非字符串字段产品",
+        }).get_json()["id"]
+
+        payload = {"type": "package", "series_name": "S1",
+                   "package_name": "com.a.b", "url": PLAY}
+        payload[field] = 123
+
+        resp = client.post(f"/api/tt/products/{pid}/packages",
+                           headers=tt_headers, json=payload)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == f"{label}格式不正确"
+
+    def test_update_package_non_string_field_rejected_not_500(self, client, tt_headers):
+        """PUT 单包是第二处 `.strip()`：同样必须先拦非字符串，不能 500。"""
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "PUT 非字符串产品",
+        }).get_json()["id"]
+        pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": "com.a.b", "url": PLAY,
+        }).get_json()["id"]
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}",
+                          headers=tt_headers, json={"series_name": 123})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "系列名格式不正确"
+
+    def test_update_package_partial_series_name_only_still_works(self, client, tt_headers):
+        """类型闸门不得误伤部分更新：只传 series_name 时其余字段必须原样保留。
+
+        卡片上的「点标题改名」走的就是这条路径（TtProductCard 只发 series_name）。
+        """
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "部分更新产品",
+        }).get_json()["id"]
+        pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "旧系列", "package_name": "com.a.b", "url": PLAY,
+        }).get_json()["id"]
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}",
+                          headers=tt_headers, json={"series_name": "新系列"})
+        assert resp.status_code == 200
+
+        detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+        pkg = detail["packages"][0]
+        assert pkg["series_name"] == "新系列"
+        assert pkg["package_name"] == "com.a.b"
+        assert pkg["url"] == PLAY
 
     def test_create_product_with_appstore_package(self, client, tt_headers):
         """建产品时带包这条路径（第三个调用点）也要放行。"""
@@ -344,6 +445,28 @@ class TestAppstoreLinkRegexCaseAndPunctuation:
         parsed = client.post("/api/tt/products/import-text", headers=tt_headers,
                              json={"text": f"神包上线：大写\n{url}"}).get_json()["parsed"]
         assert [p["url"] for p in parsed] == [url]
+
+
+class TestPlayLinkRegexCaseInsensitive:
+    """Play 链接的同型分裂：手填侧完全不校验 host（有包名即放行），
+    import 侧的 `_PLAY_LINK_RE` 大小写敏感 ⇒ 大写 host 粘贴进来被静默丢弃。"""
+
+    def test_uppercase_play_host_matched(self):
+        url = "https://PLAY.GOOGLE.COM/store/apps/details?id=com.a.b"
+        assert tt_routes._LINK_RE.findall(url) == [url]
+
+    def test_uppercase_play_host_imported(self, client, tt_headers):
+        url = "https://PLAY.GOOGLE.COM/store/apps/details?id=com.a.b"
+        parsed = client.post("/api/tt/products/import-text", headers=tt_headers,
+                             json={"text": f"神包上线：大写\n{url}"}).get_json()["parsed"]
+        assert [p["url"] for p in parsed] == [url]
+
+    def test_case_insensitivity_does_not_loosen_play_host(self):
+        """反向边界：大小写不敏感不得放进伪装域。"""
+        assert tt_routes._LINK_RE.findall(
+            "https://play.google.com.evil.com/store/apps/details?id=com.a.b") == []
+        assert tt_routes._LINK_RE.findall(
+            "https://EVIL.COM/store/apps/details?id=com.a.b") == []
 
 
 class TestUpdatePackageTypeValidation:
