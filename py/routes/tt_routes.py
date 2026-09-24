@@ -19,7 +19,11 @@ _PLAY_LINK_RE = r'https?://play\.google\.com/store/apps/details\?id=[\w.&=/\-?%]
 #   https://apps.apple.com/vn/app/id6804355336         （无 slug）
 #   https://apps.apple.com/vn/app/densia/id6804355336  （有 slug —— 实测中 200 会跳转到这个形状）
 # slug 必须作为独立路径段可选：写成 `[\w\-]*id\d+` 会跨不过 slug 后的 `/`，导致 slug 形式漏匹配。
-_APPSTORE_LINK_RE = r'https?://(?:apps|itunes)\.apple\.com/(?:[\w\-]+/)?app/(?:[\w\-]+/)?id\d+'
+# slug 段字符集含 `.` 与 `%`：真实存在 `.../app/foo.bar/id123` 与
+# `.../app/%E5%BE%AE%E4%BF%A1/id414478124`（百分号编码的应用名），旧字符集
+# `[\w\-]+` 不含这两者 —— 同一 URL 手填能落库、粘贴导入却被静默丢弃，两条通道口径分裂。
+# 只放宽 slug 那一段，region 段维持原样。
+_APPSTORE_LINK_RE = r'https?://(?:apps|itunes)\.apple\.com/(?:[\w\-]+/)?app/(?:[\w.\-%]+/)?id\d+'
 _LINK_RE = re.compile(f'(?:{_PLAY_LINK_RE})|(?:{_APPSTORE_LINK_RE})')
 
 tt_bp = Blueprint('tt', __name__)
@@ -480,6 +484,13 @@ def update_package(pkg_id):
         updates['status'] = data.get('status', '')
     if 'type' in data:
         updates['type'] = data.get('type', '')
+
+    # type 与 _validate_package 同口径：只允许 package / pwa。
+    # 否则 PUT {"type":"ios"} 会落库一个既非 package 也非 pwa 的行，
+    # 该行此后不再被手动/定时掉包检测取到（两处 SQL 都按 type='package' 过滤），
+    # 等于悄悄退出巡检范围。
+    if 'type' in updates and updates['type'] not in ('package', 'pwa'):
+        return err('无效的投放对象类型', 400)
 
     # re-enforce type 规则：package 必须填写包名（App Store 链接除外，与 add_package 语义一致）
     # 用「生效后的」包名判定，而不是看本次是否传了 package_name 这个 key：
@@ -1003,11 +1014,19 @@ def _is_appstore_url(url):
 
     必须解析出 host 后**全等**比较：用子串匹配会让
     `https://evil.com/?u=apps.apple.com` 这类 URL 误判为苹果链接。
+
+    含反斜杠一律判否：`urlsplit('https://evil.com\\@apps.apple.com/x').hostname`
+    会得到 `apps.apple.com`（反斜杠在 Python 眼里只是 userinfo 里的普通字符），
+    而浏览器 `new URL()` 会把 `\\` 归一成 `/` 得到 `evil.com` —— 前后端口径分裂，
+    且可绕过「跑包必须填写包名」守卫。苹果链接不含反斜杠，fail-closed。
     """
     if not url:
         return False
+    text = str(url).strip()
+    if "\\" in text:
+        return False
     try:
-        host = urllib.parse.urlsplit(str(url).strip()).hostname or ""
+        host = urllib.parse.urlsplit(text).hostname or ""
     except ValueError:
         return False
     return host.lower() in _APPSTORE_HOSTS

@@ -45,6 +45,18 @@ class TestIsAppstoreUrl:
         assert tt_routes._is_appstore_url("") is False
         assert tt_routes._is_appstore_url(None) is False
 
+    def test_backslash_userinfo_is_not_appstore(self):
+        r"""反斜杠 host 绕过必须 fail-closed。
+
+        `urlsplit('https://evil.com\@apps.apple.com/vn/app/id123').hostname`
+        在 Python 眼里反斜杠只是 userinfo 里的普通字符，host 取最后一个 @ 之后 → `apps.apple.com`；
+        而浏览器 / 前端 `new URL()`（WHATWG 把 `\` 归一成 `/`）算出的是 `evil.com`。
+        后端据此放行会落库成「空包名 + 非苹果链接」，绕过「跑包必须填写包名」守卫。
+        苹果链接不含反斜杠，一律判否。
+        """
+        assert tt_routes._is_appstore_url(
+            "https://evil.com\\@apps.apple.com/vn/app/id123") is False
+
 
 class TestValidatePackage:
     """校验四象限：只有「苹果链接 + 空包名」是新放行的组合。"""
@@ -248,6 +260,86 @@ class TestImportTextAppstore:
         resp = client.post("/api/tt/products/import-text", headers=tt_headers,
                            json={"text": "看看 https://apps.apple.com/vn/charts/paid-apps"})
         assert resp.get_json()["parsed"] == []
+
+    def test_parse_dotted_slug_form(self, client, tt_headers):
+        """含点 slug 要能捞出来 —— 原 slug 字符集 [\\w\\-]+ 不含 `.`。
+
+        后果：同一 URL 手填能落库、粘贴导入被静默丢弃（`parsed` 里没有它，
+        不报错不提示），两条录入通道口径分裂。
+        """
+        url = "https://apps.apple.com/us/app/foo.bar/id123"
+        resp = client.post("/api/tt/products/import-text", headers=tt_headers,
+                           json={"text": f"神包上线：带点\n{url}"})
+        parsed = resp.get_json()["parsed"]
+        assert len(parsed) == 1
+        assert parsed[0]["url"] == url
+
+    def test_parse_percent_encoded_slug_form(self, client, tt_headers):
+        """含百分号编码的 slug（中文应用名）同样要能捞出来。"""
+        url = "https://apps.apple.com/cn/app/%E5%BE%AE%E4%BF%A1/id414478124"
+        resp = client.post("/api/tt/products/import-text", headers=tt_headers,
+                           json={"text": f"神包上线：微信\n{url}"})
+        parsed = resp.get_json()["parsed"]
+        assert len(parsed) == 1
+        assert parsed[0]["url"] == url
+
+    def test_widened_slug_does_not_loosen_boundaries(self):
+        """反向边界：放宽 slug 段不得把非包链接吞进来。
+
+        `/app/` 后没有 `id<数字>`、以及非苹果 host 的同类路径，都不得被 `_LINK_RE` 命中。
+        """
+        assert tt_routes._LINK_RE.findall("https://apps.apple.com/vn/app/") == []
+        assert tt_routes._LINK_RE.findall("https://evil.com/vn/app/id123") == []
+
+
+class TestUpdatePackageTypeValidation:
+    """PUT /api/tt/packages/<id> 的 type 必须与 _validate_package 同口径（只允许 package/pwa）。
+
+    落库一个既非 package 也非 pwa 的行，该行此后不再被手动/定时掉包检测取到
+    （两处 SQL 都按 type='package' 过滤），等于悄悄退出巡检范围。
+    """
+
+    def _make_pkg(self, client, tt_headers):
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "type 校验产品",
+        }).get_json()["id"]
+        pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": "com.a.b", "url": PLAY,
+        }).get_json()["id"]
+        return pid, pkg_id
+
+    def test_invalid_type_rejected(self, client, tt_headers):
+        _, pkg_id = self._make_pkg(client, tt_headers)
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers, json={"type": "ios"})
+
+        assert resp.status_code == 400
+        assert "无效的投放对象类型" in resp.get_json()["error"]
+
+    def test_empty_type_rejected(self, client, tt_headers):
+        """空字符串同属非法取值，不得落库。"""
+        _, pkg_id = self._make_pkg(client, tt_headers)
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers, json={"type": ""})
+
+        assert resp.status_code == 400
+        assert "无效的投放对象类型" in resp.get_json()["error"]
+
+    def test_pwa_type_allowed(self, client, tt_headers):
+        """合法取值不得误伤。"""
+        _, pkg_id = self._make_pkg(client, tt_headers)
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers, json={"type": "pwa"})
+
+        assert resp.status_code == 200
+
+    def test_package_type_allowed_on_compliant_row(self, client, tt_headers):
+        """已合规行显式传 package 仍放行。"""
+        _, pkg_id = self._make_pkg(client, tt_headers)
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers, json={"type": "package"})
+
+        assert resp.status_code == 200
 
 
 class TestUpdatePackageExplicitEmptyUrl:
