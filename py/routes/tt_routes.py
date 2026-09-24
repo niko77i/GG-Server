@@ -662,7 +662,10 @@ def check_delist(pid):
         return ok({'results': [], 'message': '没有需要检测的跑包'})
 
     pkg_list = [dict(p) for p in pkgs]
-    results = delist_checker.check_product_packages(pid, pkg_list, None)
+    # 与 GG 手动 / GG 定时 / TT 定时口径一致：走代理池，降低限流概率。
+    # 局部导入：main.py 导入并注册本 Blueprint，模块级互导会成环。
+    from main import _build_delist_proxy_pool
+    results = delist_checker.check_product_packages(pid, pkg_list, _build_delist_proxy_pool())
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dropped = []

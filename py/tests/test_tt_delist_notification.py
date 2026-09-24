@@ -499,6 +499,36 @@ class TestTtManualCheckNotify:
         assert checked == []  # 未发起任何 HTTP 检测
         assert sent == []
 
+    def test_manual_check_passes_proxy_pool(self, client, tt_headers, monkeypatch):
+        """TT 手动检测必须把代理池透传给 check_product_packages（口径同 GG 手动 / TT 定时）。
+
+        原实现在 tt_routes.py 传 None（直连），与 AGENTS.md 描述及另外三处调用不一致。
+        """
+        import main
+
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+        pid = _mk_product(db, uid, "代理池产品")
+        _mk_package(db, pid, "系列P")
+        db.close()
+
+        sentinel = object()
+        monkeypatch.setattr(main, "_build_delist_proxy_pool", lambda: sentinel)
+
+        seen = {}
+
+        def _fake_check_product(pid_, pkgs, pool):
+            seen["pool"] = pool
+            return [{"package_id": p["id"], "product_id": pid_,
+                     "is_delisted": False, "error": ""} for p in pkgs]
+
+        monkeypatch.setattr(delist_checker, "check_product_packages", _fake_check_product)
+
+        resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+
+        assert resp.status_code == 200
+        assert seen["pool"] is sentinel
+
 
 # ==================== 定时检测 ====================
 
