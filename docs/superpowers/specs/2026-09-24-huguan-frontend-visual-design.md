@@ -777,7 +777,7 @@ const WARN_TOKENS = { agent_name: '所属渠道', bc_name: 'BC', mcc_name: '所�
     <div class="owner-cell">
       <el-skeleton v-if="!ownerOptionsLoaded" :rows="1" animated />
       <el-tooltip v-else-if="row.owner_id && !ownerOptionMap[row.owner_id]"
-        content="这个归属人不在当前平台的用户列表里（可能已禁用或属于其他平台）。请重新选择。">
+        content="这个归属人不在用户列表里（账号可能已停用）。请重新选择。">
         <el-select :model-value="row.owner_id" size="small" filterable disabled
           style="width:100%;" placeholder="未知用户">
           <el-option :key="row.owner_id" :label="`用户 #${row.owner_id}`" :value="row.owner_id" />
@@ -794,7 +794,7 @@ const WARN_TOKENS = { agent_name: '所属渠道', bc_name: 'BC', mcc_name: '所�
             :label="u.display_name || u.username" :value="u.id" />
           <template #empty>
             <div style="padding:8px 12px;font-size:12px;color:#6b7280;line-height:1.6;">
-              没有匹配的用户。<br />只有在本平台已有账户的用户、开发者和管理员会出现在这里。
+              没有匹配的用户。<br />停用的账号不会出现在这里。
             </div>
           </template>
         </el-select>
@@ -808,7 +808,7 @@ const WARN_TOKENS = { agent_name: '所属渠道', bc_name: 'BC', mcc_name: '所�
           :label="u.display_name || u.username" :value="u.id" />
         <template #empty>
           <div style="padding:8px 12px;font-size:12px;color:#6b7280;line-height:1.6;">
-            没有匹配的用户。<br />只有在本平台已有账户的用户、开发者和管理员会出现在这里。
+            没有匹配的用户。<br />停用的账号不会出现在这里。
           </div>
         </template>
       </el-select>
@@ -836,6 +836,15 @@ const ownerOptionMap = computed(() => Object.fromEntries(ownerOptions.value.map(
 
 > **为什么「未知归属」是个真问题**：`GET /api/platform/users`（`main.py:6256-6281`）的 SQL 是 `(u.platform = ? OR u.role = 'developer') AND u.role != 'hidden' AND (u.role = 'huguan' OR EXISTS(该平台未删账户))`。它的设计目的是**筛选**（「只列有账户的用户」，docstring 明写「选中一个名下无户的人必然得到空表，这种选项没有筛选价值」）。**而「改归属」需要的是全量用户列表**——两者诉求相反。CC 上会出现：给一个 GG 账户换到一个只在 TT 有户的人名下 → 该人不在列表里 → 单元格进「未知归属」态。
 > 规格 §9.2 说「复用 `GET /platform/users`」，本文照做，但把这个缺口显式设计出来（而不是让裸数字悄悄出现）。彻底修法见 §9-4。
+>
+> **✅ 更正（2026-09-24）**：§5.3 的下拉数据源已不再是 `/platform/users`。用户裁定
+> 「在户管蓝图里加专用端点」，后端已实现 `GET /api/huguan/dashboard/owner-options`
+> （`py/routes/huguan_dashboard_routes.py:177`），返回**全量**用户（仅排除 `viewer` 与
+> `hidden`，**不按平台过滤**）——即本节描述的缺口已从根上补掉。因此两处文案随之上修：
+> `#empty` 不再宣称「只有在本平台已有账户的用户…会出现在这里」（那是旧端点口径，在成品
+> 上是假话）；「未知归属」的 tooltip 也不再提「属于其他平台」（全量列表下不可能发生，
+> 该形态现在只剩「账号已停用／已删除」一种成因）。
+> **「未知归属」形态本身保留** —— `hidden` 用户仍不在列表里，该分支仍可达。
 
 ### 5.5 编辑交互与反馈
 
