@@ -1799,15 +1799,28 @@ git commit -m "docs: AGENTS.md 补充 TT 支持 App Store 链接与掉包判定�
   链接解析失败（畸形 url）、代理池为空、代理全部失败、url 为空。
 ```
 
-「代理池为空」实测不可达 —— `_build_delist_proxy_pool()`（`main.py:3593`）在
-「未启用」或「proxies 为空」时返回 `None`，而 `None` 走直连分支，**不会**进入
-`proxy_pool.count == 0` 那一段。保留它在列表里是为了说明分支语义，但需标注：
+~~「代理池为空」实测不可达~~ —— **本步的断言有误，已订正。** 原文只看到
+`_build_delist_proxy_pool()`（`main.py:3593`）的**列表级**判空，忽略了
+`ProxyPool._load`（`proxy_pool.py:23-50`）会**逐条跳过非法条目**（非 dict /
+`ip` 去空白后为空 / `port` 转不了 int）。实测：
+
+```
+ProxyPool([{'ip':'','port':8080}]).count == 0     # 列表非空，池子却是空的
+ProxyPool(['garbage']).count == 0
+ProxyPool([{'ip':'1.1.1.1','port':'abc'}]).count == 0
+```
+
+⇒ 配置列表**非空但条目全部非法**时，`if proxy_pool.count == 0: return None, "代理池为空，无法判定"`
+（`delist_checker.py`）**会被走到**。Task 6 实施后由审查者提出、控制者独立复现并订正。
+订正后的文本（保留该分支在列表中，并写明它何时可达）：
 
 ```markdown
   「拿不到判定」的七类一律归为 `None`：HTTP 429/5xx、请求超时、网络连接失败、
   链接解析失败（畸形 url）、代理池为空、代理全部失败、url 为空。
-  （其中「代理池为空」分支实测不可达：`_build_delist_proxy_pool()` 在未启用或
-  代理列表为空时返回 `None`，直接走直连分支；保留它只为说明该分支语义。）
+  （其中「代理池为空」= `ProxyPool.count == 0`。配置列表为空或未启用时
+  `_build_delist_proxy_pool()` 返回 `None`、直接走直连分支，不进这一段；而列表
+  **非空但条目全部非法**（非 dict / ip 去空白后为空 / port 转不了 int，
+  `ProxyPool._load` 会逐条跳过）时，池子仍会以 count=0 建成，**这一段即会走到**。）
 ```
 
 - [ ] **Step 3: M-4：补记前端「本轮未能判定」提示**
