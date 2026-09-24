@@ -67,34 +67,34 @@ class TestCheckUrlDelisted:
         assert is_delisted is False
         assert error == ""
 
-    def test_returns_false_with_error_on_timeout(self):
-        """请求超时 → 判定为未掉包，返回错误信息。"""
+    def test_returns_none_on_timeout(self):
+        """请求超时 → 判定未知（拿不到判定，不得当作「正常」覆盖既有记录）。"""
         from delist_checker import check_url_delisted
 
         with patch("delist_checker.requests.get", side_effect=requests.Timeout("timed out")):
             is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.example.app")
 
-        assert is_delisted is False
-        assert "超时" in error or "timeout" in error.lower()
+        assert is_delisted is None
+        assert "超时" in error
 
-    def test_returns_false_with_error_on_connection_error(self):
-        """网络连接错误 → 判定为未掉包，返回错误信息。"""
+    def test_returns_none_on_connection_error(self):
+        """网络连接错误 → 判定未知（拿不到判定，不得当作「正常」覆盖既有记录）。"""
         from delist_checker import check_url_delisted
 
         with patch("delist_checker.requests.get", side_effect=requests.ConnectionError("connection refused")):
             is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.example.app")
 
-        assert is_delisted is False
+        assert is_delisted is None
         assert error != ""
 
-    def test_returns_false_with_error_on_general_exception(self):
-        """其他异常 → 判定为未掉包，返回错误信息。"""
+    def test_returns_none_on_general_exception(self):
+        """其他异常（含解析失败）→ 判定未知（拿不到判定，不得当作「正常」覆盖既有记录）。"""
         from delist_checker import check_url_delisted
 
         with patch("delist_checker.requests.get", side_effect=Exception("unknown error")):
             is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.example.app")
 
-        assert is_delisted is False
+        assert is_delisted is None
         assert error != ""
 
     def test_empty_url_returns_none(self):
@@ -241,7 +241,11 @@ class TestCheckUrlDelistedWithProxy:
         assert mock_get.call_count == 2
 
     def test_all_proxies_fail_returns_proxy_error(self):
-        """所有代理都失败，返回带「代理」标识的错误，不判为掉包。"""
+        """代理全部失败 → 判定未知，返回带「代理」标识的错误（不判掉包，也不判正常）。
+
+        语义变更（2026-09-24）：原 is_delisted=False，会被消费方写库成 is_delisted=0，
+        抹掉上一轮正确的掉包记录 —— 与 429 属同一缺陷家族。逐代理重试行为不变。
+        """
         from delist_checker import check_url_delisted
 
         pool = self._make_pool(2)
@@ -251,7 +255,7 @@ class TestCheckUrlDelistedWithProxy:
                 "https://play.google.com/store/apps/details?id=test.a", pool
             )
 
-        assert is_delisted is False
+        assert is_delisted is None
         assert "代理" in error
         assert mock_get.call_count == 2
 
@@ -292,7 +296,11 @@ class TestCheckUrlDelistedWithProxy:
         assert mock_get.call_args.kwargs.get("proxies") is None
 
     def test_empty_pool_returns_proxy_error(self):
-        """空代理池返回「代理池为空」错误，不发请求、不判为掉包。"""
+        """空代理池 → 判定未知，返回「代理池为空」错误；不发请求。
+
+        语义变更（2026-09-24）：原为精确断言 error == "代理池为空" 且 is_delisted=False，
+        文案已追加「，无法判定」，判定改判未知（与 429 同型）。
+        """
         from delist_checker import check_url_delisted
         from proxy_pool import ProxyPool
 
@@ -303,8 +311,8 @@ class TestCheckUrlDelistedWithProxy:
                 "https://play.google.com/store/apps/details?id=test.a", pool
             )
 
-        assert is_delisted is False
-        assert error == "代理池为空"
+        assert is_delisted is None
+        assert "代理池为空" in error
         mock_get.assert_not_called()
 
 
@@ -366,15 +374,43 @@ class TestIndeterminateStatus:
         assert is_delisted is False
         assert error == ""
 
-    def test_timeout_still_false_not_none(self):
-        """超时仍返回 False（既有不变量：代理/网络失败绝不判掉包，也不改判未知）。"""
+    def test_timeout_is_none_not_false(self):
+        """超时改判未知（2026-09-24 裁定：与 429 同型，拿不到判定不得覆盖既有记录）。
+
+        本用例的前身 test_timeout_still_false_not_none 钉的是「不让未知态扩大化」，
+        该理由已被裁定作废。「失败绝不判掉包」不变量不受影响 —— None 既非 True 也非 False。
+        """
         from delist_checker import check_url_delisted
 
         with patch("delist_checker.requests.get", side_effect=requests.Timeout("timed out")):
             is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
 
-        assert is_delisted is False
+        assert is_delisted is None
         assert error != ""
+
+    def test_malformed_url_returns_none(self):
+        """畸形 url（漏写 scheme）→ 判定未知，而非「正常」。
+
+        requests.MissingSchema 不是 ConnectionError 子类，原兜底 except 会吞成 False，
+        经消费方写库后抹掉既有掉包记录。实测确认过的事实。
+        """
+        from delist_checker import check_url_delisted
+
+        is_delisted, error = check_url_delisted("play.google.com/store/apps/details?id=com.x.y")
+
+        assert is_delisted is None
+        assert error != ""
+
+    def test_200_normal_still_false_after_unknown_widening(self):
+        """边界：200 且无关键词仍是 False —— 「未知」不得吸收「判为正常」。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=200, text="<html>welcome to the app page</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is False
+        assert error == ""
 
     def test_proxy_retries_to_next_after_429(self):
         """第一个代理 429，第二个代理 200 → 最终判正常，且请求了两次。"""

@@ -81,28 +81,29 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool | None, str]:
     Returns:
         (is_delisted, error)：
           True  → 已掉包
-          False → 正常（含网络/代理失败：既有不变量「失败绝不判掉包」）
-          None  → 判定未知（限流或服务端异常且重试耗尽），调用方应保留上一次判定结果
+          False → 正常（拿到了判定，且判为在架）
+          None  → 判定未知（限流/服务端异常/超时/连接失败/解析失败/空 url），
+                  调用方应保留上一次判定结果，不得覆盖
     """
     if not url or not url.strip():
         return None, "URL 为空，无法判定"
 
-    # 无代理池：直连，行为与历史版本一致（新增：限流/服务端异常返回「未知」）
+    # 无代理池：直连；拿不到判定（限流/服务端异常/超时/连接失败/解析失败）一律返回「未知」
     if proxy_pool is None:
         try:
             return _request_and_judge(url, None)
         except DelistIndeterminate as e:
             return None, f"{e} 限流或服务端异常，判定未知"
         except requests.Timeout:
-            return False, "请求超时"
+            return None, "请求超时，无法判定"
         except requests.ConnectionError:
-            return False, "网络连接失败"
+            return None, "网络连接失败，无法判定"
         except Exception as e:
-            return False, str(e)
+            return None, f"{e}，无法判定"
 
     # 有代理池：失败换下一个代理重试，绝不因代理失败误判为掉包
     if proxy_pool.count == 0:
-        return False, "代理池为空"
+        return None, "代理池为空，无法判定"
 
     tried = set()
     last_error = ""
@@ -126,7 +127,7 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool | None, str]:
     # 出现过限流/服务端异常 → 整体判为未知（保守：既不算掉包也不算正常）
     if last_indeterminate:
         return None, f"代理响应异常（限流/服务端）: {last_indeterminate}"
-    return False, f"代理全部失败: {last_error}"
+    return None, f"代理全部失败: {last_error}，无法判定"
 
 
 def check_product_packages(product_id: int, packages: list[dict], proxy_pool=None) -> list[dict]:
@@ -139,7 +140,8 @@ def check_product_packages(product_id: int, packages: list[dict], proxy_pool=Non
 
     Returns:
         检测结果列表，每个元素包含 package_id, is_delisted, error。
-        is_delisted 为 True/False/None（None 表示判定未知）。函数只做透传。
+        is_delisted 为 True/False/None（None 表示判定未知）。
+        空 url 由本函数直接判为 None（无法判定），其余原样透传 check_url_delisted 的结果。
     """
     results = []
     for pkg in packages:
