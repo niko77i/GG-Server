@@ -20,6 +20,48 @@ def _get_role(db, uid):
     return user['role'] if user else 'user'
 
 
+def _huguan_push(uid, account_ids):
+    """触发户管看板的 TT 单行回写。未配置看板时静默跳过。"""
+    try:
+        import huguan_dashboard as hd
+        hd.push_rows(uid, "tt", account_ids)
+    except Exception as e:
+        import logging
+        logging.getLogger("gg-server").warning("户管看板 TT 回写触发失败: %s", e)
+
+
+def _huguan_owner_channel(uid, account_id, new_owner_id):
+    """TT 侧户管改归属 → 写「换绑情况」列（规格 §7.2 规则 3①）。"""
+    try:
+        import huguan_dashboard as hd
+        db = database.get_db()
+        try:
+            conf = hd.get_platform_config(db, uid, "tt")
+            if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+                return
+            r = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username, '') AS n "
+                           "FROM users WHERE id=?", (new_owner_id,)).fetchone()
+            name = (r["n"] if r else "").strip()
+        finally:
+            db.close()
+        if not name:
+            return
+
+        rows = hd.owner_channel_cells([{"account_id": account_id}], "tt", name)
+
+        def _do():
+            from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
+            import google_sheets_service as gs
+            svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+            gs.update_rows_by_account_id(svc, conf["spreadsheet_id"], conf["sheet_name"], rows)
+
+        from main import _sync_sheets_background
+        _sync_sheets_background(_do, lambda s, e: None)
+    except Exception as e:
+        import logging
+        logging.getLogger("gg-server").warning("TT 换绑情况列回写触发失败: %s", e)
+
+
 def _get_tt_sheet_id(db):
     row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_id'").fetchone()
     return (row["value"] if row and row["value"] else "")
@@ -130,6 +172,8 @@ def create_account():
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     _record_bc_change(db, new_id, bc_id, uid, "create")
     db.commit()
+    # 户管看板单行回写（规格 §6.2）。只写可写列，绝不碰「换绑情况」列。
+    _huguan_push(uid, [advertiser_id])
     return ok({"id": new_id})
 
 
@@ -349,6 +393,8 @@ def update_account(aid):
 
     db.execute("UPDATE tt_accounts SET updated_at=datetime('now','localtime') WHERE id=?", (aid,))
     db.commit()
+    # 户管看板单行回写（规格 §6.2）。只写可写列，绝不碰「换绑情况」列。
+    _huguan_push(uid, [row["advertiser_id"]])
     return ok()
 
 
@@ -413,6 +459,8 @@ def batch_create_accounts():
                 skipped.append({"advertiser_id": aid, "reason": "已存在"})
             else:
                 skipped.append({"advertiser_id": aid, "reason": str(e)})
+    # 户管看板单行回写（规格 §6.2）。created 里装的就是 advertiser_id。
+    _huguan_push(uid, created)
     return ok({"created": len(created), "created_ids": created, "skipped": skipped})
 
 
@@ -434,6 +482,7 @@ def batch_update_accounts():
     if field == "bc_id" and value in (None, 0, "0", ""):
         value = None
     role = _get_role(db, uid)
+    affected_advertiser_ids = []
     for aid in ids:
         # owner 权限校验
         if role not in CROSS_USER_ROLES:
@@ -459,7 +508,10 @@ def batch_update_accounts():
                                          (data.get("recycle_reason") or "").strip())
         db.execute(f"UPDATE tt_accounts SET {field}=?, updated_at=datetime('now','localtime') WHERE id=?",
                    (value, aid))
+        affected_advertiser_ids.append(r["advertiser_id"])
     db.commit()
+    # 户管看板单行回写（规格 §6.2）：只刷真的落库了的那些行（被权限跳过的 continue 不计）。
+    _huguan_push(uid, affected_advertiser_ids)
     return ok({"updated": len(ids)})
 
 
@@ -470,16 +522,36 @@ def reassign_account(aid):
     db = get_db()
     uid = get_uid()
     data = parse_body()
+    # 目标归属：跨用户角色（developer/admin/户管）可用 owner_id 转给指定用户，
+    # 其余角色恒为调用者自己（默认路径与改动前逐字节一致）。
+    # `or ""` 不能省：owner_id 给 0 时 `"0".isdigit()` 为真，会被当成合法目标。
+    target_owner = uid
+    if _get_role(db, uid) in CROSS_USER_ROLES:
+        raw_owner = (data.get("owner_id") or "")
+        raw_owner_str = str(raw_owner).strip()
+        if raw_owner_str:
+            if not (raw_owner_str.isascii() and raw_owner_str.isdigit()):
+                return err("owner_id 不合法", 400)
+            target_owner = int(raw_owner_str)
+            if target_owner > 2**63 - 1:
+                return err("owner_id 不合法", 400)
     existing = db.execute(
         "SELECT a.*, u.username, u.display_name FROM tt_accounts a "
         "LEFT JOIN users u ON a.owner_id = u.id WHERE a.id = ?", (aid,)
     ).fetchone()
     if not existing:
         return err("账户不存在", 404)
-    if int(existing["owner_id"] or 0) == uid:
-        return err("该账户已属于当前用户，无需转移", 409)
+    # 目标用户存在性校验是**必需**的：tt_accounts.owner_id 是 INTEGER REFERENCES
+    # users(id)，连接又开了 PRAGMA foreign_keys=ON ⇒ 指向不存在的用户会在
+    # UPDATE 处抛 IntegrityError 变成 500。这是本任务新引入的输入路径。
+    if target_owner != uid:
+        if not db.execute("SELECT 1 FROM users WHERE id=?", (target_owner,)).fetchone():
+            return err("目标用户不存在", 400)
+    if int(existing["owner_id"] or 0) == target_owner:
+        return err("该账户已属于当前用户，无需转移" if target_owner == uid
+                   else "该账户已属于目标用户，无需转移", 409)
     db.execute("UPDATE tt_accounts SET owner_id=?, updated_at=datetime('now','localtime') WHERE id=?",
-               (uid, aid))
+               (target_owner, aid))
     for f in ["name", "country", "timezone", "agent_id", "status_id", "acquired_date", "consumption"]:
         if f in data and data[f] is not None:
             db.execute(f"UPDATE tt_accounts SET {f}=? WHERE id=?",
@@ -493,7 +565,14 @@ def reassign_account(aid):
             "VALUES(?,?,?,?,?)", (aid, existing["bc_id"], bc_id, uid, "reassign"))
         db.execute("UPDATE tt_accounts SET bc_id=? WHERE id=?", (bc_id, aid))
     db.commit()
-    return ok({"message": f"账户「{existing['name'] or existing['advertiser_id']}」已转移至当前用户"})
+    # 户管看板回写（规格 §6.2 / §7.2 规则 3①）：先刷该行的可写列，再写「换绑情况」列。
+    _huguan_push(uid, [existing["advertiser_id"]])
+    _huguan_owner_channel(uid, existing["advertiser_id"], target_owner)
+    if target_owner == uid:
+        return ok({"message": f"账户「{existing['name'] or existing['advertiser_id']}」已转移至当前用户"})
+    t = db.execute("SELECT display_name, username FROM users WHERE id=?", (target_owner,)).fetchone()
+    label = (t["display_name"] or t["username"]) if t else str(target_owner)
+    return ok({"message": f"账户「{existing['name'] or existing['advertiser_id']}」已转移至 {label}"})
 
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>', methods=['DELETE'])
@@ -1144,6 +1223,17 @@ def sync_from_sheet():
             db.execute("UPDATE tt_accounts SET status_id=?, status_changed_date=datetime('now','localtime'), death_date=? WHERE advertiser_id=? AND owner_id=?",
                        (status_id, death_date, adv_id, uid))
     db.commit()
+    # 户管看板单行回写（规格 §6.2）：本次同步**真的落库**的账户。
+    # created / updated 里装的是 {"advertiser_id": ...}；消耗与状态两处冲突处置
+    # 走 resolutions / status_resolutions 的键，且都可能与 updated 重叠，故去重。
+    touched_ids = [c["advertiser_id"] for c in created] + [u["advertiser_id"] for u in updated]
+    for adv in resolutions:
+        if adv in valid_ids:
+            touched_ids.append(adv)
+    for adv in status_resolutions:
+        if adv in valid_ids:
+            touched_ids.append(adv)
+    _huguan_push(uid, list(dict.fromkeys(touched_ids)))
     return ok({"created": len(created), "updated": len(updated), "conflicts": conflicts})
 
 

@@ -1978,3 +1978,157 @@ class TestPushEndpoint:
         assert client.post("/api/huguan/dashboard/push", headers=hg,
                            json=[1, 2]).status_code == 400
         assert captured == []
+
+# ---------- Task 9: TT 触发点 + TT reassign 跨用户 ----------
+
+def _seed_tt(db, advertiser_id, owner_id, **over):
+    cols = {"advertiser_id": advertiser_id, "name": advertiser_id,
+            "owner_id": owner_id, "country": "", "timezone": "",
+            "consumption": "", "remark": "", "death_date": "", "deleted_at": None}
+    cols.update(over)
+    keys = ", ".join(cols)
+    marks = ", ".join("?" for _ in cols)
+    db.execute(f"INSERT INTO tt_accounts({keys}) VALUES({marks})", tuple(cols.values()))
+    db.commit()
+    return db.execute("SELECT id FROM tt_accounts WHERE advertiser_id=?",
+                      (advertiser_id,)).fetchone()["id"]
+
+
+class TestTtReassignCrossUser:
+    def test_huguan_can_transfer_to_another_user(self, client):
+        """TT 原本只能认领给自己；户管要能转给别人（规格 §7.5）。"""
+        hg, hid = _create_user(client, "_tt_rg_hg", role="huguan", platform="tt")
+        db = database.get_db()
+        target = _seed(db, "_tt_rg_target", "王五")
+        aid = _seed_tt(db, "TTR-1", hid)
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": target})
+        assert resp.status_code == 200
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()["owner_id"] == target
+        db.close()
+
+    def test_plain_user_still_only_claims_for_self(self, client):
+        """回归：非跨用户角色即使传 owner_id 也只能认领给自己（默认路径逐字节不变）。"""
+        u, uid = _create_user(client, "_tt_rg_user", role="user", platform="tt")
+        db = database.get_db()
+        other = _seed(db, "_tt_rg_other", "赵六")
+        aid = _seed_tt(db, "TTR-2", other)
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=u,
+                          json={"owner_id": uid})
+        assert resp.status_code == 200
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()["owner_id"] == uid
+        db.close()
+
+    def test_developer_can_transfer(self, client):
+        dev, _ = _create_user(client, "_tt_rg_dev", role="developer", platform="tt")
+        db = database.get_db()
+        target = _seed(db, "_tt_rg_t2", "钱七")
+        aid = _seed_tt(db, "TTR-3", target)
+        other = _seed(db, "_tt_rg_t3", "孙八")
+        db.close()
+        assert client.put(f"/api/tt/accounts/{aid}/reassign", headers=dev,
+                          json={"owner_id": other}).status_code == 200
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()["owner_id"] == other
+        db.close()
+
+    def test_zero_owner_id_falls_back_to_self(self, client):
+        """owner_id 给 0 不得被当成合法目标。
+
+        `"0".isdigit()` 为真，所以必须先 `or ""` 吃掉 —— 否则归属会被设成
+        不存在的用户 0。空 body（`{}`）走的是同一条 `or ""` 路径，故认领流程不受影响。
+        """
+        hg, hid = _create_user(client, "_tt_rg_zero", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-4", _seed(db, "_tt_rg_zother", "周九"))
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": 0})
+        assert resp.status_code == 200
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
+                          (aid,)).fetchone()["owner_id"] == hid
+        db.close()
+
+    def test_unknown_target_user_is_400_not_500(self, client):
+        """目标用户不存在必须在写库前挡成 400 —— 否则 FK IntegrityError → 500。
+
+        `tt_accounts.owner_id REFERENCES users(id)` 且连接开了 `PRAGMA foreign_keys=ON`。
+        """
+        hg, _ = _create_user(client, "_tt_rg_ghost", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-5", _seed(db, "_tt_rg_gother", "吴十"))
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": 99999999})
+        assert resp.status_code == 400
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
+                          (aid,)).fetchone()["owner_id"] != 99999999
+        db.close()
+
+    def test_non_ascii_digit_owner_id_is_400(self, client):
+        """非 ASCII 数字一律拒 —— `"١٢٣".isdigit()` 为真，不挡会静默变成 123。"""
+        hg, _ = _create_user(client, "_tt_rg_bad", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-6", _seed(db, "_tt_rg_badother", "郑一"))
+        db.close()
+        for bad in ["abc", "١٢٣", "1.5"]:
+            assert client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                              json={"owner_id": bad}).status_code == 400, bad
+
+    def test_oversized_owner_id_is_400(self, client):
+        """超 int64 的值在 sqlite3 参数绑定处抛 OverflowError → 500，须提前挡掉。"""
+        hg, _ = _create_user(client, "_tt_rg_big", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-7", _seed(db, "_tt_rg_bigother", "冯二"))
+        db.close()
+        assert client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": "9" * 25}).status_code == 400
+
+
+class TestTTTriggerPoints:
+    def test_tt_create_triggers_writeback(self, client, monkeypatch):
+        """新建 → 单行回写（规格 §6.2 触发点 1），且绝不写「换绑情况」列（规则 2）。
+
+        与简报的两处偏差（简报该用例照抄不可执行，理由已实测）：
+        1. TT 新建端点的实际路径是 `/api/tt/accounts/create`，仓库里**没有**
+           `POST /api/tt/accounts` 这条规则（`app.url_map` 实测），照抄会得到 404，
+           断言的是「路由不存在」而不是回写，故必须用真实路径。
+        2. `create_account` 对 `advertiser_id` 有 `isdigit()` 校验（"广告账户 ID
+           必须是纯数字"），非数字 ID 直接 400，故夹具改用 10 位纯数字。
+        """
+        hg, uid = _create_user(client, "_tt_trig_c", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/tt/accounts/create", headers=hg,
+                           json={"advertiser_id": "9876543210", "name": "TTTRIG-1"})
+        assert resp.status_code in (200, 201)
+        all_cells = [r["cells"] for c in captured for r in c["rows"]]
+        assert any(c.get("C") == "'9876543210" for c in all_cells)
+        assert all("L" not in c for c in all_cells)
+
+    def test_tt_soft_delete_does_not_trigger(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_tt_trig_d", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        aid = _seed_tt(db, "TTTRIG-D", uid)
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        assert client.delete(f"/api/tt/accounts/{aid}", headers=hg).status_code == 200
+        assert captured == []
