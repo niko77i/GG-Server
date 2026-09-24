@@ -465,3 +465,36 @@ class TestIndeterminateStatus:
 
         assert results[0]["is_delisted"] is None
         assert "429" in results[0]["error"]
+
+    def test_501_is_indeterminate_not_normal(self):
+        """501 也是 5xx，同样拿不到判定 —— 原枚举集合漏了它，会判成「正常」抹掉掉包记录。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=501, text="<html>not implemented</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is None
+        assert error != ""
+
+    def test_505_is_indeterminate_not_normal(self):
+        """505 HTTP Version Not Supported 同理。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=505, text="<html>http version not supported</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is None
+        assert error != ""
+
+    def test_499_is_not_indeterminate(self):
+        """边界：4xx 中只有 429 算未知，499 不属于本族（沿用既有口径，不得顺手拓宽）。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=499, text="<html>client closed request</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is False
+        assert error == ""

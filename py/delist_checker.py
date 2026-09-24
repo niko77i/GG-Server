@@ -19,18 +19,23 @@ _DELISTED_PATTERNS = [
     "We're sorry, the requested URL was not found",
 ]
 
-# 可重试的异常状态码：既不是 404（掉包），也不是正常页面（限流 / 服务端异常），
+# 判定未知的响应状态码：429（限流）与**任意** 5xx（500-599，服务端异常）。
 # 命中时本次无法判定，交由调用方换代理重试。
 # 实测依据：App Store 对掉包链接返回 404，被限流时返回 429，两者响应体同为
 # 2383 字节，只能靠状态码区分；旧逻辑只认 404，会把 429 当成「正常」，
 # 进而用 INSERT OR REPLACE 抹掉上一轮正确的掉包记录。
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+# 原实现是枚举集合 {429, 500, 502, 503, 504}，501/505 等冷门 5xx 会漏成「正常」，
+# 后果同型 —— 故改为按区间判定。
+def _is_indeterminate_status(status_code: int) -> bool:
+    """429 或任意 5xx 均视为「拿不到判定」。"""
+    return status_code == 429 or 500 <= status_code < 600
+
 
 _TIMEOUT = 15  # 请求超时秒数
 
 
 class DelistIndeterminate(Exception):
-    """响应状态既非 404 也非正常页面（429/5xx），本次判定结果未知。
+    """响应状态为 429 或任意 5xx，本次判定结果未知。
 
     调用方应保留上一轮判定结果，不得当作「正常」写入。
     """
@@ -44,7 +49,7 @@ def _request_and_judge(url: str, proxies: dict | None) -> tuple[bool, str]:
         proxies: requests 的 proxies 参数，None 表示直连
 
     Raises:
-        DelistIndeterminate: 状态码属于 _RETRYABLE_STATUS，本次无法判定
+        DelistIndeterminate: 状态码为 429 或任意 5xx（500-599），本次无法判定
     """
     resp = requests.get(
         url,
@@ -59,7 +64,7 @@ def _request_and_judge(url: str, proxies: dict | None) -> tuple[bool, str]:
         return True, ""
 
     # 2. 限流 / 服务端异常：结果未知，抛出让调用方换代理重试
-    if resp.status_code in _RETRYABLE_STATUS:
+    if _is_indeterminate_status(resp.status_code):
         raise DelistIndeterminate(f"HTTP {resp.status_code}")
 
     # 3. 检查页面内容关键词
