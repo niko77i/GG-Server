@@ -10,6 +10,7 @@
 就等于用一套「攻击者根本不用走那条门」的断言冒充安全 —— 这是本文件存在的理由。
 """
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1369,6 +1370,188 @@ class TestFormerNameBelongsToLastHolder:
         )
 
 
+class TestReleaseMustCoverTheDirectoryIncarnation:
+    """判据加**时间维度**（2026-09-25，设计文档 §0.13，用户裁定「换判据：加时间维度」）。
+
+    一行释放记录只在**它还说得出话来**的时候参与判据 —— 条件是「该行时刻 > 该名字
+    **当前**目录化身的创建时刻」（`auth._release_row_covers_dir`）。这不是单纯收紧，
+    而是**换判据**：
+
+      · 收紧：曾用名豁免要求「目录建于我这段持有**期间**」—— 过期的行（我离开之后
+        别人才建出这个目录）不再给我认领权，而那条路正是读到别人产物的越权路径；
+      · 放宽：过期的行连 `others` 一侧也一并剔除 ⇒ 目录被清掉重建后，这个名字对
+        新化身的覆盖者重新开放（§0.12 收口 1 的代价回收：上线前已改名者的认领路）。
+
+    两侧都必须成对钉住，否则「一律过滤」或「一律不过滤」都能让其中一条绿。
+    形态一律用**显式时刻**构造（`datetime('now', ?)`）而不靠时序巧合 —— 靠 sleep 的
+    用例在快机器上会塌成假绿。
+    """
+
+    NAME = "_cov_r8"
+
+    @pytest.fixture
+    def conn(self, client):
+        """client 只为触发 app 夹具（把 database._db_path 指向临时库）。"""
+        c = database.get_db()
+        yield c
+        c.close()
+
+    @pytest.fixture
+    def cov_dir(self):
+        """真实爬取根下一个**目录名级**的临时目录（用完删掉）。"""
+        path = os.path.join(_SCRAPE_DEFAULT_DIR, self.NAME)
+        shutil.rmtree(path, ignore_errors=True)
+        os.makedirs(path, exist_ok=True)
+        yield path
+        shutil.rmtree(path, ignore_errors=True)
+
+    @staticmethod
+    def _row(conn, uid, dn, offset=None):
+        """插一行释放记录。`offset=None` ⇒ 当前时刻且带**亚秒**（生产写入方同款）；
+        否则用 SQLite 时间修饰符（如 `-60 seconds`）把行时刻推到过去。"""
+        if offset is None:
+            conn.execute("INSERT INTO scrape_dn_history(user_id, dn, created_at) "
+                         "VALUES(?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))", (uid, dn))
+        else:
+            conn.execute("INSERT INTO scrape_dn_history(user_id, dn, created_at) "
+                         "VALUES(?, ?, datetime('now', ?))", (uid, dn, offset))
+        conn.commit()
+
+    def test_covering_release_row_can_reclaim(self, client, conn, cov_dir):
+        """放行腿：目录先建、我的释放行**在其后** ⇒ 目录建于我持有期间 ⇒ 可认领。"""
+        _h, uid = _create_user(client, "_cov_r8_a")
+        # 这一腿刻意走**生产写入方 + 真实时刻**（不推偏移）：它证明的是「现实的
+        # 『建目录 → 改名离开 → 改名回来』能过判据」。睡 50ms 只为避开毫秒截断的
+        # 同一毫秒（§0.13 残余风险 4），不承载判据本身。
+        time.sleep(0.05)
+        auth.note_scrape_dn_release(conn, uid, self.NAME)
+        conn.commit()
+        assert auth.directory_name_error(uid, None, self.NAME) is None, (
+            "目录建于我持有期间，却认领不到 —— 时间维度把放行方向一起封死了"
+        )
+
+    def test_stale_release_row_cannot_reclaim(self, client, conn, cov_dir):
+        """承重腿（本次修的正是这一档）：释放行**早于**目录创建 ⇒ 目录是别人建的 ⇒ 拒。
+
+        形态 = §0.12 的攻击形态：曾用过这个名字的人离开后，别人用该名建出目录并产出；
+        他凭自己那行**过期**的释放记录认领 ⇒ 读到别人的产物。少了这条，把时间过滤
+        整段删掉也不会有任何用例转红（`_release_row_covers_dir` 恒真时本用例必红）。
+        """
+        _h, uid = _create_user(client, "_cov_r8_b")
+        self._row(conn, uid, self.NAME, "-60 seconds")
+        assert auth.directory_name_error(uid, None, self.NAME) == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        ), "释放行早于目录创建，却仍能认领 —— 目录里的产物可能是别人后来放进去的"
+
+    def test_stale_row_of_another_user_does_not_block(self, client, conn, cov_dir):
+        """对照腿（另一侧）：**别人**的过期行不得再挡住我。
+
+        这才是「换判据」的放宽面 —— 过期的行从 `others` 一侧也剔除。形态是「行序号更大
+        但时刻更早」：真实数据里只有**迁移搬来的行**会这样（`created_at` 是迁移那一刻，
+        而目录是迁移**之后**建的），故这条腿同时钉住「迁移行不会把一个名字永久冻住」。
+        少了它，把过滤只写在 `mine` 一侧（`others` 不过滤）照样能让上面两条绿。
+        """
+        _h_me, uid_me = _create_user(client, "_cov_r8_c")
+        _h_other, uid_other = _create_user(client, "_cov_r8_d")
+        self._row(conn, uid_me, self.NAME, "+60 seconds")     # 覆盖（序号小）
+        self._row(conn, uid_other, self.NAME, "-60 seconds")  # 过期（序号**大**）
+        assert self.NAME in auth._dn_released_keys(conn, uid_me), (
+            "别人那行**过期**的释放记录仍把我的名字挡住 —— 过期行不该再参与比较"
+        )
+
+    def test_rows_are_not_filtered_when_no_directory_exists(self, client, conn):
+        """承重（惰性分支）：磁盘上没有这个目录时，释放行**不**被时间过滤掉。
+
+        为什么保留旧语义：判据 3 只在目录**存在**时才用 `hist_keys`，故这一档对判据 3
+        是惰性的；而 `_dn_released_keys` 同时被当作「释放序查询」用（迁移那条用例就靠它）。
+        若把「没有目录」也判成不覆盖，迁移行与存量行会集体消失，认领判据静默退化成
+        「谁都没有曾用名」。
+        """
+        _h, uid = _create_user(client, "_cov_r8_e")
+        self._row(conn, uid, self.NAME, "-60 seconds")
+        assert self.NAME in auth._dn_released_keys(conn, uid), (
+            "目录不存在时释放行也被过滤了 —— 释放序查询在无目录形态下整体失效"
+        )
+
+    def test_release_row_is_written_with_subsecond_precision(self, client, conn):
+        """承重：生产写入方 `auth.note_scrape_dn_release` 必须写**亚秒**。
+
+        为什么：判据是「行时刻 > 目录创建时刻」的**严格**比较，而表的默认值
+        `datetime('now')` 只到秒；秒级截断会把「目录建完、同一秒内就改名离开」判成 tie，
+        tie 取拒 ⇒ **本人**取不回自己的产物。断言**格式**而不是「与 int() 不等」：
+        后者有 1/1000 的偶发绿（毫秒恰好为 0）。
+        """
+        _h, uid = _create_user(client, "_cov_r8_f")
+        auth.note_scrape_dn_release(conn, uid, "_cov_r8_row")
+        conn.commit()
+        ts = conn.execute("SELECT created_at FROM scrape_dn_history "
+                          "WHERE user_id = ? AND dn = ?",
+                          (uid, "_cov_r8_row")).fetchone()[0]
+        assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$", ts), (
+            f"释放行的时刻没有亚秒（{ts!r}）—— 同秒内的合法认领会被判成 tie 而误拒"
+        )
+        assert auth._parse_utc_ts(ts) is not None, f"时刻解析不了：{ts!r}"
+
+    def test_second_truncated_row_at_the_same_second_is_rejected(self, client, conn,
+                                                                cov_dir):
+        """承重（存量秒级行 + tie 方向）：秒级行读不出「晚于目录」⇒ 拒。
+
+        为什么必须拒：存量行全是秒级的（`datetime('now')`），截断到整秒后**无法分辨**
+        「先建目录还是先释放」，而放行方向是「读别人的产物」⇒ fail-closed。
+        构造刻意做成**确定性**的：行时刻直接取目录 ctime 的 `int()`（即与目录落在同一秒
+        的秒级时刻）⇒ `ts <= ctime` 恒成立，不靠机器快慢，也不会退化成假绿。
+        """
+        _h, uid = _create_user(client, "_cov_r8_g")
+        ctime = auth._dir_ctime(self.NAME)
+        assert ctime is not None, "夹具前提：目录应当存在"
+        conn.execute("INSERT INTO scrape_dn_history(user_id, dn, created_at) "
+                     "VALUES(?, ?, datetime(?, 'unixepoch'))",
+                     (uid, self.NAME, int(ctime)))
+        conn.commit()
+
+        assert auth.directory_name_error(uid, None, self.NAME) == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        ), "秒级行与目录同秒却算成了「覆盖」—— tie 方向反了（放行侧是读到别人的产物）"
+
+        # 对照腿（纯函数、不碰时钟）：同一时刻取「不覆盖」，晚 1ms 才取「覆盖」
+        assert auth._release_row_covers_dir(self.NAME, ctime) is False, (
+            "ts == ctime（同一时刻）被判成了覆盖 —— 放行方向是读别人的产物，必须取严"
+        )
+        assert auth._release_row_covers_dir(self.NAME, ctime + 0.001) is True, (
+            "晚 1ms 的行也被判成不覆盖 —— 时间维度会误拒本人的合法认领"
+        )
+
+    def test_timestamp_parser_treats_the_column_as_utc(self, conn):
+        """承重（纯函数 + **定值**）：`scrape_dn_history.created_at` 必须按 **UTC** 解析。
+
+        为什么不能只靠「陈旧行仍拒」那几条腿：错按本地时区解析（本机 UTC+8）会让每行
+        时刻整体**提前 8 小时** —— 释放行更过期、哨兵更失效，方向恰好与「陈旧行不该
+        参与」同侧，于是那些腿**照样绿**（实测 m31：陈旧腿、秒级 tie 腿都不红）。
+        用两个可手算的定值钉住，才不必依赖「哪种错法恰好被抓到」。
+        """
+        assert auth._parse_utc_ts("1970-01-01 00:00:00") == 0, (
+            "把 UTC 文本按**本地**时区解析了 —— 所有行的时刻会整体偏移一个时区"
+        )
+        assert auth._parse_utc_ts("1970-01-01 00:00:00.000") == 0, (
+            "带毫秒的形态解析不一致 —— 新旧两种写入格式会落在两条时轴上"
+        )
+        assert auth._parse_utc_ts("2026-01-01 00:00:00") == 1767225600, (
+            "定值对不上（2026-01-01T00:00:00Z 的 epoch 是 1767225600）"
+        )
+
+    def test_dirty_row_does_not_cover(self, cov_dir):
+        """承重（纯函数）：时刻**解析不出**的释放行不算覆盖（fail-closed）。
+
+        与哨兵侧同一档相反（那边取「拦」）。少这条，把 `_release_row_covers_dir` 的
+        `ts is None → False` 翻成 `True`（脏行当成「说得出来」）不会有任何用例转红 ——
+        而那一翻就是拿一条读不出时刻的行去认领目录。
+        """
+        assert auth._dir_ctime(self.NAME) is not None, "夹具前提：目录应当存在"
+        assert auth._release_row_covers_dir(self.NAME, None) is False, (
+            "时刻解析不出的释放行被当成了「说得出来」—— 脏行必须落在不覆盖的一侧"
+        )
+
+
 class TestDeletedUserDirectoryIsTombstoned:
     """Important #2（code-review 第 5 轮）：被删用户的爬取目录可被「曾用名含该名」的人认领。
 
@@ -1535,9 +1718,11 @@ class TestSentinelIsAHardGate:
     而不是「一个很大的序号」。
 
     为什么（2026-09-24，code-review 第 6 轮第 1 条，用户裁定「改判据」）：
-    哨兵的两个用途都是「这个名字的归属**事后无法判定** ⇒ 一律拒」——
-    ① 迁移时跨用户先后不可还原的歧义名；② 迁移时磁盘上不属于任何存活用户的目录名
-    （升级**之前**就已删掉的用户留下的，既无 users 行也来不及写墓碑）。
+    哨兵代表的「这个名字的归属**事后无法判定** ⇒ 一律拒」如今只剩**一个**来源 ——
+    迁移时跨用户先后不可还原的歧义名。（原第二个来源「磁盘上不属于任何存活用户的
+    目录名」随扫盘退役，2026-09-25，设计文档 §0.13；哨兵同时改为只对**它当年所判的
+    目录化身**生效，见 `auth._sentinel_row_blocks_dir` —— 本用例的名字在磁盘上没有
+    目录，故哨兵照旧无条件拦。）
     若哨兵只按序号参与比较（`seq > others[k]`），它在迁移那一刻拿到的是当时的最大 id，
     此后任何真实用户再释放一次同名（新 id 更大）就**赢过它** ⇒ 阻断静默失效。
     """

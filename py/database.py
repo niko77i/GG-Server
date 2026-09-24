@@ -1561,8 +1561,15 @@ def _migrate_scrape_dn_history(conn: sqlite3.Connection):
                 sentinel.add(dn_key)
         for uid, dn in pending:
             if os.path.normcase(dn) in sentinel:   # 与 auth._dn_key 同一口径
-                conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)",
-                             (auth._DN_SENTINEL_UID, dn))
+                # ⚠️ 必须带**亚秒**（2026-09-25，code-review 第 7 轮 Important #1）：
+                # 表默认值 `datetime('now')` 只到秒，而哨兵判据是 `ts >= ctime` ——
+                # 同一个截断方向对**释放行**是 fail-closed（`ts > ctime` 更难成立），
+                # 对**哨兵**却成了 **fail-open**：时刻被截小就拦不住它当年所判的那个化身，
+                # 「同一秒内先建目录、后跑迁移」会把这条歧义名悄悄放开。
+                conn.execute(
+                    "INSERT INTO scrape_dn_history(user_id, dn, created_at) "
+                    "VALUES(?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))",
+                    (auth._DN_SENTINEL_UID, dn))
 
         conn.execute("ALTER TABLE users DROP COLUMN prev_scrape_dns")
         conn.execute("INSERT OR REPLACE INTO config(key,value) "
@@ -1573,72 +1580,18 @@ def _migrate_scrape_dn_history(conn: sqlite3.Connection):
         conn.rollback()
 
 
-def _tombstone_orphan_scrape_dirs(conn: sqlite3.Connection):
-    """给「磁盘上不属于任何存活用户」的爬取目录补哨兵墓碑（一次性，独立标记）。
+# ⚠️ 2026-09-25（设计文档 §0.13）：这里原有 `_tombstone_orphan_scrape_dirs` ——
+# 「扫一次盘、给不属于任何存活用户的目录名补哨兵墓碑」。**已退役删除**，理由：
+# 它当年之所以把这一档一刀切封死，是因为认领判据**没有时间维度** —— 「我自己的旧目录」
+# 与「被删用户的目录」在数据上完全同形（§0.12 收口 1 已论证），只能取严。
+# 判据升级为「我的最后释放时刻 > 该目录创建时刻」之后，这一档由判据本身接住：曾用名
+# 持有者的行**不覆盖**建于更早的无主目录 ⇒ 拒；而没有释放行的人本来就越不过判据 3
+# （目录存在、不在 own_keys）。而哨兵留下的是**永久**硬闸，会把「目录被清理后重建、
+# 本人想改回原名」这条路一并封死。
+# 它当年写下的哨兵行**保留在表里**（新判据按「化身」判，见 auth._sentinel_row_blocks_dir）
+# ⇒ 无需任何破坏性清理、无需新迁移步骤。旧一次性标记键 `tombstoned_orphan_scrape_dirs`
+# 保留（历史记录，无代码读取）。
 
-    为什么需要它（2026-09-24，code-review 第 6 轮第 1 条，独立复现后由用户裁定）：
-    墓碑只在**删除发生的当下**由 `admin_delete_user` 写入。**升级之前**就已删掉的用户，
-    既无 users 行（无从取 `main._scrape_dn_for`），也永远不会有墓碑行 —— 他们留在磁盘上
-    的目录名，在认领判据里等同「无人用过」。于是任何曾用名恰好等于该目录名的人，按
-    last-writer-wins 就能认领它、读到**那些已删用户**的产物（正是判据 3 声称要挡的
-    「无主目录」那一档）。
-
-    为什么不能只靠 `_dn_released_keys` 的哨兵硬闸：硬闸解决的是「哨兵被后来者的更大
-    序号顶掉」，而这里的问题是**根本没有哨兵行**。故必须扫一次盘补上。
-
-    为什么必须**一次性**：之后再无从分辨「无主的目录」与「当前用户还没爬过的目录」——
-    未来的删除都会自己写墓碑。故本函数只做一次（独立标记），而不是每次启动都扫。
-
-    ⚠️ 扫描口径必须与认领判据**同一个函数**（`auth._dir_name_of` + `auth._dn_key`）：
-    口径若不一致（例如漏了越界退化、或漏了大小写归一），就会把**自己人的**目录误判成
-    无主、把他的名字永久封掉。这是本函数唯一的危险方向，故宁可直接复用而不另写一份。
-    """
-    done = conn.execute(
-        "SELECT value FROM config WHERE key='tombstoned_orphan_scrape_dirs'").fetchone()
-    if done:
-        return
-
-    try:
-        # 延迟导入（auth 顶层 import database）+ 放进 try：本函数的契约是
-        # 「异常绝不逃出去打死 get_db()」，import 失败也算异常。
-        import auth
-
-        root = auth._scrape_root()
-        # ⚠️ 根**不存在**时绝不能打标记（2026-09-24，code-review 第 6 轮收口第 2 条）：
-        # 升级时若「先起服务、后拷爬取目录」，或全新部署的首次 get_db() 早于目录创建，
-        # 这一次空转就会把**唯一**的一次机会永久用掉（本函数由 config 标记守卫，
-        # 成功即不再扫），此后补上的目录再也补不上哨兵 —— 缺口原样复活。
-        # 不打标记 = 下次连接重试。刻意**不打印**：真·全新部署下根会长期不存在，
-        # 而 _migrate_if_needed 每个请求都跑，一行日志会把输出淹掉。
-        # 根存在却**读不出来**（权限等）走外层 except：打印 + 不打标记 + 重试。
-        if not os.path.isdir(root):
-            return
-
-        live = {auth._dn_key(auth._dir_name_of(r["id"], r["username"], r["display_name"]))
-                for r in conn.execute(
-                    "SELECT id, username, display_name FROM users").fetchall()}
-        entries = os.listdir(root)
-
-        added = 0
-        for name in entries:
-            if name == "ai":
-                continue          # 爬取根下的特殊子目录（main.scrape_packages 同样跳过）
-            if not os.path.isdir(os.path.join(root, name)):
-                continue          # 根下的文件不是爬取目录
-            if auth._dn_key(name) in live:
-                continue          # 仍有主，不是无主目录
-            conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)",
-                         (auth._DN_SENTINEL_UID, name))
-            added += 1
-
-        conn.execute("INSERT OR REPLACE INTO config(key,value) "
-                     "VALUES('tombstoned_orphan_scrape_dirs','1')")
-        conn.commit()
-        if added:
-            print(f"[Migrate] 已为 {added} 个无主爬取目录补哨兵墓碑（其名字不再可被认领）")
-    except Exception as e:
-        print(f"[Migrate] 无主爬取目录扫描失败（不打标记，下次重试）：{e}")
-        conn.rollback()
 
 
 def _migrate_if_needed(conn: sqlite3.Connection):
@@ -1722,8 +1675,10 @@ def _migrate_if_needed(conn: sqlite3.Connection):
     _migrate_options_tables(conn)
     # 5. users.prev_scrape_dns（JSON）→ scrape_dn_history 表，并删掉旧列
     _migrate_scrape_dn_history(conn)
-    # 6. 磁盘上的无主爬取目录 → 补哨兵墓碑（独立标记，见函数 docstring）
-    _tombstone_orphan_scrape_dirs(conn)
+    # 6. （已退役）磁盘上的无主爬取目录 → 补哨兵墓碑。
+    #    2026-09-25（设计文档 §0.13）：认领判据加了时间维度后，这一档由判据本身接住
+    #    （曾用名持有者的释放行不覆盖建于更早的无主目录 ⇒ 拒），扫盘整段删除；它当年写下
+    #    的哨兵行保留（新判据按「化身」判，不误伤）。详见被删函数位置的注释。
     _cleanup_old_option_columns(conn)
 
     conn.commit()

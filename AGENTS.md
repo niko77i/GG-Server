@@ -823,7 +823,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [TT 同步「是否回收」列驱动状态变更](docs/superpowers/specs/2026-09-22-tt-sync-recycle-status-design.md)
 - [TT 掉包通知（独立机器人）](docs/superpowers/specs/2026-09-24-tt-delist-notification-design.md)
 - [全站鉴权加固与既有缺陷收口](docs/superpowers/specs/2026-09-23-security-hardening-design.md)
-- [下载签名按需签发 + scrape 产物归属校验](docs/superpowers/specs/2026-09-24-ondemand-download-signing-design.md)（含 §0.9：code-review 第 3 轮逐条处置；§0.10：曾用目录名认领 + 存量非法名豁免，及第 5 轮审查处置；§0.11：三条裁定落地 —— 换表 + last-writer-wins、墓碑表、并发改名 500→400；§0.12：第 6 轮两条裁定落地 —— 哨兵硬闸 + 无主目录补墓碑、越界退化同步进 `_dir_name_of`）
+- [下载签名按需签发 + scrape 产物归属校验](docs/superpowers/specs/2026-09-24-ondemand-download-signing-design.md)（含 §0.9：code-review 第 3 轮逐条处置；§0.10：曾用目录名认领 + 存量非法名豁免，及第 5 轮审查处置；§0.11：三条裁定落地 —— 换表 + last-writer-wins、墓碑表、并发改名 500→400；§0.12：第 6 轮两条裁定落地 —— 哨兵硬闸 + 无主目录补墓碑、越界退化同步进 `_dir_name_of`；§0.13：换判据加时间维度 —— 释放行须晚于目录创建时刻，扫盘退役、哨兵改按**化身**生效）
 - [TT 支持苹果（App Store）包链接 + 掉包判定加固](docs/superpowers/specs/2026-09-24-tt-appstore-package-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
@@ -850,7 +850,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 | `sales_persons` | 商务字典 | 共享 |
 | `regions` | 地区字典 | 共享 |
 | `scrape_cache` | 爬取缓存 | 共享 |
-| `scrape_dn_history` | 爬取目录名历史 + **墓碑** + **哨兵硬闸**（曾用名认领判据，LWW）；**无外键、刻意不进删用户清理** | 按名字判归属 |
+| `scrape_dn_history` | 爬取目录名历史 + **墓碑** + **哨兵硬闸**（曾用名认领判据：LWW **+ 时间维度**，释放行须晚于目录 `ctime`）；**无外键、刻意不进删用户清理** | 按名字判归属 |
 | `import_history` | 导入历史 | user_id 隔离 |
 | `video_history` | 视频生成历史 | user_id 隔离 |
 | `video_tasks` | 视频任务追踪（DB 持久化） | 共享 |
@@ -913,23 +913,30 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 > `py/tests/test_scrape_ownership.py::TestDeletedUserDirectoryIsTombstoned`。
 >
 > ⚠️ **`user_id = auth._DN_SENTINEL_UID`（= 0）的行是「硬闸」，不是「一个很大的序号」。**
-> 该语义下的名字**无条件**不可被认领（`auth._dn_released_keys` 用独立 `blocked` 集合剔除，
-> 不参与序号比较）。两个写入点：① 迁移时**跨用户先后无法还原**的歧义名
-> （`database._migrate_scrape_dn_history`）；② 迁移时**磁盘上不属于任何存活用户**的目录名
-> （`database._tombstone_orphan_scrape_dirs`，一次性、独立标记
-> `tombstoned_orphan_scrape_dirs`，作为 `_migrate_if_needed` 第 6 步）。
-> 把哨兵改成「参与序号比较」会被后来者更大的 id 顶掉、阻断静默失效（变异 m17 恰好 1 红）。
-> 扫盘的判据**必须**与认领判据复用同一对函数（`auth._dir_name_of` + `auth._dn_key`）——
-> 口径不一致会把**自己人**的目录误判成无主、永久封掉他的名字（变异 m21 恰好 1 红）。
-> 回归测试见 `py/tests/test_scrape_dn_history_migration.py::TestOrphanScrapeDirsAreTombstoned`
+> 该语义下的名字**无条件**不可被认领（**在该哨兵所判的那个化身仍在时** —— 见下「按化身生效」，
+> 两句话合起来才是完整口径；`auth._dn_released_keys` 用独立 `blocked` 集合剔除，
+> 不参与序号比较）。把哨兵改成「参与序号比较」会被后来者更大的 id 顶掉、阻断静默失效
+> （变异 m17 恰好 1 红）。**写入点只剩一个**：迁移时**跨用户先后无法还原**的歧义名
+> （`database._migrate_scrape_dn_history`）—— 第二个写入点（扫盘补墓碑）已随「时间维度」
+> 判据退役，见 §0.13。
+> **哨兵按「化身」生效**：只拦它写下的那一刻就已存在的那个目录（`ts >= ctime`），
+> 目录在其后**重建**则旧哨兵失效（否则本人的认领路会被永久封死）。tie 取拦的一侧。
+> 回归测试见 `py/tests/test_scrape_dn_history_migration.py::TestScanRetirementAndSentinelIncarnations`
 > 与 `py/tests/test_scrape_ownership.py::TestSentinelIsAHardGate`。
 >
-> ⚠️ **别把「已有释放行的名字排除出扫盘」当成修 bug**（code-review 第 6 轮收口 1 曾在
-> 这个方向上给了修法，已被否）。攻击者要越过判据 3 占用某名字，前提**正是**他有一行同名
-> 释放记录（`own_keys` 只有自己的当前目录名 + username 派生名，越不过去）⇒ 按该方向修会
-> **恰好放过每一条可被利用的名字**、保护退化成空操作。代价是「上线前已改名者的旧目录
-> 认领路」被一并封掉（实测 live **0 人**受影响，见 `docs/.../2026-09-24-ondemand-download-signing-design.md` §0.12 收口 1）。
-> 该代价已写进 `test_orphan_dir_gets_sentinel_and_cannot_be_claimed` 的 docstring。
+> ⚠️ **（已作废）**「别把『已有释放行的名字排除出扫盘』当成修 bug」这条警示随扫盘退役
+> 一并失效，保留在此仅为记录来路：那时代价是「上线前已改名者的旧目录认领路」被封
+> （§0.12 收口 1）。§0.13 换判据后该路已恢复，扫盘整段删除。
+>
+> ⚠️ **判据现在带时间维度，改它之前先读 §0.13。** 释放行只有在 `created_at > 目录 ctime`
+> 时才参与比较（自己与**他人**两侧一起过滤）；拿不到化身（目录不存在 / 越界 / stat 失败）
+> 或时刻解析不出时，释放行**不过滤**、哨兵**照拦**（fail-closed）。存量秒级行的写入口径
+> 仍是**向下截断** ⇒ 与目录同毫秒会判成「不覆盖」（生产不可达，方向安全）。
+> 时刻列是 **UTC**（`calendar.timegm`），改成本地解析会让整批行偏移一个时区（变异 m31）。
+> **任何写 `scrape_dn_history` 的地方都必须带亚秒**（`strftime('%Y-%m-%d %H:%M:%f','now')`）：
+> 表默认值 `datetime('now')` 只到秒，对**释放行**是 fail-closed（更难覆盖），对**哨兵**
+> 却是 **fail-open**（`ts >= ctime` 更难成立 ⇒ 拦不住它当年所判的化身）。迁移的哨兵写入口
+> 曾漏了这一条，见 §0.13「code-review 第 7 轮」I-1（变异 m35）。
 
 ## 启动方式
 

@@ -19,6 +19,7 @@
 """
 import os
 import shutil
+import time
 
 import pytest
 
@@ -128,6 +129,62 @@ def test_ambiguous_name_from_old_format_is_given_to_nobody(db):
     )
     # 对照：同一次迁移里**无歧义**的名字仍照常判给本人（哨兵没有一刀切全冻住）
     assert {"_mg_x"} <= auth._dn_released_keys(conn, uid_q)
+def test_migration_sentinel_blocks_the_dir_it_judged(db):
+    """承重（**效果级**）+ 钉住**亚秒**：迁移时**已存在**的歧义名目录，必须被迁移写下的哨兵拦住。
+
+    为什么单列一条（2026-09-25，code-review 第 7 轮 Important #1）：迁移那两处 INSERT 原先
+    都吃表的默认值 `datetime('now')`（**秒级、向下截断**）。同一截断方向在**释放行**上是
+    fail-closed（`ts > ctime` 更难成立 ⇒ 更严），在**哨兵**上却是 **fail-open** ——
+    哨兵判据是 `ts >= ctime`，时刻被截小就拦不住它当年所判的那个化身，于是
+    「同一秒内先建目录、后跑迁移」会把这条歧义名悄悄放开。
+
+    构型就是那一档：目录先建好，迁移随后写哨兵（两者几乎必然落在同一秒）。
+    两条断言各钉一头：
+      · `ts > int(ts)` —— 迁移写下的哨兵行**必须带亚秒**（与时钟无关，确定性强）；
+      · `_sentinel_row_blocks_dir(name, ts) is True` —— 效果：它拦得住那个化身。
+        这条只在「目录与迁移同秒」时对秒级截断敏感（跨秒时退化为恒真，**不会假红**）。
+    """
+    conn = db
+    name = "_mg_amb_dir"
+    path = os.path.join(auth._scrape_root(), name)
+    shutil.rmtree(path, ignore_errors=True)
+    uid_p, uid_q, _uid_bad = _pre_migration(conn)
+    # ⚠️ 为什么不能「紧挨着建目录就调迁移」（首版正是这么写，假红）：
+    # SQLite 的 `now` 与文件系统时钟之间有**毫秒级抖动**（自测 300 次采样：-0.2ms ~ +0.8ms，
+    # 跨零），于是「目录 ctime 反而晚于哨兵时刻」是**合法**情形，`ts >= ctime` 并不必然成立。
+    # 改为确定性构造：先把当前这一秒「用掉」，再建目录、睡 50ms —— 于是
+    #   ① 目录与迁移**必在同一秒**（除非 sleep 超 1s，不可能）；
+    #   ② 抖动（≤1ms）远小于 50ms ⇒ 修复后 `ts > ctime` 必成立。
+    # 两个方向都确定，不靠机器快慢。
+    now = time.time()
+    time.sleep(1.0 - (now - int(now)) + 0.02)
+    os.makedirs(path)
+    time.sleep(0.05)
+    try:
+        conn.execute("UPDATE users SET prev_scrape_dns = ? WHERE id = ?",
+                     ('["%s"]' % name, uid_p))
+        conn.execute("UPDATE users SET prev_scrape_dns = ? WHERE id = ?",
+                     ('["%s"]' % name, uid_q))
+        conn.commit()
+
+        database._migrate_scrape_dn_history(conn)
+
+        row = conn.execute(
+            "SELECT created_at FROM scrape_dn_history WHERE user_id = ? AND dn = ?",
+            (auth._DN_SENTINEL_UID, name)).fetchone()
+        assert row is not None, "夹具前提：歧义名应当被补一行哨兵"
+        ts = auth._parse_utc_ts(row[0])
+        assert ts is not None, f"哨兵行时刻解析不出：{row[0]!r}"
+        assert ts > float(int(ts)), (
+            f"迁移写下的哨兵行没有亚秒（{row[0]!r}）—— 秒级截断对哨兵是 **fail-open** 方向，"
+            "会把「同一秒内先建目录、后跑迁移」的歧义名悄悄放开"
+        )
+        assert auth._dir_ctime(name) is not None, "夹具前提：目录应当存在"
+        assert auth._sentinel_row_blocks_dir(name, ts) is True, (
+            f"迁移写下的哨兵（{row[0]!r}）拦不住它当年所判的那个目录"
+        )
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def test_migration_is_idempotent(db):
@@ -158,154 +215,175 @@ def _sentinel_rows(conn, dn):
         (auth._DN_SENTINEL_UID, dn)).fetchone()[0]
 
 
-class TestOrphanScrapeDirsAreTombstoned:
-    """磁盘上「不属于任何存活用户」的爬取目录，迁移时必须补哨兵墓碑。
+class TestScanRetirementAndSentinelIncarnations:
+    """无主目录扫盘**退役** + 哨兵改为「按化身处境」判（2026-09-25，设计文档 §0.13）。
 
-    挡的是哪一档（2026-09-24，code-review 第 6 轮第 1 条，用户裁定「改判据」）：
-    `scrape_dn_history` 上线**之前**就已删掉的用户，既没有 users 行、也没来得及写
-    墓碑行 —— 他的目录留在盘上却**完全无主**，`_dn_released_keys` 看不见它，于是
-    「曾用名含该目录名」的人可以认领并读到产物。补一行哨兵即可让该名字永久不可认领。
+    用户裁定「换判据：加时间维度」后，`database._tombstone_orphan_scrape_dirs`
+    ——「扫一次盘、给不属于任何存活用户的目录名补哨兵墓碑」—— **整段删除**。
+
+    它当年之所以把这一档一刀切封死，是因为认领判据**没有时间维度**：「被删用户留下的
+    目录」与「我自己的旧目录」在数据上完全同形（§0.12 收口 1），只能取严；而它写下的
+    永久硬闸把「目录被清理后重建、本人想改回原名」这条路一并封了。判据升级为
+    「我的最后释放时刻 > 该目录创建时刻」之后，这一档由**判据本身**接住；
+    它当年写下的哨兵行留在表里，新判据只让它们对**当年所判的那个化身**生效。
+
+    ⚠️ 本类必须同时钉住三件事，缺一就是把「换判据」做成了「拆保护」：
+      ① 无主目录**仍然**认领不到（改由判据 3 接住）—— 它正是产物越权读的入口；
+      ② 迁移入口**不再**补哨兵（否则扫盘换个写法又活过来）；
+      ③ 当年补下的哨兵行仍对它当年所判的化身生效（live 的 `alice` / `alice2` 靠它）。
 
     ⚠️ `_scrape_root()` 指向**真实**的 `temp/scraped_images`（测试没有把它隔离到 tmp），
     故本类**只**对自己造的、名字唯一可控的目录做断言；对真实残留目录（如仓库里
     遗留的 `alice`/`alice2`）不置一词 —— 断言别的东西会被环境污染成假绿/假红。
     """
 
+    NAME = "_orph_r8"
+
     @pytest.fixture
-    def root(self):
-        """真实爬取根 + 一个用完就删的临时子目录名。"""
+    def orphan(self):
+        """真实爬取根 + 一个用完就删的临时子目录。"""
         r = auth._scrape_root()
-        name = "_orph_tb_probe"
-        path = os.path.join(r, name)
+        path = os.path.join(r, self.NAME)
         shutil.rmtree(path, ignore_errors=True)
-        yield r, name, path
+        yield r, self.NAME, path
         shutil.rmtree(path, ignore_errors=True)
 
-    def _rerun(self, conn):
-        """把「一次性」标记清掉，好让本用例能重复触发扫描。"""
-        conn.execute("DELETE FROM config WHERE key='tombstoned_orphan_scrape_dirs'")
-        conn.commit()
+    @staticmethod
+    def _row(conn, uid, dn, offset=None):
+        """插一行释放 / 哨兵记录。
 
-    def test_orphan_dir_gets_sentinel_and_cannot_be_claimed(self, db, root):
-        """承重：无主目录 ⇒ 补哨兵 ⇒ 曾用名含它的人认领不到（而这是产物读路径）。
+        `offset=None` ⇒ **当前**时刻且带**亚秒**（与生产写入方
+        `auth.note_scrape_dn_release` 同款）；否则用 SQLite 时间修饰符（如
+        `-60 seconds`）把行时刻推到过去，用来构造「行早于目录创建」的形态。
+        """
+        if offset is None:
+            conn.execute("INSERT INTO scrape_dn_history(user_id, dn, created_at) "
+                         "VALUES(?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))", (uid, dn))
+        else:
+            conn.execute("INSERT INTO scrape_dn_history(user_id, dn, created_at) "
+                         "VALUES(?, ?, datetime('now', ?))", (uid, dn, offset))
 
-        ⚠️ **本条同时钉住一个被接受的代价**（code-review 第 6 轮收口第 1 条，详见
-        设计文档 §0.12「两裁定的相互作用」）：V 在这里的形态 = 「**存活**用户，曾释放过
-        该名，目录还在盘上」—— 即「我自己的旧目录」。哨兵把它一并封掉，于是 V 改不回
-        原名、旧目录里的产物在盘上却取不回（MEDIUM-1 的症状）。
+    @staticmethod
+    def _new_user(conn, username):
+        return conn.execute("INSERT INTO users(username, password) VALUES(?, 'x')",
+                            (username,)).lastrowid
 
-        为什么**必须**接受：本用例的 V 与「攻击者」在数据上**完全同形** —— 攻击者要拿到
-        该名，前提正是他**也**有一行同名释放记录（否则判据 3「目录已占用」直接拒，除
-         `own_keys`/`hist_keys` 两条豁免外无路可走，见 `auth.directory_name_error:355`）。
-        于是任何「把 `scrape_dn_history` 里出现过的名字排除在扫描之外」的写法，都会**恰好
-        放过每一条可被利用的名字** ⇒ 扫描退化成空操作、缺口原样复活。
-        两档不可区分（被删用户升级前没有行，与「只有我一行」在表上长得一样），
-        按本项目一贯的 fail-closed（误放 > 误拒）取「封」。
+    def test_migration_no_longer_tombstones_orphan_dirs(self, db, orphan):
+        """接线腿（效果级）：跑一遍迁移入口，无主目录**不得**再被补哨兵。
 
-        代价的实际规模：扫描**只跑一次**，故只影响「本次上线**之前**就已改名、且想改回去」
-        的用户；live 库扫描时 `scrape_dn_history` 为 **0 行**（实测），即当前 **0 人**受影响。
+        写成「效果」而不是「代码里没有那行调用」：函数已整段删除，任何形式的复活
+        （重新实现、换个名字重挂）都会让本用例转红。
         """
         conn = db
-        r, name, path = root
+        _r, name, path = orphan
         os.makedirs(path, exist_ok=True)
-        # 造一个「曾用名含该目录名」的存活用户：没有哨兵时他会认领到该目录
-        uid_v = conn.execute(
-            "INSERT INTO users(username, password) VALUES('_orph_v', 'x')").lastrowid
-        conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)", (uid_v, name))
-        conn.commit()
-        # 夹具前提：此刻还没有哨兵，且该名**确实**判给了 V —— 否则下面的「拒」
-        # 可能来自别的原因（比如名字压根没进判据），断言就成了假绿。
-        assert _sentinel_rows(conn, name) == 0
-        assert name in auth._dn_released_keys(conn, uid_v), (
-            "夹具前提不成立：扫描前该名字没判给 V，本用例测不到「哨兵把它挡下来」"
-        )
-
-        self._rerun(conn)
-        database._tombstone_orphan_scrape_dirs(conn)
-
-        assert _sentinel_rows(conn, name) == 1, "无主目录没被补哨兵墓碑"
-        assert name not in auth._dn_released_keys(conn, uid_v), (
-            "补了哨兵却仍能被认领 —— 哨兵没有真正硬闸（产物读路径仍然敞开）"
-        )
-
-    def test_missing_scrape_root_does_not_consume_the_one_shot(self, db, tmp_path,
-                                                              monkeypatch):
-        """承重：爬取根**不存在**时不得写一次性标记。
-
-        否则升级时「先起服务、后拷爬取目录」（或全新部署首次 get_db() 早于建目录）
-        会把唯一的一次机会空转掉，此后补上的目录再也补不上哨兵 —— 缺口原样复活。
-        这与函数自称的「不打标记，下次重试」是同一个契约（code-review 第 6 轮收口第 2 条）。
-        """
-        conn = db
-        monkeypatch.setattr(auth, "_scrape_root",
-                            lambda: str(tmp_path / "_no_such_scrape_root"))
+        # 一次性标记清掉 —— 若扫描还在，这一轮**就会**跑起来并补上哨兵
         conn.execute("DELETE FROM config WHERE key='tombstoned_orphan_scrape_dirs'")
         conn.commit()
-
-        database._tombstone_orphan_scrape_dirs(conn)
-
-        mark = conn.execute("SELECT value FROM config "
-                            "WHERE key='tombstoned_orphan_scrape_dirs'").fetchone()
-        assert mark is None, (
-            "爬取根不存在却把一次性标记用掉了 —— 之后目录补上也不会再扫，墓碑永远缺席"
-        )
-
-    def test_live_users_directory_is_not_tombstoned(self, db, root):
-        """对照腿：**有主**的目录一个哨兵都不补（否则会误伤活人自己的产物）。
-
-        少了这条，把扫描写成「根下每个目录都补哨兵」也会让上面那条绿 ——
-        而那样做会让所有用户都取不回自己的产物。
-        """
-        conn = db
-        r, name, path = root
-        os.makedirs(path, exist_ok=True)
-        # 让**存活用户**的真实目录名恰好等于这个名字
-        uid_live = conn.execute(
-            "INSERT INTO users(username, password, display_name) VALUES(?, 'x', ?)",
-            ("_orph_live", name)).lastrowid
-        conn.commit()
-        assert auth._dir_name_of(uid_live, "_orph_live", name) == name, (
-            "夹具前提不成立：存活用户的实际目录名与磁盘上的目录不一致"
-        )
-
-        self._rerun(conn)
-        database._tombstone_orphan_scrape_dirs(conn)
-
-        assert _sentinel_rows(conn, name) == 0, (
-            "把活人自己的目录也补了哨兵 —— 该用户从此取不回自己的产物"
-        )
-
-    def test_scan_is_one_shot(self, db, root):
-        """标记必须在，否则每次进程启动都全量扫一遍根目录并重复插哨兵。"""
-        conn = db
-        r, name, path = root
-        os.makedirs(path, exist_ok=True)
-        conn.execute("DELETE FROM config WHERE key='tombstoned_orphan_scrape_dirs'")
-        conn.commit()
-
-        database._tombstone_orphan_scrape_dirs(conn)
-        assert _sentinel_rows(conn, name) == 1
-        mark = conn.execute("SELECT value FROM config "
-                            "WHERE key='tombstoned_orphan_scrape_dirs'").fetchone()
-        assert mark is not None and mark[0] == "1", f"标记没写上：{mark}"
-
-        database._tombstone_orphan_scrape_dirs(conn)
-        assert _sentinel_rows(conn, name) == 1, "扫描不幂等：同一个目录被补了多次哨兵"
-
-    def test_scan_is_wired_into_migration(self, db, root):
-        """接线腿：扫描必须真的挂在迁移入口上。
-
-        上面三条都是**直调函数** —— 把 `_migrate_if_needed` 里那一行调用删掉，
-        它们照样全绿，而线上再也不会补墓碑、整个保护静默消失。
-        """
-        conn = db
-        _r, name, path = root
-        os.makedirs(path, exist_ok=True)
-        conn.execute("DELETE FROM config WHERE key='tombstoned_orphan_scrape_dirs'")
-        conn.commit()
+        assert _sentinel_rows(conn, name) == 0, "夹具前提：此刻不该有哨兵行"
 
         database._migrate_if_needed(conn)
 
-        assert _sentinel_rows(conn, name) == 1, (
-            "迁移入口没有再调用无主目录扫描 —— 接线断了，墓碑永远不会补"
+        assert _sentinel_rows(conn, name) == 0, (
+            "迁移入口又给无主目录补了哨兵 —— 扫盘复活了（§0.13 已把它退役）"
+        )
+
+    def test_orphan_dir_is_still_not_claimable(self, db, orphan):
+        """承重（退役后保护仍在）：无主目录 + 我**没有**该名字的覆盖行 ⇒ 仍拒。
+
+        少了这条，「扫盘退役」就可能是「把这一档放开」—— 而这一档正是被删用户产物的
+        读路径（越权读）。正确性就在这里：无主目录由**判据 3**（目录存在，且既不在
+        `own_keys` 也不在 `hist_keys` 里）自己接住，不需要哨兵。
+        """
+        conn = db
+        _r, name, path = orphan
+        os.makedirs(path, exist_ok=True)
+        uid = self._new_user(conn, "_orph_r8_x")
+        conn.commit()
+
+        assert auth.directory_name_error(uid, None, name) == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        ), "无主目录在扫盘退役后变成可认领了 —— 越权读路径原样复活"
+
+    def test_old_sentinel_still_blocks_on_the_incarnation_it_judged(self, db, orphan):
+        """承重（兼容 live 的 `alice` / `alice2`）：哨兵行晚于目录创建 ⇒ 照旧硬闸。
+
+        与下一条**成对**：单看任何一条，「哨兵一律失效」与「哨兵一律有效」都能蒙过去，
+        而两者之一必然是错的。
+        """
+        conn = db
+        _r, name, path = orphan
+        os.makedirs(path, exist_ok=True)
+        uid = self._new_user(conn, "_orph_r8_y")
+        # 用**显式未来时刻**构造「行晚于目录创建」：`strftime('%f')` 只到毫秒且是
+        # 截断，同一毫秒内建目录 + 插行会被判成「行更早」（生产路径不会同毫秒，
+        # 见 §0.13 残余风险 4）。显式时刻让本用例只测判据、不测时钟。
+        self._row(conn, uid, name, "+60 seconds")
+        conn.commit()
+        # 夹具前提：此刻该名**确实**判给我 —— 否则下面的「拒」可能来自别的原因（假绿）
+        assert auth.directory_name_error(uid, None, name) is None, (
+            "夹具前提不成立：我的覆盖行没有让该名判给我，后面测不到哨兵"
+        )
+
+        self._row(conn, auth._DN_SENTINEL_UID, name, "+60 seconds")   # 当年扫盘补的哨兵
+        conn.commit()
+
+        assert auth.directory_name_error(uid, None, name) == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        ), "哨兵对它当年所判的化身失效了 —— live 的 alice/alice2 保护被拆掉"
+
+    def test_old_sentinel_does_not_block_a_rebuilt_incarnation(self, db, orphan):
+        """承重（本轮修复的正题）：目录在哨兵**之后**重建 ⇒ 旧哨兵不再拦。
+
+        目录被清掉重建后 `ctime` 更新，哨兵那一刻早于当前化身 ⇒ 它对当前化身没有说话
+        权，该名交由释放行的覆盖判据裁决。少了这条，「哨兵永久硬闸」会把「目录被清理后
+        重建、本人想改回原名」这条路封死 —— 正是 §0.12 收口 1 记下的代价。
+        """
+        conn = db
+        _r, name, path = orphan
+        uid = self._new_user(conn, "_orph_r8_z")
+        # 哨兵行写在**前**（老化身：当时目录还不存在），目录在后
+        self._row(conn, auth._DN_SENTINEL_UID, name, "-60 seconds")
+        conn.commit()
+        os.makedirs(path, exist_ok=True)
+        self._row(conn, uid, name, "+60 seconds")       # 覆盖行晚于新化身
+        conn.commit()
+
+        assert name in auth._dn_released_keys(conn, uid), (
+            "目录已在其后重建，旧哨兵却仍在硬闸 —— 名字被永久封死"
+        )
+        assert auth.directory_name_error(uid, None, name) is None, (
+            "判据内部放行了，但闸门仍拒 —— 本人的认领路没有真正恢复"
+        )
+
+    def test_sentinel_dirty_row_still_blocks(self, db, orphan):
+        """承重（纯函数）：时刻**解析不出**的哨兵行照拦（fail-closed）。
+
+        与释放行的同一档相反（那边取「不覆盖」），两侧一起才是 fail-closed。少这条，
+        把 `_sentinel_row_blocks_dir` 的 `ts is None → True` 翻成 `False`
+        （脏行当成「没说过话」）不会有任何用例转红。
+        """
+        _r, name, path = orphan
+        os.makedirs(path, exist_ok=True)
+        assert auth._dir_ctime(name) is not None, "夹具前提：目录应当存在"
+        assert auth._sentinel_row_blocks_dir(name, None) is True, (
+            "时刻解析不出的哨兵行被放行了 —— 脏行必须落在拦的一侧"
+        )
+
+    def test_sentinel_tie_takes_the_blocking_side(self, db, orphan):
+        """承重（纯函数、不碰时钟）：哨兵的 tie（`ts == ctime`）取**拦**。
+
+        两侧的 tie 都朝 fail-closed 倒：释放行的 tie 取「不覆盖」（不放开认领），
+        哨兵的 tie 取「拦」（不放行）。少了这条，把哨兵的 `>=` 写成 `>` 不会有任何用例
+        转红 —— 而 tie 正是「目录与哨兵在同一刻、说不清谁先」的形态。
+        """
+        _r, name, path = orphan
+        os.makedirs(path, exist_ok=True)
+        ctime = auth._dir_ctime(name)
+        assert ctime is not None, "夹具前提：目录应当存在"
+        assert auth._sentinel_row_blocks_dir(name, ctime) is True, (
+            "哨兵与目录同一时刻却被判成不拦 —— tie 必须落在拦的一侧"
+        )
+        assert auth._sentinel_row_blocks_dir(name, ctime - 0.001) is False, (
+            "早 1ms 的哨兵也被判成拦 —— 目录重建后旧哨兵永远失效不了"
         )

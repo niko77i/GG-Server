@@ -1,4 +1,6 @@
-﻿import json
+﻿import calendar
+import datetime
+import json
 import os
 import sqlite3
 
@@ -10,7 +12,11 @@ import database
 # `scrape_dn_history.user_id` 的哨兵值 —— 见 `_dn_released_keys`。
 # 该表**无外键**，故 user_id 不是真实用户 id 的取值必须自己约定；0 是安全的哨兵
 # （users.id 是 AUTOINCREMENT，从 1 起）。哨兵行 = 「这个名字的归属无法判定 ⇒ 一律拒」。
-# 写入点：`database._migrate_scrape_dn_history`（歧义名 + 磁盘上无主的目录名）。
+# 写入点：`database._migrate_scrape_dn_history`（**歧义名** —— 跨用户先后无法还原）。
+# ⚠️ 2026-09-25（设计文档 §0.13）：原先还有第二个写入点（`_tombstone_orphan_scrape_dirs`
+# 扫盘补「无主目录」哨兵），随扫盘一并退役 —— 那一档改由认领判据的**时间维度**接住。
+# 哨兵语义同时加了一条：它只对**当年所判的那个目录化身**生效（`_sentinel_row_blocks_dir`），
+# 化身被清掉重建后旧哨兵不再拦。live 的 `alice` / `alice2` 两行原化身仍在 ⇒ 行为不变。
 _DN_SENTINEL_UID = 0
 
 # ---------------------------------------------------------------------------
@@ -155,7 +161,98 @@ def note_scrape_dn_release(conn, uid, dn):
     """
     if not dn:
         return
-    conn.execute("INSERT INTO scrape_dn_history(user_id, dn) VALUES(?, ?)", (uid, dn))
+    # ⚠️ 时刻必须带**亚秒**（2026-09-25，设计文档 §0.13）：认领判据要拿它与目录的
+    # `st_ctime` 比大小，而表的默认值 `datetime('now')` 只到秒 —— 秒级截断会把「目录
+    # 建完、同一秒内就改名离开」这一档判成 tie，而 tie 取拒 ⇒ **本人**取不回自己的产物
+    # （测试里遍地都是这一档，真实动线上首次爬取后立刻改名也可能撞上）。
+    # SQLite 的 `%f` **自带秒**（形如 `SS.SSS`），故是 `%H:%M:%f` 而不是 `%H:%M:%S.%f`。
+    conn.execute(
+        "INSERT INTO scrape_dn_history(user_id, dn, created_at) "
+        "VALUES(?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))", (uid, dn))
+
+
+def _parse_utc_ts(s):
+    r"""`scrape_dn_history.created_at` -> epoch 秒（float）；解析不了返回 None。
+
+    ⚠️ SQLite 的 `datetime('now')` 是 **UTC**（与 `time.time()` 同轴；自测 300 次采样：
+    偏移 -0.2ms ~ +0.8ms，**跨零**），故必须用
+    `calendar.timegm` 解析 —— 用
+    `time.mktime` 会整体偏一个时区（本机 +8h），于是所有比较一律错向一边。
+
+    ⚠️ 别拿旧备注里的「差 -0.4s」去「校正」时轴（2026-09-25，code-review 第 7 轮 Minor #4）：
+    那个数字是**旧写入方秒级截断**的产物，不是时轴偏移 —— 照它去校正反而会引入一个
+    -0.4s 的假偏移。真实偏移在毫秒量级且**跨零**（见上），故两侧判据都不能省掉亚秒精度：
+    秒级截断会把「同一秒内的先后」整体抹平。
+
+    两种形态都要认：存量行是秒级（`datetime('now')`），新行带亚秒
+    （`strftime('%Y-%m-%d %H:%M:%f','now')`，见 `note_scrape_dn_release`）。
+    """
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.datetime.strptime(s, fmt)
+        except (TypeError, ValueError):
+            continue
+        return calendar.timegm(dt.timetuple()) + dt.microsecond / 1e6
+    return None
+
+
+def _dir_ctime(name):
+    """磁盘上这个名字的爬取目录的**创建**时刻；根内没有这个名字的目录 ⇒ None。
+
+    为什么 `st_ctime` 就是创建时间：探针实测（本机 Windows/NTFS）「建目录 → 写入文件」后
+    `st_ctime` **不变**、`st_mtime` 变（`st_birthtime` 本机 Python 不提供）。
+    ⚠️ 平台相关：Linux 上 `st_ctime` 是 inode 元数据变更时间，迁平台必须复核
+    （见设计文档 §0.13 残余风险 2）。
+
+    越界名（`_dn_within_root` 为假）直接 None：它不可能是爬取根内的目录名。
+    """
+    if not name or not _dn_within_root(name):
+        return None
+    try:
+        path = os.path.join(_scrape_root(), name)
+        if not os.path.isdir(path):
+            return None
+        return os.stat(path).st_ctime
+    except OSError:
+        return None
+
+
+def _release_row_covers_dir(name, ts):
+    """这行释放记录是否还**说得出话来** —— 即「目录的当前化身建于这段持有期间」。
+
+    True = 参与判据；False = 说的是**更早**的那个化身、与当前目录无关
+    （于是从 `mine` / `others` **两侧一起**剔除：既不给我认领权，也不再挡住别人）。
+
+    取严的三档（方向全部 fail-closed）：
+      · 目录在根内、`ts` 解析不出来（脏行）⇒ False
+      · `ts == ctime`（同秒 —— 秒级存量行会撞上）⇒ False
+      · 根内没有这个目录 / 越界名 / 非目录 / stat 失败 ⇒ 走 `_dir_ctime` 的 None 分支
+        ⇒ True（**不过滤**）：判据 3 只在目录**存在**时才用 `hist_keys`，这一档对判据 3
+        是惰性的；保留旧语义也让「释放序查询」在没有目录时仍然成立（迁移用例靠它）。
+    """
+    ctime = _dir_ctime(name)
+    if ctime is None:
+        return True
+    if ts is None:
+        return False
+    return ts > ctime
+
+
+def _sentinel_row_blocks_dir(name, ts):
+    """这行哨兵是否仍拦住该名字 —— 只对它**当年所判的那个化身**有效。
+
+    目录若在其后被清掉重建（`ctime` 更新），旧哨兵对新化身失效；那一档**不打开洞**：
+    迁移来的释放行同样不覆盖**新**建目录 ⇒ 谁也认领不了（见 §0.13 形态表）。
+    tie（`ts == ctime`）取**拦**，fail-closed。
+    """
+    ctime = _dir_ctime(name)
+    if ctime is None:
+        return True
+    if ts is None:
+        return True
+    return ts >= ctime
 
 
 def _dn_released_keys(conn, uid) -> set:
@@ -166,6 +263,18 @@ def _dn_released_keys(conn, uid) -> set:
 
     为什么同值必须拒（而不是「我先用过就算我的」）：同值意味着无法从记录里分辨谁是
     最后持有者，这时唯一 conservative 的选择是退回修复前的「拒」。方向 fail-closed。
+
+    ⚠️ **时间维度**（2026-09-25，设计文档 §0.13，用户裁定「换判据：加时间维度」）：
+    一行释放记录只在**它还说得出话来**的时候参与比较 —— 条件是「该行的时刻 > 磁盘上这个
+    名字**当前化身**的创建时刻」（`_release_row_covers_dir`）。否则这行说的是**更早**的
+    那个目录化身（我离开之后目录被清掉重建、或那目录本来就是别人建的），与当前目录无关，
+    于是从 `mine` / `others` **两侧一起**剔除 —— 既不给我认领权，也**不再挡住别人**。
+
+    为什么需要它：只靠「当前目录名」这一个维度时，「我自己的旧目录」与「被删用户的目录」
+    在数据上完全同形（§0.12 收口 1），只能一刀切封死，把「上线前已改名者」的认领路一起
+    封掉。接上时间维度后：目录建于我持有期间 ⇒ 里面的产物是我的 ⇒ 放行；建于我离开之后
+    ⇒ 拒。两条支撑不变量（本次未改）：① 非 admin 的爬取只写进自己的目录名
+    （`main._scrape_dn_for:482`）；② 同一名字不可能被两人同时持有（判据 2 + 唯一索引）。
 
     ⚠️ 「其他人」**包含已被删除的用户** —— 他们的行仍在表里（无外键、刻意不清理），
     这正是墓碑的用意：被删用户的目录**不**因为 users 行消失而变成可认领的无主目录。
@@ -178,20 +287,31 @@ def _dn_released_keys(conn, uid) -> set:
 
     ⚠️ **哨兵行（`user_id = _DN_SENTINEL_UID`）无条件阻断**，不参与序号比较
     （2026-09-24，code-review 第 6 轮第 1 条，用户裁定「改判据」）：哨兵代表
-    「这个名字的归属**事后无法判定**」，用途有两处 —— 迁移时跨用户先后不可还原的
-    歧义名，以及迁移时磁盘上「不属于任何存活用户」的目录名（升级**之前**就已删掉的
-    用户留下的，既无 users 行也来不及写墓碑）。若哨兵只按序号参与比较，它在迁移那
+    「这个名字的归属**事后无法判定**」—— 迁移时跨用户先后不可还原的歧义名。
+    （原来的第二个来源「磁盘上不属于任何存活用户的目录名」随扫盘退役，见 §0.13。）
+    若哨兵只按序号参与比较，它在迁移那
     一刻拿到的是当时的最大 id，此后任何真实用户再释放一次同名（新 id 更大）就**赢过
     它** ⇒ 阻断失效。故哨兵必须是硬闸，而不是一个序号。
     哨兵**不进** `mine` 也不进 `others`：它不是某个用户的释放记录。
+
+    ⚠️ 但硬闸只对**它当年所判的那个目录化身**生效（2026-09-25，§0.13）：
+    `_sentinel_row_blocks_dir` 要求「哨兵行时刻 >= 目录创建时刻」；目录若在其后被清掉
+    重建（`ctime` 更新），旧哨兵不再拦 —— 新化身交由释放行的覆盖判据裁决，而那一档
+    谁也认领不了（迁移来的行不覆盖**新**建目录），故不打开洞。
     """
     mine, others, blocked = {}, {}, set()
+    # ⚠️ `created_at` 是**裸列**配 `MAX(id)`：SQLite 保证此时裸列取自「取到 MAX 的那一行」
+    # （只有同一行的 id 与 created_at 才是配套的）。别改成 `MAX(created_at)` —— 那是另一个量。
     for r in conn.execute(
-            "SELECT user_id, dn, MAX(id) AS seq FROM scrape_dn_history "
+            "SELECT user_id, dn, MAX(id) AS seq, created_at FROM scrape_dn_history "
             "GROUP BY user_id, dn").fetchall():
         key = _dn_key(r["dn"])
+        ts = _parse_utc_ts(r["created_at"])
         if r["user_id"] == _DN_SENTINEL_UID:
-            blocked.add(key)
+            if _sentinel_row_blocks_dir(r["dn"], ts):
+                blocked.add(key)
+            continue
+        if not _release_row_covers_dir(r["dn"], ts):
             continue
         bucket = mine if r["user_id"] == uid else others
         prev = bucket.get(key)
@@ -318,7 +438,8 @@ def directory_name_error(uid, username=None, display_name=None):
     # TestFormerDirectoryNameIsReclaimable::
     #   test_former_name_that_someone_else_also_used_is_not_reclaimable（先红后绿）。
     # 判据本身 = `_dn_released_keys(conn, uid)`，即 `scrape_dn_history` 上的
-    # **last-writer-wins**（我的释放序 > 所有他人的释放序，同值一律拒）。
+    # **last-writer-wins**（我的释放序 > 所有他人的释放序，同值一律拒），
+    # 且该行必须**覆盖当前目录化身**（判据加时间维度，2026-09-25，§0.13）。
     #
     # 为什么从「除我之外没人用过」升级为 last-writer-wins：旧判据丢掉了**顺序**，
     # 于是「一个名字被 ≥2 人先后用过」时**最后持有者**也取不回自己的产物 —— 而那个
@@ -333,7 +454,8 @@ def directory_name_error(uid, username=None, display_name=None):
     # TestDeletedUserDirectoryIsTombstoned。**若哪天有人「顺手」把本表加进
     # admin_delete_user 的清理清单，这条保护会静默失效**（表空了 ⇒ 判据看不见他）。
     #
-    # ⚠️ 本表**只增不减** ⇒ 一个名字一旦被谁最后释放过，就**永久**对其他人关闭认领。
+    # ⚠️ 本表**只增不减** ⇒ 一个名字一旦被谁最后释放过，就对目录**当前这个化身**
+    # **永久**对其他人关闭认领（化身被清掉重建后，按 §0.13 的时间判据重新裁决）。
     # 它不是白名单，别当白名单用。且本修复是**单向**的：只对**上线后**发生的改名
     # 生效 —— 旧库迁移只能搬走当年已落库的曾用名（原本就改过名而没落过库的，同症状
     # 仍在），且**无法自动回填**（无主目录的归属无法事后判定）。
