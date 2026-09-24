@@ -40,13 +40,23 @@ def sign_query(endpoint: str, path: str, secret: str,
 
 def verify_query(endpoint: str, path: str, exp: str, sig: str, secret: str,
                  now: float | None = None) -> bool:
-    """校验签名。任何异常情况均返回 False（调用方据此返回 401）。"""
+    """校验签名。任何异常情况均返回 False（调用方据此返回 401）。
+
+    ## exp 语义
+
+    `exp` 是**排他**上界，与 JWT 一致：`now >= exp` 即视为已过期。
+    有效窗口是 `[签发时刻, exp)` —— 注意 `exp` 那一刻**已经失效**。
+
+    刻意与 JWT 对齐：本工具就是 JWT 在「浏览器原生请求」场景下的替代品，
+    两处语义若有分歧，后续读代码的人必然错判。
+    """
     if not path or not exp or not sig:
         return False
     try:
         exp_i = int(exp)
     except (TypeError, ValueError):
         return False
-    if exp_i < int(now if now is not None else time.time()):
+    # 用 <= 而非 <：exp 那一刻本身即失效（见 docstring「exp 语义」）。
+    if exp_i <= int(now if now is not None else time.time()):
         return False
     return hmac.compare_digest(_digest(endpoint, path, exp_i, secret), sig)

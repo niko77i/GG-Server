@@ -58,6 +58,25 @@ class TestSignVerify:
         assert verify_query(EP, PATH, p["exp"], p["sig"], SECRET, now=now + 301) is False
         assert verify_query(EP, PATH, p["exp"], p["sig"], SECRET, now=now + 299) is True
 
+    def test_exp_boundary_is_exclusive(self):
+        """钉死 exp 语义：**exp 那一刻本身即失效**（与 JWT 一致）。
+
+        为什么必须有这条：`test_expired_rejected` 用 now+299 / now+301 对称地
+        ±1 绕开了等号，因此**无法区分 `<` 与 `<=`** —— 有人把判据改松、改严，
+        现有测试都全绿、零信号。这条专门钉住等号那一点。
+        """
+        now = 1_000_000.0
+        qs = sign_query(EP, PATH, SECRET, ttl=300, now=now)
+        p = _parse(qs)
+        exp = int(p["exp"])  # = 1_000_300
+
+        assert verify_query(EP, PATH, p["exp"], p["sig"], SECRET, now=exp) is False, (
+            "now == exp 时签名仍被接受 —— exp 这一刻应已失效（与 JWT 语义一致）"
+        )
+        assert verify_query(EP, PATH, p["exp"], p["sig"], SECRET, now=exp - 1) is True, (
+            "now == exp-1 时签名被拒 —— 有效期右端点被收得过紧"
+        )
+
     def test_missing_fields_rejected(self):
         """缺任一字段 ⇒ False（不得因「空签名匹配空签名」而放行）。"""
         assert verify_query(EP, PATH, "", "", SECRET) is False
