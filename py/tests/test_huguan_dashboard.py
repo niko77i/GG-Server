@@ -2189,14 +2189,22 @@ class TestTTTriggerPoints:
         `created ∪ updated ∪ (resolutions ∩ valid_ids) ∪ (status_resolutions ∩ valid_ids)`
         再 `dict.fromkeys` 去重。另外 5 处是直读可验的单行插入，这一处不是 ——
         多算一条会把别人的行写进看板，少算一条会让刚同步的账户在看板上停在旧值。
-        四条臂各放一个 id，断掉任意一条都会转红。
 
-        故断言**集合相等**，并把不该回写的 id 逐条钉死（只断言「有回写发生」在这里
-        等于没断言 —— 集合只多不少也照样绿）：
-        - `9990000002`：他人的**软删**账户，普通用户角色不得复活（`continue`），
-          既没落库也不该回写；
-        - `9990000009`：body 的 `resolutions` 里带的**看板外** id（越权改任意账户
-          消耗的标准载荷），被 `valid_ids` 挡掉 —— 不落库，也不该进回写集合。
+        断言分两层，各钉各的接缝：
+        - **回写产物**（`update_rows_by_account_id` 的入参）== 真正落库的 3 个 id
+          （created / updated / resolutions 三条臂各贡献一个，`status_resolutions`
+          的 in-board 项与 `updated` 重合，去重后不新增元素）；
+        - **上游意图**（传给 `collect_rows_for_push` 的 id 集合）里不得出现不该回写的
+          id。这层不能省略：`collect_rows_for_push` 自己会按 `deleted_at IS NULL`
+          过滤，软删户的 id 就算被误算进 id 集合也到不了产物 —— 负断言只下在产物上
+          就是恒真式。
+
+        `resolutions` 与 `status_resolutions` 两条臂的承重点是**看板外 id 必须被
+        `valid_ids` 挡掉**：`9990000009` 是本用户名下真实存在的户，但不在本次 sheet
+        行里，body 把它同时塞进「改消耗」和「改状态」两处（越权改任意账户的标准
+        载荷）—— 拆掉任一条 `valid_ids` 守卫，它就会落库 / 进 id 集合、转红。
+        `9990000002` 是他人的**软删**账户，普通用户角色不得复活（`continue`），
+        既没落库也不该进 id 集合。
         """
         u, uid = _create_user(client, "_tt_syn_plain", role="user", platform="tt")
         db = database.get_db()
@@ -2204,7 +2212,7 @@ class TestTTTriggerPoints:
         _seed_tt(db, "9990000001", uid)                     # 消耗冲突 → resolutions 落库
         _seed_tt(db, "9990000002", other, deleted_at="2026-01-01 00:00:00")   # 他人软删 → 跳过
         _seed_tt(db, "9990000004", uid)                     # 无冲突的既有户 → updated 分支
-        _seed_tt(db, "9990000009", uid)                     # 看板外：不得被 resolutions 改
+        _seed_tt(db, "9990000009", uid)                     # 看板外：两处 resolutions 都不得改它
         # 9990000003 刻意不预置：它由本次同步走 create 分支新建
         db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','SHEET-SYN')")
         db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
@@ -2225,8 +2233,21 @@ class TestTTTriggerPoints:
         captured = []
         _stub_sheets(monkeypatch, captured)
 
+        # 捕获「上游意图」：传给 collect_rows_for_push 的 id 集合（见 docstring）。
+        # 必须转调真函数 —— 产物层断言依赖它真的往下走。
+        import huguan_dashboard as hd
+        passed_ids = []
+        _real_collect = hd.collect_rows_for_push
+
+        def _spy_collect(dbc, platform, account_ids=None):
+            passed_ids.append(None if account_ids is None else list(account_ids))
+            return _real_collect(dbc, platform, account_ids)
+
+        monkeypatch.setattr(hd, "collect_rows_for_push", _spy_collect)
+
         resp = client.post("/api/tt/accounts/sync-from-sheet", headers=u, json={
-            "resolutions": {"9990000001": "500", "9990000009": "999"}})
+            "resolutions": {"9990000001": "500", "9990000009": "999"},
+            "status_resolutions": {"9990000004": "死亡", "9990000009": "死亡"}})
         assert resp.status_code == 200
         body = resp.get_json()
         assert body["created"] == 1 and body["updated"] == 1
@@ -2235,19 +2256,30 @@ class TestTTTriggerPoints:
 
         db = database.get_db()
         rows = {r["advertiser_id"]: r for r in db.execute(
-            "SELECT advertiser_id, consumption, deleted_at, owner_id FROM tt_accounts "
+            "SELECT advertiser_id, consumption, status_id, deleted_at, owner_id FROM tt_accounts "
             "WHERE advertiser_id LIKE '999000000%'").fetchall()}
         db.close()
 
         # 真正落库的两条：0001 的消耗被 resolutions 改写，0003 被新建且归属当前用户
         assert rows["9990000001"]["consumption"] == "500"
         assert rows["9990000003"]["owner_id"] == uid
-        # 没落库的两条：他人的软删户仍软删；看板外 id 的消耗没被动过一个字节
+        # 看板内的 0004 状态被 status_resolutions 改掉（in-board ⇒ 允许改）
+        assert rows["9990000004"]["status_id"] is not None
+        # 没落库的两条：他人的软删户仍软删；看板外 id 的消耗与状态都没被动过一个字节
         assert rows["9990000002"]["deleted_at"] is not None
         assert rows["9990000009"]["consumption"] == ""
+        assert rows["9990000009"]["status_id"] is None
 
         got = {r["account_id"] for c in captured for r in c["rows"]}
-        # 回写集合 == 本次同步真正处置过的那四条（规格 §6.2），一条不多一条不少
+        # 回写集合 == 本次同步真正处置过的那三条（规格 §6.2），一条不多一条不少
         assert got == {"9990000001", "9990000003", "9990000004"}, got
-        assert "9990000002" not in got          # 他人软删户未被复活 ⇒ 不该回写
         assert "9990000009" not in got          # 看板外 id 未被改动 ⇒ 不该回写
+
+        # 上游意图：进 collect_rows_for_push 的 id 集合，一条不多一条不少。
+        # 9990000002 的负断言只能下在这里 —— 下游按 `deleted_at IS NULL` 过滤，
+        # 它永远到不了 got（在 got 上断言是恒真式，不承重）。
+        assert len(passed_ids) == 1, passed_ids
+        upstream = set(passed_ids[0])
+        assert upstream == {"9990000001", "9990000003", "9990000004"}, upstream
+        assert "9990000009" not in upstream     # 看板外 id 不得进 id 集合
+        assert "9990000002" not in upstream     # 他人软删户不得进 id 集合
