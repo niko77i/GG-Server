@@ -3336,7 +3336,12 @@ git commit -m "feat: 户管看板 TT 回写接入与 TT 跨用户归属转移"
 
 ## Task 10: 前端 —— 设置页看板配置卡片
 
-> **前置（CLAUDE.md 硬性要求）**：动手前必须先调用 `/frontend-design` 技能完成视觉设计。下面的代码是**功能基线**，视觉细节以 `/frontend-design` 的产出为准。
+> **视觉设计已产出**：`docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md`（1017 行，2026-09-24）。
+> 本任务下方代码块里**只有**这些是有效基线：文件清单、API 路径与函数名、数据字段的取法、构建与提交步骤。
+> **一切视觉细节以那份设计文档为准**，它明确取代下方代码块的 UI 部分——差异确认从 `ElMessageBox`
+> 的文本行改为自绘 `el-dialog` + `el-table` 分组呈现（归属变更区五列）、「工作表名」独占一行、
+> 用手写 label 而非 `el-form`。设计文档 §9 的 11 项裁定记录见 `.superpowers/sdd/progress.md`。
+> 若你读设计文档时发现它**与本任务的数据字段/接口对不上**，停下来回报，不要自行改设计。
 
 **Files:**
 - Create: `frontend/src/api/huguan.js`
@@ -3346,13 +3351,31 @@ git commit -m "feat: 户管看板 TT 回写接入与 TT 跨用户归属转移"
 
 **Interfaces:**
 - Consumes: `GET/POST /api/huguan/dashboard`、`POST /api/huguan/dashboard/push`、`POST /api/huguan/dashboard/sync`、`GET /api/google-sheets/sheets`（既有，户管已可达）
-- Produces: 户管可见的配置卡片
+- Produces: 户管可见的配置卡片；`frontend/src/api/huguan.js` 的 `huguanApi`（Task 11 要用）
 
-- [ ] **Step 1: 调用 /frontend-design**
+**本任务要消费的两个后端事实**（设计：`docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md`，已实现于 `py/huguan_dashboard.py` 与 `py/routes/huguan_dashboard_routes.py`）：
 
-Run: `/frontend-design`
+1. `diff.owner_changes[i]` 现在多一个 `via` 键，取值只有两个：`"owner_channel"` / `"owner_name"`。
+   「归属变更」区必须显示**来源**列，且**不得直接渲染 token**——按平台映射：
 
-产出必须覆盖：卡片的视觉层级（与既有的「充值表配置」/「Google 表格配置」卡片并列时的主次关系）、六个控件的排布、差异确认对话框的信息层级（五类差异如何分组呈现，`owner_changes` 要最醒目）。把产出落进下面的实现。
+   | `via` | GG 显示 | TT 显示 |
+   |---|---|---|
+   | `owner_channel` | 重新分配 | 换绑情况 |
+   | `owner_name` | 运营 | 接户运营 |
+
+   四个中文名与 `py/huguan_dashboard.py:25-56` 的 `COLUMNS` 表头逐字一致。**兜底**：未知 token
+   渲染 `—` 而不是裸 token，避免将来加 token 时把内部标识泄到界面。（设计文档 §1.4）
+
+2. `frontend/src/api/huguan.js` 除四个既有方法外，还要加一个 `ownerOptions()`，打到
+   `GET /api/huguan/dashboard/owner-options`。Task 11 的「户归属」下拉用它，**不是** `/platform/users`。
+
+- [ ] **Step 1: 读视觉设计文档**
+
+Read: `docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md`
+
+本任务需要的四件事都在里面：卡片的视觉层级（与既有的「充值表配置」/「Google 表格配置」卡片并列时的主次关系）、六个控件的排布、差异确认对话框的信息层级（五类差异如何分组呈现、`owner_changes` 要最醒目）、以及「归属变更」区那五列的列定义。
+
+设计已产出并裁定，**不要重跑 `/frontend-design` 另做一版**——那只会得到一份与计划、与后端接口都对不上的第二版。有缺口就回报。
 
 - [ ] **Step 2: 新建 API 封装**
 
@@ -3366,6 +3389,11 @@ export const huguanApi = {
   saveConfig: (body) => api.post('/huguan/dashboard', body),
   push: (platform) => api.post('/huguan/dashboard/push', { platform }),
   sync: (body) => api.post('/huguan/dashboard/sync', body),
+  // 「户归属」下拉的数据源（编辑用途，全量用户）。**不要**换回 /platform/users：
+  // 那个端点是给「归属人」筛选器用的，只列该平台有未删除账户的人；拿它当改归属的
+  // 选项源，户管就没法把 GG 的户转给一个只在 TT 有户的合法用户（实测缺口）。
+  // 见 docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md §2。
+  ownerOptions: () => api.get('/huguan/dashboard/owner-options'),
 }
 ```
 
@@ -3472,6 +3500,11 @@ async function syncHd() {
     const res = await huguanApi.sync({ platform: 'gg', dry_run: true })
     const d = res.diff
     const s = d.summary
+    // ⚠ 下面这段「用 ElMessageBox 拼文本行」的**呈现方式已被视觉设计取代**：
+    //   docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md 改成自绘
+    //   el-dialog + el-table 分组呈现，「归属变更」区五列（日期/账户ID/由/改为/来源）。
+    //   保留这段只是为了钉住**数据侧**的决定：取哪些字段、按什么顺序、每个列表封顶多少行。
+    //   照抄它的呈现方式 = 与设计文档冲突。
     const lines = [
       `表里共 ${s.total_in_sheet} 行`,
       `新增账户 ${s.new_accounts} 个`,
@@ -3572,7 +3605,8 @@ git commit -m "feat: 户管看板配置卡片（GG/TT 设置页）"
 - Test: `cd frontend && npm run build`
 
 **Interfaces:**
-- Consumes: `PUT /api/accounts/<aid>/reassign`（GG，既有）、`PUT /api/tt/accounts/<aid>/reassign`（TT，Task 9 扩展后）、`GET /platform/users`（下拉数据源）
+- Consumes: `PUT /api/accounts/<aid>/reassign`（GG，既有）、`PUT /api/tt/accounts/<aid>/reassign`（TT，Task 9 扩展后）、`huguanApi.ownerOptions()`（「户归属」列下拉的数据源，Task 10 建的封装）、`GET /api/platform/users`（**仅**「归属人」筛选器的数据源，本任务不碰）
+- 注意：**这两个端点用途不同，不要合并**。`/platform/users` 只列该平台有未删除账户的用户（筛选场景的有意取舍，见 `docs/superpowers/specs/2026-09-23-owner-filter-hide-empty-users-design.md`）；`owner-options` 是全量用户（编辑场景必需）。详见 `docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md` §2。
 - Produces: 仅户管可见可编辑的「户归属」列
 
 - [ ] **Step 1: 调用 /frontend-design**
@@ -3598,15 +3632,27 @@ Run: `/frontend-design`
 </el-table-column>
 ```
 
-在 `<script setup>` 中追加：
+在 `<script setup>` 顶部 import 区追加（本文件的既有风格是 `@/` 别名，见 `:171-183`）：
 
 ```js
-const ownerOptions = ref([])
+import { huguanApi } from '@/api/huguan'
+```
 
-async function loadOwnerOptions() {
+再在 `<script setup>` 中追加：
+
+```js
+const ownerOptions = ref([])   // 「户归属」列下拉：全量用户，**编辑**用途
+
+// 数据源必须是户管专用的 owner-options，**不是** /platform/users。
+// `/platform/users` 是给上方「归属人」筛选器用的：它只列**该平台有未删除账户**的用户
+// （那是筛选场景的有意设计，见 docs/superpowers/specs/2026-09-23-owner-filter-hide-empty-users-design.md）。
+// 拿它当改归属的选项源，户管就没法把 GG 的户转给一个只在 TT 有户的合法用户（实测缺口）。
+// 两个端点各服务一个场景，勿合并回一个。
+// 依据：docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md §2.4
+async function loadOwnerPickerOptions() {
   if (!authStore.isHuguan) return
   try {
-    const res = await api.get('/platform/users')
+    const res = await huguanApi.ownerOptions()
     ownerOptions.value = res.users || []
   } catch { /* 下拉加载失败不阻塞主流程 */ }
 }
@@ -3630,7 +3676,7 @@ async function changeOwner(row, newOwnerId) {
   }
 }
 
-onMounted(loadOwnerOptions)
+onMounted(loadOwnerPickerOptions)
 ```
 
 - [ ] **Step 3: TT 面板加同样的列**
