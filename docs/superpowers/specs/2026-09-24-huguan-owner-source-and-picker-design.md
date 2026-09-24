@@ -2,7 +2,7 @@
 
 > 父设计：`docs/superpowers/specs/2026-09-23-huguan-sheet-design.md`（子项目 B：户管看板 Google Sheet 双向同步）
 > 前端视觉设计：`docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md`
-> 状态：**待用户确认**（确认后才动手写代码）
+> 状态：**已确认**（2026-09-24，用户裁定两项子问题，见 §6）
 > 日期：2026-09-24
 
 ---
@@ -32,25 +32,14 @@
 
 ### 1.2 技术方案
 
-`build_diff` 里归属变更项（`py/huguan_dashboard.py:397-404`）新增一个 `via` 键，取值是**该平台下那一列的真实表头文字**：
+`build_diff` 里归属变更项（`py/huguan_dashboard.py:397-404`）新增一个 `via` 键，取值是**稳定 token**（用户裁定，见 §6-1）：
 
-- 触发列是归属变更通道 → GG `"重新分配"` / TT `"换绑情况"`
-- 否则（走当前归属列）→ GG `"运营"` / TT `"接户运营"`
+| 触发列 | `via` 取值 |
+|---|---|
+| 归属变更通道（GG `H` / TT `L`） | `"owner_channel"` |
+| 当前归属列（GG `G` / TT `G`） | `"owner_name"` |
 
-判定依据是已有的合成字段 `p["_owner_channel"]`（`parse_row` 产出，`:33`/`:53` 定义，`effective_owner_name` 在 `:125` 就是这么用的）——**空串即未触发通道**。
-
-**不硬编码中文列头**：新增一个按平台查列头的小工具，从 `COLUMNS` 表（`:25-56`）反查，避免列头改名时两处不同步。
-
-```python
-def column_header(platform: str, field: str) -> str:
-    """按平台反查某字段对应的表头文字（列头改名时只改 COLUMNS 一处）。"""
-    for _col, header, f, _writable, _syncable in COLUMNS[platform]:
-        if f == field:
-            return header
-    return field
-```
-
-`build_diff` 内：
+判定依据是已有的合成字段 `p["_owner_channel"]`（`parse_row` 产出，`:33`/`:53` 定义，`effective_owner_name` 在 `:125` 就是这么用的）——**空串即未触发通道**：
 
 ```python
             owner_changes.append({
@@ -62,11 +51,15 @@ def column_header(platform: str, field: str) -> str:
                 "to_owner_id": want_owner_id,
                 # 规格 §7.2 规则 1：通道列非空时压过当前归属列。`via` 让户管看见
                 # 「为什么这个人被改了」——否则规则与眼前这条变更对不上。
-                "via": (column_header(platform, "_owner_channel")
+                # 稳定 token（不是中文列头）：列头改名/加平台都不影响接口契约，
+                # 中文文字由前端按平台映射（GG 重新分配 / TT 换绑情况）。
+                "via": ("owner_channel"
                         if (p.get("_owner_channel") or "").strip()
-                        else column_header(platform, "owner_name")),
+                        else "owner_name"),
             })
 ```
+
+**为什么是 token 而不是列头文字**（用户裁定理由：后续扩展）：列头文字会在①列头改名、②新增平台、③前端要按 `via` 做分支/统计时全部变成破坏性变更；token 把这些都挡在接口之外。
 
 ### 1.3 数据结构
 
@@ -79,22 +72,31 @@ def column_header(platform: str, field: str) -> str:
 | `existing_id` | int | 系统内主键 | 否 |
 | `from` / `to` | str | 变更前后归属人名 | 否 |
 | `to_owner_id` | int | 变更后归属人 id | 否 |
-| **`via`** | str | **触发列的表头文字**：`重新分配`/`换绑情况`/`运营`/`接户运营` | **是** |
+| **`via`** | str | **`"owner_channel"` \| `"owner_name"`** | **是** |
 
 ### 1.4 UI 改动
 
-前端在差异报告的「归属变更」区块（设计文档 §4.x 的 ① 区块）显示 `via` 列。设计者已按此设计好 `来源` 列；本增量后它变成 5 列。
+前端在差异报告的「归属变更」区块（设计文档 §4.x 的 ① 区块）显示 `来源` 列。设计者已按此设计好该列；本增量后它变成 5 列。
+
+**前端必须映射，不得直接渲染 token**：新增一张按平台的映射表——
+
+| `via` | GG | TT |
+|---|---|---|
+| `owner_channel` | 重新分配 | 换绑情况 |
+| `owner_name` | 运营 | 接户运营 |
+
+四个中文名与 `py/huguan_dashboard.py:25-56` 的 `COLUMNS` 表头逐字一致。前端已有的平台切换逻辑（设计文档 §3.4/§4.7）直接复用；**兜底**：未知 token 渲染为 `—` 而不是裸 token，避免将来加 token 时把内部标识泄到界面。
 
 ### 1.5 涉及文件与测试
 
-- 改：`py/huguan_dashboard.py`（新增 `column_header`；`build_diff` 的 `owner_changes.append` 加一个键）
+- 改：`py/huguan_dashboard.py`（`build_diff` 的 `owner_changes.append` 加一个键；**不新增辅助函数**）
 - 测：`py/tests/test_huguan_dashboard.py`
 
 测试（4 条）：
 
-1. GG：表里只有「运营」(G) 有值 → `via == "运营"`
-2. GG：表里「重新分配」(H) 有值 → `via == "重新分配"`
-3. TT：`via` 分别为 `"接户运营"` / `"换绑情况"`
+1. GG：表里只有「运营」(G) 有值 → `via == "owner_name"`
+2. GG：表里「重新分配」(H) 有值 → `via == "owner_channel"`
+3. TT：同上两条 → `via` 分别为 `"owner_name"` / `"owner_channel"`（断言与 GG **同 token**，证明 token 不随平台变）
 4. 回归：`owner_changes[i]` 的既有 6 个键仍在、且值不变
 
 ---
@@ -120,7 +122,7 @@ def column_header(platform: str, field: str) -> str:
 
 - 路径：`GET /api/huguan/dashboard/owner-options`
 - 装饰器：`@jwt_required()` + `@huguan_required`（与蓝图里既有 4 个端点同款，`decorators.py:38-50` 实测为严格 `role == "huguan"`，否则 403）
-- 语义：列出**全部非 `hidden` 用户**（不限平台、不限有无账户）
+- 语义：列出除 `viewer` 与 `hidden` 外的**全部**用户（不限平台、不限有无账户）
 - 返回形状：与既有 `/api/platform/users` **逐字段一致**（`id` / `username` / `display_name` / `platform`），前端可无缝换源
 
 ```python
@@ -137,13 +139,15 @@ def dashboard_owner_options():
       只在 TT 有户的合法用户（实测缺口）。
     两者都保留，各有各的用途，不要互相替代。
 
-    只排 `role='hidden'`（被停用、无法登录），与既有端点同口径。
+    排除 `viewer`（只读角色，转给它在业务上无意义，用户已裁定）与 `hidden`
+    （被停用、无法登录）。
     """
     db = database.get_db()
     try:
         rows = db.execute(
             "SELECT id, username, display_name, platform FROM users "
-            "WHERE role != 'hidden' ORDER BY display_name, username"
+            "WHERE role NOT IN ('viewer', 'hidden') "
+            "ORDER BY display_name, username"
         ).fetchall()
     finally:
         db.close()
@@ -169,7 +173,7 @@ def dashboard_owner_options():
 
 1. 户管调用 → 200，且列表里**包含一个在该平台没有任何账户的用户**（这条正是缺口的回归钉）
 2. 非户管（`user` 角色）调用 → 403
-3. `role='hidden'` 的用户**不出现**在结果里
+3. `role='viewer'` 与 `role='hidden'` 的用户**都不出现**在结果里
 
 ---
 
@@ -178,14 +182,15 @@ def dashboard_owner_options():
 - **不改 `GET /api/platform/users`**（不加 `?scope=all`）：用户已裁定走户管专用端点，`py/main.py` 不动。
 - **不让 `reassign` 返回「是否回写了看板」的布尔**：那要动 `py/main.py` 与 `py/routes/tt_accounts_routes.py`。前端继续用条件句兜底文案（计划 Task 11 已落文）。
 - **不做「来源」列的前端筛选/排序**：只是标注，不引入交互。
-- **本设计不含前端实现**：前端按 `2026-09-24-huguan-frontend-visual-design.md` 走，本设计只补它需要的两个后端事实。
+- **本设计不含前端实现**：前端按 `2026-09-24-huguan-frontend-visual-design.md` 走，本设计只补它需要的两个后端事实，前端消费方式见 §1.4 / §2.4。
 
 ## 4. 风险与已知代价
 
 | 项 | 说明 |
 |---|---|
-| `via` 是展示用文字而非稳定枚举 | 若将来前端要按 `via` 做逻辑判断，需改为稳定 token（如 `owner_channel`/`owner_name`）再由前端映射。**当前只有展示用途，故直接给列头文字**（这也是户管在表里实际看到的名字）。 |
-| 新端点列出全部非 hidden 用户 | 含 `viewer` 角色与无账户用户。这是「转给谁」的**真实全集**；是否允许转给 viewer 由既有 reassign 逻辑决定（TT 侧只校验目标存在），本端点不额外设限。 |
+| `via` 是 token，前端必须映射 | 前端漏映射会显示裸 token。已要求兜底渲染 `—`（§1.4），并在测试里钉住 token 值。 |
+| 新端点列出全部非 viewer/hidden 用户 | 含无账户用户与 `admin`/`developer`。这是「转给谁」的**真实全集**；是否允许转给某角色由既有 reassign 逻辑决定（TT 侧只校验目标存在），本端点不额外设限。 |
+| 排除 `viewer` 后，若某户当前归属恰是 viewer | 该用户**不会**出现在下拉的选项里，但「户归属」列的只读展示仍按 `owner_id` 解析人名（不依赖本端点），故不会显示为空白。设计文档 §5.4 的「未知归属」兜底态仍覆盖真正解析不到的情况。 |
 | 端点未做分页 | 本部署为局域网 20 人以下（AGENTS.md），用户量极小，下拉一次性拉全量即可。 |
 
 ## 5. 门禁
@@ -197,7 +202,9 @@ def dashboard_owner_options():
 - `PYTHONDONTWRITEBYTECODE=1` 不能省：同秒内生成的同字节数变异体不会让 `.pyc` 失效，会得到假 GREEN
 - 完成后按 CLAUDE.md 调用 `/code-review`，修复后重跑门禁
 
-## 6. 待确认问题
+## 6. 已确认的决策（2026-09-24 用户裁定）
 
-1. `via` 给**列头文字**（本设计的选择）还是稳定 token？——本设计选列头文字，理由是只有展示用途，且它就是户管在表里看到的名字。
-2. 新端点是否需要**排除 `viewer`**？——本设计不排除（保持「转给谁」的全集），若你认为不该转给只读角色，我改为排除。
+| # | 问题 | 裁定 | 理由 |
+|---|---|---|---|
+| 1 | `via` 给列头文字还是稳定 token | **稳定 token**：`"owner_channel"` / `"owner_name"` | 用户原话「那个更好后续扩展就选哪个」。token 在列头改名、新增平台、前端分支判断三种未来场景下都不破坏接口契约。中文文字由前端按平台映射（§1.4）。 |
+| 2 | 新端点是否排除 `viewer` | **排除**（连同 `hidden` 一起排除） | 用户裁定。`viewer` 是只读角色，把户转给它没有业务意义。 |
