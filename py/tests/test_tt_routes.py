@@ -364,29 +364,36 @@ def test_package_update_delete_batch_requires_owner(client, tt_headers):
     assert client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()["packages"] == []
 
 
-def test_check_delist(client, tt_headers):
-    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
-        "product_name": "掉包产品",
-        "packages": [{"type": "package", "series_name": "S", "package_name": "com.a.b", "url": "https://play.google.com/store/apps/details?id=com.a.b"}],
-    }).get_json()["id"]
-
-    # 从真实数据取 package id，避免硬编码 id=1 依赖「全新临时 DB 首个插入」这一事实
-    detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
-    pkg_id = detail["packages"][0]["id"]
-
-    fake = [{"package_id": pkg_id, "product_id": pid, "is_delisted": True, "error": ""}]
-    with mock.patch("delist_checker.check_product_packages", return_value=fake):
-        resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
-    assert resp.status_code == 200
-    assert resp.get_json()["results"][0]["is_delisted"] is True
-
-    # 检测掉包后，list_products 通过 LEFT JOIN 返回 is_delisted，用于卡片红边持久标记
-    items = client.get("/api/tt/products/list", headers=tt_headers).get_json()["items"]
-    assert items[0]["packages"][0]["is_delisted"] == 1
-
-    # 掉包状态查询
-    resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
-    assert len(resp.get_json()["delisted_packages"]) == 1
+# [2026-09-24 停用] 本测试会真实外发 Telegram 群消息，故整段注释（用户裁定）。
+# 原因：/check-delist 路由在 is_delisted=True 时会调用 send_tt_delist_notifications，
+# 而本测试只 mock 了 delist_checker.check_product_packages，未 mock 通知函数，
+# 于是每跑一轮测试就往 TT 掉包群发一条「掉包产品 / 系列 S」。
+# 恢复方式：参照 test_tt_delist_notification.py 里的
+#   monkeypatch.setattr(tt_routes, "send_tt_delist_notifications", ...)
+# 补上通知函数的 mock 后即可取消注释。
+# def test_check_delist(client, tt_headers):
+#     pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+#         "product_name": "掉包产品",
+#         "packages": [{"type": "package", "series_name": "S", "package_name": "com.a.b", "url": "https://play.google.com/store/apps/details?id=com.a.b"}],
+#     }).get_json()["id"]
+#
+#     # 从真实数据取 package id，避免硬编码 id=1 依赖「全新临时 DB 首个插入」这一事实
+#     detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+#     pkg_id = detail["packages"][0]["id"]
+#
+#     fake = [{"package_id": pkg_id, "product_id": pid, "is_delisted": True, "error": ""}]
+#     with mock.patch("delist_checker.check_product_packages", return_value=fake):
+#         resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+#     assert resp.status_code == 200
+#     assert resp.get_json()["results"][0]["is_delisted"] is True
+#
+#     # 检测掉包后，list_products 通过 LEFT JOIN 返回 is_delisted，用于卡片红边持久标记
+#     items = client.get("/api/tt/products/list", headers=tt_headers).get_json()["items"]
+#     assert items[0]["packages"][0]["is_delisted"] == 1
+#
+#     # 掉包状态查询
+#     resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
+#     assert len(resp.get_json()["delisted_packages"]) == 1
 
 
 def test_check_delist_requires_owner(client, tt_headers):
@@ -401,28 +408,31 @@ def test_check_delist_requires_owner(client, tt_headers):
     assert resp.status_code == 403
 
 
-def test_delist_status_scope(client, tt_headers):
-    """横向越权修复：非 owner/runner 用户看不到他人产品的掉包记录；owner 能看到自己的。"""
-    pid = client.post("/api/tt/products/create", headers=tt_headers, json={
-        "product_name": "我的掉包产品",
-        "packages": [{"type": "package", "series_name": "S", "package_name": "com.mine.delist", "url": "https://play.google.com/store/apps/details?id=com.mine.delist"}],
-    }).get_json()["id"]
-    detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
-    pkg_id = detail["packages"][0]["id"]
-
-    fake = [{"package_id": pkg_id, "product_id": pid, "is_delisted": True, "error": ""}]
-    with mock.patch("delist_checker.check_product_packages", return_value=fake):
-        resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
-    assert resp.status_code == 200
-
-    # owner 能看到自己产品的掉包记录
-    resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
-    assert len(resp.get_json()["delisted_packages"]) == 1
-
-    # 非 owner/runner 用户看不到他人产品的掉包记录
-    other_headers = _make_tt_headers(client, "ttuser2")
-    resp = client.get("/api/tt/products/delist-status", headers=other_headers)
-    assert resp.get_json()["delisted_packages"] == []
+# [2026-09-24 停用] 同 test_check_delist：本测试也真实外发 Telegram 群消息，故整段注释（用户裁定）。
+# 注意：本测试同时覆盖「横向越权修复」（非 owner/runner 看不到他人掉包记录），
+# 注释后该越权防护失去回归测试，恢复时请一并还原。
+# def test_delist_status_scope(client, tt_headers):
+#     """横向越权修复：非 owner/runner 用户看不到他人产品的掉包记录；owner 能看到自己的。"""
+#     pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+#         "product_name": "我的掉包产品",
+#         "packages": [{"type": "package", "series_name": "S", "package_name": "com.mine.delist", "url": "https://play.google.com/store/apps/details?id=com.mine.delist"}],
+#     }).get_json()["id"]
+#     detail = client.get(f"/api/tt/products/{pid}/detail", headers=tt_headers).get_json()
+#     pkg_id = detail["packages"][0]["id"]
+#
+#     fake = [{"package_id": pkg_id, "product_id": pid, "is_delisted": True, "error": ""}]
+#     with mock.patch("delist_checker.check_product_packages", return_value=fake):
+#         resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+#     assert resp.status_code == 200
+#
+#     # owner 能看到自己产品的掉包记录
+#     resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
+#     assert len(resp.get_json()["delisted_packages"]) == 1
+#
+#     # 非 owner/runner 用户看不到他人产品的掉包记录
+#     other_headers = _make_tt_headers(client, "ttuser2")
+#     resp = client.get("/api/tt/products/delist-status", headers=other_headers)
+#     assert resp.get_json()["delisted_packages"] == []
 
 
 def test_import_text_parse(client, tt_headers):
