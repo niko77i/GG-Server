@@ -309,3 +309,59 @@ App Store 链接带地区段（`/vn/`、`/us/`…），**同一个 app 可能越
 
 **处置**：先判 key 存在性（`'url' in updates`）再决定用本次值还是库里值。
 「本次没传 url → 回落库里 url」这一既有能力保持不变。
+
+### 12.3 「拿不到判定」的四类残余全部归为「未知」
+
+Task 3 审查环节发现 §2.3 的同族缺陷**还有第三个实例**，且同样可达。实现后实测：
+
+```
+check_url_delisted('play.google.com/store/apps/details?id=x')   # 漏写 http://
+  → (False, "Invalid URL '...': No scheme supplied. ...")
+```
+
+`requests.MissingSchema` 不是 `ConnectionError` 子类，落进 `delist_checker.py` 的兜底
+`except Exception → False`，于是**畸形 url 被判成「正常」**，照样经消费方写成 `is_delisted=0`
+抹掉既有掉包记录。同族还有三处：
+
+| # | 分支 | 位置 | 现状 |
+|---|------|------|------|
+| ① | 畸形 url（`MissingSchema` 等解析异常） | 直连兜底 `except Exception` | `False` |
+| ② | 直连超时 | `except requests.Timeout` | `False` |
+| ③ | 直连连接失败 | `except requests.ConnectionError` | `False` |
+| ④ | 代理池为空 | `proxy_pool.count == 0` | `False` |
+| ⑤ | 代理全部失败（重试耗尽） | 末尾返回 | `False` |
+
+**可达性已实测**：GG 加包端点只校验包名不校验 url；`products_update_package` 可写入任意
+url 或把 url 清空；定时取包 SQL 只过滤 `url != ''`，故畸形/失效 url 真能进到检测环节。
+
+> 这五处保持 `False` 原是 Task 1 的**显式决定**（计划明文要求三条测试继续断言 `is False`，
+> 理由是「不让未知态扩大化」）。2026-09-24 用户裁定：**与 429 后果同型，一并收口**，
+> 五处统一改判 `None`。
+
+**处置**：五处全部由 `False` 改判 `None`，模块契约彻底统一为「拿不到判定 → `None`」。
+「代理失败绝不判掉包」不变量不受影响 —— `None` 既非 `True` 也非 `False`，且消费方对
+`None` 一律不写库。`test_delist_checker.py` 中钉住旧行为的四条既有测试
+（`test_returns_false_with_error_on_timeout` / `..._on_connection_error` /
+`..._on_general_exception`、`test_all_proxies_fail_returns_proxy_error` /
+`test_empty_pool_returns_proxy_error`，以及 Task 1 新增的
+`test_timeout_still_false_not_none`）**改断言 + 改名 + 注明语义变更，不删除**。
+
+反面必须保持不变：**200 正常页面仍判 `False`**（`test_returns_false_when_app_page_normal`、
+`test_200_normal_still_false`、`test_retries_next_proxy_after_failure`、
+`test_proxy_retries_to_next_after_429`、`test_no_pool_keeps_direct_connection` 五条断言不得改动）。
+「未知」只吸收「拿不到判定」，不得吸收「拿到了判定且判为正常」。
+
+顺带修正 `check_product_packages` 的 docstring —— 它写「函数只做透传」，但该函数自身在
+空 url 分支返回 `None`，措辞自相矛盾（Task 1 遗留）。
+
+### 12.4 前端「本轮全部未知」时的误报提示
+
+`ProductCard.vue:196`、`TtProductCard.vue:308` 在 `delisted.length === 0` 时**无条件**
+弹 `ElMessage.success('所有包均正常 ✓')`。整批 429 限流（或全为空 url 包）时本轮结果全是
+`None`，该提示会说谎，让人以为检测正常完成。
+
+数据本身不受影响（列表仍按持久化的 `is_delisted=1` 标红），仅提示语失真。
+Task 1 起即可达，Task 3 扩大了可达面。
+
+**处置**：折进 Task 4 一并修正（Task 4 本就要改 `TtProductCard.vue`），提示语需区分
+「全部正常」与「本轮有 N 个未能判定」。用户 2026-09-24 裁定。

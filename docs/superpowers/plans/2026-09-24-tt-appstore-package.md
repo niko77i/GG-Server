@@ -1159,15 +1159,202 @@ git commit -m "fix(delist): 判定未知时不覆盖既有掉包记录，空 url
 
 ---
 
+## Task 3b: 「拿不到判定」的五类残余全部归为「未知」
+
+> 用户 2026-09-24 裁定：与 429 后果同型，一并收口（spec §12.3）。
+> 本任务**推翻 Task 1 的一处显式决定** —— Task 1 曾明文要求超时/连接失败/代理失败保持
+> `False`（理由是「不让未知态扩大化」）。裁定后该理由作废，模块契约统一为
+> 「拿不到判定 → `None`」。
+
+**Files:**
+- Modify: `py/delist_checker.py`（`check_url_delisted` 的 5 个失败分支 + 两处 docstring/注释）
+- Modify: `py/tests/test_delist_checker.py`（5 条既有测试改断言/改名，注明语义变更）
+
+**Interfaces:**
+- Consumes: Task 3 已落地的消费方 `is None` 守卫（本任务只改生产侧，消费方无需再动）
+- Produces: `check_url_delisted` 只在**拿到了判定**时才返回 `False`；其余一律 `None`
+
+**关键分界（不得越界）**：`None` 只吸收「拿不到判定」，**不得**吸收「拿到了判定且判为正常」。
+200 正常页面、404 掉包页面的判定一个字都不许动。
+
+- [ ] **Step 1: 改 5 个失败分支（错误文案保留原文并追加「，无法判定」）**
+
+`check_url_delisted` 直连分支（`if proxy_pool is None:` 内的 try/except）改成：
+
+```python
+    # 无代理池：直连；拿不到判定（限流/服务端异常/超时/连接失败/解析失败）一律返回「未知」
+    if proxy_pool is None:
+        try:
+            return _request_and_judge(url, None)
+        except DelistIndeterminate as e:
+            return None, f"{e} 限流或服务端异常，判定未知"
+        except requests.Timeout:
+            return None, "请求超时，无法判定"
+        except requests.ConnectionError:
+            return None, "网络连接失败，无法判定"
+        except Exception as e:
+            return None, f"{e}，无法判定"
+```
+
+代理分支两处返回值改成：
+
+```python
+    # 有代理池：失败换下一个代理重试，绝不因代理失败误判为掉包
+    if proxy_pool.count == 0:
+        return None, "代理池为空，无法判定"
+```
+
+```python
+    if last_indeterminate:
+        return None, f"代理响应异常（限流/服务端）: {last_indeterminate}"
+    return None, f"代理全部失败: {last_error}，无法判定"
+```
+
+> 代理分支**循环内**的逐代理 `except` 全部保持原样（继续换下一个代理重试），
+> 只改「重试耗尽后」的最终返回。`_request_and_judge` 一字不动。
+
+- [ ] **Step 2: 修正两处失真的文档措辞**
+
+`check_url_delisted` 的 docstring Returns 段：
+
+```python
+    Returns:
+        (is_delisted, error)：
+          True  → 已掉包
+          False → 正常（拿到了判定，且判为在架）
+          None  → 判定未知（限流/服务端异常/超时/连接失败/解析失败/空 url），
+                  调用方应保留上一次判定结果，不得覆盖
+```
+
+`check_product_packages` 的 docstring 末句「函数只做透传」自相矛盾（该函数自身在空 url
+分支返回 `None`），改成：
+
+```python
+        is_delisted 为 True/False/None（None 表示判定未知）。
+        空 url 由本函数直接判为 None（无法判定），其余原样透传 check_url_delisted 的结果。
+```
+
+- [ ] **Step 3: 改 5 条既有测试的断言（只改断言/改名，不删除）**
+
+`TestCheckUrlDelisted` 三条 —— 断言 `is False` 改 `is None`，名字由
+`test_returns_false_*` 改为 `test_returns_none_*`，docstring 说明「拿不到判定 → 未知」。
+**`error` 的既有断言原样保留**（文案保留原文，故 `"超时" in error`、`error != ""` 仍成立）：
+
+```python
+    def test_returns_none_on_timeout(self):
+        """请求超时 → 判定未知（拿不到判定，不得当作「正常」覆盖既有记录）。"""
+        from delist_checker import check_url_delisted
+
+        with patch("delist_checker.requests.get", side_effect=requests.Timeout("timed out")):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.example.app")
+
+        assert is_delisted is None
+        assert "超时" in error
+```
+
+`test_returns_none_on_connection_error` / `test_returns_none_on_general_exception`
+同法（断言 `is None`，保留 `assert error != ""`）。
+
+`TestCheckUrlDelistedWithProxies` 两条：
+
+```python
+        assert is_delisted is None          # 原 assert is_delisted is False
+        assert "代理" in error              # 保留
+        assert mock_get.call_count == 2     # 保留
+```
+
+```python
+        assert is_delisted is None                  # 原 assert is_delisted is False
+        assert "代理池为空" in error                # 原 error == "代理池为空"（文案已追加「，无法判定」）
+        mock_get.assert_not_called()                # 保留
+```
+
+`TestIndeterminateStatus.test_timeout_still_false_not_none` 的整个前提已被裁定推翻，
+**改名并反转断言 + 注明语义变更**（这是 Task 1 新增的用例，同样只改不删）：
+
+```python
+    def test_timeout_is_none_not_false(self):
+        """超时改判未知（2026-09-24 裁定：与 429 同型，拿不到判定不得覆盖既有记录）。
+
+        本用例的前身 test_timeout_still_false_not_none 钉的是「不让未知态扩大化」，
+        该理由已被裁定作废。「失败绝不判掉包」不变量不受影响 —— None 既非 True 也非 False。
+        """
+        from delist_checker import check_url_delisted
+
+        with patch("delist_checker.requests.get", side_effect=requests.Timeout("timed out")):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is None
+        assert error != ""
+```
+
+- [ ] **Step 4: 新增两条用例，钉住「拿到了判定仍是 False」的边界**
+
+在 `TestIndeterminateStatus` 内追加：
+
+```python
+    def test_malformed_url_returns_none(self):
+        """畸形 url（漏写 scheme）→ 判定未知，而非「正常」。
+
+        requests.MissingSchema 不是 ConnectionError 子类，原兜底 except 会吞成 False，
+        经消费方写库后抹掉既有掉包记录。实测确认过的事实。
+        """
+        from delist_checker import check_url_delisted
+
+        is_delisted, error = check_url_delisted("play.google.com/store/apps/details?id=com.x.y")
+
+        assert is_delisted is None
+        assert error != ""
+
+    def test_200_normal_still_false_after_unknown_widening(self):
+        """边界：200 且无关键词仍是 False —— 「未知」不得吸收「判为正常」。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=200, text="<html>welcome to the app page</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is False
+        assert error == ""
+```
+
+> `MagicMock` 若文件顶部未导入，在 Step 4 一并补 `from unittest.mock import MagicMock, patch`
+> （该文件已导入 `patch`，按实际导入行调整，不要重复导入）。
+
+- [ ] **Step 5: 跑测试**
+
+Run: `cd py && python -m pytest tests/test_delist_checker.py tests/test_delist_indeterminate.py tests/test_tt_appstore_package.py "tests/test_tt_delist_notification.py::TestTtDelistScheduler" -v`
+
+Expected: 全绿（含 Step 3 改过断言的 5 条 + Step 4 新增的 2 条）。
+
+Run: `cd py && python -m pytest tests/ -q`
+
+Expected: 全绿。
+
+> 若出现 `TestGGManualCheckEmptyUrl` 之类依赖 `is False` 的失败，**不要**改那些用例的
+> 期望值去迁就，先看它钉的是不是「拿到判定判为正常」的边界 —— 那类边界必须保持语义。
+
+- [ ] **Step 6: 提交**
+
+逐文件 add（**禁止 `git add -A`**），提交前 `git status` 核对暂存区无并行会话的改动：
+
+```bash
+git add py/delist_checker.py py/tests/test_delist_checker.py
+git commit -m "fix(delist): 超时/连接失败/解析失败/代理失败统一改判「未知」，不再覆盖既有判定"
+```
+
+---
+
 ## Task 4: 前端录入放行与 iOS 标识
 
 **Files:**
 - Modify: `frontend/src/components/TtAddPackageModal.vue`（第 9、86、93 行）
-- Modify: `frontend/src/components/TtProductCard.vue`（第 85-88 行 + `<script setup>` 加判定函数）
+- Modify: `frontend/src/components/TtProductCard.vue`（第 85-88 行 + `<script setup>` 加判定函数 + `checkDelist`）
+- Modify: `frontend/src/components/ProductCard.vue`（`checkDelist`）
 
 **Interfaces:**
-- Consumes: 后端 Task 2 已放行苹果空包名
-- Produces: 前端不再拦截苹果包；卡片上苹果包显示灰色 `iOS` 占位
+- Consumes: 后端 Task 2 已放行苹果空包名；Task 1/3/3b 的 `is_delisted` 可能为 `null`（判定未知）
+- Produces: 前端不再拦截苹果包；卡片上苹果包显示灰色 `iOS` 占位；检测提示语不再把「本轮全部未知」说成「所有包均正常」
 
 > 本任务**没有自动化测试** —— 该仓库前端无测试框架（`frontend/package.json` 只有 `dev`/`build`/`preview` 三个脚本，devDependencies 里没有 vitest/jest）。验证方式为 `npm run build` 通过 + 下面的浏览器人工核对清单。
 
@@ -1234,13 +1421,38 @@ function isIosPkg(pkg) {
 
 `iOS` 占位符**不绑点击事件、不可复制**（避免复制出无意义的字符串）。
 
-- [ ] **Step 3: 构建验证**
+- [ ] **Step 3: 修正「本轮全部未知」时的误报提示（用户 2026-09-24 裁定，spec §12.4）**
+
+`TtProductCard.vue` 的 `checkDelist` 与 `ProductCard.vue` 的 `checkDelist` 目前都在
+无掉包时无条件弹「所有包均正常 ✓」。整批 429 限流时本轮结果全是 `null`，该提示会说谎。
+两处改成同样口径（下面是 `TtProductCard.vue` 的形态，`ProductCard.vue` 按自己的
+`res.success` 包裹结构套用同一段判断）：
+
+```javascript
+    const results = res.results || []
+    const delisted = results.filter(r => r.is_delisted)
+    // 判定未知（限流/网络异常/空 url）：is_delisted 为 null 或缺失
+    const unknown = results.filter(r => r.is_delisted == null)
+    if (delisted.length) {
+      ElMessage.warning(`检测到 ${delisted.length} 个包已掉包！`)
+    } else if (unknown.length) {
+      ElMessage.warning(`${unknown.length} 个包本轮未能判定（限流或网络异常），已保留上次判定结果`)
+    } else {
+      ElMessage.success('所有包均正常 ✓')
+    }
+```
+
+**严格增量**：`unknown.length === 0` 时行为与改前逐字一致（含 `results` 为空仍走
+「所有包均正常」这一原有行为）。只有「存在未知」这一新增情形改变文案。
+`emit('refresh')` 的调用位置按各自文件原有位置保持不动。
+
+- [ ] **Step 4: 构建验证**
 
 Run: `cd frontend && npm run build`
 
 Expected: 构建成功，无 Vue 编译错误（`v-else-if` 紧跟 `v-if`，不报 "v-else-if has no adjacent v-if"）。
 
-- [ ] **Step 4: 浏览器人工核对**
+- [ ] **Step 5: 浏览器人工核对**
 
 前置：后端已重启（用户执行），前端已 `npm run build`。
 
@@ -1252,11 +1464,16 @@ Expected: 构建成功，无 Vue 编译错误（`v-else-if` 紧跟 `v-if`，不�
 5. 手动添加区：类型「跑包」+ 链接填苹果链接 + **包名留空** → 点「添加」→ 期望成功
 6. 手动添加区：类型「跑包」+ 链接填 `https://play.google.com/store/apps/details?id=com.a.b` + 包名留空 → 期望仍被拦截，提示「跑包必须填写包名（App Store 链接可留空）」
 7. 对该产品点「是否掉包」手动检测 → 期望苹果包出现在检测结果里（说明掉包检测覆盖到了苹果包）
+8. 提示语核对：构造一个「本轮未能判定」的场景（例如给某产品加一个空 url 的 GG 包，或在 GG 产品卡片上检测一个 url 为空的包），点「是否掉包」
+   - 期望：提示「N 个包本轮未能判定（限流或网络异常），已保留上次判定结果」，**不再**出现「所有包均正常 ✓」
+   - 反例核对：一个所有包 url 都正常的 GG 产品，点检测 → 期望仍是「所有包均正常 ✓」
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 提交**
+
+逐文件 add（**禁止 `git add -A`**），提交前 `git status` 核对暂存区无并行会话的改动：
 
 ```bash
-git add frontend/src/components/TtAddPackageModal.vue frontend/src/components/TtProductCard.vue
+git add frontend/src/components/TtAddPackageModal.vue frontend/src/components/TtProductCard.vue frontend/src/components/ProductCard.vue
 git commit -m "feat(tt): 前端放行 App Store 链接，苹果包以灰色 iOS 占位展示"
 ```
 
