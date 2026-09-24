@@ -527,7 +527,9 @@ def reassign_account(aid):
     # `or ""` 不能省：owner_id 给 0 时 `"0".isdigit()` 为真，会被当成合法目标。
     target_owner = uid
     if _get_role(db, uid) in CROSS_USER_ROLES:
-        raw_owner = (data.get("owner_id") or "")
+        # `parse_body()` 对「真值非 dict」的 body（如 JSON 数组）原样返回，
+        # 不判类型直接 `.get` 会 AttributeError → 500（本任务新引入的读取点）。
+        raw_owner = (data.get("owner_id") or "") if isinstance(data, dict) else ""
         raw_owner_str = str(raw_owner).strip()
         if raw_owner_str:
             if not (raw_owner_str.isascii() and raw_owner_str.isdigit()):
@@ -957,14 +959,9 @@ def recharge_retry_sheets(rid):
 @jwt_required()
 @tt_required
 def recycle_reasons_list():
+    """回收原因为全平台公用词表：所有 TT 用户（含 viewer）均可读。"""
     db = get_db()
-    uid = get_uid()
-    role = _get_role(db, uid)
-    if role in CROSS_USER_ROLES:
-        rows = db.execute("SELECT id, name FROM tt_recycle_reasons ORDER BY id").fetchall()
-    else:
-        rows = db.execute("SELECT id, name FROM tt_recycle_reasons WHERE owner_id=? ORDER BY id",
-                          (uid,)).fetchall()
+    rows = db.execute("SELECT id, name FROM tt_recycle_reasons ORDER BY id").fetchall()
     return ok({"items": [dict(r) for r in rows]})
 
 
@@ -977,12 +974,16 @@ def recycle_reason_create():
     name = (parse_body().get("name") or "").strip()
     if not name:
         return err("名称不能为空")
-    existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=? AND owner_id=?",
-                          (name, uid)).fetchone()
+    # 词表公用：按 name 全局去重；owner_id 仅记录创建者，不参与权限判断
+    existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=?", (name,)).fetchone()
     if existing:
         return err(f"回收原因「{name}」已存在", 409)
-    db.execute("INSERT INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (name, uid))
-    db.commit()
+    try:
+        db.execute("INSERT INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (name, uid))
+        db.commit()
+    except sqlite3.IntegrityError:
+        # 并发下撞 name 唯一索引
+        return err(f"回收原因「{name}」已存在", 409)
     return ok({"id": db.execute("SELECT last_insert_rowid()").fetchone()[0]})
 
 
@@ -990,19 +991,23 @@ def recycle_reason_create():
 @jwt_required()
 @tt_write_required
 def recycle_reason_rename(rid):
+    """公用词表：任何非 viewer 均可改名；name 全局唯一。"""
     db = get_db()
-    uid = get_uid()
-    role = _get_role(db, uid)
     name = (parse_body().get("name") or "").strip()
     if not name:
         return err("名称不能为空")
-    row = db.execute("SELECT owner_id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
+    row = db.execute("SELECT id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
     if not row:
         return err("回收原因不存在", 404)
-    if role not in CROSS_USER_ROLES and row["owner_id"] != uid:
-        return err("无权限", 403)
-    db.execute("UPDATE tt_recycle_reasons SET name=? WHERE id=?", (name, rid))
-    db.commit()
+    other = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=? AND id!=?",
+                       (name, rid)).fetchone()
+    if other:
+        return err(f"回收原因「{name}」已存在", 409)
+    try:
+        db.execute("UPDATE tt_recycle_reasons SET name=? WHERE id=?", (name, rid))
+        db.commit()
+    except sqlite3.IntegrityError:
+        return err(f"回收原因「{name}」已存在", 409)
     return ok()
 
 
@@ -1010,14 +1015,11 @@ def recycle_reason_rename(rid):
 @jwt_required()
 @tt_write_required
 def recycle_reason_delete(rid):
+    """公用词表：任何非 viewer 均可删除。"""
     db = get_db()
-    uid = get_uid()
-    role = _get_role(db, uid)
-    row = db.execute("SELECT owner_id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
+    row = db.execute("SELECT id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
     if not row:
         return err("回收原因不存在", 404)
-    if role not in CROSS_USER_ROLES and row["owner_id"] != uid:
-        return err("无权限", 403)
     db.execute("DELETE FROM tt_recycle_reasons WHERE id=?", (rid,))
     db.commit()
     return ok()

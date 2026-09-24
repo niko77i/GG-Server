@@ -2090,6 +2090,24 @@ class TestTtReassignCrossUser:
         assert client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
                           json={"owner_id": "9" * 25}).status_code == 400
 
+    def test_array_body_does_not_500(self, client):
+        """body 是 JSON 数组时不得 500（本任务新引入的读取点）。
+
+        `parse_body()` 对「真值非 dict」的 body 原样返回，不判类型直接
+        `data.get("owner_id")` 会 AttributeError → 500。非跨用户角色不走这段，
+        故只钉跨用户角色。行为与改动前一致：字段更新照旧全跳过，仍返回 200 并认领给自己。
+        """
+        hg, hid = _create_user(client, "_tt_rg_arr", role="huguan", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "TTR-8", _seed(db, "_tt_rg_arrof", "陈十一"))
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg, json=[1, 2])
+        assert resp.status_code == 200
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
+                          (aid,)).fetchone()["owner_id"] == hid
+        db.close()
+
 
 class TestTTTriggerPoints:
     def test_tt_create_triggers_writeback(self, client, monkeypatch):
