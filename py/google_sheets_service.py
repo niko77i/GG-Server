@@ -148,7 +148,7 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
     sheet_id_int = first_sheet.get("gid", 0)
 
     # 2. 读取目标 Sheet 现有数据（A-N 列）
-    range_read = f"'{sheet_name}'!A:N"
+    range_read = f"{_a1_sheet(sheet_name)}A:N"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
         range=range_read,
@@ -230,7 +230,7 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
             row_data[12] = f"=F{row_num}*L{row_num}"
             row_data[13] = f"=F{row_num}-K{row_num}+M{row_num}"
             data.append({
-                "range": f"'{sheet_name}'!A{row_num}:N{row_num}",
+                "range": f"{_a1_sheet(sheet_name)}A{row_num}:N{row_num}",
                 "values": [row_data],
             })
         service.spreadsheets().values().batchUpdate(
@@ -252,7 +252,7 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
             row_data[13] = f"=F{row_num}-K{row_num}+M{row_num}"
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"'{sheet_name}'!A{start}:N{end}",
+            range=f"{_a1_sheet(sheet_name)}A{start}:N{end}",
             valueInputOption="USER_ENTERED",
             body={"values": appends},
         ).execute()
@@ -314,7 +314,7 @@ def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -
     sheet_rows = target_sheet["rowCount"]
 
     # 2. 读取现有数据，找最后一行
-    range_read = f"'{sheet_name}'!A:G"
+    range_read = f"{_a1_sheet(sheet_name)}A:G"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range_read,
     ).execute()
@@ -357,7 +357,7 @@ def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -
     # 5. 追加写入
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range=f"'{sheet_name}'!A{start}:G{end}",
+        range=f"{_a1_sheet(sheet_name)}A{start}:G{end}",
         valueInputOption="USER_ENTERED",
         body={"values": new_rows},
     ).execute()
@@ -396,7 +396,7 @@ def append_recharge_tt(service, spreadsheet_id: str, sheet_name: str, rows: list
     sheet_rows = target_sheet["rowCount"]
 
     # 读现有 A:C，以「账户ID」列（B 列）有无数据判断最后一行（忽略时间/金额列残留）
-    range_read = f"'{sheet_name}'!A:C"
+    range_read = f"{_a1_sheet(sheet_name)}A:C"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range_read,
     ).execute()
@@ -438,7 +438,7 @@ def append_recharge_tt(service, spreadsheet_id: str, sheet_name: str, rows: list
 
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range=f"'{sheet_name}'!A{start}:C{end}",
+        range=f"{_a1_sheet(sheet_name)}A{start}:C{end}",
         valueInputOption="USER_ENTERED",
         body={"values": new_rows},
     ).execute()
@@ -476,7 +476,7 @@ def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) ->
     sheet_id_int = target_sheet["gid"]
     sheet_rows = target_sheet["rowCount"]
 
-    range_read = f"'{sheet_name}'!A:B"
+    range_read = f"{_a1_sheet(sheet_name)}A:B"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range_read,
     ).execute()
@@ -508,17 +508,27 @@ def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) ->
     service.spreadsheets().values().batchUpdate(
         spreadsheetId=spreadsheet_id,
         body={"valueInputOption": "USER_ENTERED", "data": [
-            {"range": f"'{sheet_name}'!A{start}:A{end}",
+            {"range": f"{_a1_sheet(sheet_name)}A{start}:A{end}",
              "values": [["'" + str(r.get("time", ""))] for r in rows]},
-            {"range": f"'{sheet_name}'!B{start}:B{end}",
+            {"range": f"{_a1_sheet(sheet_name)}B{start}:B{end}",
              "values": [["'" + str(r.get("account_id", ""))] for r in rows]},
-            {"range": f"'{sheet_name}'!H{start}:H{end}",
+            {"range": f"{_a1_sheet(sheet_name)}H{start}:H{end}",
              "values": [[r.get("reason", "")] for r in rows]},
         ]},
     ).execute()
 
     log.info("回收记录已追加到 Google Sheets: %d 行", len(rows))
     return {"appended": len(rows)}
+
+
+def _a1_sheet(sheet_name: str) -> str:
+    """工作表名 → A1 记法前缀 `'...'!`（含单引号转义）。
+
+    A1 记法里工作表名要用单引号包起来；名字本身含单引号时必须写成两个单引号
+    （Google Sheets 与 Excel 同规则），否则整条 range 不可解析、该次写入全废。
+    本文件所有拼 `'{sheet_name}'!` 的地方统一走这里。
+    """
+    return "'" + str(sheet_name).replace("'", "''") + "'!"
 
 
 def col_index(letter: str) -> int:
@@ -566,7 +576,7 @@ def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: 
     Returns:
         二维列表，每行为一个 list[str]，不包含空行之后的数据
     """
-    range_full = f"'{sheet_name}'!{range_str}"
+    range_full = f"{_a1_sheet(sheet_name)}{range_str}"
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
@@ -624,7 +634,7 @@ def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
 
     # 写回单个单元格
     row_num = target_row + 1  # 1-indexed
-    range_write = f"'{sheet_name}'!{col_letter}{row_num}"
+    range_write = f"{_a1_sheet(sheet_name)}{col_letter}{row_num}"
     try:
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
@@ -686,7 +696,7 @@ def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
             first, last = rng.split(":")
             start, end = col_index(first), col_index(last)
             data.append({
-                "range": f"'{sheet_name}'!{first}{row_num}:{last}{row_num}",
+                "range": f"{_a1_sheet(sheet_name)}{first}{row_num}:{last}{row_num}",
                 "values": [[cells.get(col_letter(c), "") for c in range(start, end + 1)]],
             })
 
@@ -802,7 +812,7 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
         target_sheet = info.get("sheets", [{}])[0].get("name", "Sheet1")
 
         # 读取现有数据
-        range_read = f"'{target_sheet}'!A:L"
+        range_read = f"{_a1_sheet(target_sheet)}A:L"
         try:
             result = service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id, range=range_read
@@ -859,10 +869,10 @@ def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
 
             if key in existing_map:
                 row_idx = existing_map[key]
-                range_write = f"'{target_sheet}'!A{row_idx + 1}:L{row_idx + 1}"
+                range_write = f"{_a1_sheet(target_sheet)}A{row_idx + 1}:L{row_idx + 1}"
             else:
                 last_row += 1
-                range_write = f"'{target_sheet}'!A{last_row}:L{last_row}"
+                range_write = f"{_a1_sheet(target_sheet)}A{last_row}:L{last_row}"
 
             updates.append({"range": range_write, "values": [row_data]})
 

@@ -545,6 +545,104 @@ def owner_channel_cells(rows: list, platform: str, value: str) -> list:
     return [{"account_id": r["account_id"], "cells": {col: value}} for r in rows]
 
 
+# MCC / BC 变更历史的分平台落库规格：
+# (业务表, 业务列, 历史表, 旧值列, 新值列)
+_CHANNEL_HISTORY_SPEC = {
+    "gg": ("accounts", "mcc_id", "account_mcc_history", "old_mcc_id", "new_mcc_id"),
+    "tt": ("tt_accounts", "bc_id", "tt_account_bc_history", "old_bc_id", "new_bc_id"),
+}
+
+# 户管同步造成的 MCC / BC 变更的 change_type，**按语义分成两个**：
+#   create —— 建号时的首次分配（to_create 分支），面板显示「新建账户」，
+#             与仓库既有建号路径取同一个值（main.py:4333）。
+#   batch  —— 改**既存**账户的 MCC/BC（to_update 分支），面板显示「批量修改」，
+#             表驱动的一批账户批量改列，与仓库既有的批量修改同档（main.py:4943）。
+# 两者都取既有取值、不新增 —— 新增取值会让 GG 的 `_MCC_CHANGE_TYPE_LABELS`
+# （main.py:1957）与 TT 的 `changeTypeLabel`（TtAccountDetailModal.vue:150）
+# 双双回落成英文原值（两处映射都没有中文兜底）。
+_CHANNEL_HISTORY_CHANGE_TYPE_CREATE = "create"
+_CHANNEL_HISTORY_CHANGE_TYPE_UPDATE = "batch"
+
+
+def _norm_ref_id(value):
+    """外键列的空值归一：0 / "0" / 空串 / None 一律算「没挂」。"""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    if value == 0 or value == "0":
+        return None
+    return value
+
+
+def _record_channel_change(db, platform: str, account_pk: int, fields: dict,
+                           changed_by: int) -> None:
+    """同步改了 MCC（GG）/ BC（TT）时补写变更历史，值没真变则不写。
+
+    仓库既有契约是**任何** mcc_id 变更都要写 `account_mcc_history`
+    （main.py:4339 / :4479 / :4539 / :4729 / :4943，TT 侧同构走
+    `tt_account_bc_history`）。户管同步此前直接 UPDATE 而不留痕，MCC 变更历史
+    面板会整批漏掉这类变更 —— 谁在什么时候把账户挂到了哪个 MCC 上再也查不回来。
+
+    `account_id` 列存的是**业务表行主键**（`account_mcc_history.account_id
+    REFERENCES accounts(id)`，database.py:334；TT 同构），不是表里的文本账户ID
+    —— 历史面板正是按行主键查的（main.py:5749 的 `<int:aid>`）。
+
+    changed_by 取发起本次同步的户管 uid（调用方传入的 user_id）。
+    本函数不 commit：与调用方共用同一个事务，历史行与业务行同生共死。
+    """
+    table, col, _hist_table, _old_col, _new_col = _CHANNEL_HISTORY_SPEC[platform]
+    if col not in fields:
+        return
+    new_val = _norm_ref_id(fields[col])
+    old = db.execute(f"SELECT {col} AS v FROM {table} WHERE id=?", (account_pk,)).fetchone()
+    if not old:
+        return
+    old_val = _norm_ref_id(old["v"])
+    # 必须与**库里的当前值**比，而不是只看 fields 里有没有这个键：
+    # 值没变时写历史会凭空多出一条「A → A」的变更，历史面板上真变更被淹没。
+    # （NULL → 某值是真变更：NULL 表示原本没挂 MCC/BC。）
+    if old_val == new_val:
+        return
+    _insert_channel_history(db, platform, account_pk, old_val, new_val, changed_by,
+                            _CHANNEL_HISTORY_CHANGE_TYPE_UPDATE)
+
+
+def _record_channel_assign(db, platform: str, account_pk: int, fields: dict,
+                           changed_by: int) -> None:
+    """同步**新建**的账户带了 MCC / BC 时补写「首次分配」历史（旧值恒为 NULL）。
+
+    与仓库既有建号路径同契约：main.py:4333（`create`）/ :4479（`import`）在
+    INSERT 账户之后同样紧接着补一条 old=NULL 的历史 —— 首次分配也是变更，
+    否则新账户的 MCC 挂载在历史面板上凭空出现、事后无从追溯。
+
+    值没落地就不写：表里那一列空着是「不填」，压根没有可记的首次分配。
+    change_type 取 `create`（与仓库既有建号路径 main.py:4333 同值）。
+    """
+    col = _CHANNEL_HISTORY_SPEC[platform][1]
+    new_val = _norm_ref_id(fields.get(col))
+    if new_val is None:
+        return
+    _insert_channel_history(db, platform, account_pk, None, new_val, changed_by,
+                            _CHANNEL_HISTORY_CHANGE_TYPE_CREATE)
+
+
+def _insert_channel_history(db, platform: str, account_pk: int, old_val, new_val,
+                           changed_by, change_type: str) -> None:
+    """写一行 MCC / BC 变更历史。**调用方负责判定「这确实是一次变更」与取值。**"""
+    if not changed_by:
+        # changed_by REFERENCES users(id)：写 None/0 会撞 FK 或记出一行无主历史。
+        # 真出现（调用方没传 uid）时宁可漏记也不能写坏。
+        log.warning("户管同步改 MCC/BC 但缺少 changed_by，跳过历史记录 platform=%s id=%s",
+                    platform, account_pk)
+        return
+    _table, _col, hist_table, old_col, new_col = _CHANNEL_HISTORY_SPEC[platform]
+    db.execute(
+        f"INSERT INTO {hist_table}(account_id, {old_col}, {new_col}, changed_by, change_type) "
+        "VALUES(?,?,?,?,?)",
+        (account_pk, old_val, new_val, changed_by, change_type))
+
+
 def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> dict:
     """执行户管确认过的差异（规格 §8.3 步骤 8）。
 
@@ -589,6 +687,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             marks = ", ".join("?" for _ in src)
             db.execute(f"INSERT INTO {table}({cols}) VALUES({marks})", tuple(src.values()))
             new_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            # 首次分配也要留痕（与 main.py:4333 的 create / :4479 的 import 同契约）。
+            # new_id 是刚 INSERT 出来的**行主键**，历史表的外键列要的正是它。
+            _record_channel_assign(db, platform, new_id, src, user_id)
             _apply_death(db, platform, new_id, want_dead)
             created += 1
         except Exception as e:
@@ -615,6 +716,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             sets = [f"{k}=?" for k in fields]
             if "status_id" in fields:
                 sets.append("status_changed_date=datetime('now','localtime')")
+            # MCC / BC 变更必须留痕（历史面板按行主键查）。放在 UPDATE **之前**：
+            # 旧值要从库里读，写完这一行就读不到了。
+            _record_channel_change(db, platform, item["existing_id"], fields, user_id)
             if sets:
                 db.execute(f"UPDATE {table} SET {', '.join(sets)}, "
                            "updated_at=datetime('now','localtime') WHERE id=?",

@@ -1443,6 +1443,220 @@ class TestApplyDiff:
         assert len(ids) == 1                       # 两个账户指向同一行状态
         db.close()
 
+    def test_mcc_change_writes_history_keyed_by_row_pk(self, client):
+        """GG：同步改了 MCC 必须写 `account_mcc_history`（此前整批漏记）。
+
+        四件事一起钉住：
+        - `account_id` 用**账户行主键** —— 该列是 `REFERENCES accounts(id)`
+          （database.py:334），历史面板也正是按 `<int:aid>` 查（main.py:5749）。
+          写成表里的文本账户ID「MC-1」时面板一条都查不出来，等于白记；
+        - `old_mcc_id` 为 NULL：原本没挂 MCC，NULL → 某值是真变更，不能被当成
+          「空对空」丢掉；
+        - `changed_by` 是发起本次同步的户管（`apply_diff(..., user_id=u1)` 的 u1）；
+        - `change_type` 取面板能显示中文的既有取值 `batch`（「批量修改」）。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        aid = _seed_account(db, "MC-1", u1, acquired_date="")
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('MC-新','9')")
+        db.commit()
+        new_mcc = db.execute("SELECT id FROM mcc WHERE name='MC-新'").fetchone()["id"]
+        rows = [dict(parse_row(["", "", "MC-1", "MC-新", "", "", "张三"], "gg"), row=2)]
+        diff = build_diff(db, rows, "gg")
+        assert diff["to_update"][0]["fields"]["mcc_id"] == new_mcc
+        apply_diff(db, diff, "gg", {"update": ["MC-1"]}, user_id=u1)
+        hist = db.execute("SELECT * FROM account_mcc_history").fetchall()
+        assert len(hist) == 1
+        assert hist[0]["account_id"] == aid            # 行主键，不是 "MC-1"
+        assert hist[0]["old_mcc_id"] is None
+        assert hist[0]["new_mcc_id"] == new_mcc
+        assert hist[0]["changed_by"] == u1
+        assert hist[0]["change_type"] == "batch"
+        db.close()
+
+    def test_mcc_change_records_pre_update_old_value(self, client):
+        """旧值必须取自 UPDATE **之前**的库内值：甲 → 乙 的历史行得是 (甲, 乙)。
+
+        先写 UPDATE 再读旧值只会读到新值，(old, new) 变成 (乙, 乙) —— 变更历史
+        看上去像「原地没动」，谁把它从甲挪到乙的线索就断了。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('MC-甲','1')")
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('MC-乙','2')")
+        db.commit()
+        old_mcc = db.execute("SELECT id FROM mcc WHERE name='MC-甲'").fetchone()["id"]
+        new_mcc = db.execute("SELECT id FROM mcc WHERE name='MC-乙'").fetchone()["id"]
+        _seed_account(db, "MC-2", u1, acquired_date="", mcc_id=old_mcc)
+        rows = [dict(parse_row(["", "", "MC-2", "MC-乙", "", "", "张三"], "gg"), row=2)]
+        apply_diff(db, build_diff(db, rows, "gg"), "gg", {"update": ["MC-2"]}, user_id=u1)
+        hist = db.execute("SELECT * FROM account_mcc_history").fetchall()
+        assert len(hist) == 1
+        assert (hist[0]["old_mcc_id"], hist[0]["new_mcc_id"]) == (old_mcc, new_mcc)
+        assert db.execute("SELECT mcc_id FROM accounts WHERE account_id='MC-2'"
+                          ).fetchone()["mcc_id"] == new_mcc
+        db.close()
+
+    def test_unchanged_mcc_writes_no_history(self, client):
+        """MCC 没变就不写历史 —— 连「fields 里带着同一个值」也不写。
+
+        口径是「与库里的**当前值**比较」，不是「fields 里有没有这个键」：只看键
+        会让每次同步都补一条 A → A 的假变更，真变更被淹没在噪声里。
+        这里人为把同值塞进 fields 来钉住那个比较（build_diff 正常不会产出它）。
+        对照行：同一批里 timezone 真变了，照常落库 —— 证明这条 diff 确实被应用过。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('MC-同','3')")
+        db.commit()
+        same_mcc = db.execute("SELECT id FROM mcc WHERE name='MC-同'").fetchone()["id"]
+        _seed_account(db, "MC-3", u1, acquired_date="",
+                      mcc_id=same_mcc, timezone="Asia/Tokyo")
+        rows = [dict(parse_row(["", "", "MC-3", "MC-同", "", "", "张三", "",
+                                "Asia/Seoul"], "gg"), row=2)]
+        diff = build_diff(db, rows, "gg")
+        item = diff["to_update"][0]
+        assert "mcc_id" not in item["fields"]       # 没变 → 不进 fields
+        item["fields"]["mcc_id"] = same_mcc         # 人为塞入同值（模拟脏 diff）
+        apply_diff(db, diff, "gg", {"update": ["MC-3"]}, user_id=u1)
+        assert db.execute("SELECT COUNT(*) AS n FROM account_mcc_history"
+                          ).fetchone()["n"] == 0
+        row = db.execute("SELECT mcc_id, timezone FROM accounts "
+                         "WHERE account_id='MC-3'").fetchone()
+        assert row["mcc_id"] == same_mcc
+        assert row["timezone"] == "Asia/Seoul"      # 对照：该行确实被更新过
+        db.close()
+
+    def test_create_with_mcc_writes_first_assignment_history(self, client):
+        """GG：从表**新建**带 MCC 的账户要补一条首次分配历史（old=NULL）。
+
+        与仓库既有建号路径同契约（main.py:4333 的 `create` / :4479 的 `import`：
+        INSERT 账户后紧接着写 old=NULL 的历史）。漏写时新账户的 MCC 挂载在历史
+        面板上凭空出现，事后追溯不到；`account_id` 同样必须是**新账户行主键**
+        （取 `last_insert_rowid()`，与仓库既有建号路径一致），写成文本账户ID
+        面板查不出来。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('MC-建','5')")
+        db.commit()
+        new_mcc = db.execute("SELECT id FROM mcc WHERE name='MC-建'").fetchone()["id"]
+        rows = [dict(parse_row(["", "", "NEW-MC", "MC-建", "", "", "张三"], "gg"), row=2)]
+        res = apply_diff(db, build_diff(db, rows, "gg"), "gg",
+                         {"create": ["NEW-MC"]}, user_id=u1)
+        assert res["created"] == 1
+        new_id = db.execute("SELECT id FROM accounts WHERE account_id='NEW-MC'"
+                            ).fetchone()["id"]
+        hist = db.execute("SELECT * FROM account_mcc_history").fetchall()
+        assert len(hist) == 1
+        assert hist[0]["account_id"] == new_id         # 新账户行主键，不是 "NEW-MC"
+        assert hist[0]["old_mcc_id"] is None           # 首次分配 ⇒ 无旧值
+        assert hist[0]["new_mcc_id"] == new_mcc
+        assert hist[0]["changed_by"] == u1             # 发起同步的户管
+        assert hist[0]["change_type"] == "create"      # 建号首次分配（与 main.py:4333 同值）
+        db.close()
+
+    def test_create_without_mcc_writes_no_history(self, client):
+        """不带 MCC 的新建账户不写历史 —— 空列是「不填」，没有首次分配可言。
+
+        对照行：同一批里另一个**带** MCC 的新账户照常写了一条，证明这条 diff
+        确实被应用过，而不是整体没跑。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        db.execute("INSERT INTO mcc(name, mcc_id) VALUES('MC-建2','6')")
+        db.commit()
+        rows = [
+            dict(parse_row(["", "", "NEW-EMPTY", "", "", "", "张三"], "gg"), row=2),
+            dict(parse_row(["", "", "NEW-FULL", "MC-建2", "", "", "张三"], "gg"), row=3),
+        ]
+        res = apply_diff(db, build_diff(db, rows, "gg"), "gg",
+                         {"create": ["NEW-EMPTY", "NEW-FULL"]}, user_id=u1)
+        assert res["created"] == 2
+        empty_id = db.execute("SELECT id FROM accounts WHERE account_id='NEW-EMPTY'"
+                              ).fetchone()["id"]
+        hist = db.execute("SELECT * FROM account_mcc_history").fetchall()
+        assert len(hist) == 1                          # 只有 NEW-FULL 那条
+        assert hist[0]["account_id"] != empty_id
+        assert hist[0]["account_id"] == db.execute(
+            "SELECT id FROM accounts WHERE account_id='NEW-FULL'").fetchone()["id"]
+        assert db.execute("SELECT mcc_id FROM accounts WHERE id=?", (empty_id,)
+                          ).fetchone()["mcc_id"] is None
+        db.close()
+
+    def test_create_with_bc_writes_first_assignment_history_tt(self, client):
+        """TT：新建带 BC 的账户同样补首次分配历史（`tt_account_bc_history`）。"""
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('BC-建','tt9003')")
+        db.commit()
+        new_bc = db.execute("SELECT id FROM tt_bcs WHERE name='BC-建'").fetchone()["id"]
+        row = ["", "", "TBN-1", "BC-建", "", "", "", "", "", "", "", "", ""]
+        res = apply_diff(db, build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt"), "tt",
+                         {"create": ["TBN-1"]}, user_id=u1)
+        assert res["created"] == 1
+        new_id = db.execute("SELECT id FROM tt_accounts WHERE advertiser_id='TBN-1'"
+                            ).fetchone()["id"]
+        hist = db.execute("SELECT * FROM tt_account_bc_history").fetchall()
+        assert len(hist) == 1
+        assert hist[0]["account_id"] == new_id
+        assert hist[0]["old_bc_id"] is None
+        assert hist[0]["new_bc_id"] == new_bc
+        assert hist[0]["changed_by"] == u1
+        assert hist[0]["change_type"] == "create"      # 建号首次分配，不是 update 的 batch
+        db.close()
+
+    def test_tt_bc_change_writes_history_keyed_by_row_pk(self, client):
+        """TT：同步改了 BC 同样要写 `tt_account_bc_history`（字段是 bc_id / old_bc_id）。
+
+        TT 没有 MCC，对应物是 BC。表与列名不同、契约相同：`account_id` 仍是行主键
+        （`tt_account_bc_history.account_id REFERENCES tt_accounts(id)`）。
+        """
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        _seed_tt_account(db, "TB-1", u1)
+        db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('BC-新','tt9001')")
+        db.commit()
+        new_bc = db.execute("SELECT id FROM tt_bcs WHERE name='BC-新'").fetchone()["id"]
+        aid = db.execute("SELECT id FROM tt_accounts WHERE advertiser_id='TB-1'"
+                         ).fetchone()["id"]
+        row = ["", "", "TB-1", "BC-新", "", "", "", "", "", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        assert diff["to_update"][0]["fields"]["bc_id"] == new_bc
+        apply_diff(db, diff, "tt", {"update": ["TB-1"]}, user_id=u1)
+        hist = db.execute("SELECT * FROM tt_account_bc_history").fetchall()
+        assert len(hist) == 1
+        assert hist[0]["account_id"] == aid            # 行主键，不是 "TB-1"
+        assert hist[0]["old_bc_id"] is None
+        assert hist[0]["new_bc_id"] == new_bc
+        assert hist[0]["changed_by"] == u1
+        assert hist[0]["change_type"] == "batch"
+        db.close()
+
+    def test_unchanged_bc_writes_no_history_tt(self, client):
+        """TT 侧的「没变不写」与 GG 同口径（同值塞进 fields 也不写）。"""
+        from huguan_dashboard import build_diff, parse_row, apply_diff
+        db, u1, _ = self._setup(client)
+        db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('BC-同','tt9002')")
+        db.commit()
+        same_bc = db.execute("SELECT id FROM tt_bcs WHERE name='BC-同'").fetchone()["id"]
+        _seed_tt_account(db, "TB-2", u1, bc_id=same_bc, country="US")
+        row = ["", "", "TB-2", "BC-同", "CA", "", "", "", "", "", "", "", ""]
+        parsed = [dict(parse_row(row, "tt"), row=2)]
+        diff = build_diff(db, parsed, "tt")
+        item = diff["to_update"][0]
+        assert "bc_id" not in item["fields"]        # 没变 → 不进 fields
+        item["fields"]["bc_id"] = same_bc           # 人为塞入同值
+        apply_diff(db, diff, "tt", {"update": ["TB-2"]}, user_id=u1)
+        assert db.execute("SELECT COUNT(*) AS n FROM tt_account_bc_history"
+                          ).fetchone()["n"] == 0
+        row2 = db.execute("SELECT bc_id, country FROM tt_accounts "
+                          "WHERE advertiser_id='TB-2'").fetchone()
+        assert row2["bc_id"] == same_bc
+        assert row2["country"] == "CA"              # 对照：该行确实被更新过
+        db.close()
+
 
 class TestSyncEndpoint:
     def test_dry_run_does_not_touch_db(self, client, monkeypatch):
@@ -2030,8 +2244,13 @@ class TestTtReassignCrossUser:
         assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()["owner_id"] == target
         db.close()
 
-    def test_plain_user_still_only_claims_for_self(self, client):
-        """回归：非跨用户角色即使传 owner_id 也只能认领给自己（默认路径逐字节不变）。"""
+    def test_plain_user_cannot_claim_others_account(self, client):
+        """普通 user 对**他人名下**的账户调 reassign → 403，且归属一字不动。
+
+        改动前这里返回 200 并把账户白送给 caller：端点既无归属校验、也不拒 viewer，
+        而非跨用户角色的 `target_owner` 恒等于 uid —— 按 id 就能抢走任意账户。
+        现在与同文件 `delete_account` 同口径，拦在任何写操作之前。
+        """
         u, uid = _create_user(client, "_tt_rg_user", role="user", platform="tt")
         db = database.get_db()
         other = _seed(db, "_tt_rg_other", "赵六")
@@ -2039,9 +2258,50 @@ class TestTtReassignCrossUser:
         db.close()
         resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=u,
                           json={"owner_id": uid})
-        assert resp.status_code == 200
+        assert resp.status_code == 403
         db = database.get_db()
-        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()["owner_id"] == uid
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
+                          (aid,)).fetchone()["owner_id"] == other
+        db.close()
+
+    def test_plain_user_owner_id_ignored_on_own_account(self, client):
+        """非跨用户角色传别人的 owner_id 也只归自己（原用例被修掉的那条语义）。
+
+        账户**本来就在自己名下**，caller 传另一个用户的 id —— `target_owner` 仍恒为
+        uid，于是落进「已属于当前用户，无需转移」的 409，归属不动。这条与上面那条
+        互补：那条钉「不能抢别人的」，这条钉「抢自己也不改变现实」——即 owner_id
+        入参对非跨用户角色完全无效（没有越权转移路径）。
+        """
+        u, uid = _create_user(client, "_tt_rg_own", role="user", platform="tt")
+        db = database.get_db()
+        other = _seed(db, "_tt_rg_ownother", "周十")
+        aid = _seed_tt(db, "TTR-2B", uid)
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=u,
+                          json={"owner_id": other})
+        assert resp.status_code == 409
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
+                          (aid,)).fetchone()["owner_id"] == uid
+        db.close()
+
+    def test_viewer_cannot_reassign(self, client):
+        """viewer 调该端点 → 403（`@tt_write_required`），归属不变。
+
+        本文件其它写端点一律用 `tt_write_required`；该端点此前是 `tt_required`，
+        只读角色因此能改归属。这里钉住装饰器本身，与归属闸分开测（两道闸各自独立）。
+        """
+        v, _ = _create_user(client, "_tt_rg_viewer", role="viewer", platform="tt")
+        db = database.get_db()
+        owner = _seed(db, "_tt_rg_vowner", "钱十一")
+        aid = _seed_tt(db, "TTR-2V", owner)
+        db.close()
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=v,
+                          json={"owner_id": owner})
+        assert resp.status_code == 403
+        db = database.get_db()
+        assert db.execute("SELECT owner_id FROM tt_accounts WHERE id=?",
+                          (aid,)).fetchone()["owner_id"] == owner
         db.close()
 
     def test_developer_can_transfer(self, client):
@@ -2686,3 +2946,89 @@ class TestSyncAndPushRoleCoverage:
             h, _ = _create_user(client, f"_push_cov_{role}", role=role)
             assert client.post("/api/huguan/dashboard/push", headers=h,
                                json={"platform": "gg"}).status_code == 403, role
+
+
+# ---------- F5: A1 区间里的工作表名必须转义单引号 ----------
+# 这一节自带桩件（不复用上面的 _FakeService），因为 update_cell_by_account_id 走的是
+# values().update()，上面的桩没实现它；只为新增用例补桩，不动任何既有用例。
+
+class _RecFakeExec:
+    def __init__(self, recorder, payload):
+        self._recorder = recorder
+        self._payload = payload
+
+    def execute(self):
+        self._recorder.append(self._payload)
+        return self._payload
+
+
+class _RecFakeValues:
+    def __init__(self, recorder, grid):
+        self._recorder = recorder
+        self._grid = grid
+
+    def get(self, spreadsheetId=None, range=None):
+        self._recorder.append({"op": "get", "range": range})
+        return _RecFakeExec(self._recorder, {"values": self._grid})
+
+    def update(self, spreadsheetId=None, range=None, valueInputOption=None, body=None):
+        self._recorder.append({"op": "update", "range": range, "body": body})
+        return _RecFakeExec(self._recorder, {})
+
+    def batchUpdate(self, spreadsheetId=None, body=None):
+        return _RecFakeExec(self._recorder, {"op": "batchUpdate", "body": body})
+
+
+class _RecFakeService:
+    def __init__(self, grid):
+        self.recorder = []
+        self._values = _RecFakeValues(self.recorder, grid)
+
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self._values
+
+
+QUOTED = "看板'26"
+ESCAPED = "'看板''26'!"
+
+
+class TestA1SheetNameEscaping:
+    """工作表名含单引号时，A1 记法要求写成两个单引号，否则整条 range 不可解析。"""
+
+    def test_helper_escapes_quote_and_wraps(self):
+        from google_sheets_service import _a1_sheet
+        assert _a1_sheet("看板") == "'看板'!"
+        assert _a1_sheet(QUOTED) == ESCAPED
+
+    def test_read_range_is_escaped(self):
+        from google_sheets_service import read_sheet_values
+        svc = _RecFakeService([["x"]])
+        read_sheet_values(svc, "SS", QUOTED, "A:G")
+        assert svc.recorder[0]["range"] == f"{ESCAPED}A:G"
+
+    def test_batch_write_ranges_are_escaped(self):
+        """findings 点名的 update_rows_by_account_id（读键区间 + 写回区间）。"""
+        from google_sheets_service import update_rows_by_account_id
+        svc = _RecFakeService([["", "", "111"]])
+        res = update_rows_by_account_id(
+            svc, "SS", QUOTED, [{"account_id": "111", "cells": {"A": "1", "G": "张三"}}]
+        )
+        assert res == {"updated": 1, "not_found": []}
+        gets = [r for r in svc.recorder if r.get("op") == "get"]
+        assert gets[0]["range"] == f"{ESCAPED}A:C"
+        batch = [r for r in svc.recorder if r.get("op") == "batchUpdate"]
+        assert [d["range"] for d in batch[0]["body"]["data"]] == [
+            f"{ESCAPED}A1:A1", f"{ESCAPED}G1:G1",
+        ]
+
+    def test_cell_update_range_is_escaped(self):
+        """findings 点名的 update_cell_by_account_id（单格写入）。"""
+        from google_sheets_service import update_cell_by_account_id
+        svc = _RecFakeService([["", "111"]])
+        res = update_cell_by_account_id(svc, "SS", QUOTED, "111", "备注", col_index=5)
+        assert res == {"updated": 1}
+        upd = [r for r in svc.recorder if r.get("op") == "update"][0]
+        assert upd["range"] == f"{ESCAPED}F1"

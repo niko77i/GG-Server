@@ -697,7 +697,11 @@ async function syncHd() {
     const res = await huguanApi.sync({ platform: HD_PLATFORM, dry_run: true })
     const d = res.diff || {}
     const s = d.summary || {}
-    if (!s.new_accounts && !s.updates && !s.owner_changes) {
+    // warnings 必须一起判：表里运营名写错（系统里没有这个名字）这类差异**只**
+    // 产生警告，不产生 new_accounts / updates / owner_changes 任何一条。漏掉它
+    // 就会把「表里有行没同步上」当成「已经一致」整份丢掉 —— 既不弹警告面板，
+    // 用户也永远不知道表里有行没同步上。
+    if (!s.new_accounts && !s.updates && !s.owner_changes && !s.warnings) {
       setHdHint('看板与系统已经一致，没有需要同步的改动。', 'info')
       return
     }

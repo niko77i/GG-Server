@@ -134,9 +134,8 @@ def dashboard_sync():
             rows = [{"account_id": item["account_id"],
                      "cells": {hd.OWNER_COL[platform]: item["to"]}}
                     for item in applied]
-            _write_background(service, conf, rows)
-            _write_background(service, conf,
-                              hd.owner_channel_cells(applied, platform, ""))
+            _write_background(conf, rows)
+            _write_background(conf, hd.owner_channel_cells(applied, platform, ""))
     finally:
         db.close()
 
@@ -202,13 +201,23 @@ def dashboard_owner_options():
     return ok({"users": [dict(r) for r in rows]})
 
 
-def _write_background(service, conf, rows):
-    """后台写表；失败只记日志，不影响同步接口的返回（对照 main.py:5006 的做法）。"""
+def _write_background(conf, rows):
+    """后台写表；失败只记日志，不影响同步接口的返回（对照 main.py:5006 的做法）。
+
+    **service 必须在 _do() 里 build**，不能由调用方传进来：本函数经
+    `_sync_sheets_background` 起**后台线程**执行，失败还会在 30s 后重试一次，
+    而调用点（dashboard_sync）是**背靠背调两次**的 —— 于是两个线程会并发复用
+    同一个 httplib2 客户端（httplib2 非线程安全）。仓库既有写法（huguan_dashboard.py
+    的 push_rows / writeback_owner_channel、main.py 的多个站点）都是在线程内的闭包
+    里 build，此处照该形状。
+    """
     import logging
     log = logging.getLogger("gg-server")
 
     def _do():
         import google_sheets_service as gs
+        from main import _GOOGLE_SHEETS_CONFIG
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
         gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
                                      conf["sheet_name"], rows)
 

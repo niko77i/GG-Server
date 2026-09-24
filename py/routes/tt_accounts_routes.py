@@ -477,16 +477,17 @@ def batch_update_accounts():
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>/reassign', methods=['PUT'])
 @jwt_required()
-@tt_required
+@tt_write_required
 def reassign_account(aid):
     db = get_db()
     uid = get_uid()
+    role = _get_role(db, uid)
     data = parse_body()
     # 目标归属：跨用户角色（developer/admin/户管）可用 owner_id 转给指定用户，
     # 其余角色恒为调用者自己（默认路径与改动前逐字节一致）。
     # `or ""` 不能省：owner_id 给 0 时 `"0".isdigit()` 为真，会被当成合法目标。
     target_owner = uid
-    if _get_role(db, uid) in CROSS_USER_ROLES:
+    if role in CROSS_USER_ROLES:
         # `parse_body()` 对「真值非 dict」的 body（如 JSON 数组）原样返回，
         # 不判类型直接 `.get` 会 AttributeError → 500（本任务新引入的读取点）。
         raw_owner = (data.get("owner_id") or "") if isinstance(data, dict) else ""
@@ -503,6 +504,12 @@ def reassign_account(aid):
     ).fetchone()
     if not existing:
         return err("账户不存在", 404)
+    # 归属校验（与同文件 delete_account 同口径）：非跨用户角色只能操作自己的账户。
+    # 少了这道闸，普通 user / viewer 按 id 就能把**别人名下**的账户改成自己的
+    # —— 非跨用户角色走默认路径时 target_owner 恒为 uid，改归属等于白送。
+    # 与 GG 侧 `/api/accounts/<aid>/reassign`（main.py:4701）一致：先鉴权，再判重复。
+    if role not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     # 目标用户存在性校验是**必需**的：tt_accounts.owner_id 是 INTEGER REFERENCES
     # users(id)，连接又开了 PRAGMA foreign_keys=ON ⇒ 指向不存在的用户会在
     # UPDATE 处抛 IntegrityError 变成 500。这是本任务新引入的输入路径。
