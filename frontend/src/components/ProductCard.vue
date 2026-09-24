@@ -138,6 +138,8 @@ const props = defineProps({
   regionTimezone: { type: Object, default: () => ({}) },
   runnerUsers: { type: Array, default: () => [] },
   customName: { type: String, default: '' },
+  // 掉包通知跳转后需要定位的包 ID 列表（父组件传入；仅用于自动展开，不影响其他逻辑）
+  highlightPkgIds: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['edit', 'detail', 'add-pkg', 'del', 'toggle-pause', 'refresh', 'select'])
 const auth = useAuthStore()
@@ -156,6 +158,15 @@ const checkingDelist = ref(false)
 watch(() => props.customName, (v) => {
   productSuffix.value = v || ''
 })
+
+// 掉包通知点击后定位到具体包：包行包在 v-show="expanded" 容器里，卡片折叠时
+// 元素虽然存在但是 display:none —— 没有布局盒，scrollIntoView 是空操作、
+// 高亮也看不见。故命中本卡片的包就自动展开，父组件展开后再滚动。
+watch(() => props.highlightPkgIds, (ids) => {
+  if (!ids || !ids.length) return
+  const mine = (props.product?.packages || []).some(p => ids.includes(String(p.id)))
+  if (mine) expanded.value = true
+}, { immediate: true })
 
 function getRunnerName(rid) {
   const u = props.runnerUsers.find(u => u.id === rid)

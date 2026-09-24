@@ -5,7 +5,11 @@
 
 ## 项目概述
 
-谷歌广告运营工具箱的多人协作版本 — 包含图片爬取、AI 视频生成、YouTube 视频管理、产品管理、数据做表、广告账户管理、充值管理、掉包检测、数据分析、全局任务追踪、Facebook（FB）广告平台管理、代理池等模块。
+谷歌广告运营工具箱的多人协作版本 — 包含图片爬取、AI 视频生成、YouTube 视频管理、产品管理、数据做表、广告账户管理、充值管理、掉包检测、数据分析、全局任务追踪、Facebook（FB）广告平台管理、TikTok（TT）广告平台管理、代理池等模块。
+
+> **三平台并行**：GG（Google Ads）、FB（Facebook）、TT（TikTok）三套业务数据相互隔离，
+> 各自有独立的页面、Blueprint 和表前缀（无前缀 / `fb_` / `tt_`）；仅 developer 可跨平台切换，
+> 户管（huguan）角色只作用于 GG。
 
 ### 与 ImageCrawling 的关系
 - **ImageCrawling**：单用户本地工具，PyInstaller 打包为独立 EXE
@@ -67,7 +71,7 @@ CREATE TABLE users (
     role        TEXT NOT NULL DEFAULT 'user',
     display_name TEXT DEFAULT '',
     custom_name TEXT DEFAULT '',
-    platform    TEXT DEFAULT 'gg',   -- 'gg' | 'fb'，developer 双平台
+    platform    TEXT DEFAULT 'gg',   -- 'gg' | 'fb' | 'tt'，developer 三平台
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     last_login  TEXT,
     created_by  INTEGER REFERENCES users(id),
@@ -93,15 +97,16 @@ CREATE TABLE users (
 - `scrape_cache` — 爬取缓存（同包名命中跳过爬取）
 - `videos`（is_public=1）— YouTube 公共视频库
 - `fb_products` / `fb_bms` / `fb_pixel_bms` / `fb_pixels` / `fb_lines` — FB 平台数据
-- 字典表 `agents` / `account_statuses` / `mcc_levels` / `sales_persons` / `regions` — GG/FB 共用
+- `tt_products` / `tt_packages` / `tt_bcs` / `tt_recycle_reasons` — TT 平台数据
+- 字典表 `agents` / `account_statuses` / `mcc_levels` / `sales_persons` / `regions` — GG/FB/TT 共用
 
 #### 个人数据（按 user_id 隔离）
 - `accounts` — GG 广告账户管理（owner_id）
 - `mcc` — GG MCC 管理（owner_id）
 - `video_history` — AI 视频生成历史
 - `videos`（is_public=0）— YouTube 个人视频库
-- `ad_reports` / `fb_ad_reports` — 做表数据
-- `recharge_records` — 充值记录（created_by 隔离）
+- `ad_reports` / `fb_ad_reports` — 做表数据（TT 数据提取为纯前端解析，不落库）
+- `recharge_records` / `tt_recharge_records` — 充值记录（created_by 隔离）
 
 #### YouTube 双层模型
 - `videos` 表有 `owner_id` 和 `is_public` 字段
@@ -181,7 +186,7 @@ GG-Server/
 │   │   │   ├── AnalysisView.vue        # 数据分析看板
 │   │   │   ├── DataManageView.vue      # 数据管理
 │   │   │   ├── SchedulerView.vue       # 定时任务手动触发（developer）
-│   │   │   └── fb/                     # FB 平台页面
+│   │   │   ├── fb/                     # FB 平台页面
 │   │   │       ├── FbAccountPanel.vue  # FB 账户管理
 │   │   │       ├── FbBmPanel.vue       # FB 账户 BM 管理
 │   │   │       ├── FbProductPanel.vue  # FB 产品管理
@@ -190,6 +195,13 @@ GG-Server/
 │   │   │       ├── FbDataExtract.vue   # FB 数据提取
 │   │   │       ├── FbDataManage.vue    # FB 数据管理
 │   │   │       └── FbSettingsPanel.vue # FB 系统设置
+│   │   │   └── tt/                     # TT 平台页面
+│   │   │       ├── TtView.vue          # TT 账户管理容器
+│   │   │       ├── TtAccountPanel.vue  # TT 广告账户面板
+│   │   │       ├── TtBcPanel.vue       # TT 商务中心（BC）管理
+│   │   │       ├── TtProductPanel.vue  # TT 产品管理
+│   │   │       ├── TtDataExtract.vue   # TT 数据提取
+│   │   │       └── TtSettingsPanel.vue # TT 系统设置
 │   │   ├── components/             # 公共组件
 │   │   │   ├── AppSidebar.vue
 │   │   │   ├── ProductCard.vue
@@ -208,6 +220,14 @@ GG-Server/
 │   │   │   ├── MccDetailModal.vue
 │   │   │   ├── CopyImportModal.vue
 │   │   │   ├── GlobalTaskPanel.vue     # 全局任务浮动面板
+│   │   │   ├── TtProductCard.vue       # TT 产品卡片
+│   │   │   ├── TtAddPackageModal.vue   # TT 新增投放对象弹窗
+│   │   │   ├── tt/                     # TT 弹窗（账户/充值/回收，与 GG 同构）
+│   │   │   │   ├── TtAccountModal.vue / TtAccountDetailModal.vue
+│   │   │   │   ├── TtAccountBatchImportModal.vue / TtAccountBatchLookupModal.vue
+│   │   │   │   ├── TtAccountSyncModal.vue / TtAccountDeletedModal.vue
+│   │   │   │   ├── TtRechargeModal.vue / TtRechargeBatchModal.vue
+│   │   │   │   └── TtRecycleReasonModal.vue
 │   │   │   └── youtube/
 │   │   │       ├── TagsConfig.vue      # YouTube 标签配置
 │   │   │       ├── ImportTab.vue       # YouTube 导入 Tab
@@ -238,8 +258,9 @@ GG-Server/
 │   │   ├── __init__.py            # 包标记（Blueprint 在 main.py 注册）
 │   │   ├── decorators.py          # 权限装饰器（_reject_viewer、_require_developer 等）
 │   │   ├── helpers.py             # 公共工具函数（scope_where、can_modify 等）
-│   │   ├── auth_routes.py         # 认证相关 Blueprint（已激活）
-│   │   └── fb_routes.py           # FB 平台 Blueprint（已激活，49 路由）
+│   │   ├── auth_routes.py         # 认证相关 Blueprint（已激活，12 路由）
+│   │   ├── fb_routes.py           # FB 平台 Blueprint（已激活，49 路由）
+│   │   └── tt_routes.py           # TT 平台 Blueprint（已激活，30 路由）
 │   └── tests/                     # 测试文件
 ├── config/
 │   └── config.json                # 服务器配置（含 developer 账号）
@@ -355,9 +376,31 @@ GG-Server/
 | POST | /api/fb/extract/check-duplicates | 重复校验 |
 | GET/POST/PUT/DELETE | /api/fb/reports/... | FB 做表数据管理 + Sheets 同步 |
 
+### TT 平台（tt_routes.py，30 路由）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | /api/tt/products/list · runner-products · delist-status | 产品列表 / 在跑产品 / 掉包检测状态 |
+| POST | /api/tt/products/create · merge · import-text | 新建 / 合并（含掉包行清理）/ 脏数据解析导入 |
+| GET/PUT/DELETE | /api/tt/products/:pid[/detail] · /restore | 详情 / 编辑 / 归档 / 恢复 |
+| POST | /api/tt/products/:pid/packages | 新增投放对象（跑包 / PWA） |
+| PUT/DELETE | /api/tt/packages/:pkg_id | 编辑 / 删除单个投放对象 |
+| POST | /api/tt/packages/batch-delete | 批量删除投放对象（含掉包通知清理） |
+| GET/POST | /api/tt/products/:pid/assets | TT 产品成效素材列表 / 新增 |
+| DELETE | /api/tt/products/:pid/assets/:video_id | 移除单个成效素材 |
+| POST | /api/tt/products/:pid/check-delist | 手动检测 TT 产品掉包（口径同 GG：只查正常跑包，走代理池） |
+| GET | /api/tt/delist/pending | TT 待处理掉包通知（按产品聚合，带平台闸门） |
+| POST | /api/tt/delist/dismiss | 关闭 TT 掉包通知（支持批量） |
+| GET/POST/PUT/DELETE | /api/tt/bcs/list · create · options · :id | TT 商务中心 BC 管理 |
+| GET | /api/tt/data/export · POST /api/tt/data/import | TT 数据备份导入/导出（JSON，按外键依赖顺序重建 + ID 重映射） |
+| GET/POST | /api/tt/settings | TT 系统设置 |
+| GET | /api/tt/users | TT 用户列表（下拉用） |
+
+> TT 的**广告账户 / 充值 / 回收**路由仍在 `main.py`（尚未拆入 Blueprint），
+> 对应页面 `frontend/src/views/tt/TtAccountPanel.vue`、`TtBcPanel.vue`、`TtDataExtract.vue`、`TtSettingsPanel.vue`。
+
 ### 其他模块路由
 
-所有路由均需 `@jwt_required()`，返回 `{"success": bool, ...}` 格式。路由总数约 240 个（main.py 177 + fb_routes 49 + auth_routes 12），分布在 GG/FB 双平台 15+ 个模块中。
+所有路由均需 `@jwt_required()`，返回 `{"success": bool, ...}` 格式。路由总数 270 个（main.py 179 + fb_routes 49 + tt_routes 30 + auth_routes 12），分布在 GG/FB/TT 三平台 20+ 个模块中。
 
 ## 新增功能模块
 
@@ -479,7 +522,7 @@ GG-Server/
 
 - **后端**：main.py (~9800 行) 逐步拆分为 Flask Blueprint，目标 18 个 route 文件
 - **前端**：大组件（YoutubeView/MediaView/AnalysisView/VideoView）逐步拆分为子组件
-- **已完成**：auth_routes.py、fb_routes.py Blueprint 激活、helpers 扩展、JWT 滑动过期、前端 3 个 Tab 独立、dedupLoader 公共化
+- **已完成**：auth_routes.py、fb_routes.py、tt_routes.py Blueprint 激活、helpers 扩展、JWT 滑动过期、前端 3 个 Tab 独立、dedupLoader 公共化
 
 ### 数据库完整性改进
 
@@ -542,6 +585,32 @@ GG-Server 在 GG（Google Ads）基础上新增 FB（Facebook）广告管理能�
 ### 视频频道名
 
 YouTube 视频新增频道名（channel name）字段，导入时自动获取频道信息。
+
+### TT（TikTok）平台
+
+继 GG、FB 之后的第三条业务线，页面与数据完全独立（`tt_` 前缀），仅 developer 可切换进入。
+
+**核心设计**：
+- **表结构**：11 张 `tt_*` 表（产品 / 投放对象 / 成效素材 / 在跑人员 / 账户 / 商务中心 BC / 账户-BC 变更历史 / 充值记录 / 回收原因 / 掉包检测 / 掉包通知）
+- **结构差异**：TT 用 **BC（商务中心）** 而非 MCC 或 BM；产品的投放对象分 `package`（跑包）和 `pwa` 两种 `type`
+- **后端**：`routes/tt_routes.py`（30 路由，产品 / 投放对象 / 素材 / BC / 数据提取 / 设置 / 掉包）；TT 的账户、充值、回收路由仍在 `main.py`
+- **前端**：`views/tt/` 下 6 个视图（TtView 容器 / TtAccountPanel / TtBcPanel / TtProductPanel / TtDataExtract / TtSettingsPanel）+ `components/TtProductCard.vue`、`TtAddPackageModal.vue`
+- **UI 对齐**：TT 页面视觉与交互对齐 GG（见 `2026-09-18-tt-ui-gg-alignment-design.md`）
+- **数据提取**：TtDataExtract.vue **纯前端**解析（`utils/adsParser.js`），产出 TSV/表格供复制，不写库
+- **数据备份**：`GET /api/tt/data/export` 导出 JSON、`POST /api/tt/data/import` 按外键依赖顺序重建（含 ID 重映射）
+- **共享层**：用户 platform 字段、侧边栏切换、路由守卫、选项表（地区 / 商务等）三平台共用
+
+### TT 掉包通知（独立机器人）
+
+TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_telegram` 机器人**；**不发邮件**。
+
+**核心逻辑**：
+- **定时检测**：后台 daemon 线程每小时检测正常状态 TT 产品的正常状态跑包
+- **手动检测**：`POST /api/tt/products/:pid/check-delist`，同样走代理池
+- **前端通知**：`GET /api/tt/delist/pending` 按产品聚合返回，首次弹窗 + 关闭后 3 分钟未处理再提醒
+- **Telegram 通知**：首次检测到掉包时，通过 `tt_telegram` 机器人向群组发送消息并 @在跑人员（与 GG 的 `telegram` 节点**互不影响**，可分别配置不同的群）
+- **配置**：`config.json` 保留空的 `tt_telegram.{bot_token,chat_id}` 结构，真实值放 `config/config.local.json`（已 gitignore）
+- **数据清理**：TT 产品合并、投放对象批量删除时同步清理其掉包检测与通知行
 
 ## 共享功能知识（来自 ImageCrawling）
 
@@ -715,12 +784,20 @@ YouTube 视频新增频道名（channel name）字段，导入时自动获取频
 - [户管看板 Google Sheet 配置与双向同步（子项目 B）](docs/superpowers/specs/2026-09-23-huguan-sheet-design.md)
 - [户管看板前端视觉设计（子项目 B / Task 10 + Task 11）](docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md)
 - [户管看板：归属变更「来源」标注 + 户管专用归属人列表](docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md)
+- [TT 产品管理模块](docs/superpowers/specs/2026-09-18-tt-product-management-design.md)
+- [TT 设置界面](docs/superpowers/specs/2026-09-18-tt-settings-design.md)
+- [TT 模块 UI 对齐 GG 风格](docs/superpowers/specs/2026-09-18-tt-ui-gg-alignment-design.md)
+- [TT 广告账户管理页面](docs/superpowers/specs/2026-09-21-tt-accounts-design.md)
+- [TT 数据提取（解析预览）](docs/superpowers/specs/2026-09-22-tt-data-extract-design.md)
+- [TT 充值表表头适配](docs/superpowers/specs/2026-09-22-tt-recharge-sheet-header-design.md)
+- [TT 回收户清单写入（只写 3 列、保护公式、非存活即触发）](docs/superpowers/specs/2026-09-22-tt-recycle-sheet-columns-design.md)
+- [TT 同步「是否回收」列驱动状态变更](docs/superpowers/specs/2026-09-22-tt-sync-recycle-status-design.md)
 - [TT 掉包通知（独立机器人）](docs/superpowers/specs/2026-09-24-tt-delist-notification-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
 
-> 共 40 张表：GG 平台 29 张 + FB 平台 11 张。字典表（选项表）5 张 GG/FB 共用。
+> 共 51 张表：GG 平台 29 张 + FB 平台 11 张 + TT 平台 11 张。字典表（选项表）5 张三平台共用。
 
 ### GG 平台
 | 表名 | 用途 | 隔离方式 |
@@ -769,6 +846,29 @@ YouTube 视频新增频道名（channel name）字段，导入时自动获取频
 | `fb_pixels` | FB 像素 | 关联 pixel_bms |
 | `fb_lines` | FB 产品线名 | 关联 fb_products |
 | `fb_ad_reports` | FB 做表数据 | user_id 隔离 |
+
+### TT 平台
+| 表名 | 用途 | 隔离方式 |
+|------|------|----------|
+| `tt_products` | TT 产品管理 | 共享 |
+| `tt_packages` | TT 投放对象（`type='package'` 跑包 / PWA） | 共享 |
+| `tt_product_assets` | TT 产品成效素材 | 共享 |
+| `tt_product_runners` | TT 产品在跑人员 | 共享 |
+| `tt_bcs` | TT 商务中心（BC，对应 GG 的 MCC / FB 的 BM） | 共享 |
+| `tt_accounts` | TT 广告账户 | owner_id 隔离 |
+| `tt_account_bc_history` | TT 账户 BC 变更历史 | 关联 tt_accounts |
+| `tt_recycle_reasons` | TT 回收原因 | owner_id |
+| `tt_recharge_records` | TT 充值记录 | created_by 隔离 |
+| `tt_delist_checks` | TT 掉包检测结果 | 关联 tt_packages |
+| `tt_delist_notifications` | TT 掉包通知状态 | user_id 隔离 |
+
+> **删用户时的关联清理**：`admin_delete_user` 必须清理所有引用 `users(id)` 的列 —— 这些列
+> 都是 `REFERENCES users(id)` 且**无 ON DELETE**，连接又开了 `PRAGMA foreign_keys=ON`，
+> 漏一张表就会以 `删除失败: FOREIGN KEY constraint failed` 收场。口径：归属/创建人列置空
+> （`owner_id` / `created_by` / `changed_by` / `added_by`），纯归属关系表直接删除
+> （`*_product_runners`、`ad_reports` / `fb_ad_reports` 等 NOT NULL 列）。
+> 新增任何带 `user_id` 的表后，务必同步补充清理，回归测试见
+> `py/tests/test_user_delete_and_merge_cleanup.py`。
 
 ## 启动方式
 

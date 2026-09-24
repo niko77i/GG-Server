@@ -118,6 +118,8 @@ import { copyToClipboard } from '@/utils/clipboard'
 const props = defineProps({
   product: Object,
   customName: { type: String, default: '' },
+  // 掉包通知跳转后需要定位的包 ID 列表（父组件传入；仅用于自动展开，不影响其他逻辑）
+  highlightPkgIds: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['edit', 'add-pkg', 'del', 'toggle-pause', 'refresh', 'restore'])
 const auth = useAuthStore()
@@ -131,6 +133,15 @@ const editPkgModal = ref(null)
 const checkingDelist = ref(false)
 const productSuffix = ref(props.customName || '')
 watch(() => props.customName, (v) => { productSuffix.value = v || '' })
+
+// 掉包通知点击后定位到具体包：包行包在 v-show="expanded" 容器里，卡片折叠时
+// 元素虽然存在但是 display:none —— 没有布局盒，scrollIntoView 是空操作、
+// 高亮也看不见。故命中本卡片的包就自动展开，父组件展开后再滚动。
+watch(() => props.highlightPkgIds, (ids) => {
+  if (!ids || !ids.length) return
+  const mine = (props.product?.packages || []).some(p => ids.includes(String(p.id)))
+  if (mine) expanded.value = true
+}, { immediate: true })
 
 // TT 后端 owner-only：编辑/删除/改状态/加包等操作仅 owner 或 developer/admin 有权
 // （list_products 对非 developer/admin 返回「我拥有或在跑」，故不能只用 !isViewer 门控）

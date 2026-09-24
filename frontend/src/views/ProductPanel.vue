@@ -40,6 +40,7 @@
         :region-timezone="regionTimezone"
         :runner-users="runnerUserOptions"
         :custom-name="customName"
+        :highlight-pkg-ids="highlightPkgIds"
         :selected="selectedIds.includes(p.id)"
         @select="toggleSelect(p.id)"
         @edit="showProductModal($event)"
@@ -178,6 +179,9 @@ async function load() {
 
 const { debounced: debouncedLoad } = useDebounce(load, 200)
 
+// 掉包通知待定位的包 ID，透传给 ProductCard 用于自动展开（见 scrollToHighlightedPackage）
+const highlightPkgIds = ref([])
+
 // 已在产品页时点击通知（路由 query 变化），同样滚动
 watch(() => route.query.highlight_pkgs, () => { scrollToHighlightedPackage() })
 
@@ -186,7 +190,11 @@ async function scrollToHighlightedPackage() {
   const pkgIds = String(raw).split(',').filter(Boolean)
   if (!pkgIds.length) return
   router.replace({ query: {} })  // 清除 query，避免后续重复滚动
-  await nextTick()
+  // 先把待定位的包 ID 交给卡片，命中的卡片会自动展开（折叠态下包行是
+  // display:none，没有布局盒则 scrollIntoView 无效），展开并渲染完再滚动
+  highlightPkgIds.value = pkgIds
+  await nextTick()   // 子组件 watcher 置 expanded=true
+  await nextTick()   // 等展开后的 DOM 布局生效
   let scrolled = false
   for (const pkgId of pkgIds) {
     const el = document.getElementById('pkg-' + pkgId)

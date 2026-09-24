@@ -909,6 +909,15 @@ def products_merge():
 
         # 清理并删除副产品
         db.execute("DELETE FROM tt_product_assets WHERE product_id=?", (mid,))
+        # 掉包检测结果与通知都按 package_id 挂载，且上面关了外键级联（PRAGMA
+        # foreign_keys=OFF），必须在 tt_packages 删除**之前**按包清理，否则遗留
+        # 指向已删包的孤儿行（口径与 GG 合并一致：合并即丢弃副产品的掉包状态）
+        db.execute(
+            "DELETE FROM tt_delist_notifications WHERE package_id IN "
+            "(SELECT id FROM tt_packages WHERE product_id=?)", (mid,))
+        db.execute(
+            "DELETE FROM tt_delist_checks WHERE package_id IN "
+            "(SELECT id FROM tt_packages WHERE product_id=?)", (mid,))
         db.execute("DELETE FROM tt_packages WHERE product_id=?", (mid,))
         db.execute("DELETE FROM tt_product_runners WHERE product_id=?", (mid,))
         db.execute("DELETE FROM tt_products WHERE id=?", (mid,))

@@ -30,6 +30,7 @@
         v-for="p in items" :key="p.id"
         :product="p"
         :custom-name="customName"
+        :highlight-pkg-ids="highlightPkgIds"
         @edit="openEdit"
         @add-pkg="showAddPkg"
         @del="handleDelete"
@@ -235,12 +236,19 @@ async function loadCustomName() {
 }
 
 // ---------- 掉包通知点击跳转后，滚动到对应包并高亮（与 GG ProductPanel 口径一致） ----------
+// 掉包通知待定位的包 ID，透传给 TtProductCard 用于自动展开
+const highlightPkgIds = ref([])
+
 async function scrollToHighlightedPackage() {
   const raw = route.query.highlight_pkgs || route.query.highlight_pkg || ''
   const pkgIds = String(raw).split(',').filter(Boolean)
   if (!pkgIds.length) return
   router.replace({ query: {} })  // 清除 query，避免后续重复滚动
-  await nextTick()
+  // 先把待定位的包 ID 交给卡片，命中的卡片会自动展开（折叠态下包行是
+  // display:none，没有布局盒则 scrollIntoView 无效），展开并渲染完再滚动
+  highlightPkgIds.value = pkgIds
+  await nextTick()   // 子组件 watcher 置 expanded=true
+  await nextTick()   // 等展开后的 DOM 布局生效
   let scrolled = false
   for (const pkgId of pkgIds) {
     const el = document.getElementById('pkg-' + pkgId)

@@ -3172,6 +3172,11 @@ def products_merge():
         db.execute("DELETE FROM product_assets WHERE product_id=?", (mid,))
         db.execute("DELETE FROM delist_checks WHERE product_id=?", (mid,))
         db.execute("DELETE FROM product_runners WHERE product_id=?", (mid,))
+        # 掉包通知按 package_id 挂载（不是 product_id），且上面关了外键级联，
+        # 必须在 packages 删除**之前**按包清理，否则留下指向已删包的孤儿通知
+        db.execute(
+            "DELETE FROM delist_notifications WHERE package_id IN "
+            "(SELECT id FROM packages WHERE product_id=?)", (mid,))
         # 删除副产品
         db.execute("DELETE FROM packages WHERE product_id=?", (mid,))
         db.execute("DELETE FROM products WHERE id=?", (mid,))
@@ -8123,6 +8128,33 @@ def admin_delete_user(uid):
         conn.execute("DELETE FROM audit_log WHERE user_id = ?", (uid,))
         conn.execute("DELETE FROM delist_notifications WHERE user_id = ?", (uid,))
         conn.execute("DELETE FROM tt_delist_notifications WHERE user_id = ?", (uid,))
+        # TT / FB 两条线的关联数据：这些表都有 REFERENCES users(id) 且无 ON DELETE，
+        # 而连接开了 PRAGMA foreign_keys=ON，此前整条线未纳入清理 —— 删任何拥有
+        # TT/FB 数据的用户都会以 `FOREIGN KEY constraint failed` 收场（实测复现）。
+        # 处理口径与上面 GG 表一致：owner/created_by/changed_by/added_by 置空，
+        # 纯归属关系表（在跑人员、做表数据）直接删除。
+        # TT（fb_* / tt_* 部分列的 NOT NULL 决定只能删，不能置空）
+        conn.execute("DELETE FROM tt_product_runners WHERE user_id = ?", (uid,))
+        conn.execute("UPDATE tt_products SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE tt_accounts SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE tt_bcs SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE tt_account_bc_history SET changed_by = NULL WHERE changed_by = ?", (uid,))
+        conn.execute("UPDATE tt_product_assets SET added_by = NULL WHERE added_by = ?", (uid,))
+        conn.execute("UPDATE tt_recharge_records SET created_by = NULL WHERE created_by = ?", (uid,))
+        conn.execute("UPDATE tt_recycle_reasons SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        # FB
+        conn.execute("DELETE FROM fb_product_runners WHERE user_id = ?", (uid,))
+        conn.execute("DELETE FROM fb_ad_reports WHERE user_id = ?", (uid,))
+        conn.execute("UPDATE fb_products SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE fb_accounts SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE fb_bms SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE fb_pixel_bms SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE fb_account_bm_history SET changed_by = NULL WHERE changed_by = ?", (uid,))
+        # 字典表（选项）的创建人
+        conn.execute("UPDATE agents SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE account_statuses SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE mcc_levels SET owner_id = NULL WHERE owner_id = ?", (uid,))
+        conn.execute("UPDATE sales_persons SET owner_id = NULL WHERE owner_id = ?", (uid,))
         # 现在可以安全删除用户
         conn.execute("DELETE FROM users WHERE id = ?", (uid,))
         conn.commit()
