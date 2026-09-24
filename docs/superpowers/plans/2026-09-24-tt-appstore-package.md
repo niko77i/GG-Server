@@ -636,7 +636,11 @@ def _validate_package(pkg):
 # 苹果链接的查询参数（?pt= / ?ct= / ?l=）是分享/联盟参数，与掉包判定无关，
 # 故意不捕获 —— 去掉后同一个 app 的重复粘贴能被合并去重键识别。
 _PLAY_LINK_RE = r'https?://play\.google\.com/store/apps/details\?id=[\w.&=/\-?%]+'
-_APPSTORE_LINK_RE = r'https?://(?:apps|itunes)\.apple\.com/(?:[\w\-]+/)?app/[\w\-]*id\d+'
+# 苹果链接两种真实形状都要匹配：
+#   https://apps.apple.com/vn/app/id6804355336         （无 slug）
+#   https://apps.apple.com/vn/app/densia/id6804355336  （有 slug —— 实测中 200 会跳转到这个形状）
+# slug 必须作为独立路径段可选：写成 `[\w\-]*id\d+` 会跨不过 slug 后的 `/`，导致 slug 形式漏匹配。
+_APPSTORE_LINK_RE = r'https?://(?:apps|itunes)\.apple\.com/(?:[\w\-]+/)?app/(?:[\w\-]+/)?id\d+'
 _LINK_RE = re.compile(f'(?:{_PLAY_LINK_RE})|(?:{_APPSTORE_LINK_RE})')
 ```
 
