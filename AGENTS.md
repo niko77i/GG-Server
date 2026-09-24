@@ -626,6 +626,12 @@ YouTube 视频新增频道名（channel name）字段，导入时自动获取频
   `apps.apple.com` / `itunes.apple.com` 时**包名允许留空**（不自动填数字 id），
   卡片上以灰色 `iOS` 占位展示；安卓包仍强制填写包名。域名判定按解析出的 host
   全等比较（防 `evil.com/?u=apps.apple.com` 误判）
+- **投放对象字段类型闸门**：系列名 / 包名 / 链接三个文本字段必须为字符串
+  （`None` 视同未填写），非字符串（数字 / 数组 / 对象）一律 **400**
+  （`_check_pkg_text_types`）。三处入口（新建产品带包 / 编辑产品带包 / 单包 POST·PUT）
+  同口径：`add_package` 与 `update_package` 的 `.strip()` 必须在闸门**之后**，
+  否则 `123.strip()` 抛 `AttributeError` → 500。
+  「只改系列名」这类部分更新仍须放行 —— 闸门只管类型，不管「跑包必须填包名」
 - **数据备份**：`GET /api/tt/data/export` 导出 JSON、`POST /api/tt/data/import` 按外键依赖顺序重建（含 ID 重映射）
 - **共享层**：用户 platform 字段、侧边栏切换、路由守卫、选项表（地区 / 商务等）三平台共用
 
