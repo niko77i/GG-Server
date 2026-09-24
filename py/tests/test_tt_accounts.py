@@ -248,6 +248,57 @@ def test_recycle_reason_crud(client, tt_headers):
     assert resp.status_code == 200
 
 
+def _mk_tt_admin_headers(client, username="ttadmin"):
+    """创建一个 TT 平台的 admin 用户并返回其 JWT 请求头。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET platform='tt', role='admin' WHERE username=?", (username,))
+    db.commit()
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    token = resp.get_json().get("access_token", "")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_recycle_reason_is_shared_across_users(client, tt_headers):
+    """回收原因为公用词表：admin 建的原因，普通用户能看到并改名/删除。"""
+    admin = _mk_tt_admin_headers(client)
+    rid = client.post("/api/tt/recycle-reasons/create", headers=admin,
+                      json={"name": "公用原因A"}).get_json()["id"]
+
+    names = [r["name"] for r in
+             client.get("/api/tt/recycle-reasons/list", headers=tt_headers)
+                   .get_json()["items"]]
+    assert "公用原因A" in names, "普通用户应能看到 admin 建的回收原因"
+
+    assert client.put(f"/api/tt/recycle-reasons/{rid}", headers=tt_headers,
+                      json={"name": "公用原因A改"}).status_code == 200
+    assert client.delete(f"/api/tt/recycle-reasons/{rid}", headers=tt_headers).status_code == 200
+
+
+def test_recycle_reason_name_globally_unique(client, tt_headers):
+    """名称全平台唯一：不同用户建同名原因应 409。"""
+    admin = _mk_tt_admin_headers(client, username="ttadmin2")
+    assert client.post("/api/tt/recycle-reasons/create", headers=admin,
+                       json={"name": "重名原因"}).status_code == 200
+    assert client.post("/api/tt/recycle-reasons/create", headers=tt_headers,
+                       json={"name": "重名原因"}).status_code == 409
+
+
+def test_recycle_reason_rename_global_conflict(client, tt_headers):
+    """改名撞已有名称应 409，而不是静默产生重名。"""
+    rid_a = client.post("/api/tt/recycle-reasons/create", headers=tt_headers,
+                        json={"name": "原因甲"}).get_json()["id"]
+    client.post("/api/tt/recycle-reasons/create", headers=tt_headers, json={"name": "原因乙"})
+
+    assert client.put(f"/api/tt/recycle-reasons/{rid_a}", headers=tt_headers,
+                      json={"name": "原因乙"}).status_code == 409
+    names = [r["name"] for r in
+             client.get("/api/tt/recycle-reasons/list", headers=tt_headers)
+                   .get_json()["items"]]
+    assert "原因甲" in names and "原因乙" in names, "改名失败后原值应保持不变"
+
+
 @mock.patch("google_sheets_service.build_service")
 @mock.patch("google_sheets_service.read_sheet_values")
 def test_sync_from_sheet_dry_run(mock_read, mock_build, client, tt_headers):

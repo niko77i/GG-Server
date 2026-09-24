@@ -127,6 +127,15 @@ def _ensure_columns(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_products_owner ON products(owner_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_products_archived ON products(is_archived)")
+    # 回收原因改为全平台公用词表（2026-09-24）：name 全局唯一。
+    # 防御：存量若有重名则跳过建索引——否则唯一索引创建失败会让每次连库都抛异常。
+    if _table_exists(conn, "tt_recycle_reasons"):
+        _dup = conn.execute(
+            "SELECT name FROM tt_recycle_reasons GROUP BY name HAVING COUNT(*) > 1 LIMIT 1"
+        ).fetchone()
+        if _dup is None:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tt_recycle_reasons_name "
+                         "ON tt_recycle_reasons(name)")
     _add_column_if_missing(conn, "products", "customer", "customer TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "deleted_at", "deleted_at TEXT DEFAULT ''")
     _add_column_if_missing(conn, "products", "agency_ratio", "agency_ratio REAL DEFAULT NULL")

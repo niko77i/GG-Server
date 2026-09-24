@@ -63,63 +63,60 @@
           </el-col>
         </el-row>
 
-        <!-- 管理员专属 Google 表格配置 -->
-        <template v-if="authStore.isAdmin || authStore.isDeveloper || authStore.isHuguan">
-          <!-- 代理 / 状态 / 回收原因选项卡片 -->
-          <el-row :gutter="16">
-            <el-col :span="12" v-for="card in adminOptionCards" :key="card.key">
-              <el-card shadow="never" style="margin-bottom:16px;">
-                <template #header>
-                  <div style="display:flex;align-items:center;justify-content:space-between;">
-                    <span style="font-weight:600;font-size:14px;">{{ card.icon }} {{ card.label }}</span>
-                    <el-tag size="small" type="info" round>{{ adminLists[card.key].length }} 项</el-tag>
-                  </div>
-                </template>
-
-                <div style="display:flex;flex-wrap:wrap;gap:8px;min-height:32px;align-items:center;">
-                  <template v-if="adminLists[card.key].length">
-                    <el-tag
-                      v-for="item in adminLists[card.key]"
-                      :key="item.id"
-                      :type="card.tagType"
-                      closable
-                      size="default"
-                      @close="handleAdminDelete(card.key, item)"
-                      @dblclick="startAdminTagEdit(card.key, item)"
-                      style="cursor:pointer;user-select:none;"
-                    >
-                      <template v-if="adminEditingId[card.key] === item.id">
-                        <el-input
-                          v-model="item._editName"
-                          size="small"
-                          style="width:80px;"
-                          @blur="finishAdminTagEdit(card.key, item)"
-                          @keyup.enter="finishAdminTagEdit(card.key, item)"
-                          @click.stop
-                        />
-                      </template>
-                      <span v-else>{{ item.name }}</span>
-                    </el-tag>
-                  </template>
-                  <span v-else style="color:#c0c4cc;font-size:13px;">暂无选项</span>
-
-                  <template v-if="adminAdding[card.key]">
-                    <el-input
-                      v-model="adminNewNames[card.key]"
-                      size="small"
-                      :placeholder="card.addPlaceholder"
-                      style="width:100px;"
-                      @keyup.enter="addAdminOption(card.key)"
-                      @blur="cancelAdminAddOption(card.key)"
-                    />
-                    <el-button size="small" type="primary" @click="addAdminOption(card.key)" :loading="adminAddingLoading">确认</el-button>
-                  </template>
-                  <el-button v-else size="small" circle @click="showAdminAddInput(card.key)" style="width:24px;height:24px;font-size:14px;">+</el-button>
+        <!-- 选项卡片：代理/状态=管理员专属；回收原因=全平台公用词表，所有 TT 用户可见可改 -->
+        <el-row :gutter="16">
+          <el-col :span="12" v-for="card in visibleOptionCards" :key="card.key">
+            <el-card shadow="never" style="margin-bottom:16px;">
+              <template #header>
+                <div style="display:flex;align-items:center;justify-content:space-between;">
+                  <span style="font-weight:600;font-size:14px;">{{ card.icon }} {{ card.label }}</span>
+                  <el-tag size="small" type="info" round>{{ adminLists[card.key].length }} 项</el-tag>
                 </div>
-              </el-card>
-            </el-col>
-          </el-row>
-        </template>
+              </template>
+
+              <div style="display:flex;flex-wrap:wrap;gap:8px;min-height:32px;align-items:center;">
+                <template v-if="adminLists[card.key].length">
+                  <el-tag
+                    v-for="item in adminLists[card.key]"
+                    :key="item.id"
+                    :type="card.tagType"
+                    closable
+                    size="default"
+                    @close="handleAdminDelete(card.key, item)"
+                    @dblclick="startAdminTagEdit(card.key, item)"
+                    style="cursor:pointer;user-select:none;"
+                  >
+                    <template v-if="adminEditingId[card.key] === item.id">
+                      <el-input
+                        v-model="item._editName"
+                        size="small"
+                        style="width:80px;"
+                        @blur="finishAdminTagEdit(card.key, item)"
+                        @keyup.enter="finishAdminTagEdit(card.key, item)"
+                        @click.stop
+                      />
+                    </template>
+                    <span v-else>{{ item.name }}</span>
+                  </el-tag>
+                </template>
+                <span v-else style="color:#c0c4cc;font-size:13px;">暂无选项</span>
+
+                <template v-if="adminAdding[card.key]">
+                  <el-input
+                    v-model="adminNewNames[card.key]"
+                    size="small"
+                    :placeholder="card.addPlaceholder"
+                    style="width:100px;"
+                    @keyup.enter="addAdminOption(card.key)"
+                    @blur="cancelAdminAddOption(card.key)"
+                  />
+                  <el-button size="small" type="primary" @click="addAdminOption(card.key)" :loading="adminAddingLoading">确认</el-button>
+                </template>
+                <el-button v-else size="small" circle @click="showAdminAddInput(card.key)" style="width:24px;height:24px;font-size:14px;">+</el-button>
+              </div>
+            </el-card>
+          </el-col>
+        </el-row>
 
           <el-card v-if="!authStore.isHuguan" shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
             <template #header>
@@ -310,16 +307,19 @@ const addingOption = ref(false)
 const addingLoading = ref(false)
 const newOptionName = ref('')
 
-// ---- 管理员选项卡片（代理 / 状态 / 回收原因） ----
+// ---- 选项卡片数据源（代理 / 状态 / 回收原因） ----
 const agents = ref([])
 const statuses = ref([])
 const recycleReasons = ref([])
 
-const adminOptionCards = [
-  { key: 'agents',         icon: '🏷', label: '代理名选项',   tagType: 'success', addPlaceholder: '新代理名' },
-  { key: 'statuses',       icon: '📊', label: '账户状态选项', tagType: '',        addPlaceholder: '新状态名' },
-  { key: 'recycleReasons', icon: '♻️', label: '回收原因选项', tagType: 'warning', addPlaceholder: '新回收原因' },
+// 回收原因全平台公用（所有 TT 用户可见可改）；代理名/状态仍管理员专属
+const optionCards = [
+  { key: 'agents',         icon: '🏷', label: '代理名选项',   tagType: 'success', addPlaceholder: '新代理名',   adminOnly: true },
+  { key: 'statuses',       icon: '📊', label: '账户状态选项', tagType: '',        addPlaceholder: '新状态名',   adminOnly: true },
+  { key: 'recycleReasons', icon: '♻️', label: '回收原因选项', tagType: 'warning', addPlaceholder: '新回收原因', adminOnly: false },
 ]
+const visibleOptionCards = computed(() => optionCards.filter(c =>
+  !c.adminOnly || authStore.isAdmin || authStore.isDeveloper || authStore.isHuguan))
 const adminLists = computed(() => ({
   agents: agents.value,
   statuses: statuses.value,
