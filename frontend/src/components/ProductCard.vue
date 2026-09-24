@@ -193,7 +193,9 @@ async function checkDelist() {
       const delisted = results.filter(r => r.is_delisted)
       // 判定未知（限流/网络异常/空 url）：is_delisted 为 null 或缺失
       const unknown = results.filter(r => r.is_delisted == null)
-      if (delisted.length) {
+      if (!results.length) {
+        ElMessage.info(res.message || '没有需要检测的包')
+      } else if (delisted.length) {
         ElMessage.warning(`检测到 ${delisted.length} 个包已掉包！`)
         emit('refresh')
       } else if (unknown.length) {
