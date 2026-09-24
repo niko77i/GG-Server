@@ -7,8 +7,11 @@
 routes/huguan_dashboard_routes.py。
 """
 import json
+import logging
 
 from google_sheets_service import col_index
+
+log = logging.getLogger("gg-server")
 
 PLATFORMS = ("gg", "tt")
 
@@ -769,3 +772,48 @@ def _open_db():
     """惰性取库连接（避免本模块在 import 期依赖 database）。"""
     import database
     return database.get_db()
+
+
+def writeback_rows(user_id, platform, account_ids=None):
+    """触发户管看板的单行/多行回写（规格 §6.2）。未配置看板时静默跳过。
+
+    回写是业务端点的副作用，任何失败都不得影响主流程，故本函数绝不抛异常。
+    """
+    try:
+        push_rows(user_id, platform, account_ids)
+    except Exception as e:
+        log.warning("户管看板回写触发失败: %s", e)
+
+
+def writeback_owner_channel(user_id, platform, account_id, new_owner_id):
+    """户管在系统里改了归属 → 把新归属写进表里的变更通道列（规格 §7.2 规则 3①）。
+
+    GG 写 H「重新分配」，TT 写 L「换绑情况」。绝不抛异常（理由同 writeback_rows）。
+    """
+    try:
+        db = _open_db()
+        try:
+            conf = get_platform_config(db, user_id, platform)
+            if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+                return
+            r = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username, '') AS n "
+                           "FROM users WHERE id=?", (new_owner_id,)).fetchone()
+            name = (r["n"] if r else "").strip()
+        finally:
+            db.close()
+        if not name:
+            return
+        rows = owner_channel_cells([{"account_id": account_id}], platform, name)
+
+        def _do():
+            import google_sheets_service as gs
+            from main import _GOOGLE_SHEETS_CONFIG
+            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+            gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
+                                         conf["sheet_name"], rows)
+
+        from main import _sync_sheets_background
+        _sync_sheets_background(
+            _do, lambda s, e: log.warning("归属变更通道列回写失败: %s", e) if e else None)
+    except Exception as e:
+        log.warning("归属变更通道列回写触发失败: %s", e)

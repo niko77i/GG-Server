@@ -12,54 +12,14 @@ from cache import cache as _app_cache
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import tt_required, tt_write_required
 
+import huguan_dashboard as hd
+
 tt_accounts_bp = Blueprint('tt_accounts', __name__)
 
 
 def _get_role(db, uid):
     user = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
     return user['role'] if user else 'user'
-
-
-def _huguan_push(uid, account_ids):
-    """触发户管看板的 TT 单行回写。未配置看板时静默跳过。"""
-    try:
-        import huguan_dashboard as hd
-        hd.push_rows(uid, "tt", account_ids)
-    except Exception as e:
-        import logging
-        logging.getLogger("gg-server").warning("户管看板 TT 回写触发失败: %s", e)
-
-
-def _huguan_owner_channel(uid, account_id, new_owner_id):
-    """TT 侧户管改归属 → 写「换绑情况」列（规格 §7.2 规则 3①）。"""
-    try:
-        import huguan_dashboard as hd
-        db = database.get_db()
-        try:
-            conf = hd.get_platform_config(db, uid, "tt")
-            if not conf["spreadsheet_id"] or not conf["sheet_name"]:
-                return
-            r = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username, '') AS n "
-                           "FROM users WHERE id=?", (new_owner_id,)).fetchone()
-            name = (r["n"] if r else "").strip()
-        finally:
-            db.close()
-        if not name:
-            return
-
-        rows = hd.owner_channel_cells([{"account_id": account_id}], "tt", name)
-
-        def _do():
-            from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
-            import google_sheets_service as gs
-            svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-            gs.update_rows_by_account_id(svc, conf["spreadsheet_id"], conf["sheet_name"], rows)
-
-        from main import _sync_sheets_background
-        _sync_sheets_background(_do, lambda s, e: None)
-    except Exception as e:
-        import logging
-        logging.getLogger("gg-server").warning("TT 换绑情况列回写触发失败: %s", e)
 
 
 def _get_tt_sheet_id(db):
@@ -173,7 +133,7 @@ def create_account():
     _record_bc_change(db, new_id, bc_id, uid, "create")
     db.commit()
     # 户管看板单行回写（规格 §6.2）。只写可写列，绝不碰「换绑情况」列。
-    _huguan_push(uid, [advertiser_id])
+    hd.writeback_rows(uid, "tt", [advertiser_id])
     return ok({"id": new_id})
 
 
@@ -394,7 +354,7 @@ def update_account(aid):
     db.execute("UPDATE tt_accounts SET updated_at=datetime('now','localtime') WHERE id=?", (aid,))
     db.commit()
     # 户管看板单行回写（规格 §6.2）。只写可写列，绝不碰「换绑情况」列。
-    _huguan_push(uid, [row["advertiser_id"]])
+    hd.writeback_rows(uid, "tt", [row["advertiser_id"]])
     return ok()
 
 
@@ -460,7 +420,7 @@ def batch_create_accounts():
             else:
                 skipped.append({"advertiser_id": aid, "reason": str(e)})
     # 户管看板单行回写（规格 §6.2）。created 里装的就是 advertiser_id。
-    _huguan_push(uid, created)
+    hd.writeback_rows(uid, "tt", created)
     return ok({"created": len(created), "created_ids": created, "skipped": skipped})
 
 
@@ -511,7 +471,7 @@ def batch_update_accounts():
         affected_advertiser_ids.append(r["advertiser_id"])
     db.commit()
     # 户管看板单行回写（规格 §6.2）：只刷真的落库了的那些行（被权限跳过的 continue 不计）。
-    _huguan_push(uid, affected_advertiser_ids)
+    hd.writeback_rows(uid, "tt", affected_advertiser_ids)
     return ok({"updated": len(ids)})
 
 
@@ -568,8 +528,8 @@ def reassign_account(aid):
         db.execute("UPDATE tt_accounts SET bc_id=? WHERE id=?", (bc_id, aid))
     db.commit()
     # 户管看板回写（规格 §6.2 / §7.2 规则 3①）：先刷该行的可写列，再写「换绑情况」列。
-    _huguan_push(uid, [existing["advertiser_id"]])
-    _huguan_owner_channel(uid, existing["advertiser_id"], target_owner)
+    hd.writeback_rows(uid, "tt", [existing["advertiser_id"]])
+    hd.writeback_owner_channel(uid, "tt", existing["advertiser_id"], target_owner)
     if target_owner == uid:
         return ok({"message": f"账户「{existing['name'] or existing['advertiser_id']}」已转移至当前用户"})
     # 规格 §7.5：文案须区分「已转移至当前用户」与「已从 A 转移至 B」。
@@ -1238,7 +1198,7 @@ def sync_from_sheet():
     for adv in status_resolutions:
         if adv in valid_ids:
             touched_ids.append(adv)
-    _huguan_push(uid, list(dict.fromkeys(touched_ids)))
+    hd.writeback_rows(uid, "tt", list(dict.fromkeys(touched_ids)))
     return ok({"created": len(created), "updated": len(updated), "conflicts": conflicts})
 
 

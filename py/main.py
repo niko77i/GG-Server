@@ -39,6 +39,7 @@ from functools import wraps
 from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform, no_huguan
 from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES, GLOBAL_OPTION_ROLES
 from routes.auth_routes import auth_bp, register_jwt_callbacks
+import huguan_dashboard as hd
 # google_ads_service 按需加载，不打包进 EXE
 
 # 判断是否为 PyInstaller 打包模式
@@ -4343,6 +4344,8 @@ def accounts_create():
         db.close()
         # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
         _app_cache.clear_prefix("accounts:agents:")
+        # 户管看板单行回写（规格 §6.2）。只写可写列，绝不碰「重新分配」列。
+        hd.writeback_rows(user_id, "gg", [account_id])
         return jsonify({"success": True, "id": new_id})
     except _sqlite3.IntegrityError as e:
         err_msg = str(e).lower()
@@ -4497,6 +4500,8 @@ def accounts_batch_create():
     db.close()
     # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
     _app_cache.clear_prefix("accounts:agents:")
+    # 户管看板单行回写（规格 §6.2）。created 里装的就是 account_id。
+    hd.writeback_rows(user_id, "gg", created)
     return jsonify({
         "success": True,
         "created": len(created),
@@ -4627,6 +4632,8 @@ def accounts_update(aid):
                 _sync_sheets_background(_sync_dashboard, _on_dash_fail)
 
         db.commit()
+        # 户管看板单行回写（规格 §6.2）。只写可写列，绝不碰「重新分配」列。
+        hd.writeback_rows(user_id, "gg", [old_status["account_id"]])
 
         resp = {"success": True}
         if recharge_note:
@@ -4723,6 +4730,9 @@ def accounts_reassign(aid):
             db.execute("UPDATE accounts SET mcc_id = ? WHERE id = ?", (mcc_val, aid))
 
         db.commit()
+        # 户管看板回写（规格 §6.2 / §7.2 规则 3①）：先刷该行的可写列，再写「重新分配」列。
+        hd.writeback_rows(user_id, "gg", [existing["account_id"]])
+        hd.writeback_owner_channel(user_id, "gg", existing["account_id"], target_owner)
         # 返回文案：代转场景需指名目标用户；target_owner == user_id 时逐字节保持原句不变
         if target_owner == user_id:
             msg = f"账户「{existing['name']}」已从 {old_owner} 转移至当前用户"
@@ -4987,6 +4997,14 @@ def accounts_batch_update():
             db.execute(f"UPDATE accounts SET {field}=?, updated_at=datetime('now','localtime') WHERE id=?",
                        (value, aid))
         db.commit()
+        # 户管看板单行回写（规格 §6.2）：只刷真的落库了的那些行。
+        # 本端点只有主键 ids，回写需要 account_id 字符串，故按主键反查。
+        if ids:
+            _marks = ",".join("?" for _ in ids)
+            _affected = db.execute(
+                f"SELECT account_id FROM accounts WHERE id IN ({_marks})", tuple(ids)
+            ).fetchall()
+            hd.writeback_rows(user_id, "gg", [r["account_id"] for r in _affected])
         # 后台同步 Google Sheets（仅写入新插入的记录）
         if field in ("status", "status_id") and value and new_clear_rows:
             sheet_id = _get_sync_spreadsheet_id(db)
@@ -5285,6 +5303,8 @@ def accounts_sync_from_sheet():
         db.commit()
         # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
         _app_cache.clear_prefix("accounts:agents:")
+        # 户管看板单行回写（规格 §6.2）：本次同步涉及的账户。
+        hd.writeback_rows(user_id, "gg", sheet_ids)
 
         # 10c. 系统 → Sheet：将系统当前状态同步回「我的看板」备注列
         if sheet_id and dashboard_name:

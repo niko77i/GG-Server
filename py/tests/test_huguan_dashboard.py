@@ -2444,3 +2444,245 @@ class TestOwnerOptionsEndpoint:
         assert viewer not in ids
         assert hidden not in ids
         assert normal in ids
+
+
+# ---------- Task 8 Part 2: GG 触发点 + 缺口覆盖 ----------
+
+class TestGGTriggerPoints:
+    """GG 侧 6 个账户变更端点各触发一次户管看板单行/多行回写（规格 §6.2）。
+
+    沿用 TestTTTriggerPoints 的夹具与打桩：配好看板 → 打桩 update_rows_by_account_id
+    并捕获 → 打端点 → 断言捕获里出现预期账户 ID 对应的行。
+    """
+
+    def _conf(self, db, uid):
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+
+    def test_gg_create_triggers_writeback(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_gg_trig_c", role="huguan")
+        db = database.get_db()
+        self._conf(db, uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/accounts/create", headers=hg,
+                           json={"name": "GGTRIG-C", "account_id": "GGTRIG-C-1"})
+        assert resp.status_code == 200
+        all_cells = [r["cells"] for c in captured for r in c["rows"]]
+        assert any(c.get("C") == "GGTRIG-C-1" for c in all_cells)
+        assert all("H" not in c for c in all_cells)
+
+    def test_gg_batch_create_triggers_writeback(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_gg_trig_bc", role="huguan")
+        db = database.get_db()
+        self._conf(db, uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/accounts/batch-create", headers=hg,
+                           json={"account_ids": ["GGTRIG-BC-1", "GGTRIG-BC-2"]})
+        assert resp.status_code == 200
+        got = {r["account_id"] for c in captured for r in c["rows"]}
+        assert got == {"GGTRIG-BC-1", "GGTRIG-BC-2"}
+
+    def test_gg_update_triggers_writeback(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_gg_trig_u", role="huguan")
+        db = database.get_db()
+        self._conf(db, uid)
+        aid = _seed_account(db, "GGTRIG-U-1", uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.put(f"/api/accounts/{aid}", headers=hg, json={"timezone": "UTC+8"})
+        assert resp.status_code == 200
+        all_cells = [r["cells"] for c in captured for r in c["rows"]]
+        assert any(c.get("C") == "GGTRIG-U-1" for c in all_cells)
+
+    def test_gg_batch_update_triggers_writeback(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_gg_trig_bu", role="huguan")
+        db = database.get_db()
+        self._conf(db, uid)
+        aid1 = _seed_account(db, "GGTRIG-BU-1", uid)
+        aid2 = _seed_account(db, "GGTRIG-BU-2", uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/accounts/batch-update", headers=hg,
+                           json={"ids": [aid1, aid2], "field": "timezone", "value": "UTC"})
+        assert resp.status_code == 200
+        got = {r["account_id"] for c in captured for r in c["rows"]}
+        assert got == {"GGTRIG-BU-1", "GGTRIG-BU-2"}
+
+    def test_gg_sync_from_sheet_triggers_writeback(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_gg_trig_sync", role="huguan")
+        db = database.get_db()
+        db.execute("UPDATE users SET display_name=? WHERE id=?", ("户管甲", uid))
+        self._conf(db, uid)
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('recharge_sheet_id','SRC-SHEET')")
+        _seed_account(db, "GGTRIG-SYNC-1", uid)
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        import main as m
+        monkeypatch.setattr(m, "_GOOGLE_SHEETS_CONFIG", {"credentials_path": __file__})
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["运营", "账户ID", "所属渠道", "国家", "时区", "备注", "是否封户", "是否解绑"],
+            ["户管甲", "GGTRIG-SYNC-1", "", "", "", "", "否", ""],
+        ])
+        monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: {"updated": 1})
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        resp = client.post("/api/accounts/sync-from-sheet", headers=hg,
+                           json={"dry_run": False})
+        assert resp.status_code == 200
+        got = {r["account_id"] for c in captured for r in c["rows"]}
+        assert "GGTRIG-SYNC-1" in got
+
+    def test_gg_reassign_writes_rows_and_channel(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_gg_trig_rs", role="huguan")
+        db = database.get_db()
+        self._conf(db, uid)
+        old = _seed(db, "_gg_trig_rs_old", "旧归属")
+        target = _seed(db, "_gg_trig_rs_new", "新归属")
+        aid = _seed_account(db, "GGTRIG-RS-1", old)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.put(f"/api/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": target})
+        assert resp.status_code == 200
+        # 普通列回写（不带通道列）覆盖该账户
+        plain = [r for c in captured for r in c["rows"] if "H" not in r["cells"]]
+        assert any(r["account_id"] == "GGTRIG-RS-1" for r in plain)
+        # 通道列 H「重新分配」= 新归属名
+        chan = [r for c in captured for r in c["rows"] if "H" in r["cells"]]
+        assert chan, "reassign 应额外写归属变更通道列 H"
+        assert {r["account_id"]: r["cells"]["H"] for r in chan}["GGTRIG-RS-1"] == "新归属"
+
+
+class TestGGSoftDeleteNoTrigger:
+    def test_soft_delete_does_not_trigger_huguan_sheet(self, client, monkeypatch):
+        """GG 软删确实会写「我的看板」H 列，但绝不写户管看板那张表。
+
+        陷阱：软删写的是 `update_cell_by_account_id`（另一张表的另一函数），
+        `_stub_sheets` 只捕获 `update_rows_by_account_id` —— 照字面断言
+        「零 Sheets 调用」就会在软删确实写了点什么的情况下假绿。这里把
+        `update_cell_by_account_id` 也捕获进来，按 spreadsheet_id 过滤断言。
+        """
+        hg, uid = _create_user(client, "_gg_trig_del", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS-HG", "sheet_name": "S"}})))
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('recharge_sheet_id','SRC-SHEET')")
+        aid = _seed_account(db, "GGTRIG-DEL-1", uid)
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        cell_calls = []
+
+        def _fake_cell(service, spreadsheet_id, sheet_name, account_id, value, col_index=5):
+            cell_calls.append({"spreadsheet_id": spreadsheet_id, "col_index": col_index})
+            return {"updated": 1}
+
+        monkeypatch.setattr(gs, "update_cell_by_account_id", _fake_cell)
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        assert client.delete(f"/api/accounts/{aid}", headers=hg).status_code == 200
+
+        # 户管看板那张表（SS-HG）一个单元格都没被写
+        assert [c for c in captured if c["spreadsheet_id"] == "SS-HG"] == []
+        assert [c for c in cell_calls if c["spreadsheet_id"] == "SS-HG"] == []
+        # 软删确实写了「我的看板」（SRC-SHEET）的 H 列 —— 证明断言不是恒真式
+        assert any(c["spreadsheet_id"] == "SRC-SHEET" and c["col_index"] == 7
+                   for c in cell_calls)
+
+
+class TestTTNoTriggerGaps:
+    def test_tt_restore_does_not_trigger(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_tt_trig_rs", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        aid = _seed_tt(db, "TTTRIG-RS", uid, deleted_at="2026-01-01 00:00:00")
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        assert client.post(f"/api/tt/accounts/{aid}/restore", headers=hg).status_code == 200
+        assert captured == []
+
+    def test_tt_permanent_delete_does_not_trigger(self, client, monkeypatch):
+        hg, uid = _create_user(client, "_tt_trig_pd", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        aid = _seed_tt(db, "TTTRIG-PD", uid, deleted_at="2026-01-01 00:00:00")
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        assert client.delete(f"/api/tt/accounts/{aid}/permanent", headers=hg).status_code == 200
+        assert captured == []
+
+
+class TestTtReassignChannelWrite:
+    def test_tt_reassign_writes_channel_column(self, client, monkeypatch):
+        """户管把 TT 户转给他人 → 写「换绑情况」列（L 列）且值为新归属名。
+
+        既有的 TestTtReassignCrossUser 夹具没配看板，导致
+        `writeback_owner_channel` 那条路径从未被执行（未配置看板静默 return）。
+        """
+        hg, uid = _create_user(client, "_tt_trig_chan", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        old = _seed(db, "_tt_trig_chan_old", "旧归属", platform="tt")
+        target = _seed(db, "_tt_trig_chan_new", "新归属", platform="tt")
+        aid = _seed_tt(db, "TTTRIG-CHAN", old)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": target})
+        assert resp.status_code == 200
+        chan = [r for c in captured for r in c["rows"] if "L" in r["cells"]]
+        assert chan, "reassign 应写换绑情况列 L"
+        assert {r["account_id"]: r["cells"]["L"] for r in chan}["TTTRIG-CHAN"] == "新归属"
+
+
+class TestSyncAndPushRoleCoverage:
+    """规格：/sync 与 /push 仅户管可达 —— 补 viewer/admin/developer 的 403 覆盖。"""
+
+    def test_sync_403_for_non_huguan_roles(self, client):
+        for role in ("viewer", "admin", "developer"):
+            h, _ = _create_user(client, f"_syn_cov_{role}", role=role)
+            assert client.post("/api/huguan/dashboard/sync", headers=h,
+                               json={"platform": "gg", "dry_run": True}).status_code == 403, role
+
+    def test_push_403_for_non_huguan_roles(self, client):
+        for role in ("viewer", "admin", "developer"):
+            h, _ = _create_user(client, f"_push_cov_{role}", role=role)
+            assert client.post("/api/huguan/dashboard/push", headers=h,
+                               json={"platform": "gg"}).status_code == 403, role
