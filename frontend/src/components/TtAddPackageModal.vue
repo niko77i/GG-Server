@@ -6,7 +6,7 @@
         <el-input v-model="form.prefix" placeholder="如 P222-A" />
       </el-form-item>
       <el-form-item label="粘贴内容">
-        <el-input v-model="form.text" type="textarea" :rows="6" placeholder="粘贴包含 Google Play 链接的文本..." />
+        <el-input v-model="form.text" type="textarea" :rows="6" placeholder="粘贴包含 Google Play / App Store 链接的文本..." />
       </el-form-item>
       <el-button @click="preview" :loading="parsing">🔍 预览解析</el-button>
 
@@ -62,6 +62,16 @@ import { ref, reactive } from 'vue'
 import { ttApi } from '@/api/tt'
 import { ElMessage } from 'element-plus'
 
+// App Store 的两个合法 host（与后端 _is_appstore_url 同口径）
+const APPSTORE_HOSTS = ['apps.apple.com', 'itunes.apple.com']
+function isAppstoreUrl(url) {
+  try {
+    return APPSTORE_HOSTS.includes(new URL(String(url || '').trim()).hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
 const props = defineProps({ visible: Boolean, prodId: Number })
 const emit = defineEmits(['update:visible', 'saved'])
 const saving = ref(false)
@@ -83,14 +93,16 @@ async function preview() {
   try {
     const res = await ttApi.importText({ text: form.text, prefix: form.prefix })
     parsed.value = (res.parsed || []).map(p => ({ type: p.type || 'package', series_name: p.series_name, package_name: p.package_name, url: p.url }))
-    if (!parsed.value.length) ElMessage.warning('未找到有效的 Google Play 链接')
+    if (!parsed.value.length) ElMessage.warning('未找到有效的 Google Play / App Store 链接')
   } catch (e) { ElMessage.error(e.response?.data?.error || '解析失败') }
   finally { parsing.value = false }
 }
 
 async function addManual() {
   if (!manual.url.trim()) return ElMessage.warning('请输入链接')
-  if (manual.type === 'package' && !manual.package_name.trim()) return ElMessage.warning('跑包必须填写包名')
+  if (manual.type === 'package' && !manual.package_name.trim() && !isAppstoreUrl(manual.url)) {
+    return ElMessage.warning('跑包必须填写包名（App Store 链接可留空）')
+  }
   manualSaving.value = true
   try {
     await ttApi.addPackage(props.prodId, {

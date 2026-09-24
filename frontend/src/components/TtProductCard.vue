@@ -83,7 +83,8 @@
           <el-tag :type="pkg.type === 'pwa' ? 'warning' : 'primary'" size="small" style="flex-shrink:0;">{{ pkg.type === 'pwa' ? 'PWA' : '跑包' }}</el-tag>
           <span style="font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer;" @click.stop="copySeriesName(pkg)" :title="'点击复制'">{{ pkg.series_name || '-' }}</span>
           <span v-if="pkg.type !== 'pwa'" style="color:#ccc;flex-shrink:0;">│</span>
-          <span v-if="pkg.type !== 'pwa'" style="font-family:monospace;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="copy(pkg.package_name)">{{ pkg.package_name }}</span>
+          <span v-if="isIosPkg(pkg)" style="font-size:11px;color:#999;flex-shrink:0;">iOS</span>
+          <span v-else-if="pkg.type !== 'pwa'" style="font-family:monospace;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="copy(pkg.package_name)">{{ pkg.package_name }}</span>
           <span style="color:#ccc;flex-shrink:0;" v-if="pkg.url">│</span>
           <span v-if="pkg.url" style="font-size:11px;color:var(--el-color-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;" @click.stop="copy(pkg.url)">{{ pkg.url }}</span>
           <a v-if="pkg.url" :href="pkg.url" target="_blank" style="font-size:11px;text-decoration:none;flex-shrink:0;" @click.stop>🔗</a>
@@ -146,6 +147,18 @@ watch(() => props.highlightPkgIds, (ids) => {
 // TT 后端 owner-only：编辑/删除/改状态/加包等操作仅 owner 或 developer/admin 有权
 // （list_products 对非 developer/admin 返回「我拥有或在跑」，故不能只用 !isViewer 门控）
 const canEdit = computed(() => auth.isAdmin || (auth.user != null && props.product.owner_id === auth.user.id))
+
+// 苹果包：URL 是 App Store 且包名为空 → 列表里显示灰色 iOS 占位
+const APPSTORE_HOSTS = ['apps.apple.com', 'itunes.apple.com']
+function isIosPkg(pkg) {
+  if (pkg.type === 'pwa') return false
+  if ((pkg.package_name || '').trim()) return false
+  try {
+    return APPSTORE_HOSTS.includes(new URL(String(pkg.url || '').trim()).hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
 
 const packages = computed(() => {
   const pkgs = [...(props.product.packages || [])]
@@ -301,9 +314,14 @@ async function checkDelist() {
   checkingDelist.value = true
   try {
     const res = await ttApi.checkDelist(props.product.id)
-    const delisted = (res.results || []).filter(r => r.is_delisted)
+    const results = res.results || []
+    const delisted = results.filter(r => r.is_delisted)
+    // 判定未知（限流/网络异常/空 url）：is_delisted 为 null 或缺失
+    const unknown = results.filter(r => r.is_delisted == null)
     if (delisted.length) {
       ElMessage.warning(`检测到 ${delisted.length} 个包已掉包！`)
+    } else if (unknown.length) {
+      ElMessage.warning(`${unknown.length} 个包本轮未能判定（限流或网络异常），已保留上次判定结果`)
     } else {
       ElMessage.success('所有包均正常 ✓')
     }

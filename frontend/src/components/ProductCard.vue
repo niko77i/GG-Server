@@ -189,10 +189,15 @@ async function checkDelist() {
   try {
     const res = await api.post(`/products/${props.product.id}/check-delist`)
     if (res.success) {
-      const delisted = (res.results || []).filter(r => r.is_delisted)
+      const results = res.results || []
+      const delisted = results.filter(r => r.is_delisted)
+      // 判定未知（限流/网络异常/空 url）：is_delisted 为 null 或缺失
+      const unknown = results.filter(r => r.is_delisted == null)
       if (delisted.length) {
         ElMessage.warning(`检测到 ${delisted.length} 个包已掉包！`)
         emit('refresh')
+      } else if (unknown.length) {
+        ElMessage.warning(`${unknown.length} 个包本轮未能判定（限流或网络异常），已保留上次判定结果`)
       } else {
         ElMessage.success('所有包均正常 ✓')
       }
