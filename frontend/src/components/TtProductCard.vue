@@ -321,7 +321,9 @@ async function checkDelist() {
     if (!results.length) {
       ElMessage.info(res.message || '没有需要检测的包')
     } else if (delisted.length) {
-      ElMessage.warning(`检测到 ${delisted.length} 个包已掉包！`)
+      // 混合轮次（既掉了包又有未判定）不能只报掉包数 —— 未判定那部分会被读成「没事」。
+      const tail = unknown.length ? `，另有 ${unknown.length} 个未能判定（已保留上次判定结果）` : ''
+      ElMessage.warning(`检测到 ${delisted.length} 个包已掉包！${tail}`)
     } else if (unknown.length) {
       // 原因来自后端：可能是限流/网络异常，也可能是「URL 为空」这类永久性数据缺失 ——
       // 不能一律说成网络抖动，否则用户永远不去补 url。
