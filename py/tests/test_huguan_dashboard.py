@@ -1856,6 +1856,63 @@ class TestCollectRowsForPush:
         assert cells["J"] == "大MCC-P"
         db.close()
 
+    def test_soft_deleted_gg_account_excluded_from_full_refresh(self, client):
+        """全量刷新（account_ids=None）必须排除软删账户。
+
+        与「从表同步」的 `build_diff` 对软删账户做 to_skip 口径对称，也符合规格 §6.2
+        「软删不触发回写」的意图：软删是用户主动从看板上撤下的意图，刷新不该把它复活。
+        """
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_sdgg_full", "软删甲")
+        _seed_account(db, "SD-GG-ALIVE", u1)
+        _seed_account(db, "SD-GG-DEAD", u1, deleted_at="2026-01-01 00:00:00")
+        ids = {r["account_id"] for r in collect_rows_for_push(db, "gg")}
+        assert "SD-GG-ALIVE" in ids
+        assert "SD-GG-DEAD" not in ids
+        db.close()
+
+    def test_soft_deleted_gg_account_excluded_when_explicitly_requested(self, client):
+        """即使被显式指定 id，软删账户也不得进产出（ids 路径同样要过滤）。
+
+        只给全量路径加过滤、漏掉 ids 路径是最可能的漏（这条把它钉死）。
+        """
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_sdgg_ids", "软删乙")
+        _seed_account(db, "SD-GG-ALIVE2", u1)
+        _seed_account(db, "SD-GG-DEAD2", u1, deleted_at="2026-01-01 00:00:00")
+        assert collect_rows_for_push(db, "gg", ["SD-GG-DEAD2"]) == []
+        assert [r["account_id"] for r in
+                collect_rows_for_push(db, "gg", ["SD-GG-ALIVE2", "SD-GG-DEAD2"])] == \
+            ["SD-GG-ALIVE2"]
+        db.close()
+
+    def test_soft_deleted_tt_account_excluded_from_full_refresh(self, client):
+        """TT 侧软删（tt_accounts.deleted_at）在全量刷新时同样排除。"""
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_sdtt_full", "软删丙", platform="tt")
+        _seed_tt_account(db, "SD-TT-ALIVE", u1)
+        _seed_tt_account(db, "SD-TT-DEAD", u1, deleted_at="2026-01-01 00:00:00")
+        ids = {r["account_id"] for r in collect_rows_for_push(db, "tt")}
+        assert "SD-TT-ALIVE" in ids
+        assert "SD-TT-DEAD" not in ids
+        db.close()
+
+    def test_soft_deleted_tt_account_excluded_when_explicitly_requested(self, client):
+        """TT 侧显式指定 id 时，软删账户同样不得进产出。"""
+        from huguan_dashboard import collect_rows_for_push
+        db = database.get_db()
+        u1 = _seed(db, "_push_sdtt_ids", "软删丁", platform="tt")
+        _seed_tt_account(db, "SD-TT-ALIVE2", u1)
+        _seed_tt_account(db, "SD-TT-DEAD2", u1, deleted_at="2026-01-01 00:00:00")
+        assert collect_rows_for_push(db, "tt", ["SD-TT-DEAD2"]) == []
+        assert [r["account_id"] for r in
+                collect_rows_for_push(db, "tt", ["SD-TT-ALIVE2", "SD-TT-DEAD2"])] == \
+            ["SD-TT-ALIVE2"]
+        db.close()
+
 
 class TestPushEndpoint:
     def test_unconfigured_is_silent_noop(self, client, monkeypatch):
@@ -1912,7 +1969,7 @@ class TestPushEndpoint:
 
         captured = []
         _stub_sheets(monkeypatch, captured)
-        # GG 已配置、平台非法 ⇒ 必须 400（不校验就会按 GG 写出去）
+        # GG 已配置、平台非法 ⇒ 必须 400（哨兵：防平台校验被挪到配置查询之后；当前顺序下必先命中「未配置 → 400」，两者响应不可区分）
         assert client.post("/api/huguan/dashboard/push", headers=hg,
                            json={"platform": "fb"}).status_code == 400
         # GG 已配置、TT 未配置 ⇒ 400，且一行都不许写

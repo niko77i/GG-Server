@@ -701,15 +701,22 @@ def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
 
     产出里刻意不含归属变更通道列（规格 §7.2 规则 2）。
     account_ids=None 表示全部；给了具体 ID 时只取这些。
+    两条路径都排除软删账户（`a.deleted_at IS NULL`）：与「从表同步」对软删做
+    to_skip 的口径对称，也符合规格 §6.2「软删不触发回写」的意图 —— 软删是用户
+    主动从看板撤下的意图，刷新不该把它复活。
     """
     sql = _TT_ROW_SQL if platform == "tt" else _GG_ROW_SQL
     params = ()
+    # 两个基语句都没有 WHERE 子句，故条件先累积成 list 再统一拼 —— 避免
+    # 「先拼 WHERE 再找地方插 AND」那种在无 WHERE 时静默拼错条件的写法。
+    conds = ["a.deleted_at IS NULL"]
     if account_ids is not None:
         if not account_ids:
             return []
         marks = ",".join("?" for _ in account_ids)
-        sql += f" WHERE a.{ACCOUNT_KEY_FIELD[platform]} IN ({marks})"
+        conds.append(f"a.{ACCOUNT_KEY_FIELD[platform]} IN ({marks})")
         params = tuple(account_ids)
+    sql += " WHERE " + " AND ".join(conds)
 
     out = []
     for r in db.execute(sql, params).fetchall():
