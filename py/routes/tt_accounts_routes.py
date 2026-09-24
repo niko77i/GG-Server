@@ -572,9 +572,12 @@ def reassign_account(aid):
     _huguan_owner_channel(uid, existing["advertiser_id"], target_owner)
     if target_owner == uid:
         return ok({"message": f"账户「{existing['name'] or existing['advertiser_id']}」已转移至当前用户"})
+    # 规格 §7.5：文案须区分「已转移至当前用户」与「已从 A 转移至 B」。
+    # old_owner 取法与 GG 侧 accounts_reassign 逐字一致；上面那条分支的文案不变。
+    old_owner = existing["display_name"] or existing["username"] or "未知"
     t = db.execute("SELECT display_name, username FROM users WHERE id=?", (target_owner,)).fetchone()
     label = (t["display_name"] or t["username"]) if t else str(target_owner)
-    return ok({"message": f"账户「{existing['name'] or existing['advertiser_id']}」已转移至 {label}"})
+    return ok({"message": f"账户「{existing['name'] or existing['advertiser_id']}」已从 {old_owner} 转移至 {label}"})
 
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>', methods=['DELETE'])

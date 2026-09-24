@@ -2108,6 +2108,37 @@ class TestTtReassignCrossUser:
                           (aid,)).fetchone()["owner_id"] == hid
         db.close()
 
+    def test_message_distinguishes_self_from_cross_user(self, client):
+        """规格 §7.5（design.md:288）：文案须区分「已转移至当前用户」与「已从 A 转移至 B」。
+
+        跨用户分支原先只写「已转移至 {label}」，把旧归属整个丢了，与 GG 侧
+        `main.py` 的「已从 {old_owner} 转移至 {_label}」不对称。old_owner 的取法
+        与 GG 逐字一致：`display_name → username → "未知"`（TT 的 `existing` 查询
+        带了 `LEFT JOIN users u ON a.owner_id = u.id`，两列都取得到）。
+
+        同时把**受保护分支**的文案逐字节钉死：计划全局约束要求
+        「默认路径必须逐字节保持原逻辑与原返回文案」，这句话在改动前只写在注释里、
+        没有任何用例守着 —— 上面两条回归钉只断言了 owner_id 落库，没断言文案。
+        """
+        hg, hid = _create_user(client, "_tt_rg_msg", role="huguan", platform="tt")
+        db = database.get_db()
+        old = _seed(db, "_tt_rg_msgold", "")          # display_name 空 ⇒ 钉住 username 回退
+        target = _seed(db, "_tt_rg_msgnew", "王五")
+        aid_cross = _seed_tt(db, "TTR-9", old)
+        aid_self = _seed_tt(db, "TTR-10", old)
+        db.close()
+
+        resp = client.put(f"/api/tt/accounts/{aid_cross}/reassign", headers=hg,
+                          json={"owner_id": target})
+        assert resp.status_code == 200
+        assert resp.get_json()["message"] == "账户「TTR-9」已从 _tt_rg_msgold 转移至 王五"
+
+        # 受保护分支：户管带 owner_id 把自己认领一遍，走的仍是 `target_owner == uid`
+        resp = client.put(f"/api/tt/accounts/{aid_self}/reassign", headers=hg,
+                          json={"owner_id": hid})
+        assert resp.status_code == 200
+        assert resp.get_json()["message"] == "账户「TTR-10」已转移至当前用户"
+
 
 class TestTTTriggerPoints:
     def test_tt_create_triggers_writeback(self, client, monkeypatch):
@@ -2150,3 +2181,73 @@ class TestTTTriggerPoints:
         _stub_sheets(monkeypatch, captured)
         assert client.delete(f"/api/tt/accounts/{aid}", headers=hg).status_code == 200
         assert captured == []
+
+    def test_tt_sync_from_sheet_pushes_exactly_the_landed_ids(self, client, monkeypatch):
+        """`sync-from-sheet` 回写的 id 集合 == 真正落库的 id 集合（规格 §6.2 触发点 6）。
+
+        6 个触发点里只有这一个带业务逻辑：id 集合是
+        `created ∪ updated ∪ (resolutions ∩ valid_ids) ∪ (status_resolutions ∩ valid_ids)`
+        再 `dict.fromkeys` 去重。另外 5 处是直读可验的单行插入，这一处不是 ——
+        多算一条会把别人的行写进看板，少算一条会让刚同步的账户在看板上停在旧值。
+        四条臂各放一个 id，断掉任意一条都会转红。
+
+        故断言**集合相等**，并把不该回写的 id 逐条钉死（只断言「有回写发生」在这里
+        等于没断言 —— 集合只多不少也照样绿）：
+        - `9990000002`：他人的**软删**账户，普通用户角色不得复活（`continue`），
+          既没落库也不该回写；
+        - `9990000009`：body 的 `resolutions` 里带的**看板外** id（越权改任意账户
+          消耗的标准载荷），被 `valid_ids` 挡掉 —— 不落库，也不该进回写集合。
+        """
+        u, uid = _create_user(client, "_tt_syn_plain", role="user", platform="tt")
+        db = database.get_db()
+        other = _seed(db, "_tt_syn_owner", "别人")
+        _seed_tt(db, "9990000001", uid)                     # 消耗冲突 → resolutions 落库
+        _seed_tt(db, "9990000002", other, deleted_at="2026-01-01 00:00:00")   # 他人软删 → 跳过
+        _seed_tt(db, "9990000004", uid)                     # 无冲突的既有户 → updated 分支
+        _seed_tt(db, "9990000009", uid)                     # 看板外：不得被 resolutions 改
+        # 9990000003 刻意不预置：它由本次同步走 create 分支新建
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','SHEET-SYN')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        op = "_tt_syn_plain"          # 门禁：A 列「运营」须等于 display_name（空→username）
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["运营", "日期", "是否回收", "账户ID"],
+            [op, "", "", "9990000001", "", "", "", "", "500"],   # 与库内空值冲突
+            [op, "", "", "9990000002"],
+            [op, "", "", "9990000003"],
+            [op, "", "", "9990000004"],
+        ])
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        resp = client.post("/api/tt/accounts/sync-from-sheet", headers=u, json={
+            "resolutions": {"9990000001": "500", "9990000009": "999"}})
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["created"] == 1 and body["updated"] == 1
+        assert body["conflicts"] == [{"advertiser_id": "9990000001",
+                                      "sheet_value": "500", "system_value": ""}]
+
+        db = database.get_db()
+        rows = {r["advertiser_id"]: r for r in db.execute(
+            "SELECT advertiser_id, consumption, deleted_at, owner_id FROM tt_accounts "
+            "WHERE advertiser_id LIKE '999000000%'").fetchall()}
+        db.close()
+
+        # 真正落库的两条：0001 的消耗被 resolutions 改写，0003 被新建且归属当前用户
+        assert rows["9990000001"]["consumption"] == "500"
+        assert rows["9990000003"]["owner_id"] == uid
+        # 没落库的两条：他人的软删户仍软删；看板外 id 的消耗没被动过一个字节
+        assert rows["9990000002"]["deleted_at"] is not None
+        assert rows["9990000009"]["consumption"] == ""
+
+        got = {r["account_id"] for c in captured for r in c["rows"]}
+        # 回写集合 == 本次同步真正处置过的那四条（规格 §6.2），一条不多一条不少
+        assert got == {"9990000001", "9990000003", "9990000004"}, got
+        assert "9990000002" not in got          # 他人软删户未被复活 ⇒ 不该回写
+        assert "9990000009" not in got          # 看板外 id 未被改动 ⇒ 不该回写
