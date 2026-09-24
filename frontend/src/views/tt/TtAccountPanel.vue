@@ -169,6 +169,65 @@
             <span v-else style="color:#ccc;">—</span>
           </template>
         </el-table-column>
+        <!-- 户归属：只有户管可见可编辑（规格 §9.2）。管理员的入口在 TtAccountModal，不在这里。 -->
+        <el-table-column v-if="authStore.isHuguan" label="户归属" width="160" align="center">
+          <template #header>
+            <el-tooltip placement="top"
+              content="这个户归谁管。改这里会把新归属写进看板的「重新分配」列（TT 是「换绑情况」列），等你在看板同步时生效。">
+              <span style="cursor:help;">户归属 ⓘ</span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <div class="owner-cell">
+              <!-- ① 加载中：不用裸 el-select，否则会退化成显示裸 owner_id 数字（§5.4） -->
+              <el-skeleton v-if="!ownerOptionsLoaded" :rows="1" animated />
+              <!-- ⑤ 失败态：列表没回来，写操作不能静默（§5.6） -->
+              <el-select v-else-if="ownerOptionsFailed" :model-value="null" size="small" disabled
+                style="width:100%;" placeholder="暂时无法加载用户列表"
+                :aria-label="`账户 ${row.advertiser_id} 的户归属`" />
+              <!-- ③ 未知归属：不在列表里（账号可能已停用），禁用并说明，不让户管以为能保持现状（§5.4） -->
+              <el-tooltip v-else-if="row.owner_id && !ownerOptionMap[row.owner_id]"
+                content="这个归属人不在用户列表里（账号可能已停用）。请重新选择。">
+                <el-select :model-value="row.owner_id" size="small" filterable disabled
+                  style="width:100%;" placeholder="未知用户"
+                  :aria-label="`账户 ${row.advertiser_id} 的户归属`">
+                  <el-option :key="row.owner_id" :label="`用户 #${row.owner_id}`" :value="row.owner_id" />
+                </el-select>
+              </el-tooltip>
+              <!-- ④ 未分配 -->
+              <el-tooltip v-else-if="!row.owner_id"
+                content="这个账户还没有归属人，普通用户看不到它，只有户管和管理员可见。">
+                <el-select :model-value="row.owner_id" size="small" filterable
+                  placeholder="未分配" style="width:100%;"
+                  :disabled="ownerPending.has(row.id)"
+                  :aria-label="`账户 ${row.advertiser_id} 的户归属`"
+                  @change="v => changeOwner(row, v)">
+                  <el-option v-for="u in ownerOptions" :key="u.id"
+                    :label="u.display_name || u.username" :value="u.id" />
+                  <template #empty>
+                    <div style="padding:8px 12px;font-size:12px;color:#6b7280;line-height:1.6;">
+                      没有匹配的用户。<br />停用的账号不会出现在这里。
+                    </div>
+                  </template>
+                </el-select>
+              </el-tooltip>
+              <!-- ② 正常 -->
+              <el-select v-else :model-value="row.owner_id" size="small" filterable
+                placeholder="未分配" style="width:100%;"
+                :disabled="ownerPending.has(row.id)"
+                :aria-label="`账户 ${row.advertiser_id} 的户归属`"
+                @change="v => changeOwner(row, v)">
+                <el-option v-for="u in ownerOptions" :key="u.id"
+                  :label="u.display_name || u.username" :value="u.id" />
+                <template #empty>
+                  <div style="padding:8px 12px;font-size:12px;color:#6b7280;line-height:1.6;">
+                    没有匹配的用户。<br />停用的账号不会出现在这里。
+                  </div>
+                </template>
+              </el-select>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showModal(row)">✏️</el-button>
@@ -215,6 +274,8 @@ import TtRechargeBatchModal from '@/components/tt/TtRechargeBatchModal.vue'
 import TtAccountSyncModal from '@/components/tt/TtAccountSyncModal.vue'
 import TtRecycleReasonModal from '@/components/tt/TtRecycleReasonModal.vue'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
+import { useAuthStore } from '@/stores/auth'
+import { huguanApi } from '@/api/huguan'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
@@ -673,6 +734,59 @@ async function doBatchBc(val) {
     batchBc.value = ''
   }
 }
+
+// ===== 「户归属」列（仅户管可见可编辑）=====
+// 视觉规格：docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md §5
+const authStore = useAuthStore()
+const ownerOptions = ref([])           // 下拉数据源：全量用户（**编辑**用途）
+const ownerOptionsLoaded = ref(false)  // 请求是否已落定（成功或失败）；落定后不再显示骨架
+const ownerOptionsFailed = ref(false)  // 请求失败：该列所有下拉禁用并提示（§5.6，写操作不许静默失败）
+const ownerPending = ref(new Set())    // 正在提交的行 id，防重入（§5.5）
+const ownerOptionMap = computed(() => Object.fromEntries(ownerOptions.value.map(u => [u.id, u])))
+
+// 数据源必须是户管专用的 owner-options，**不是** /platform/users：后者是给上方「归属人」
+// 筛选器用的，只列**该平台有未删除账户**的用户（那是筛选场景的有意设计，见
+// docs/superpowers/specs/2026-09-23-owner-filter-hide-empty-users-design.md）。拿它当改归属
+// 的选项源，户管就没法把 TT 的户转给一个当前只在 GG 有户的合法用户（实测缺口）。
+// 依据：docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md §2.4
+async function loadOwnerPickerOptions() {
+  if (!authStore.isHuguan) return
+  try {
+    const res = await huguanApi.ownerOptions()
+    ownerOptions.value = res.users || []
+  } catch (e) {
+    ownerOptionsFailed.value = true
+    // 这一列是**写**操作，静默失败会让户管以为改成功了（§5.6）
+    ElMessage.warning('用户列表加载失败，暂时无法修改户归属。')
+  } finally {
+    ownerOptionsLoaded.value = true
+  }
+}
+
+// 变更归属：乐观更新 + 提交期间锁住该格（§5.5）。
+// 「锁定」是必要的，不是保险：连续两次快速改动时 prev 会取到上一次乐观更新的值，
+// 第二次失败就会回滚出一个假值；:disabled 从交互层堵住这条路径。
+async function changeOwner(row, newOwnerId) {
+  const prev = row.owner_id
+  ownerPending.value.add(row.id)
+  row.owner_id = newOwnerId
+  try {
+    await ttAccountsApi.reassign(row.id, { owner_id: newOwnerId })
+    const t = ownerOptions.value.find(u => u.id === newOwnerId)
+    const who = (t && (t.display_name || t.username)) || `用户 #${newOwnerId}`
+    // 不写「系统已把新归属写进看板…」这种陈述句：未配置看板时那次回写是**静默跳过**的
+    // （§6.3），该句在未配置时是假话。本端点不返回「是否回写」，故只能用条件句兜底
+    // （彻底修法＝返回体带布尔，但那是 tt_accounts_routes.py 的改动，不在本任务）。
+    ElMessage.success(`归属已变更为「${who}」。如果配置了户管看板，系统会把新归属写进「换绑情况」列。`)
+  } catch (e) {
+    row.owner_id = prev
+    ElMessage.error(e?.response?.data?.error || '归属变更失败，已还原')
+  } finally {
+    ownerPending.value.delete(row.id)
+  }
+}
+
+onMounted(loadOwnerPickerOptions)
 </script>
 
 <style scoped>
@@ -743,5 +857,18 @@ async function doBatchBc(val) {
 .inline-agent-select,
 .inline-status-select {
   width: 100%;
+}
+/* 「户归属」列：静息态看去边框（看起来是一段人名文本），悬浮/聚焦时恢复成控件（§5.2）。
+   padding-left 的变化是为了让文本在两种状态下不左右跳动（EP 的 wrapper 默认有内边距）。 */
+.owner-cell :deep(.el-select__wrapper) {
+  box-shadow: none;
+  background: transparent;
+  padding-left: 0;
+}
+.owner-cell:hover :deep(.el-select__wrapper),
+.owner-cell :deep(.el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 1px var(--el-border-color) inset;
+  background: var(--el-fill-color-blank);
+  padding-left: 11px;
 }
 </style>
