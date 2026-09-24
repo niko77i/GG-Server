@@ -321,11 +321,13 @@ class TestCheckUrlDelistedWithProxy:
 # ============================================================
 
 class TestIndeterminateStatus:
-    """429/5xx 既不是 404（掉包）也不是正常页面，必须判为「未知」。
+    """**非 200/404 的一切状态码**既不是 404（掉包）也不是正常页面，必须判为「未知」。
 
     实测依据：App Store 对掉包链接返回 404，被限流时返回 429，
     两者响应体同为 2383 字节，只能靠状态码区分。旧逻辑只认 404，
-    会把 429 当成「正常」，从而抹掉上一轮正确的掉包记录。
+    会把 429（乃至 403 反爬、410、任意 5xx）当成「正常」，
+    从而抹掉上一轮正确的掉包记录。
+    口径由用户 2026-09-25 裁定拓宽（原为「429 或任意 5xx」）。
     """
 
     def _resp(self, status, text=""):
@@ -488,13 +490,43 @@ class TestIndeterminateStatus:
         assert is_delisted is None
         assert error != ""
 
-    def test_499_is_not_indeterminate(self):
-        """边界：4xx 中只有 429 算未知，499 不属于本族（沿用既有口径，不得顺手拓宽）。"""
+    def test_403_is_indeterminate_not_normal(self):
+        """403 反爬拿不到判定 —— 判成「正常」会经 INSERT OR REPLACE 抹掉掉包记录。
+
+        用户 2026-09-25 裁定：非 200/404 一律未知。
+        """
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=403, text="<html>forbidden</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is None
+        assert "403" in error
+
+    def test_410_is_indeterminate_not_normal(self):
+        """410 Gone 同理：拿不到判定，不得判「正常」。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=410, text="<html>gone</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is None
+        assert "410" in error
+
+    def test_499_is_indeterminate_not_normal(self):
+        """499 也属未知 —— 用户 2026-09-25 裁定拓宽：非 200/404 一律未知。
+
+        本用例前身 test_499_is_not_indeterminate 钉的是「4xx 中只认 429，不得顺手拓宽」，
+        该口径已被裁定推翻：403/410/499 等判「正常」同样会经 INSERT OR REPLACE
+        抹掉上一轮正确的掉包记录，与 429 同型。
+        """
         from delist_checker import check_url_delisted
 
         resp = MagicMock(status_code=499, text="<html>client closed request</html>")
         with patch("delist_checker.requests.get", return_value=resp):
             is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
 
-        assert is_delisted is False
-        assert error == ""
+        assert is_delisted is None
+        assert "499" in error
