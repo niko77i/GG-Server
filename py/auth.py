@@ -1,4 +1,5 @@
-﻿import os
+﻿import json
+import os
 import sqlite3
 
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -94,6 +95,52 @@ def _dn_key(name: str) -> str:
     return os.path.normcase(name)
 
 
+def _dn_history(raw) -> list:
+    r"""解析 `users.prev_scrape_dns`（JSON 数组文本）为字符串列表；坏值一律当空。
+
+    为什么用 JSON 而不是逗号/换行分隔：`_fs_name_error` 只挡了路径分隔符、冒号、
+    空字符与首尾的点/空白，**名字中间允许逗号和换行** —— 用分隔符拼接会在这里
+    串味（`a,b` 一个名字会被拆成两个）。
+
+    ⚠️ 「坏值当空」的方向**取决于是谁的**，两边**相反**，不可一概而论：
+      · 读 `me` 的历史（决定「哪些名字我能不能认领」）→ 当空**是 fail-closed**：
+        读不出来只是我不再去认领，不会把别人的名字误判成自己的。
+      · 读**别人**的历史（决定「哪些名字已经被别人用过」）→ 当空**是 fail-open**：
+        漏看他用过的名字，就可能让我认领到一个装着**他的**产物的目录。
+    本函数自身**无法区分「本来就是空」与「坏了」**（两者都返回 `[]`），所以「当空
+    还是当满」由**调用方按用途**决定：`directory_name_error` 读**别人**的历史时，
+    对「非空但解析失败」的行**整体放弃认领**（保守当满），不依赖本函数的返回值分辨。
+    当前该情形**不可达**：本列只由 `_dn_history_append` 写入，写进去的永远是合法
+    JSON（`json.loads(json.dumps(x))` 恒成立）。但上面那道保守处理**不依赖**这个
+    假设 —— 哪天外部改库或人工编辑造出坏值，认领也只是退回修复前的「拒」。
+    """
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(val, list):
+        return []
+    return [x for x in val if isinstance(x, str) and x]
+
+
+def _dn_history_append(raw, name) -> str:
+    """把 name 追加进曾用名（按 `_dn_key` 归一判重）；无需追加时**原样返回** raw。
+
+    原样返回（而不是回写一份规范化后的 JSON）是为了让调用方能靠 `==` 判断
+    「没变化」，从而不产生无意义的 UPDATE。
+    """
+    names = _dn_history(raw)
+    if not name:
+        return raw
+    key = _dn_key(name)
+    if any(_dn_key(n) == key for n in names):
+        return raw
+    names.append(name)
+    return json.dumps(names, ensure_ascii=False)
+
+
 def directory_name_error(uid, username=None, display_name=None):
     """校验这组取值解析出的**爬取目录名**是否可用。返回错误串；None 表示可用。
 
@@ -119,10 +166,12 @@ def directory_name_error(uid, username=None, display_name=None):
     """
     conn = database.get_db()
     try:
-        me = conn.execute("SELECT id, username, display_name FROM users WHERE id = ?",
-                          (uid,)).fetchone() if uid is not None else None
+        me = conn.execute(
+            "SELECT id, username, display_name, prev_scrape_dns FROM users WHERE id = ?",
+            (uid,)).fetchone() if uid is not None else None
         others = conn.execute(
-            "SELECT id, username, display_name FROM users WHERE id IS NOT ?", (uid,)
+            "SELECT id, username, display_name, prev_scrape_dns FROM users "
+            "WHERE id IS NOT ?", (uid,)
         ).fetchall()
     finally:
         conn.close()
@@ -133,7 +182,35 @@ def directory_name_error(uid, username=None, display_name=None):
         if display_name is None:
             display_name = me["display_name"]
 
-    err = _fs_name_error(username, "用户名") or _fs_name_error(display_name, "显示名")
+    # L-7：对「与库里现值**完全相同**」的字段跳过**字符**判据。
+    #
+    # 为什么：闸门上线**之前**入库的非法值（例如 username 里带路径分隔符）会把
+    # 用户自己锁死 —— 他只想改显示名，本函数却把他**没动过**的 username 一并
+    # 拿出来验，恒判非法 ⇒ 该用户任何一次资料更新都 400；而 profile 端点根本
+    # 不允许改 username ⇒ 没有任何修正通道（live 库实测 0 行，属潜伏；已独立复现）。
+    # 这个值此刻**已经在生效**，重验一遍挡不住任何事，只会锁死用户。
+    #
+    # 真实的边界：本豁免只对「与库中现值**严格相等**」的值生效 ⇒ 相等即无变更，
+    # 它**不可能**把一个新的非法值放进来，凡改动过的值一律仍在闸门外。
+    #
+    # ⚠️ 这里早先写着「安全性由 main._scrape_dn_for 的结构兜底接住」，那是**错的**
+    # （code-review 第 5 轮指出，已独立复现）：兜底条件只是「推导结果不得越出爬取
+    # 根」，而 `nest_user/pkg`、`alice/pkg` 这类**含分隔符但留在根内**的值规范化后
+    # 仍在根内 ⇒ **不退化**，实测目录名原样就是 `nest_user/pkg`。它的后果不是读到
+    # 根外，而是往一个真实用户（如 `alice`）的目录里凭空多出一个 `pkg` 子目录，
+    # 被 scrape_packages 当成**她自己的包**列出、可经正门下载 —— 等于她能读到那个
+    # 存量用户的产物。
+    # 于是接受本豁免的依据**只剩一条事实**：这类值只可能来自闸门上线**之前**的
+    # 存量数据，而 live 库实测 0 行。它**没有被结构兜底覆盖**，需要按存量数据治理
+    # （见设计文档 §0.10「仍未做」）。且**只豁免字符判据** —— 判据 2/3 比的是别人
+    # 与磁盘，与旧值本身是否合法无关，照旧执行。
+    _keep_u = me is not None and username == me["username"]
+    _keep_d = me is not None and display_name == me["display_name"]
+    err = None
+    if not _keep_u:
+        err = _fs_name_error(username, "用户名")
+    if not err and not _keep_d:
+        err = _fs_name_error(display_name, "显示名")
     if err:
         return err
 
@@ -158,6 +235,64 @@ def directory_name_error(uid, username=None, display_name=None):
         own_keys.add(_dn_key(_dir_name_of(me["id"], me["username"], me["display_name"])))
         own_keys.add(_dn_key(_dir_name_of(me["id"], me["username"], "")))
 
+    # 曾用目录名（MEDIUM-1）：改名之后旧目录仍留在磁盘上，但它既不在上面两行里、
+    # 也不属于任何**其他**现存用户的**当前**目录名（判据 2 只看这一维），于是判据 3
+    # 会把「改回我的曾用名」一并拒掉 —— 用户此前的产物永远回不去。
+    # 判据 3 的正当目的是挡「无主目录」（用户被删而目录还在）被**他人**认领。
+    #
+    # ⚠️ 但这个豁免必须**收窄**：只有「除我之外没有任何人用过」的名字才算我的。
+    # 若别人也用过同一个名字，他可能在该目录下爬出过产物，凭「我曾用过」放行就等于
+    # 让我读到**他的**产物 —— 把判据 3 整条绕开。已运行时复现，见
+    # TestFormerDirectoryNameIsReclaimable::
+    #   test_former_name_that_someone_else_also_used_is_not_reclaimable（先红后绿）。
+    # 「用过」必须**含曾用名**：别人改名离开后，他的产物仍留在那个目录里。
+    # 别人用过的名字一律退回**修复前**的行为（拒），fail-closed。
+    #
+    # ⚠️ 已知边界一（误拒，code-review 第 5 轮 Important #1，已独立复现）：本收窄比
+    # 「目录里的数据是否干净」**更保守** —— 一个名字被 ≥2 人先后用过时，**最后持有者**
+    # 也被拒。复现：P 占空闲名 N（从未产出）→ 改名离开；Q 合法接手 N（能放行这件事
+    # 本身就证明目录里没有 P 的产物）→ 产出后离开；此时 Q 想取回 N 被拒，而目录里
+    # **只有 Q 自己的产物**。用户可见后果与原缺陷一致（产物在盘上、应用内无恢复
+    # 路径）。这是「只看名字、不看目录内容」这一路线的固有上限；要修全需改存储格式
+    # 记「谁最后释放了该名」（last-writer-wins），属需裁定的目标行为。
+    #
+    # ⚠️ 已知边界二（误放，Important #2，已独立复现）：`others` 只能看到**还存在的**
+    # 行。用户被删后（admin_delete_user 不删爬取目录），他的目录名连同历史一起消失，
+    # 于是任何 `prev_scrape_dns` 含该名的人都能认领它、读到**被删用户**的产物。
+    # 复现：M 的曾用名含 D → V 合法接手 D 并产出 → M 认领被拒（判据 2）→ 删掉 V →
+    # M 认领 D 放行，目录里是 V 的产物。**这条边界正是判据 3 声称要挡的「无主目录」
+    # 那一档** —— 现有唯一收口点是「删用户时同步处理其爬取目录」或建墓碑表，属需
+    # 裁定的目标行为（删目录是破坏性操作）。
+    #
+    # ⚠️ 本列**只增不减** ⇒ 一个名字一旦被谁用过，就**永久**对其他人关闭认领。
+    # 它不是白名单，别当白名单用。且本修复是**单向**的：只对**上线后**发生的改名
+    # 生效 —— 此前改过名、旧目录还在的用户 `prev_scrape_dns` 仍是空串，同症状仍在，
+    # 且**无法自动回填**（无主目录的归属无法事后判定）。
+    #
+    # 刻意**不**把曾用名加进判据 2 的比较空间：那会让任何名字一旦被谁用过就全局
+    # 永久保留（prev_scrape_dns 只增不减），而「空目录被抢」没有数据可失 ——
+    # 真正的数据保护来自判据 3「目录是否存在」，产物存在 ⇔ 目录存在。
+    hist_keys = set()
+    if me:
+        others_keys = set()
+        _others_hist_unreadable = False
+        for r in others:
+            others_keys.add(_dn_key(_dir_name_of(r["id"], r["username"], r["display_name"])))
+            _oh_list = _dn_history(r["prev_scrape_dns"])
+            if r["prev_scrape_dns"] and not _oh_list:
+                _others_hist_unreadable = True
+            for _oh in _oh_list:
+                others_keys.add(_dn_key(_oh))
+        # 别人的历史「非空但解析失败」⇒ 不知道他用过哪些名字 ⇒ **整体放弃认领**，
+        # 退回修复前的行为（拒）。方向必须与读**我自己**历史时相反：那边坏值当空是
+        # fail-closed（只是我不再认领），这边当空是 fail-open（漏看别人用过的名字，
+        # 就可能认领到装着他产物的目录）。见 _dn_history 的 docstring。
+        if not _others_hist_unreadable:
+            for _h in _dn_history(me["prev_scrape_dns"]):
+                _k = _dn_key(_h)
+                if _k not in others_keys:
+                    hist_keys.add(_k)
+
     # 判据 3：目录占用 —— 与爬取根下已存在的任何目录碰撞即拒。
     # 此处**枚举真实目录名**而不是 realpath(join(root, eff))：realpath 只在
     # 目标**已存在**时才把大小写折叠到磁盘上的真实值，恰恰漏掉「目录还不存在」
@@ -168,7 +303,7 @@ def directory_name_error(uid, username=None, display_name=None):
         existing = []
     for d in existing:
         dk = _dn_key(d)
-        if dk == key and dk not in own_keys:
+        if dk == key and dk not in own_keys and dk not in hist_keys:
             return "该名字对应的爬取目录已被占用，请换一个"
     return None
 
@@ -337,6 +472,8 @@ def update_user(uid: int, username: str = None, display_name: str = None, platfo
         existing = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
         if not existing:
             return None
+        # 改名前解析出的目录名 —— 改名成功后要记进 prev_scrape_dns（见下方的追加块）。
+        old_dn = _dir_name_of(existing["id"], existing["username"], existing["display_name"])
 
         if display_name is not None:
             display_name = display_name.strip()
@@ -372,6 +509,21 @@ def update_user(uid: int, username: str = None, display_name: str = None, platfo
 
         if platform is not None:
             conn.execute("UPDATE users SET platform = ? WHERE id = ?", (platform, uid))
+
+        # 曾用目录名落库（MEDIUM-1）：目录名**变了**就把旧名字记下来。
+        # 必须在 commit 之前、与改名同属一个事务 —— 否则「改名成功而历史没落库」
+        # 会留下一个永久死角：旧目录还在磁盘上，判据 3 却因为它不在 own_keys 里
+        # 而把改回曾用名这条路封死，且再没有任何别的恢复路径。
+        _hist_row = conn.execute(
+            "SELECT username, display_name, prev_scrape_dns FROM users WHERE id = ?",
+            (uid,)).fetchone()
+        if _hist_row is not None:
+            _new_dn = _dir_name_of(uid, _hist_row["username"], _hist_row["display_name"])
+            if _dn_key(_new_dn) != _dn_key(old_dn):
+                _hist = _dn_history_append(_hist_row["prev_scrape_dns"], old_dn)
+                if _hist != _hist_row["prev_scrape_dns"]:
+                    conn.execute("UPDATE users SET prev_scrape_dns = ? WHERE id = ?",
+                                 (_hist, uid))
 
         try:
             conn.commit()

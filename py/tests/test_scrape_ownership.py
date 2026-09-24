@@ -9,6 +9,7 @@
 于是归属只能在**签发侧**（`POST /api/scrape` 的 `save_dir`）堵死。只测正门不测侧门，
 就等于用一套「攻击者根本不用走那条门」的断言冒充安全 —— 这是本文件存在的理由。
 """
+import json
 import os
 import shutil
 import sqlite3
@@ -1026,4 +1027,299 @@ class TestDbGeneratedColumnMatchesPython:
         assert got_db == "_ws_only", f"DB 侧语义变了：{got_db!r}"
         assert got_py != got_db, (
             "两边居然一致了 —— 该已知差异已消失，请删掉本条用例与 database.py 里的相关注释"
+        )
+
+
+def _token_for(uid):
+    """直接为该 uid 签一个 access_token。
+
+    刻意不走 `/api/auth/login`：本文件下文的存量用户是**闸门上线前**的形态
+    （`username` 非法），注册接口根本造不出来，只能用 `_seed_raw_user` 直接
+    INSERT，而它的 password 是占位串、登录不了。
+    """
+    from flask_jwt_extended import create_access_token
+    from main import app as _app
+    with _app.app_context():
+        return {"Authorization": f"Bearer {create_access_token(identity=str(uid))}"}
+
+
+class TestFormerDirectoryNameIsReclaimable:
+    """MEDIUM-1（code-review 第 3 轮）：改回**自己的曾用显示名**被自己的旧目录锁死。
+
+    形态（`_probe_hist_dn.py` 曾独立复现，本类把它收编为正式用例）：
+      1. 显示名设为 `老王`，爬取产物落在 `temp/scraped_images/老王/`
+      2. 改名 `老李` ⇒ 目录名变成 `老李`，`老王` 目录**原封不动留在磁盘上**
+      3. 想改回 `老王` ⇒ 判据 3 看到磁盘上存在 `老王`，而它不在 own_keys 里
+         ⇒ 400「该名字对应的爬取目录已被占用，请换一个」
+
+    即用户在 `老王` 目录里的全部产物**永远访问不到**了，且没有恢复路径。
+    修法：`users.prev_scrape_dns` 记录曾用目录名，判据 3 把它算作「我的」。
+
+    本类必须**成对**存在 —— 只测「能改回去」而不同时钉住「别人仍然抢不走」，
+    就等于用「放宽」冒充修复，把判据 3 的无主目录保护一起丢掉。
+    """
+
+    def test_rename_back_to_own_former_name_succeeds(self, client, scrape_dirs):
+        h, uid = _create_user(client, "_hist_a")
+        root = _SCRAPE_DEFAULT_DIR
+
+        # 1) 显示名 = 曾用名，并在该目录下造出产物
+        r1 = client.put("/api/auth/profile", json={"display_name": "_hist_old_a"}, headers=h)
+        assert r1.status_code == 200, f"设定显示名失败：{r1.status_code} {r1.get_json()}"
+        scrape_dirs("_hist_old_a", "com.pkg.old")
+        assert os.path.isdir(os.path.join(root, "_hist_old_a"))
+
+        # 2) 改名 —— 旧目录**刻意不动**（这正是缺陷场景：产物留在旧目录里）
+        r2 = client.put("/api/auth/profile", json={"display_name": "_hist_new_a"}, headers=h)
+        assert r2.status_code == 200, f"改名失败：{r2.status_code} {r2.get_json()}"
+        assert os.path.isdir(os.path.join(root, "_hist_old_a")), "旧目录应原封不动留着"
+
+        # 3) 改回曾用名 —— 修复前这里是 400
+        r3 = client.put("/api/auth/profile", json={"display_name": "_hist_old_a"}, headers=h)
+        assert r3.status_code == 200, (
+            f"改回自己的曾用显示名被拒：{r3.status_code} {r3.get_json()}"
+        )
+
+        # 用户可见结果：产物必须**真的又列得出来**了。
+        # 只断言 200 属「断言过弱」—— 200 只说明闸门放行，而本缺陷的用户可见后果
+        # 是「产物在盘上却列不出来」。少了这条，若哪天 dn 推导漂移导致 listdir 指向
+        # 别处（闸门放行、列表仍空），本用例照样绿。
+        pkgs = client.get("/api/scrape/packages", headers=h).get_json()["packages"]
+        assert "com.pkg.old" in [p["name"] for p in pkgs], (
+            f"改回曾用名后旧产物仍不可见，等于没修：{pkgs}"
+        )
+
+        # 落库侧核对：靠的确实是曾用名列表，而不是判据 3 整体失效。
+        db = database.get_db()
+        try:
+            hist = db.execute("SELECT prev_scrape_dns FROM users WHERE id = ?",
+                              (uid,)).fetchone()[0]
+        finally:
+            db.close()
+        assert "_hist_old_a" in json.loads(hist), (
+            f"曾用名没落库，改回成功另有原因：prev_scrape_dns={hist!r}"
+        )
+
+    def test_same_former_name_is_still_blocked_for_others(self, client, scrape_dirs):
+        """对照行：曾用名只对**本人**开闸，别人抢同一目录仍被拒。
+
+        没有这条，上一条可以被「判据 3 整个被拆掉」蒙过去 —— 那等于把「无主目录
+        保护」一起丢了，而那正是判据 3 存在的理由（用户被删、目录还在）。
+        """
+        h_a, uid_a = _create_user(client, "_hist_b")
+        h_b, uid_b = _create_user(client, "_hist_c")
+
+        # A 用 _hist_mid 当显示名 → 造出产物 → 改名腾空这个名字
+        assert client.put("/api/auth/profile", json={"display_name": "_hist_mid"},
+                          headers=h_a).status_code == 200
+        scrape_dirs("_hist_mid", "com.pkg.mid")
+        assert client.put("/api/auth/profile", json={"display_name": "_hist_after"},
+                          headers=h_a).status_code == 200
+
+        # B 想取 A 的曾用名 —— 必须仍被拒
+        r = client.put("/api/auth/profile", json={"display_name": "_hist_mid"}, headers=h_b)
+        assert r.status_code == 400, (
+            f"曾用名豁免漏给了别人：B 取 A 的曾用目录名返回 {r.status_code}"
+        )
+        # 闸门侧要**判据 3 的原文案**：钉住拒的原因是「目录占用」而不是别的判据
+        # ——若只断言 400，判据 2 或字符闸门误伤也能蒙过去。
+        assert auth.directory_name_error(uid_b, None, "_hist_mid") == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        )
+
+    def test_former_name_that_someone_else_also_used_is_not_reclaimable(self, client, scrape_dirs):
+        """**曾用名豁免必须收窄**：这个名字若**别人也用过**，就不能凭「我曾用过」认领。
+
+        反例（本次修复自己引入的形态，本用例先红后绿）：A 用过 `_lk_X` 后改名离开；
+        B 随后也取 `_lk_X` 并在其下爬出产物，再改名离开 —— 此时目录 `_lk_X` 里装的是
+        **B 的产物**，而 A 仅凭 `_lk_X` 在自己的曾用名列表里就能认领进来读到它。
+        这等于把判据 3 的「目录占用」保护整条绕开，正是本轮要防的那类越权。
+
+        判据：只有「除我之外**没有任何人**用过」的曾用名才算我的（目录里只可能有我的
+        产物）。别人用过的名字一律退回**修复前**的行为（拒），fail-closed。
+        """
+        h_a, uid_a = _create_user(client, "_lk_a")
+        h_b, uid_b = _create_user(client, "_lk_b")
+
+        # 1) A 先占用 _lk_X（此时该目录还不存在，故判据 3 无目录可撞），再改名离开
+        assert client.put("/api/auth/profile", json={"display_name": "_lk_X"},
+                          headers=h_a).status_code == 200
+        assert client.put("/api/auth/profile", json={"display_name": "_lk_Y"},
+                          headers=h_a).status_code == 200
+
+        # 2) B 也取 _lk_X，并在其下爬出产物 —— 目录里从此装的是 B 的东西
+        assert client.put("/api/auth/profile", json={"display_name": "_lk_X"},
+                          headers=h_b).status_code == 200
+        scrape_dirs("_lk_X", "com.pkg.leak")
+
+        # 3) B 再改名离开 —— 目录 _lk_X 连产物一起留在磁盘上
+        assert client.put("/api/auth/profile", json={"display_name": "_lk_Z"},
+                          headers=h_b).status_code == 200
+
+        # 4) A 拿自己的曾用名 _lk_X 回来 —— 放行就等于让 A 读到 B 的产物
+        r = client.put("/api/auth/profile", json={"display_name": "_lk_X"}, headers=h_a)
+        assert r.status_code == 400, (
+            f"曾用名豁免漏给了「别人也用过的名字」：A 认领 _lk_X 返回 {r.status_code}，"
+            f"而该目录里装的是 B 的产物（该目录归 B 用过）"
+        )
+        assert auth.directory_name_error(uid_a, None, "_lk_X") == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        )
+
+    def test_comma_in_former_name_is_not_split(self, client, scrape_dirs):
+        """承重：曾用名里的逗号**不得**被当成分隔符，拆出的子名不能变成我的曾用名。
+
+        为什么需要这条：`_fs_name_error` 只挡路径分隔符/冒号/空字符与首尾的点、空白
+        —— **名字中间允许逗号和换行**。若 `prev_scrape_dns` 用逗号或换行拼接（而不是
+        JSON），曾用名 `_j_a,b` 会被读成 `["_j_a", "b"]`，`_j_a` 就平白成了「我的曾用
+        名」。此时只要磁盘上存在一个 `_j_a` 目录（**别人的**残留，例如用户被删而目录
+        还在），判据 3 的「目录占用」保护就会被绕开，我能读到它。
+
+        两条腿都必须踩在判据 3 上，各由相反方向承重：
+          · 取回**完整**的 `_j_a,b` → 200：目录存在，只有「曾用名被原样保留为**一个**
+            条目」能解释（退化成逗号拼接时，`_j_a,b` 根本不在拆出来的列表里）；
+          · 取**拆出来**的 `_j_a`  → 400：证明它没有被拆成两条。
+        """
+        h, uid = _create_user(client, "_j_x")
+        _create_user(client, "_j_y")          # 让 others 非空，不靠判据 2 空转兜底
+        root = _SCRAPE_DEFAULT_DIR
+
+        # 1) 显示名带逗号（合法值），随后两个目录都造出来 —— 两条腿都要撞判据 3
+        assert client.put("/api/auth/profile", json={"display_name": "_j_a,b"},
+                          headers=h).status_code == 200, "带逗号的显示名应是合法值"
+        scrape_dirs("_j_a,b", "com.pkg.comma")
+        scrape_dirs("_j_a", "com.pkg.orphan")
+
+        # 2) 改名离开 —— 旧名进曾用名列表，目录原地不动
+        assert client.put("/api/auth/profile", json={"display_name": "_j_away"},
+                          headers=h).status_code == 200
+
+        # 3) 腿一：完整的曾用名应能取回
+        r_full = client.put("/api/auth/profile", json={"display_name": "_j_a,b"}, headers=h)
+        assert r_full.status_code == 200, (
+            f"带逗号的曾用名取不回，说明它没被原样保留："
+            f"{r_full.status_code} {r_full.get_json()}"
+        )
+
+        # 4) 腿二：逗号不得当分隔符 —— 拆出的 `_j_a` 不是我的曾用名，必须仍被拒
+        r_split = client.put("/api/auth/profile", json={"display_name": "_j_a"}, headers=h)
+        assert r_split.status_code == 400, (
+            f"曾用名里的逗号被当成分隔符拆开了：取 `_j_a` 返回 {r_split.status_code}，"
+            f"而磁盘上的 `_j_a` 是别人的残留目录"
+        )
+        assert auth.directory_name_error(uid, None, "_j_a") == (
+            "该名字对应的爬取目录已被占用，请换一个"
+        )
+
+    def test_unreadable_other_history_fails_closed(self, client, scrape_dirs):
+        """承重：别人的 `prev_scrape_dns` **非空但解析不出来**时，整体放弃认领。
+
+        为什么方向必须是「拒」：读**别人**的历史时「坏值当空」是 **fail-open** ——
+        漏看他用过的名字，就可能认领到一个装着他产物的目录（与读**我自己**历史时
+        的方向恰好相反）。故这条分支要挡在保守的一侧。
+
+        形态：A 的曾用名含 `_fc_X` 且 `_fc_X` 目录在盘上；B 的历史被写成非 JSON 坏值
+        （模拟外部改库 / 人工编辑）。若不保守当满，A 会因「B 的历史读出来是空的」而
+        被放行，读到 B 那一侧的历史所暗示的目录。
+        """
+        h_a, _uid_a = _create_user(client, "_fc_a")
+        uid_b = _seed_raw_user("_fc_b", "_fc_b")
+        BAD = "_fc_X,oops"
+
+        # 1) A 用 _fc_X 造出产物后改名离开 —— _fc_X 进 A 的曾用名，目录留在盘上
+        assert client.put("/api/auth/profile", json={"display_name": "_fc_X"},
+                          headers=h_a).status_code == 200
+        scrape_dirs("_fc_X", "com.pkg.fc")
+        assert client.put("/api/auth/profile", json={"display_name": "_fc_away"},
+                          headers=h_a).status_code == 200
+
+        # 2) 把 B 的历史写成「非空但解析失败」——这正是本分支的前提
+        db = database.get_db()
+        try:
+            db.execute("UPDATE users SET prev_scrape_dns = ? WHERE id = ?", (BAD, uid_b))
+            db.commit()
+        finally:
+            db.close()
+        # 前置断言：夹具确实造出了「非空且解析失败」。少了这条，本用例可以因
+        # 「那个值其实解析得出来」而假绿 —— 那时它测的是空气。
+        assert auth._dn_history(BAD) == [], "夹具没造出坏值（它居然解析得出来）"
+
+        # 3) A 认领 _fc_X —— 必须退回「拒」，而不是因 B 的历史读空而放行
+        r = client.put("/api/auth/profile", json={"display_name": "_fc_X"}, headers=h_a)
+        assert r.status_code == 400, (
+            f"别人历史读不出来时居然放行了认领：{r.status_code} {r.get_json()}"
+        )
+
+
+class TestLegacyIllegalNameIsNotSelfLocked:
+    """L-7（code-review 第 3 轮，潜伏）：闸门上线**之前**入库的非法值把用户锁死。
+
+    形态：某个存量用户的 `username` 含路径分隔符（闸门上线前可自由填）。此后他
+    只想改显示名，两处调用（路由前置校验 + `auth.update_user` 这个唯一关口）都会
+    把他**没动过**的 username 一并拿出来校验 ⇒ 恒判非法 ⇒ 任何一次资料更新都 400；
+    而 profile 端点根本不允许改 username ⇒ **没有任何修正通道**。
+
+    live 库实测 0 行（24 用户），属潜伏而非在线。修法：对「与库里现值完全相同」的
+    字段跳过**字符**判据 —— 该值此刻已经在生效，重验一遍挡不住任何事，只会锁死用户。
+
+    ⚠️ 这里早先写着「安全性由 main._scrape_dn_for 的结构兜底接住」，那是**错的**
+    （code-review 第 5 轮指出，实测已复现）：兜底只挡「推导结果越出爬取根」，而
+    `alice/pkg` 这类**含分隔符但留在根内**的值**不退化**。接受本豁免的依据只有一条
+    事实 —— 这类值只可能来自闸门上线前的存量数据，且 live 为 0 行。
+
+    本类同样必须成对：只钉「旧值豁免」而不同时钉「改成新非法值照旧拦」，就等于把
+    字符闸门整个拆掉 —— 那才是真正的越权入口。
+    """
+
+    ILLEGAL = "_l7_a/b"
+
+    def test_unchanged_illegal_value_no_longer_freezes_update(self, client):
+        uid = _seed_raw_user(self.ILLEGAL, "")
+        # 前置断言：夹具确实造出了「闸门判非法」的值。少了这条，本用例可以因
+        # 「那个值其实合法」而假绿 —— 那时它测的是空气。
+        assert auth._fs_name_error(self.ILLEGAL, "用户名"), "夹具没造出非法 username"
+
+        r = client.put("/api/auth/profile", json={"display_name": "_l7_ok"},
+                       headers=_token_for(uid))
+        assert r.status_code == 200, (
+            f"存量非法 username 把用户锁死了：{r.status_code} {r.get_json()}"
+        )
+
+    def test_changing_to_another_illegal_value_is_still_rejected(self, client):
+        """对照行：豁免只覆盖「没动它」，把 username **改**成非法值仍须被拒。"""
+        uid = _seed_raw_user("_l7_b", "")
+
+        # 1) 改成一个**新的**非法值 —— 必须拒
+        assert auth.directory_name_error(uid, "_l7_c/d", None), (
+            "改成另一个非法 username 居然放行了 —— 字符闸门被豁免逻辑拆掉了"
+        )
+        # 2) 整体写路径也确认一次（不只问闸门函数）
+        assert auth.update_user(uid, username="_l7_c/d") is None
+        # 3) 新建路径没有「旧值」可豁免，必须照旧拒
+        assert auth.directory_name_error(None, "_l7_e/f", None), (
+            "新建用户路径被豁免逻辑误伤了 —— 新值必须照旧过关"
+        )
+
+    def test_unchanged_illegal_display_name_no_longer_freezes_update(self, client):
+        """对称腿：`_keep_d`（display_name 入口）与 `_keep_u` 各需一条对照行。
+
+        豁免挂在**两个**独立条件上（`_keep_u` / `_keep_d`）。只测 username 那一侧，
+        等于放任 display 那一侧被「恒 False」蒙过去 —— 那种形态的症状正是「存量非法
+        display_name 的用户仍被锁死」，与缺陷原形一模一样。
+        """
+        ILLEGAL_DN = "_l7_g/h"
+        uid = _seed_raw_user("_l7_f", ILLEGAL_DN)
+        assert auth._fs_name_error(ILLEGAL_DN, "显示名"), "夹具没造出非法 display_name"
+
+        r = client.put("/api/auth/profile", json={"display_name": ILLEGAL_DN},
+                       headers=_token_for(uid))
+        assert r.status_code == 200, (
+            f"存量非法 display_name 把用户锁死了：{r.status_code} {r.get_json()}"
+        )
+
+        # 对照：把 display_name **改成**另一个非法值仍须被拒（豁免只管「没动它」）
+        r2 = client.put("/api/auth/profile", json={"display_name": "_l7_i/j"},
+                        headers=_token_for(uid))
+        assert r2.status_code == 400, (
+            f"改成另一个非法显示名居然放行了：{r2.status_code} {r2.get_json()}"
         )

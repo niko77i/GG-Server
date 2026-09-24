@@ -149,6 +149,18 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "users", "email", "email TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "telegram_username", "telegram_username TEXT DEFAULT ''")
     _add_column_if_missing(conn, "users", "platform", "platform TEXT DEFAULT 'gg'")
+    # 曾用爬取目录名（2026-09-24 MEDIUM-1）：JSON 数组文本，记录该用户**历史上**
+    # 用过的爬取目录名。为什么必须存：改名之后旧目录仍留在磁盘上，而它既不是
+    # 「别人主张的名字」（判据 2 不管这一维）、也不在「我当前的目录名」里，于是
+    # auth.directory_name_error 的判据 3 会把「改回自己的曾用名」一并拒掉 ——
+    # 用户此前在旧目录里的全部产物**永远访问不到**，且没有任何恢复路径
+    # （既不能删目录、也不能手选目录）。本列是判据 3 区分「我的旧名字」与
+    # 「无主目录」的唯一依据。
+    #
+    # 刻意**不参与任何唯一约束**：它是「我历史上占过的名字」的白名单，不决定
+    # 任何一行**当前**占哪个目录；当前占用仍由 scrape_dn 唯一索引裁决。
+    # 解析规则见 auth._dn_history（坏值一律当空，坏值是 fail-closed 方向）。
+    _add_column_if_missing(conn, "users", "prev_scrape_dns", "prev_scrape_dns TEXT DEFAULT ''")
     # 爬取目录名唯一约束（2026-09-24，code-review 第 3 轮 H2）：
     # users 表此前只有 username 一个唯一索引，display_name 无任何约束，而爬取
     # 产物目录名 = `display_name or username`。于是 `/api/auth/register` 这种
