@@ -537,3 +537,79 @@ class TestA2AnonymousRejected:
         assert resp.status_code != 401, (
             f"{method.upper()} {path} 带 token 仍返回 401 —— 收口过头了"
         )
+
+
+class TestFontFileWhitelistMinimized:
+    """`/api/font-file` 只应放行 _scan_fonts_dir() 列出的那 4 个具名系统字体。
+
+    承重对照：**同一目录内**的具名字体必须 200、非具名字体必须 403。
+    只测其中一条无法区分「白名单最小化」与「整个系统字体目录被误封」。
+    """
+
+    FOUR_NAMED = ("simhei.ttf", "msyh.ttc", "simsun.ttc", "arial.ttf")
+
+    @staticmethod
+    def _sys_font_dir():
+        return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Fonts")
+
+    def test_named_system_font_still_served(self, client):
+        """对照行 A：4 个具名字体必须仍可访问（证明没有误封）。"""
+        p = os.path.join(self._sys_font_dir(), "arial.ttf")
+        if not os.path.isfile(p):
+            pytest.skip("本机无 arial.ttf，无法验证对照行 A")
+        resp = client.get("/api/font-file", query_string={"path": p})
+        assert resp.status_code == 200, (
+            f"具名系统字体 arial.ttf 被拒绝（{resp.status_code}）—— 白名单收得过紧，"
+            "会打断前端字体预览"
+        )
+
+    def test_other_system_font_is_rejected(self, client):
+        """对照行 B：同目录内的非具名字体必须 403。"""
+        d = self._sys_font_dir()
+        if not os.path.isdir(d):
+            pytest.skip("本机无系统字体目录，无法验证对照行 B")
+        named = {n.lower() for n in self.FOUR_NAMED}
+        others = [f for f in os.listdir(d)
+                  if f.lower().endswith((".ttf", ".otf", ".ttc"))
+                  and f.lower() not in named]
+        if not others:
+            pytest.skip("系统字体目录内无其它字体可供对照")
+        p = os.path.join(d, others[0])
+        resp = client.get("/api/font-file", query_string={"path": p})
+        assert resp.status_code == 403, (
+            f"非具名系统字体 {others[0]} 返回 {resp.status_code}，应为 403 —— "
+            "整个系统字体目录仍然匿名可读"
+        )
+
+    def test_synthetic_fonts_dir_both_arms(self, client, tmp_path, monkeypatch):
+        """承重腿：合成一个 Fonts 目录，**同一目录内**具名字体 200、非具名字体 403。
+
+        为什么必须有这条：上面两条依赖**真实系统字体目录**，环境不满足时双双 skip
+        ⇒ 无声通过。而「整个系统字体目录被封」与「白名单最小化」这两种实现，
+        在真实环境里未必能同屏对照。这条用 tmp_path 造出受控对照，**永不 skip**。
+
+        依据：`_named_system_fonts()` 在**调用时**读 `SystemRoot`（不是模块导入时缓存），
+        所以 monkeypatch.setenv 能生效。
+        """
+        fake_root = tmp_path
+        fake_fonts = fake_root / "Fonts"
+        fake_fonts.mkdir()
+        named_file = fake_fonts / "arial.ttf"
+        other_file = fake_fonts / "unlisted_font.ttf"
+        named_file.write_bytes(b"FAKE-NAMED")
+        other_file.write_bytes(b"FAKE-OTHER")
+        monkeypatch.setenv("SystemRoot", str(fake_root))
+
+        # 对照行 A：具名字体（在 _named_system_fonts() 清单里）⇒ 200
+        resp_named = client.get("/api/font-file", query_string={"path": str(named_file)})
+        assert resp_named.status_code == 200, (
+            f"合成具名字体 arial.ttf 返回 {resp_named.status_code}，应为 200 —— "
+            "白名单收得过紧，会打断前端字体预览"
+        )
+
+        # 对照行 B：同目录内的非具名字体 ⇒ 403
+        resp_other = client.get("/api/font-file", query_string={"path": str(other_file)})
+        assert resp_other.status_code == 403, (
+            f"合成非具名字体 unlisted_font.ttf 返回 {resp_other.status_code}，应为 403 —— "
+            "白名单没有真正最小化，同目录下任意字体仍可读"
+        )

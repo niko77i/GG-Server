@@ -1437,18 +1437,29 @@ def video_history_delete():
 _FONTS_DIR = os.path.join(_DATA_ROOT, "fonts")
 
 
-def _scan_fonts_dir() -> list[dict]:
-    """扫描字体目录，返回所有可用字体列表（最近使用排前）。"""
-    fonts = []
-    # 系统字体
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    sys_font_dir = os.path.join(system_root, "Fonts")
-    sys_fonts = [
+def _named_system_fonts():
+    """系统字体的 (id, 中文名, 绝对路径) 列表。
+
+    同时供字体列表（_scan_fonts_dir）与 /api/font-file 白名单使用 —— 两处必须同源，
+    否则会出现「列表里能看到、但下载被拒」或反之。
+
+    ⚠️ 必须在**调用时**读 SystemRoot（不要缓存到模块级常量），
+    否则测试无法通过 monkeypatch 构造受控的 Fonts 目录。
+    """
+    sys_font_dir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Fonts")
+    return [
         ("simhei", "黑体", os.path.join(sys_font_dir, "simhei.ttf")),
         ("msyh", "微软雅黑", os.path.join(sys_font_dir, "msyh.ttc")),
         ("simsun", "宋体", os.path.join(sys_font_dir, "simsun.ttc")),
         ("arial", "Arial", os.path.join(sys_font_dir, "arial.ttf")),
     ]
+
+
+def _scan_fonts_dir() -> list[dict]:
+    """扫描字体目录，返回所有可用字体列表（最近使用排前）。"""
+    fonts = []
+    # 系统字体
+    sys_fonts = _named_system_fonts()
     for fid, name, path in sys_fonts:
         if os.path.isfile(path):
             fonts.append({"id": fid, "name": name, "path": path, "source": "system"})
@@ -1687,14 +1698,16 @@ def serve_font_file():
     # 扩展名白名单：只允许字体文件
     if not path.lower().endswith((".ttf", ".otf", ".ttc", ".woff", ".woff2")):
         return "", 404
-    # 目录白名单：只允许 _FONTS_DIR 与系统字体目录（_scan_fonts_dir 返回的两类来源）
+    # 路径白名单：项目字体目录内的任意字体，或系统字体目录中的**具名**字体。
+    # 不再放行整个系统字体目录 —— 前端只需要 _scan_fonts_dir() 列出的那几个文件，
+    # 白名单按「实际需要什么」最小化（见 2026-09-24 匿名面收口设计文档 §4.2）。
     real = os.path.realpath(path)
-    allowed_dirs = [
-        os.path.realpath(_FONTS_DIR),
-        os.path.realpath(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Fonts")),
-    ]
-    if not any(real == d or real.startswith(d + os.sep) for d in allowed_dirs):
-        return "", 403
+    fonts_real = os.path.realpath(_FONTS_DIR)
+    in_project_dir = (real == fonts_real or real.startswith(fonts_real + os.sep))
+    if not in_project_dir:
+        named_real = {os.path.realpath(p) for _fid, _name, p in _named_system_fonts()}
+        if real not in named_real:
+            return "", 403
     mt = "font/ttf" if path.lower().endswith('.ttf') else "font/otf"
     return send_file(path, mimetype=mt)
 
