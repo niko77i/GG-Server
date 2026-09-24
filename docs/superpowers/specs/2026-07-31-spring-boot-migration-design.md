@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.29  
-> **日期**: 2026-07-31（v1.29 更新于 2026-09-24）  
+> **文档版本**: v1.30  
+> **日期**: 2026-07-31（v1.30 更新于 2026-09-25）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.30 变更**: **爬取产物归属校验：目录名认领判据加时间维度**（对应 `py/auth.py` 的 `directory_name_error` / `_dn_released_keys` / `_dir_ctime` / `_release_row_covers_dir` / `_sentinel_row_blocks_dir` 与 `py/database.py` 的 `_migrate_scrape_dn_history`）——这套判据来自 2026-09-23「全站鉴权加固」与 2026-09-24「下载签名按需签发 + scrape 产物归属校验」，**此前未录入本文档**，v1.30 随本轮换判据一并补录（权威说明见 `2026-09-24-ondemand-download-signing-design.md` §0.9–§0.13，Java 侧重建要点见 §7.8、缺表 DDL 见 §5.2）。背景：`temp/scraped_images/<目录名>` 下是各用户的爬取产物，目录名由用户名派生、磁盘上**没有 owner 记录**，归属只能靠「目录名判据」+ 一张墓碑表 `scrape_dn_history`（无外键、刻意不进删用户清理）反推。原判据只答「谁曾用过这个名字」（last-writer-wins），挡不住「行过期、但序号最大」的形态（迁移搬来的行、admin 用 `requested_dn` 代管建出的目录、记录缺失类故障）。本轮换成**带时间维度**的判据：① **释放行须晚于目录创建时刻**才参与比较（`created_at > 目录 ctime`），自己与他人**两侧一起**过滤——于是「上线前已改名者的旧目录认领路」恢复（他的旧行晚于旧目录，仍算数），而「每周清理后旧释放行认领新目录」被挡住；② **拿不到化身**（目录不存在 / 越界 / `stat` 失败）或**时刻解析不出**（脏行）时，释放行**不过滤**、哨兵**照拦**（两侧都取严侧，fail-closed）；③ **哨兵改按「化身」生效**：`user_id = 0` 的哨兵行只拦它写下时**已存在**的那个目录（`ts >= ctime`），目录在其后**重建**则旧哨兵失效（否则本人的认领路会被永久封死）；哨兵不参与 LWW 序号比较（独立 `blocked` 集合）。同时**退役**「无主目录扫盘补墓碑」整段（`database._tombstone_orphan_scrape_dirs` 删除）——它是上一轮的兜底，换判据后不再需要，无主目录仍由「判据 3：目录占用」接住。④ **亚秒不变式（本轮修的真实缺陷）**：`scrape_dn_history.created_at` 的表默认值 `datetime('now')` **只到秒**，同一个截断方向对**释放行**是 fail-closed（`ts > ctime` 更难成立）、对**哨兵**却是 **fail-open**（`ts >= ctime` 更难成立 ⇒ 拦不住它当年所判的化身），「同一秒内先建目录、后跑迁移」会把歧义名悄悄放开。故**任何**写该表的代码都必须显式带亚秒（`strftime('%Y-%m-%d %H:%M:%f','now')`）；迁移的哨兵写入口曾漏此条，已修并补效果级用例（code-review 第 7 轮 Important #1）。⑤ 时刻列是 **UTC**，解析须用 `calendar.timegm` 而非本地解析（用 `mktime` 会整体偏一个时区）；SQLite `now` 与文件系统时钟之间存在毫秒级抖动且**跨零**，故两侧判据都不能省掉亚秒精度。**迁移红线**：Spring 侧必须在**服务层**原样重建这套判据与墓碑表，**不得**改成按 `users` 外键推导归属；`scrape_dn_history` **不得**建 `UNIQUE(dn)`、**不得**加外键、**不得**在删用户时清理；时间列精度至少毫秒且按 UTC 存
 > **v1.29 变更**: **回收原因改为全平台公用词表**（对应 `py/routes/tt_accounts_routes.py` 的四个 `recycle-reasons` 接口、`py/database.py` 的 `_ensure_columns`、前端 `frontend/src/views/tt/TtSettingsPanel.vue`）——此前 `GET /api/tt/recycle-reasons/list` **无角色拦截**（仅 `@jwt_required() @tt_required`）却按 `owner_id` 做数据隔离：`role in CROSS_USER_ROLES`（developer/admin/huguan）看全量，其余**仅本人**。但该词表在前端是「TT设置 → ♻️回收原因选项」卡片集中维护的**共享词表**，设计意图与实现不一致 → admin 建的原因普通用户下拉框恒为空（实测：库中 3 条原因 `owner_id` 全为 admin uid=23，以普通用户 uid 查询返回 `[]`），且状态变更弹窗在用户手输时会自动 `create` 一条**归自己的同名记录**，产生跨 owner 重名脏数据。同一功能本已有两条**作用域互相矛盾**的写入路径：API 路径按 `(name, owner_id)` 去重，而 `_trigger_recycle_if_dead` 走 `WHERE name=?` **全局**去重 + `INSERT OR IGNORE`。本次统一为公用语义：① `list` 删掉角色分支，所有 TT 用户（含 viewer）读全表；② `create` 去重条件 `(name, owner_id)` → 全局 `name`，`owner_id` 仅记录创建者、**不再参与鉴权**，并加 `sqlite3.IntegrityError` 兜底返回 409（防并发撞唯一索引变 500）；③ `rename`/`delete` 删掉 owner 检查，`rename` 新增全局重名检查（改到已存在名称返回 409、原值不变，前端已消费 `error` 字段）；④ `py/database.py` 的 `_ensure_columns` 新增 `CREATE UNIQUE INDEX IF NOT EXISTS idx_tt_recycle_reasons_name ON tt_recycle_reasons(name)`，**带重名防御**：存量若有重名则跳过建索引，避免唯一索引创建失败导致每次连库都抛异常；⑤ 前端把「♻️ 回收原因选项」卡片移出管理员专属 `<template v-if>`，改用 `visibleOptionCards` 计算属性按角色过滤——回收原因对所有 TT 用户可见可改，「代理名选项」「账户状态选项」仍管理员专属（管理员渲染结果逐位不变）。**权限边界**：viewer 保持只读，`@tt_write_required` 未改（可读、不可增改删）。**迁移要点**：Spring 侧回收原因不得再按 owner 过滤，`name` 唯一约束必须是**全局唯一**而非 `UNIQUE(name, owner_id)`，详见 6.3
 > **v1.28 变更**: **用户管理的平台隔离**——此前 `admin` 是**全局角色**：任何管理员都能看到并操作全部平台的用户，创建用户时非 developer 一律被强制写成 `platform='gg'`（把 TT/FB 管理员建的用户错误塞进 GG）。本次把 `admin` 从全局改为**按平台隔离**，`developer` 短路豁免。涉及：① `auth.list_users` 非 developer 强制 `platform = 自己的平台` 且不返回 developer 行（**忽略传入的 `platform` 参数**；无 `current_user_id` 的内部调用保持原行为不变）；② `admin_create_user` 非 developer 的 `platform` 锁定为创建者自己的平台（非法存量值兜底 `gg`），前端平台下拉框仅 developer 可见；③ 新增 `_check_modify_user(actor, target)` 返回**拒绝原因字符串**（`不能操作同级管理员` / `不能操作其他平台的用户`），替换原布尔 `_can_modify_user`，被 `role`/`toggle`/`delete`/`update`/`password`/`telegram` **六个**用户操作接口复用；④ 新增 `_can_access_user_data(actor, target)` 约束数据导入/导出（不限制目标角色，仅平台）；⑤ **`_get_effective_platform()` 语义修正**：原判断 `role in ('developer','admin')` 时取 `request.args.get('platform','gg')`，实际只有 developer 会被前端注入 platform，导致**非 developer 管理员落到 GG 命名空间**（TT 页面因显式传参侥幸正确，FB 页面不传参 → FB 管理员看到 GG 的商务人员/账户状态选项），现改为仅 `role == 'developer'` 跨平台；⑥ 前端 `UserManageView.vue` 平台 Tab 按身份条件渲染 + 创建弹窗平台字段仅 developer 可见 + 身份时序修正（见 7.7）。**迁移要点**：`@AdminRequired` 不再等价于跨平台权限，Spring 侧必须补平台维度的校验，详见 7.7
 > **v1.27 变更**: TT 设置「Google Sheets」区块权限展示修复（纯前端 `frontend/src/views/tt/TtSettingsPanel.vue`，后端无改动）——此前「Google Sheets URL 输入框 + 📋读取工作表 按钮」整块用 `v-if="isAdmin"` 包裹，投手（普通角色）看不到「读取工作表」按钮、无法加载 sheet 列表给「我的看板」选表。现改为：①「📋读取工作表」按钮对**所有登录用户**开放（投手可点，读的是管理员已配置的全局 `tt_sheet_id`，接口 `GET /api/google-sheets/sheets` 仅 `@jwt_required`、无角色限制）；② `sheet_id` 输入框内容**仅管理员可改**（投手侧 `:disabled` 只读显示管理员已配置的 ID，并加「仅管理员可改」标签）；③ 投手点「保存」提交的 `sheet_id` 被后端 `tt_settings_save` 忽略（`is_admin` 判断），仅写私有 `my_dashboard` 到 config 表 `tt_sheet_mappings_<uid>`。迁移到 Spring Boot 时前端需保持「读取开放、sheet_id 写仅管理员」的展示与后端权限边界一致
@@ -555,9 +556,11 @@ Security:   com.lmserver.security
 
 ### 5.2 完整 MySQL DDL
 
-> **说明**: 以下为全部 50 张表的 MySQL 8.0 DDL。执行顺序应按分类依次执行。
+> **说明**: 以下为全部 52 张表的 MySQL 8.0 DDL。执行顺序应按分类依次执行。
 >
-> **v1.29 补入册**: `tt_recycle_reasons`、`tt_accounts`、`tt_account_bc_history`、`tt_recharge_records` 四张 TT 表此前缺失于本文档。经与现网 `temp/app.db` 逐表比对（文档表名集合 vs `sqlite_master`），现已补齐，两侧数量一致（各 50 张）。
+> **v1.29 补入册**: `tt_recycle_reasons`、`tt_accounts`、`tt_account_bc_history`、`tt_recharge_records` 四张 TT 表此前缺失于本文档。经与现网 `temp/app.db` 逐表比对（文档表名集合 vs `sqlite_master`），现已补齐。
+>
+> **v1.30 补入册**: `scrape_dn_history`、`tt_delist_notifications` 两张表此前缺失于本文档（同一比对口径：文档表名集合 vs `sqlite_master`）。现已补齐，**两侧数量一致（各 52 张）**。前者是爬取产物归属校验的**墓碑表**（见 §7.8），后者的 GG 同构体 `delist_notifications` 在 §5.2「27.」已收录（TT 掉包通知走独立机器人，表结构与 GG 一致）。
 
 ```sql
 -- ============================================================
@@ -859,6 +862,24 @@ CREATE TABLE scrape_cache (
     scraped_by   BIGINT       NULL     COMMENT '爬取操作人ID',
     CONSTRAINT fk_sc_cache_user FOREIGN KEY (scraped_by) REFERENCES users(id)
 ) ENGINE=InnoDB COMMENT='爬取缓存表';
+
+-- scrape_dn_history — 爬取目录名历史 + 墓碑 + 哨兵硬闸（v1.30 补入册）
+-- ⚠️ 刻意**不建外键**、删用户时**也不清理本表**：它是「墓碑表」——删用户时先写入该用户
+-- 当前的爬取目录名（`auth.note_scrape_dn_release`），那行必须**活过**本次删除，否则本该
+-- 无主的爬取目录会被「曾用名含该名」的人认领、读到被删用户的产物。
+-- ⚠️ **不得**建 `UNIQUE(dn)`：同一目录名允许多行（last-writer-wins 靠 id 序比较）。
+-- `user_id = 0` 是**哨兵**（硬闸，非真实用户），不参与序号比较，只拦它写下时已存在的化身。
+-- ⚠️ 写入必须带**亚秒**（SQLite 侧用 strftime('%Y-%m-%d %H:%M:%f','now')）：本表的默认值
+-- 若只到秒，对「释放行」是 fail-closed、对「哨兵」却是 **fail-open**（见 §7.8 不变式 4）。
+-- 列语义与精度详见 §7.8。
+CREATE TABLE scrape_dn_history (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id    BIGINT       NOT NULL COMMENT '用户ID；0 = 哨兵（硬闸，不参与 LWW 比较）',
+    dn         VARCHAR(255) NOT NULL COMMENT '爬取目录名（应用层按 normcase 归一后比较）',
+    created_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '释放/标记时刻（UTC，毫秒精度）',
+    INDEX idx_scrape_dn_history_dn (dn),
+    INDEX idx_scrape_dn_history_user (user_id)
+) ENGINE=InnoDB COMMENT='爬取目录名历史（墓碑 + 哨兵硬闸）';
 
 -- 18. import_history — 导入历史记录
 CREATE TABLE import_history (
@@ -1368,6 +1389,23 @@ CREATE TABLE tt_delist_checks (
     UNIQUE KEY uk_tt_delist_package (package_id),
     CONSTRAINT fk_tt_delist_package FOREIGN KEY (package_id) REFERENCES tt_packages(id) ON DELETE CASCADE
 ) ENGINE=InnoDB COMMENT='TT 掉包检测结果表';
+
+-- tt_delist_notifications — TT 掉包通知状态表（v1.30 补入册）
+-- 与 GG 的 delist_notifications（见上「27.」）同构，仅平台不同；TT 掉包通知走独立的
+-- tt_telegram 机器人。`UNIQUE(package_id, user_id)` 是「每包每用户一条」的幂等键。
+-- 删包 / 批量删包时 Python 侧会同步清理本表行，故此处用 ON DELETE CASCADE 兜底。
+CREATE TABLE tt_delist_notifications (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    package_id      BIGINT  NOT NULL COMMENT '包ID',
+    user_id         BIGINT  NOT NULL COMMENT '用户ID',
+    first_notified  TINYINT DEFAULT 0 COMMENT '是否已首次通知',
+    dismissed_at    DATETIME NULL     COMMENT '关闭时间',
+    reminder_count  INT     DEFAULT 0 COMMENT '提醒次数',
+    UNIQUE KEY uk_tt_dn_package_user (package_id, user_id),
+    INDEX idx_tt_dn_user (user_id),
+    CONSTRAINT fk_tt_dn_package FOREIGN KEY (package_id) REFERENCES tt_packages(id) ON DELETE CASCADE,
+    CONSTRAINT fk_tt_dn_user FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB COMMENT='TT 掉包通知状态表';
 
 -- tt_product_assets — TT 产品素材表
 CREATE TABLE tt_product_assets (
@@ -2411,6 +2449,58 @@ return (user or {}).get("platform", "gg")
 1. **身份时序**：`App.vue` 的 `initFromStorage()` / `fetchMe()` 在**父组件 `onMounted`** 才执行，而子组件的 `onMounted` 早于父组件、`setup` 更早。因此在 `UserManageView` 的 `setup` 阶段 `authStore.user` **必为 `null`**。若把身份算进 `ref` 初始值（只求值一次），Tab 选中态与筛选值会永久错位（被误判成「非开发者 / gg」）。必须改为 `watch` 身份变化后再定值并拉数据。
 
 2. **自动注入误伤**：`client.js` 对 developer 按 `window.location.hash` 前缀推断平台（`/tt`→tt、`/fb`→fb、其余→gg）。用户管理页路由是 `/admin/users`，不以 `/tt`、`/fb` 开头 → 被推断成 `gg` 注入，导致 developer 的「全部」Tab 实际只返回 GG。须对该路径排除自动注入，平台交由页面内 Tab 显式控制。
+
+### 7.8 爬取产物归属校验：目录名认领判据（v1.30 补充）
+
+> 权威说明：`docs/superpowers/specs/2026-09-24-ondemand-download-signing-design.md` §0.9–§0.13（含各轮 code-review 的裁定与变异验证）。本节只收 **Java 侧必须原样重建的判据**；同一防线里「下载签名按需签发」那半条线（§0.9–§0.11）本版未收录。
+
+**为什么不能靠外键推导归属**：爬取产物落在 `temp/scraped_images/<目录名>/`，目录名由用户「显示名」派生，**磁盘上没有 owner 记录**；`scrape_cache` 只记包名与保存路径、不记目录归属。因此归属判定 = 「这个名字此刻是不是你的」+「你曾用过这个名字，且你**最后一次释放**晚于这个目录的**创建时刻**」。
+
+**三条判据**（`AuthService.directoryNameError(uid, username, displayName)`，任一条不过即拒）：
+
+| # | 判据 | 规则 | 迁移注意 |
+|---|------|------|---------|
+| 1 | 字符闸门 | 禁 `/`、`\`、`:`、`\x00`，禁首尾点、禁首尾空白 | 必须在**应用层**做；别用 `Paths.get(..).normalize()` 代替（Windows 上 `\` 与盘符语义不同，且 normalize 不拦首尾空白） |
+| 2 | 唯一 | 与本人**当前**目录名 + **曾用名**（`scrape_dn_history` 中 `user_id = 我` 的行）比较，先按 `normcase` 归一 | 别靠 MySQL 排序规则代劳：`utf8mb4_general_ci` 的大小写不敏感与 `normcase` 不等价（后者只处理 ASCII），且该表**刻意无唯一约束** |
+| 3 | 目录占用 | `scrape_root` 下**任意**同名条目（**文件也算**）即拒 | 别改成 `isDirectory()`（占用判据要更严）；本条是「无主目录」现在**唯一**的兜底（扫盘补墓碑已于 v1.30 退役） |
+
+**last-writer-wins + 时间维度**（`_dn_released_keys`）：把 `scrape_dn_history` 按 `dn` 归一分组，以 `id` 作**跨用户单调序号**，只有「我的序号 > 他人的序号」才算我说了算（**同值取拒**）。v1.30 起，每组先按**化身**过滤再比序号：
+
+| 情形 | 释放行（`user_id != 0`） | 哨兵行（`user_id = 0`） |
+|------|------------------------|------------------------|
+| 目录存在，且 `ts` 晚于 `ctime` | 参与 LWW（`ts > ctime`） | **拦**（`ts >= ctime`） |
+| 目录存在，但 `ts` 不晚于 `ctime` | **整条剔除**（不参与） | 不拦（该化身已被重建，旧哨兵失效） |
+| 目录存在，但 `ts` 解析不出（脏行） | 剔除（不算「说得出来」） | **照拦** |
+| 拿不到化身（不存在 / 越界 / `stat` 失败） | **不剔除**（照常参与） | **照拦** |
+
+两个方向的取舍都要照抄：**释放行**抖向「不覆盖」= 误拒（fail-closed，可接受）；**哨兵**抖向「不拦」= 放开（fail-open，不可接受）——所以哨兵这侧必须带亚秒（见不变式 4）。tie（`ts == ctime`）在**两侧都取严**：释放行判「不覆盖」、哨兵判「拦」。
+
+**方法骨架**（Python 侧纯函数，逐字对应）：
+
+```java
+/** 判据：该目录名此刻能否判给 uid（三条判据全过才放行）。 */
+boolean directoryNameError(long uid, String username, String displayName);
+
+/** 化身：目录创建时刻（epoch ms，UTC）；null = 目录不存在 / 越界 / stat 失败。 */
+Long dirCtime(String dn);
+
+/** 释放行是否覆盖该化身：ts == null → false（脏行不算覆盖）；化身 == null → true（不过滤）；否则 ts > ctime。 */
+boolean releaseRowCoversDir(String dn, Long ts);
+
+/** 哨兵行是否拦该化身：ts == null → true（照拦）；化身 == null → true（照拦）；否则 ts >= ctime。 */
+boolean sentinelRowBlocksDir(String dn, Long ts);
+```
+
+`dirCtime` 的**越界判定**要与读路径**复用同一个函数**（Python 侧为 `auth._dir_name_of`，做 realpath + `os.sep` 前缀判断）：口径不一致会把**自己人**的目录误判成无主，永久封掉他的名字（Python 侧变异 m21 恰好 1 红）。
+
+**四条不变式（迁错任何一条都会静默削弱或静默放大权限）**：
+
+1. **墓碑必须活过删用户**：`DELETE /api/admin/users/{id}` 需先写该用户当前目录名的释放行，且**该表不进删用户清理清单**（其余引用 `users(id)` 的表都要清）。少了这步，被删用户的目录会立刻变成无主、可被「曾用名含该名」的人认领并读到其产物（Python 侧回归：`test_scrape_ownership.py::TestDeletedUserDirectoryIsTombstoned`，变异实测**恰好 1 红**）。
+2. **哨兵是独立集合**：`user_id = 0` 的名字在「已释放」查询里用独立 `blocked` 集合剔除，**不参与序号比较**。若改成「参与比较」，后来者更大的 id 会把它顶掉，硬闸静默失效（变异 m17 恰好 1 红）。
+3. **迁移歧义名要种哨兵**：一次性数据迁移时，若同一目录名在多个用户间**先后无法还原**，必须写入哨兵行（`database._migrate_scrape_dn_history`）——这是哨兵**唯一**的写入点（另一个写入点「无主目录扫盘补墓碑」已于 v1.30 退役）。
+4. **写入必须带亚秒**：表默认值只到秒时，「同一秒内先建目录、后跑迁移」会让哨兵时刻被截小 ⇒ `ts >= ctime` 不成立 ⇒ 歧义名被放开。**任何**写该表的代码路径都要显式带毫秒（SQLite：`strftime('%Y-%m-%d %H:%M:%f','now')`；MySQL：`CURRENT_TIMESTAMP(3)` + `DATETIME(3)`）。解析时轴必须按 **UTC**（Python 侧 `calendar.timegm`；用本地解析会整批偏一个时区，变异 m31）。
+
+> **回归锚点（迁移后用等价用例覆盖）**：`py/tests/test_scrape_ownership.py`（认领放行/拒绝、他人过期行不挡我、时间维度惰性分支、亚秒格式、秒级 tie、时轴定值、删号墓碑、哨兵硬闸）与 `py/tests/test_scrape_dn_history_migration.py`（迁移幂等、扫盘退役后无主目录仍不可认领、哨兵按化身生效、脏行照拦）。**别只测「拿得到产物」**——这几条判据的价值全在**反例**上。
 
 ---
 
