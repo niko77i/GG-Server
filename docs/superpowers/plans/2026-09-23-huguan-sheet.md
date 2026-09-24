@@ -30,10 +30,12 @@
 - **请求体读字段的统一口径（所有 `/api/huguan/*` 端点）**：`data = request.get_json(silent=True)` 后先判 `isinstance(data, dict)`，否则 400；字段一律 `str(... or "")` 兜底再 `.strip()`。**禁止**写 `(data.get(x) or "").strip()` —— 客户端给个数字或 `null` 就会 `AttributeError` 炸成 500（Task 5 审查实测 `{"platform": 5}` / `{"spreadsheet_id": 123}` / `[1,2]` 三种 body 全中）。
 - **同一口径适用于「容器型字段」**：`confirmed` 这类期望 dict 的字段，`data.get(x) or {}` 只能兜住 `None`/`""`/`0`，兜不住真值非 dict（`[1,2]`、`"abc"`）—— 那样会把 `AttributeError` 带到逻辑层炸成 500。必须显式判类型，非 dict 一律 400。判据与上一条相同：**客户端能构造出的畸形 body，只能是 4xx，不能是 5xx**。
 - **「畸形」的边界（避免两种口径打架）**：畸形 = ①body 不是 JSON 对象；②容器型字段的类型不符。**标量字段给数字/`None` 不算畸形** —— 按 `str(... or "")` 兜底后照常走后续校验，该 200 就 200（`sheet_name: 5` → `"5"` 存下来），该 400 才 400（`platform: 5` → `"5"` 不在 `PLATFORMS` 里）。**不要**为了「数字也该拒绝」而对标量字段加 `isinstance(x, str)` 检查，那会与 `test_numeric_fields_are_coerced_not_500` 直接冲突（Task 5 修复时计划里真出现过这对互斥断言，一站一立才收敛）。
-- **测试门禁**：`cd py && python -m pytest tests/ -q`，基线 **424 passed**（2026-09-23 实测；子项目 A 收尾时为 420，其后 `f46007c` 净增 4 条）。每次提交后不得低于此数。
+- **测试门禁**：`cd py && PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/ -q`。
+  **不写死基线数字**——以 `.superpowers/sdd/progress.md` 里各任务的**实测值**为准。本仓库有并行会话在同时加测试，数字只会涨，写死的数字必然过期（此处原写「基线 424 passed」，早已被 693 超越）。
+  **`PYTHONDONTWRITEBYTECODE=1` 不能省**：同秒内生成的同字节数变异体不会让 `.pyc` 失效，会得到假 GREEN（Task 9 实测教训）。每次提交后不得低于该任务当次的实测基线。
 - **各任务的计数是「累计预期」，为下界而非精确值**：以 `.superpowers/sdd/progress.md` 里记的**上一任务实测值**为准。若实际条数与预期不符，**先核实是计划写错还是实现漏做**：计划写错就改计划（并顺移后续累计值），实现漏做就补实现 —— 不要为了对上数字而删测试或改断言（Task 2 就因计划漏数而多出 1 条）。
 - **前端门禁**：`cd frontend && npm run build` 必须通过。
-- **前端 UI 前置**：Task 10 / Task 11 动手前必须先调用 `/frontend-design` 技能完成视觉设计（CLAUDE.md 硬性要求）。
+- **前端 UI 前置**：Task 10 / Task 11 的视觉设计**已产出**：`docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md`（2026-09-24）。两个任务动手前**先读它**，**不要**重跑 `/frontend-design` 另做一版——那只会得到一份与计划、与后端接口都对不上的第二版。设计与本计划的文字冲突时**以设计文档为准**（CLAUDE.md 该条的意图是「先有视觉设计再写 UI」，该前提已满足）；发现设计与接口对不上，回报，不要自行改设计。
 - **git**：本仓库常有并行会话在途改文件，**禁用 `git add -A` / `git add .`**，每次只 `git add` 本任务明确列出的文件。
 - **测试不得打真实 Google API**：所有 Sheets 调用在测试中必须被 monkeypatch 或替换为桩。
 
@@ -3597,7 +3599,10 @@ git commit -m "feat: 户管看板配置卡片（GG/TT 设置页）"
 
 ## Task 11: 前端 —— 账户面板「户归属」字段
 
-> **前置（CLAUDE.md 硬性要求）**：动手前必须先调用 `/frontend-design` 技能。
+> **视觉设计已产出**：`docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md` §5（「户归属」列专章）。
+> 本任务下方代码块里**只有**这些是有效基线：文件清单、标识符与数据源、`store`/`ttAccountsApi` 的调用路径、构建与提交步骤。
+> **一切视觉细节以设计文档 §5 为准**，它明确取代下方代码块的 UI 部分（列宽、表头 tooltip、静息态去边框、`aria-label`、失败态）。
+> 设计与本任务的接口对不上时停下来回报，不要自行改设计。
 
 **Files:**
 - Modify: `frontend/src/views/AdsAccountPanel.vue`（GG）
@@ -3609,15 +3614,38 @@ git commit -m "feat: 户管看板配置卡片（GG/TT 设置页）"
 - 注意：**这两个端点用途不同，不要合并**。`/platform/users` 只列该平台有未删除账户的用户（筛选场景的有意取舍，见 `docs/superpowers/specs/2026-09-23-owner-filter-hide-empty-users-design.md`）；`owner-options` 是全量用户（编辑场景必需）。详见 `docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md` §2。
 - Produces: 仅户管可见可编辑的「户归属」列
 
-- [ ] **Step 1: 调用 /frontend-design**
+**动手前先对齐既有标识符**（本计划的初稿在这里写错过三处，**以本表为准**）：
 
-Run: `/frontend-design`
+| 初稿里写的 | 该文件的实际情况（已核实） | 应当怎么写 |
+|---|---|---|
+| `accountsApi.reassign(...)` | `AdsAccountPanel.vue` 既不导入 `accountsApi` 也不导入裸 `api`；它持有 `const store = useAccountStore()`（`:172` / `:185`），而 store **已有** `reassignAccount(id, body)`（`frontend/src/stores/accounts.js:38`） | `await store.reassignAccount(row.id, { owner_id: newOwnerId })`，**零新增 import** |
+| `authStore.isHuguan` | 两个面板**都没有** `authStore`，文件里没有任何 auth store 的导入 | 新增 `import { useAuthStore } from '@/stores/auth'` + `const authStore = useAuthStore()`（getter 定义在 `stores/auth.js:15`） |
+| 下拉数据源 | 需要一个户管专用端点 | 新增 `import { huguanApi } from '@/api/huguan'`（Task 10 建的封装） |
 
-产出必须覆盖：「户归属」列在表格里的呈现（是常显下拉还是「点击编辑」）、与既有「归属人」筛选下拉的区分（一个是筛选、一个是编辑，别让户管混淆）、编辑后的反馈。
+TT 侧不同：`TtAccountPanel.vue:206` **已经**导入 `ttAccountsApi`，且 TT 没有 store —— TT 直接
+`await ttAccountsApi.reassign(row.id, { owner_id: newOwnerId })`（`frontend/src/api/tt.js:71`），
+只需再加 `huguanApi` 与 `useAuthStore` 两个 import。
+
+- [ ] **Step 1: 读视觉设计文档**
+
+Read: `docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md` §5
+
+设计已裁定以下四点，照它做，**不要重跑 `/frontend-design`**：「户归属」列在表格里的呈现（结论：常显下拉 + 静息态去边框）、与既有「归属人」筛选下拉的区分（表格外=筛选 / 表格内=编辑，靠表格边界区隔，不新增控件）、编辑后的反馈文案、以及列名为什么是「户归属」而不是「归属人」（用户原话，见设计文档 §5.1）。有缺口就回报。
 
 - [ ] **Step 2: GG 面板加列**
 
-在 `frontend/src/views/AdsAccountPanel.vue` 的账户表格里加一列，并用 `v-if="authStore.isHuguan"` 控制**可见性**：
+在 `frontend/src/views/AdsAccountPanel.vue` 的账户表格里加一列，并用 `v-if="authStore.isHuguan"` 控制**可见性**。
+
+> **视觉细节以设计文档 §5 为准**（`:738` 起给了成品标记）：列宽 `160`、表头带 `el-tooltip` 解释
+> 「改这里会把新归属写进看板的「重新分配」列（TT 是「换绑情况」列），等你在看板同步时生效」、
+> 每格 `el-select` 带 `aria-label`、静息态用 `:deep()` 去边框（手法见 `:915`）。
+> **失败态是行为要求，不是装饰**（设计文档 §5.6）：用户列表加载失败时该列所有 `el-select` 一律
+> `disabled` + placeholder `暂时无法加载用户列表`，并在表格顶部出一次
+> `ElMessage.warning('用户列表加载失败，暂时无法修改户归属。')` —— **不要沿用
+> `OwnerFilterSelect.vue:56` 的静默失败口径**：这一列是**写**操作，静默失败会让户管以为改成功了。
+> 另：**不要**把「户归属」加进 `AccountModal.vue`（设计文档 §5.1 第 4 条：那里已有「认领/转移给我」
+> 通路，同一动作两个入口、两种副作用才是真正的困惑源）。
+> 下面这段是**最小功能基线**（无 tooltip / 无失败态 / 无 aria），不要照抄它的呈现方式。
 
 ```vue
 <!-- 户归属：只有户管可见可编辑（规格 §9.2）。管理员的入口不在这里。 -->
@@ -3661,7 +3689,7 @@ async function changeOwner(row, newOwnerId) {
   const prev = row.owner_id
   row.owner_id = newOwnerId                       // 乐观更新，失败回滚
   try {
-    await accountsApi.reassign(row.id, { owner_id: newOwnerId })
+    await store.reassignAccount(row.id, { owner_id: newOwnerId })
     // 不能写「系统已把新归属写进看板的「重新分配」列」——规格 §6.3：未配置看板时
     // 那次回写是**静默跳过**的，这句在未配置时是假话。本端点不返回「是否回写」，
     // 所以只能用条件句兜底（彻底修法＝返回体带布尔，但那是 main.py 的改动，不在本任务）。
@@ -3682,7 +3710,8 @@ onMounted(loadOwnerPickerOptions)
 - [ ] **Step 3: TT 面板加同样的列**
 
 在 `frontend/src/views/tt/TtAccountPanel.vue` 里加同样的列，改动两点：
-- `accountsApi.reassign` 改为 `ttAccountsApi.reassign`（`frontend/src/api/tt.js:71`）
+- `store.reassignAccount` 改为 `ttAccountsApi.reassign`（`frontend/src/api/tt.js:71`；`ttAccountsApi` 在 `:206` **已导入**，TT 面板没有 store）
+- `useAuthStore` 与 `huguanApi` 两个 import 同样要加（TT 面板同样没有 `authStore`）
 - 成功文案里的「重新分配」改为「换绑情况」（TT 侧户管通道列名，见规格 §3.4；Task 9 的 `_huguan_owner_channel` 写的就是这一列），条件句部分与 GG 逐字一致
 
 - [ ] **Step 4: 构建验证**
