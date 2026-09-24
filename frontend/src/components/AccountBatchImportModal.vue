@@ -28,11 +28,16 @@
       <!-- ===== 他人的账户 ===== -->
       <template v-if="existingAccounts.length">
         <el-divider content-position="left" style="margin:8px 0;">
-          ⚠ 他人账户（{{ existingAccounts.length }} 个）— 可编辑后勾选认领
+          <template v-if="auth.canManageAccounts">
+            ⚠ 他人账户（{{ existingAccounts.length }} 个）— 可编辑后勾选认领
+          </template>
+          <template v-else>
+            ⚠ 他人账户（{{ existingAccounts.length }} 个）— 属于他人，需由户管或管理员转移
+          </template>
         </el-divider>
         <el-table :data="existingAccounts" size="small" border stripe max-height="260"
           @selection-change="v => claimSelection = v" :row-class-name="existingRowClass" style="width:100%;">
-          <el-table-column type="selection" width="34" />
+          <el-table-column v-if="auth.canManageAccounts" type="selection" width="34" />
           <el-table-column prop="account_id" label="账户 ID" width="118" />
           <el-table-column label="名称" min-width="70" show-overflow-tooltip>
             <template #default="{ row }">
@@ -61,7 +66,7 @@
               <el-tag size="small" type="warning">{{ row.owner_name }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="编辑" width="48" align="center">
+          <el-table-column v-if="auth.canManageAccounts" label="编辑" width="48" align="center">
             <template #default="{ row }">
               <el-button link size="small" :type="editingId === row.account_id ? 'primary' : ''"
                 @click="toggleEdit(row)" style="padding:0;">✏️</el-button>
@@ -69,8 +74,8 @@
           </el-table-column>
         </el-table>
 
-        <!-- 编辑面板 — 展开在表格下方 -->
-        <div v-if="editingId" style="background:#f5f7fa;border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-top:8px;">
+        <!-- 编辑面板 — 展开在表格下方（仅跨用户角色可编辑后认领） -->
+        <div v-if="auth.canManageAccounts && editingId" style="background:#f5f7fa;border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-top:8px;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
             <span style="font-weight:600;font-size:13px;">✏️ 编辑 {{ editingId }}</span>
             <el-button link size="small" @click="editingId = null">关闭 ✕</el-button>
@@ -655,22 +660,26 @@ async function submit() {
     }
   }
 
-  // 2. 认领选中的已有账户（带编辑后的字段）
-  for (const row of claimSelection.value) {
-    try {
-      initClaimEdits(row)
-      const edits = claimEdits[row.account_id]
-      await accountsApi.reassign(row.id, {
-        name: edits.name !== row.name ? edits.name : undefined,
-        timezone: edits.timezone,
-        agent_id: edits.agent,
-        status_id: edits.status,
-        mcc_id: edits.mcc_id,
-        acquired_date: edits.acquired_date,
-      })
-      claimed++
-    } catch (e) {
-      claimFailed.push({ account_id: row.account_id, reason: e.response?.data?.error || e.message })
+  // 2. 认领选中的已有账户（带编辑后的字段）—— 仅跨用户角色可认领
+  //    非跨用户角色在 UI 上拿不到勾选入口，这里再拦一道，确保 claimSelection
+  //    即使残留也不会触发必然 403 的 reassign（见 TT 侧同构的归属闸）。
+  if (auth.canManageAccounts) {
+    for (const row of claimSelection.value) {
+      try {
+        initClaimEdits(row)
+        const edits = claimEdits[row.account_id]
+        await accountsApi.reassign(row.id, {
+          name: edits.name !== row.name ? edits.name : undefined,
+          timezone: edits.timezone,
+          agent_id: edits.agent,
+          status_id: edits.status,
+          mcc_id: edits.mcc_id,
+          acquired_date: edits.acquired_date,
+        })
+        claimed++
+      } catch (e) {
+        claimFailed.push({ account_id: row.account_id, reason: e.response?.data?.error || e.message })
+      }
     }
   }
 

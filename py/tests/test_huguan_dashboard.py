@@ -4,11 +4,22 @@
 本文件不打真实 Google API：服务层调用一律用桩替换。
 """
 import json
+import re
 import sqlite3
 
 import pytest
 
 import database
+
+
+def _is_datetime_shape(value) -> bool:
+    """钉住 status_changed_date 的真实形状 `YYYY-MM-DD HH:MM:SS`。
+
+    `datetime('now','localtime')` 产出该形状。终审点名的两条用例此前只断言
+    「非空 / ≠ 播种值」——把 SQL 表达式文本写死进该列、或写死 'x' 都能全绿，
+    而前端有 3 处直接展示该列，写错形状会把一串 SQL 显示给用户。
+    """
+    return re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value or "") is not None
 
 
 # ---------- Task 1: 列工具 ----------
@@ -451,6 +462,103 @@ class TestUpdateRowsByAccountId:
         svc = _FakeService(_grid(["111"]))
         assert update_rows_by_account_id(svc, "SS", "看板", []) == {"updated": 0, "not_found": []}
         assert svc.recorder == []
+
+    def test_multiple_rows_produce_single_batch_call(self):
+        """承重断言：N 行只产生 1 次 values().batchUpdate。
+
+        重构前是逐行各发一次 batchUpdate；改成「先写前几行、再撞配额」的半写。
+        这条正是能杀掉「逐行调用」变异体的承重测试 —— 三行合并后必须只有 1 次调用。
+        """
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService(_grid(["111", "222", "333"]))
+        res = update_rows_by_account_id(
+            svc, "SS", "看板",
+            [
+                {"account_id": "111", "cells": {"A": "1"}},
+                {"account_id": "222", "cells": {"A": "2"}},
+                {"account_id": "333", "cells": {"A": "3"}},
+            ],
+        )
+        assert res == {"updated": 3, "not_found": []}
+        batches = [r for r in svc.recorder if r.get("op") == "batchUpdate"]
+        assert len(batches) == 1
+        assert [d["range"] for d in batches[0]["body"]["data"]] == [
+            "'看板'!A1:A1", "'看板'!A2:A2", "'看板'!A3:A3"]
+
+    def test_failure_message_lists_account_ids_and_written_count(self):
+        """失败异常信息须能定位 account_id，并如实写明「本次已写入 N 行」。
+
+        单次 batchUpdate 是原子的：失败即整批未写入，故「已写入 0 行」。
+        """
+        from google_sheets_service import update_rows_by_account_id, GoogleSheetsServiceError
+        recorder = []
+
+        class _BoomValues:
+            def __init__(self, recorder, grid):
+                self._recorder = recorder
+                self._grid = grid
+
+            def get(self, spreadsheetId=None, range=None):
+                self._recorder.append({"op": "get", "range": range})
+                return _FakeExec(self._recorder, {"values": self._grid})
+
+            def batchUpdate(self, spreadsheetId=None, body=None):
+                raise RuntimeError("quota exceeded")
+
+        class _BoomSheets:
+            def __init__(self, values):
+                self._values = values
+
+            def values(self):
+                return self._values
+
+        class _BoomService:
+            def __init__(self, values):
+                self._sheets = _BoomSheets(values)
+
+            def spreadsheets(self):
+                return self._sheets
+
+        svc = _BoomService(_BoomValues(recorder, _grid(["111", "222"])))
+        with pytest.raises(GoogleSheetsServiceError) as exc:
+            update_rows_by_account_id(
+                svc, "SS", "看板",
+                [{"account_id": "111", "cells": {"A": "1"}},
+                 {"account_id": "222", "cells": {"A": "2"}}],
+            )
+        msg = str(exc.value)
+        assert "111" in msg and "222" in msg
+        assert "本次已写入 0 行" in msg
+
+    def test_gap_guard_holds_across_multiple_rows_in_single_call(self):
+        """merge_ranges 的空洞在多行合并成单次调用后仍逐行断开。
+
+        cells 缺 B/C 列时，合并后的单次调用里每个区间都不得覆盖 B、C —— 公式列
+        靠这个保命。这是对「逐行调用 → 单次合并调用」重构的守门：若有人把区间
+        拍平成整行 A:D，这条会红。
+        """
+        from google_sheets_service import update_rows_by_account_id
+        svc = _FakeService(_grid(["111", "222"]))
+        update_rows_by_account_id(
+            svc, "SS", "看板",
+            [
+                {"account_id": "111", "cells": {"A": "1", "D": "4"}},
+                {"account_id": "222", "cells": {"A": "x", "D": "y"}},
+            ],
+        )
+        batches = [r for r in svc.recorder if r.get("op") == "batchUpdate"]
+        assert len(batches) == 1
+        data = batches[0]["body"]["data"]
+        assert [d["range"] for d in data] == [
+            "'看板'!A1:A1", "'看板'!D1:D1", "'看板'!A2:A2", "'看板'!D2:D2"]
+        covered = set()
+        for d in data:
+            a1 = d["range"].split("!")[1]      # 剥掉 sheet 前缀 → "A1:A1"
+            left, right = a1.split(":")
+            first = re.match(r"[A-Z]+", left).group(0)   # 列字母，撇开行号
+            last = re.match(r"[A-Z]+", right).group(0)
+            covered.update(chr(c) for c in range(ord(first), ord(last) + 1))
+        assert "B" not in covered and "C" not in covered
 
 
 # ---------- Task 5: 配置读写 + 权限 ----------
@@ -1958,8 +2066,10 @@ class TestApplyDiffUncoveredBranches:
         row = db.execute("SELECT death_date, status_changed_date FROM accounts "
                          "WHERE account_id='RSD-1'").fetchone()
         assert (row["death_date"] or "").strip() == ""
-        assert (row["status_changed_date"] or "").strip() != ""
-        assert row["status_changed_date"] != "2026-01-01 00:00:00"
+        assert _is_datetime_shape(row["status_changed_date"]), \
+            f"status_changed_date 形状不符: {row['status_changed_date']!r}"
+        assert row["status_changed_date"] != "2026-01-01 00:00:00", \
+            f"status_changed_date 未刷新（仍是播种值）: {row['status_changed_date']!r}"
         db.close()
 
     def test_status_change_refreshes_status_changed_date(self, client):
@@ -1988,8 +2098,10 @@ class TestApplyDiffUncoveredBranches:
         row = db.execute("SELECT status_id, status_changed_date FROM accounts "
                          "WHERE account_id='SSD-1'").fetchone()
         assert row["status_id"] == sid
-        assert (row["status_changed_date"] or "").strip() != ""
-        assert row["status_changed_date"] != "2026-01-01 00:00:00"
+        assert _is_datetime_shape(row["status_changed_date"]), \
+            f"status_changed_date 形状不符: {row['status_changed_date']!r}"
+        assert row["status_changed_date"] != "2026-01-01 00:00:00", \
+            f"status_changed_date 未刷新（仍是播种值）: {row['status_changed_date']!r}"
         db.close()
 
 

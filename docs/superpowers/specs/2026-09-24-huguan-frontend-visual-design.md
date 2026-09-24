@@ -192,7 +192,7 @@ const hdConfigured = computed(() => !!(hdForm.value.spreadsheet_id && hdForm.val
 | **刷新到看板 · 进行中** | 二次确认后 | 按钮 `:loading`；两个同步按钮 `disabled`（防重入） |
 | **刷新成功（全部命中）** | `not_found` 为空 | `ElMessage.success('已刷新到看板：写入 {updated} 行。')`；`hdHint` = `已刷新到看板：写入 {updated} 行。`（`type="success"`） |
 | **刷新成功（部分命中）** | `not_found.length > 0` | `ElMessage.warning('有 {n} 个账户不在你的表里，未写入。')`；`hdHint` = `已刷新到看板：写入 {updated} 行。有 {n} 个账户不在你的表里，没有写入。`（`type="warning"`） |
-| **刷新 · 部分失败** | 500（`update_rows_by_account_id` 逐行写、失败即中断） | `hdHint` = `刷新到看板失败。Google 可能已经写入了一部分，请打开表格核对后再重试。`（`type="error"`，**不自动消失**） |
+| **刷新 · 失败（整批未写入）** | 500（`update_rows_by_account_id` 单次 `values().batchUpdate`，原子：失败即整批未写入） | `hdHint` = `刷新到看板失败。本次没有写入任何数据，直接重试是安全的。`（`type="error"`，**不自动消失**） |
 | **同步预演 · 进行中** | 点击 `⬇️ 从表同步到系统` | 按钮 `:loading`；两个同步按钮 `disabled` |
 | **同步预演 · 无差异** | `summary` 三项计数全为 0 | 不开弹窗；`hdHint` = `看板与系统已经一致，没有需要同步的改动。`（`type="info"`） |
 | **同步预演 · 有差异** | —— | 开差异报告对话框（Mode A，见 §4） |
@@ -1002,7 +1002,7 @@ const ownerOptionMap = computed(() => Object.fromEntries(ownerOptions.value.map(
 | 层 | 场景 | 表达 |
 |---|---|---|
 | **① 落库部分失败（`not_applied`）** | 户管勾了、但落库时表已变、当前 diff 找不到该账户 | 对话框切 Mode B，**停在那里不自动关**，`el-alert type="warning"` 明确说「有 N 项没有落库（确认之后表又变了）」，逐条列账户ID + 中文类别，并给出下一步动作「请重新点「⬇️ 从表同步到系统」再看一次」。**不做 toast**——toast 会消失、超 20 条会被截断，而规格 §8.3 要求「不能静默丢弃」 |
-| **② 刷新到看板的中途中断** | `update_rows_by_account_id` 逐行写、失败即抛 | 卡片上的 `hdHint` 常驻 `type="error"` 提示：`刷新到看板失败。Google 可能已经写入了一部分，请打开表格核对后再重试。` **不自动消失**（户管需要它留着） |
+| **② 刷新到看板失败（整批未写入）** | `update_rows_by_account_id` 单次 `values().batchUpdate`，原子：失败即整批未写入 | 卡片上的 `hdHint` 常驻 `type="error"` 提示：`刷新到看板失败。本次没有写入任何数据，直接重试是安全的。` **不自动消失**（户管需要它留着） |
 | **③ 刷新到看板的「部分命中」** | 表里没有某些账户（`not_found`） | `ElMessage.warning('有 {n} 个账户不在你的表里，未写入。')` + `hdHint type="warning"` 常驻。这是**正常结果**不是失败，所以用 warning 不用 error |
 | **④ 单行名称歧义** | MCC / 渠道 / BC 名匹配不到或重名 | 进 `warnings`，第 ⑤ 折叠区；同时该列不落库、该行其余列照常（后端已实现）。前端不额外做提示——它已经在报告里 |
 

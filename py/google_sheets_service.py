@@ -682,6 +682,14 @@ def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
             if v and v not in row_of:
                 row_of[v] = i + 1  # 1-indexed
 
+    # 把所有行的写入区间合并进**一次** values().batchUpdate 调用。
+    #
+    # Google 的 values.batchUpdate 单次请求是原子的（要么全成、要么全不成），
+    # 合并调用同时解掉两个问题：逐行调用撞配额时「前面的行已落表」的半写，
+    # 以及几百行对应几百次请求的请求数爆炸。户管看板一次刷新通常几百行 ×
+    # 十几列，远小于 values.batchUpdate 的请求体上限，无需分块。
+    data = []
+    pending_aids = []  # 本次要写入的 account_id（= 已定位到的行），用于失败定位
     updated, not_found = 0, []
     for item in rows:
         aid = (item.get("account_id") or "").strip()
@@ -691,7 +699,6 @@ def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
             not_found.append(aid)
             continue
 
-        data = []
         for rng in merge_ranges(list(cells.keys())):
             first, last = rng.split(":")
             start, end = col_index(first), col_index(last)
@@ -699,15 +706,25 @@ def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
                 "range": f"{_a1_sheet(sheet_name)}{first}{row_num}:{last}{row_num}",
                 "values": [[cells.get(col_letter(c), "") for c in range(start, end + 1)]],
             })
+        pending_aids.append(aid)
 
+    if data:
         try:
             service.spreadsheets().values().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"valueInputOption": "USER_ENTERED", "data": data},
             ).execute()
-            updated += 1
+            updated = len(pending_aids)
         except Exception as e:
-            raise GoogleSheetsServiceError(f"批量更新行失败 account_id={aid}: {e}") from e
+            # 单次请求原子：失败即整批未写入，故「本次已写入 0 行」是如实表述，
+            # 不再有「前面的行已经落表」的半写。
+            raise GoogleSheetsServiceError(
+                f"批量更新行失败（本次已写入 0 行，涉及 account_id="
+                f"{','.join(pending_aids)}）: {e}") from e
+    else:
+        # data 为空：要么 rows 全未找到（not_found 已记），要么找到的行 cells 为空。
+        # 无待写区间，跳过 API 调用；updated 仍按「已定位到的行数」计，与旧契约一致。
+        updated = len(pending_aids)
 
     log.info("update_rows_by_account_id: 更新 %d 行，未找到 %d 行", updated, len(not_found))
     return {"updated": updated, "not_found": not_found}

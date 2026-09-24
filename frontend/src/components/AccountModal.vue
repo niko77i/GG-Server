@@ -51,12 +51,14 @@
 <script setup>
 import { ref, reactive, watch } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
+import { useAuthStore } from '@/stores/auth'
 import { mccApi, accountsApi } from '@/api/accounts'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const props = defineProps({ visible: Boolean, editId: [Number, null] })
 const emit = defineEmits(['update:visible', 'saved'])
 const store = useAccountStore()
+const auth = useAuthStore()
 const saving = ref(false)
 const lookingUp = ref(false)
 const mccOptions = ref([])
@@ -220,27 +222,42 @@ async function submit() {
     // 409 冲突：账户 ID 已存在，弹窗展示详情并询问是否转户
     if (e.response?.status === 409 && e.response?.data?.existing) {
       const ex = e.response.data.existing
-      try {
-        await ElMessageBox.confirm(
-          `该账户 ID 已被「${ex.owner_name}」占用，账户详情如下：\n\n` +
-          `  名称：${ex.name}\n` +
-          `  ID：${ex.account_id}\n` +
-          `  时区：${ex.timezone || '无'}\n` +
-          `  代理：${ex.agent || '无'}\n` +
-          `  状态：${ex.status || '未知'}\n` +
-          `  MCC：${ex.mcc_name ? ex.mcc_name + ' (' + ex.mcc_code + ')' : '未分配'}\n` +
-          `  到手时间：${ex.acquired_date || '无'}\n\n` +
-          `是否将该账户转移至当前用户？`,
+      const detail = `该账户 ID 已被「${ex.owner_name}」占用，账户详情如下：\n\n` +
+        `  名称：${ex.name}\n` +
+        `  ID：${ex.account_id}\n` +
+        `  时区：${ex.timezone || '无'}\n` +
+        `  代理：${ex.agent || '无'}\n` +
+        `  状态：${ex.status || '未知'}\n` +
+        `  MCC：${ex.mcc_name ? ex.mcc_name + ' (' + ex.mcc_code + ')' : '未分配'}\n` +
+        `  到手时间：${ex.acquired_date || '无'}\n\n`
+      if (!auth.canManageAccounts) {
+        // 普通用户没有转移他人账户的权限（后端归属闸必然 403），不再提供「转移给我」
+        // 这个点了必然失败的入口，改为如实告知归属与下一步。
+        await ElMessageBox.alert(
+          detail + '该账户属于他人，需由户管或管理员转移。',
           '账户 ID 已存在',
-          { confirmButtonText: '转移给我', cancelButtonText: '取消', type: 'warning', distinguishCancelAndClose: true }
-        )
-        // 用户确认 → 调用转户 API
-        await store.reassignAccount(ex.id)
-        ElMessage.success(`账户「${ex.name}」已转移至当前用户`)
-        emit('update:visible', false)
-        emit('saved')
-      } catch (cancelErr) {
-        // 用户取消或关闭弹窗，不做操作
+          { confirmButtonText: '知道了', type: 'warning' }
+        ).catch(() => {})   // 点 X / ESC 关闭会 reject，不接住会逃出 submit() 成为未处理拒绝
+      } else {
+        try {
+          await ElMessageBox.confirm(
+            detail + '是否将该账户转移至当前用户？',
+            '账户 ID 已存在',
+            { confirmButtonText: '转移给我', cancelButtonText: '取消', type: 'warning', distinguishCancelAndClose: true }
+          )
+          // 用户确认 → 调用转户 API
+          await store.reassignAccount(ex.id)
+          ElMessage.success(`账户「${ex.name}」已转移至当前用户`)
+          emit('update:visible', false)
+          emit('saved')
+        } catch (cancelErr) {
+          // 区分「用户取消/关闭」与「API 报错」：ElMessageBox 的 reject 值是 'cancel'/'close'
+          // 字符串（distinguishCancelAndClose: true），而 axios 错误是对象。
+          if (cancelErr === 'cancel' || cancelErr === 'close') {
+            return  // 用户取消或关闭弹窗，不做操作
+          }
+          ElMessage.error(cancelErr?.response?.data?.error || '转移账户失败')
+        }
       }
     } else {
       ElMessage.error(e.response?.data?.error || e.message || '操作失败')

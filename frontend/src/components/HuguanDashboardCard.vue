@@ -684,8 +684,9 @@ async function doPushHd() {
       setHdHint(`已刷新到看板：写入 ${r.updated} 行。`, 'success')
     }
   } catch (e) {
-    // 逐行写、失败即中断：Google 可能已经写入一部分，不能只说「失败」
-    setHdHint('刷新到看板失败。Google 可能已经写入了一部分，请打开表格核对后再重试。', 'error')
+    // 单次 values().batchUpdate 是原子的：要么全成、要么全不成，不存在「写了一半」。
+    // 因此失败即整批未写入，直接重试是安全的，无需打开表格核对。
+    setHdHint('刷新到看板失败。本次没有写入任何数据，直接重试是安全的。', 'error')
   } finally {
     hdPushing.value = false
   }

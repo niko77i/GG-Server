@@ -28,11 +28,16 @@
       <!-- ===== 他人的账户 ===== -->
       <template v-if="existingAccounts.length">
         <el-divider content-position="left" style="margin:8px 0;">
-          ⚠ 他人账户（{{ existingAccounts.length }} 个）— 勾选认领
+          <template v-if="auth.canManageAccounts">
+            ⚠ 他人账户（{{ existingAccounts.length }} 个）— 勾选认领
+          </template>
+          <template v-else>
+            ⚠ 他人账户（{{ existingAccounts.length }} 个）— 属于他人，需由户管或管理员转移
+          </template>
         </el-divider>
         <el-table :data="existingAccounts" size="small" border stripe max-height="240"
           @selection-change="v => claimSelection = v" style="width:100%;">
-          <el-table-column type="selection" width="34" />
+          <el-table-column v-if="auth.canManageAccounts" type="selection" width="34" />
           <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="180" show-overflow-tooltip />
           <el-table-column label="归属" min-width="100" show-overflow-tooltip>
             <template #default="{ row }">
@@ -516,13 +521,17 @@ async function submit() {
     }
   }
 
-  // 2. 认领选中的已有账户
-  for (const row of claimSelection.value) {
-    try {
-      await ttAccountsApi.reassign(row.id, {})
-      claimed++
-    } catch (e) {
-      claimFailed.push({ advertiser_id: row.advertiser_id, reason: e.response?.data?.error || e.message })
+  // 2. 认领选中的已有账户 —— 仅跨用户角色可认领
+  //    非跨用户角色在 UI 上拿不到勾选入口，这里再拦一道，确保 claimSelection
+  //    即使残留也不会触发必然 403 的 reassign（后端归属闸：非跨用户角色认领他人账户 → 403）。
+  if (auth.canManageAccounts) {
+    for (const row of claimSelection.value) {
+      try {
+        await ttAccountsApi.reassign(row.id, {})
+        claimed++
+      } catch (e) {
+        claimFailed.push({ advertiser_id: row.advertiser_id, reason: e.response?.data?.error || e.message })
+      }
     }
   }
 
