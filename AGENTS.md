@@ -708,6 +708,13 @@ YouTube 视频新增频道名（channel name）字段，导入时自动获取频
 - [产品包筛选工具栏吸顶](docs/superpowers/specs/2026-08-13-product-pkg-filter-toolbar-sticky-design.md)
 - [产品吸顶表头](docs/superpowers/specs/2026-08-13-product-sticky-header-design.md)
 - [掉包检测代理](docs/superpowers/specs/2026-08-27-delist-check-proxy-design.md)
+- [户管角色](docs/superpowers/specs/2026-09-22-huguan-role-design.md)
+- [户管角色前端界面](docs/superpowers/specs/2026-09-22-huguan-frontend-design.md)
+- [账户面板「归属人」下拉只列出有账户的用户](docs/superpowers/specs/2026-09-23-owner-filter-hide-empty-users-design.md)
+- [账户面板「归属人」默认作用域](docs/superpowers/specs/2026-09-23-owner-filter-default-scope-design.md)
+- [户管看板 Google Sheet 配置与双向同步（子项目 B）](docs/superpowers/specs/2026-09-23-huguan-sheet-design.md)
+- [户管看板前端视觉设计（子项目 B / Task 10 + Task 11）](docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md)
+- [户管看板：归属变更「来源」标注 + 户管专用归属人列表](docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
