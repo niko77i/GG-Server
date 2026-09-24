@@ -19,11 +19,16 @@ _PLAY_LINK_RE = r'https?://play\.google\.com/store/apps/details\?id=[\w.&=/\-?%]
 #   https://apps.apple.com/vn/app/id6804355336         （无 slug）
 #   https://apps.apple.com/vn/app/densia/id6804355336  （有 slug —— 实测中 200 会跳转到这个形状）
 # slug 必须作为独立路径段可选：写成 `[\w\-]*id\d+` 会跨不过 slug 后的 `/`，导致 slug 形式漏匹配。
-# slug 段字符集含 `.` 与 `%`：真实存在 `.../app/foo.bar/id123` 与
-# `.../app/%E5%BE%AE%E4%BF%A1/id414478124`（百分号编码的应用名），旧字符集
-# `[\w\-]+` 不含这两者 —— 同一 URL 手填能落库、粘贴导入却被静默丢弃，两条通道口径分裂。
-# 只放宽 slug 那一段，region 段维持原样。
-_APPSTORE_LINK_RE = r'https?://(?:apps|itunes)\.apple\.com/(?:[\w\-]+/)?app/(?:[\w.\-%]+/)?id\d+'
+# slug 段不枚举字符集，一律用 `[^/\s]+`（除 `/` 与空白外的任意一段）：
+# 真实存在 `.../app/foo.bar/id123`、`.../app/%E5%BE%AE%E4%BF%A1/id414478124`
+# （百分号编码的应用名）、`.../app/joe's+app~(beta)/id123` 等形态，逐个枚举必漏。
+# 枚举的代价就是口径分裂：同一 URL 手填能落库、粘贴导入却被静默丢弃 ——
+# `_is_appstore_url` 只看 host、完全不看 path，手填侧从不挑 slug 字符集。
+# 整体加 `(?i:...)`：`urlsplit` 会归一 scheme/host 大小写，`_is_appstore_url`
+# 又用 `host.lower()` 比较，故 `https://APPS.APPLE.COM/...` 在手填侧本就放行，
+# 正则侧大小写敏感会再次造成同型分裂（scheme 按 RFC 也大小写不敏感）。
+# 收紧仍靠两端锚点：host 必须全等 `apps|itunes.apple.com`，且必须以 `id\d+` 收尾。
+_APPSTORE_LINK_RE = r'(?i:https?://(?:apps|itunes)\.apple\.com/(?:[\w\-]+/)?app/(?:[^/\s]+/)?id\d+)'
 _LINK_RE = re.compile(f'(?:{_PLAY_LINK_RE})|(?:{_APPSTORE_LINK_RE})')
 
 tt_bp = Blueprint('tt', __name__)

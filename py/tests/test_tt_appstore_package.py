@@ -292,6 +292,60 @@ class TestImportTextAppstore:
         assert tt_routes._LINK_RE.findall("https://evil.com/vn/app/id123") == []
 
 
+class TestAppstoreLinkRegexCaseAndPunctuation:
+    """host/scheme 大小写与 slug 标点：两条录入通道必须继续同口径。
+
+    `_is_appstore_url` 用 `host.lower()` 全等比较（`urlsplit` 归一小写 scheme/host），
+    而 `_LINK_RE` 大小写敏感 —— 于是 `https://APPS.APPLE.COM/vn/app/id123`
+    手填放行、粘贴导入却被静默丢弃。这与「含点/百分号 slug」是同一类口径分裂，
+    此处按 `_is_appstore_url` 的既有语义收口（收敛，不是放松到它之外的形态）。
+    """
+
+    def test_uppercase_host_matched(self):
+        assert tt_routes._LINK_RE.findall("https://APPS.APPLE.COM/vn/app/id123") == [
+            "https://APPS.APPLE.COM/vn/app/id123"]
+
+    def test_uppercase_scheme_matched(self):
+        """scheme 按 RFC 大小写不敏感，`urlsplit` 也会归一。"""
+        assert tt_routes._LINK_RE.findall("HTTPS://apps.apple.com/vn/app/id123") == [
+            "HTTPS://apps.apple.com/vn/app/id123"]
+
+    def test_mixed_case_itunes_matched(self):
+        assert tt_routes._LINK_RE.findall("https://iTunes.Apple.COM/us/app/id123") == [
+            "https://iTunes.Apple.COM/us/app/id123"]
+
+    def test_slug_with_punctuation_matched(self):
+        """slug 含 `'` `+` `~` `(` `)` 等标点也要能捞出来。
+
+        `_is_appstore_url` 只看 host、完全不看 path，这些 URL 手填一律 200；
+        导入侧若漏匹配即静默丢弃（同 F2 口径分裂）。
+        """
+        url = "https://apps.apple.com/us/app/joe's+app~(beta)/id123"
+        assert tt_routes._LINK_RE.findall(url) == [url]
+
+    def test_case_insensitivity_does_not_loosen_host(self):
+        """反向边界：大小写不敏感只作用于合法 host，不得放进伪装域。"""
+        assert tt_routes._LINK_RE.findall("https://EVIL.COM/vn/app/id123") == []
+        assert tt_routes._LINK_RE.findall("https://APPS.APPLE.COM.evil.com/vn/app/id1") == []
+
+    def test_uppercase_host_consistent_across_both_channels(self, client, tt_headers):
+        """端到端钉住契约：同一 URL 手填放行 ⇒ 粘贴导入必须也能捞出来。"""
+        url = "https://APPS.APPLE.COM/vn/app/id123"
+        assert tt_routes._is_appstore_url(url) is True  # 通道一：手填的判据
+
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "大写 host 苹果包产品",
+        }).get_json()["id"]
+        added = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": "", "url": url,
+        })
+        assert added.status_code == 200
+
+        parsed = client.post("/api/tt/products/import-text", headers=tt_headers,
+                             json={"text": f"神包上线：大写\n{url}"}).get_json()["parsed"]
+        assert [p["url"] for p in parsed] == [url]
+
+
 class TestUpdatePackageTypeValidation:
     """PUT /api/tt/packages/<id> 的 type 必须与 _validate_package 同口径（只允许 package/pwa）。
 
