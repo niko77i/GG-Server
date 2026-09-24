@@ -168,13 +168,23 @@ def update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows, key_col
     """按「账户ID 列」定位行，一次写多列。
 
     rows: [{"account_id": "123", "cells": {"A": "2026-09-23", "B": "", "G": "张三"}}]
-    实现：读一次整表建立 账户ID → 行号 索引；再对每行做一次 values.batchUpdate，
-    把 cells 按连续列合并成区间（如 A-D / F-H / I-K），非连续处断开，
-    未出现在 cells 里的列一律不碰（保护公式列）。
+    实现：读一次整表建立 账户ID → 行号 索引；再**把所有行合并成一次
+    values.batchUpdate**，每行的 cells 按连续列合并成区间（如 A-D / F-H / I-K），
+    非连续处断开，未出现在 cells 里的列一律不碰（保护公式列）。
 
     返回 {"updated": n, "not_found": ["<account_id>", ...]}
     """
 ```
+
+> **v1.31 修订（实现已收口，原文描述的逐行调用已作废）**：本函数最初是「循环内每行发一次
+> `batchUpdate`」，现已改为**整批合并成单次 `values().batchUpdate`**。Google 的
+> `values.batchUpdate` 单次请求**原子**（要么全成、要么全不成），因而：
+> - 失败时**本次写入 0 行**，不存在「前面的行已落表」的半写，**无需回滚**；
+>   异常文案即 `批量更新行失败（本次已写入 0 行，涉及 account_id=...）`。
+> - 请求数由「表里命中行数」降为 **1 次**（`data` 为空时才跳过调用）。
+> - 一次刷新通常几百行 × 十几列，远小于请求体上限，**不分块**。
+> 上面 §6.4 第二项「已知代价」与 §12.5 第 5 条已按此口径改写。
+
 
 关键点（对照 `append_recycle`，`google_sheets_service.py:450` 的既有先例——「只写 A/B/H 三列，其余列含公式，不写入以免清掉公式」）：
 
@@ -228,12 +238,13 @@ def update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows, key_col
 `POST /api/huguan/dashboard/push`，body `{"platform": "gg"|"tt"}`。
 取该系统内该户管可见的**全部账户，但排除已软删的**（条件 `deleted_at IS NULL`；GG：`accounts`；TT：`tt_accounts`）——与「表→系统」对软删账户做 `to_skip` 的口径对称（§8.3），也符合 §6.2「软删不触发回写」的意图。按 §5 逐列生成 cells，走 `update_rows_by_account_id` 一次性刷。
 
-响应键是 **`{"rows": n, "updated": n, "not_found": [...]}`**（不是 `total`）：`rows` 是**候选行数**（由 `collect_rows_for_push` 生成的行数），`updated` 是**真正写进去的行数**。两者必然不等——`update_rows_by_account_id` 按**该户管自己那张表**的 C 列建索引，表里没有的账户进了 `not_found`、**不写**。所以「全量」是**候选**全量，**实际落笔 ⊆ 他自己表里已有的行**。前端只消费 `updated` 与 `not_found`（计划 Task 10），不读 `rows`。
+响应体是 **`{"success": true, "result": {"rows": n, "updated": n, "not_found": [...]}}`**——三个键**包在 `result` 里**（`py/routes/huguan_dashboard_routes.py:172` 的 `ok({"result": {...}})`），**不是**平铺在顶层。（不是 `total`。）
+`rows` 是**候选行数**（由 `collect_rows_for_push` 生成的行数），`updated` 是**真正写进去的行数**。两者必然不等——`update_rows_by_account_id` 按**该户管自己那张表**的 C 列建索引，表里没有的账户进了 `not_found`、**不写**。所以「全量」是**候选**全量，**实际落笔 ⊆ 他自己表里已有的行**。前端只消费 `result.updated` 与 `result.not_found`（计划 Task 10），不读 `rows`。
 
 **两条已知代价（都不阻塞首版，但必须在 UI 侧交代）：**
 
 - **全量刷新会一次性覆盖表侧未同步的手改**（D/F/G/I/J/K 列；H/L 因 §7.2 规则 2 不含在产出里而幸免）。§12.1 决策 #4 已把这条列为已知代价，但那是针对**单行回写**写的——全量 push 把同一个代价放大到整表，且**默认状态下没有任何提示**。⇒ 前端「刷新到看板」**必须**带二次确认，并在确认文案里写明会覆盖哪些列。
-- **逐行调用 + 失败即中断**：`update_rows_by_account_id`（`google_sheets_service.py:693-700`）在 `for item in rows` 循环体内**每行发一次 `batchUpdate`**，失败时**立刻抛 `GoogleSheetsServiceError` 中断**。⇒ 表里命中 N 行就是 N 次顺序 HTTP 调用，一旦撞配额或瞬时错误，结果是**请求 500 + 表已部分写入、无回滚、响应里没有任何提示**。**关键限定**：未命中的账户在发 API 前就 `continue`，故调用数 = **表里命中行数**，不是全库账户数。§12.5 已决定首版不做并发（「账户量大时可能较慢，若实测超时再考虑聚合」），此处补记的是**部分写入**这一后果，不只是「慢」。
+- ~~**逐行调用 + 失败即中断**~~ → **v1.31 已收口为「整批单次 + 失败即 0 行」**：`update_rows_by_account_id`（`google_sheets_service.py:685-723`）先建索引、把**所有行**的写入区间合并进 `data`，最后只发**一次** `values().batchUpdate`。单次请求是**原子**的，所以失败时的后果不是「表已部分写入、无回滚」，而是**本次写入 0 行**——异常文案 `批量更新行失败（本次已写入 0 行，涉及 account_id=...）` 即如实表述，前端可以安全地引导用户直接重试。请求数不再是「表里命中行数」，就是 **1 次**（`data` 为空时才跳过调用）。**仍然成立的代价**：`data` 为空的具体分支（rows 全未命中，或命中行的 `cells` 全为空）**不发请求**，`updated` 仍按「已定位到的行数」计——此时 `updated > 0` 但一个字都没写，`updated` 的含义是「命中行数」而非「确实改动了内容的行数」。§12.5 第 5 条原记的聚合建议**已落地**（见该处 v1.31 修订）。
 
 ---
 
@@ -413,7 +424,7 @@ body：`{"platform": "gg"|"tt", "dry_run": true}` / `{"platform": ..., "dry_run"
 1. **配置读写**：POST 后 GET 能取回；GG / TT 互不覆盖（平台隔离）。
 2. **权限**：非户管访问 `/api/huguan/dashboard*` 全部 403。
 3. **列映射**：给定账户 fixture，验证 §5 的 GG 9 项 / TT 11 项写值正确，且**跳过列（GG E/L/M/N、TT K）不在写入区间内**。
-4. **区间合并**：`update_rows_by_account_id` 按连续列合区间，`not_found` 正确回传。
+4. **区间合并 + 整批单次（v1.31 补）**：`update_rows_by_account_id` 按连续列合区间，`not_found` 正确回传。另须断言 **`values().batchUpdate` 恰好被调用 1 次**（无论命中几行），且 `data` 里每个 range 的行号对应正确的账户；失败路径断言异常文案含「本次已写入 0 行」，以及 `data` 为空时**一次都不调用**、`updated` 仍等于命中行数。
 5. **归属协议**：
    - `重新分配` 非空 → 压过 `运营`（规则 1）
    - 自动回写**不写** `重新分配` 列（规则 2，用写入区间断言）
@@ -457,7 +468,7 @@ Google Sheets 调用在测试中一律 mock（对照现有测试做法），不�
 2. **归属变更权限很大。** 按「表里为准」，户管表里一行写谁的名，同步后就归谁。护栏是**差异确认页**——`owner_changes` 单列一类，户管逐个确认才落库。**这道护栏必须真的绑得住**：确认项按账户ID 绑定（不是行号，见 §8.3 步骤 8），且落库时对「勾了却没落库」的账户用 `not_applied` 明确回报——否则「确认页」只是走个形式，而行位移会让它把变更作用到另一个账户。
 3. **`account_id` / `advertiser_id` 全局 UNIQUE。** 表里出现系统已存在的同一账户ID 但归属不同 → 走 `owner_changes` 改归属，而不是新建（否则撞 UNIQUE 约束）。
 4. **名称歧义。** MCC / BC / 渠道 / 状态名重名时该列不落库（§8.4）。户管会在差异报告里看到警告，需要自己去把表里的名字写准确。
-5. **一次同步的请求耗时。** 全量 push 会逐行调 Sheets API。首版不做并发，账户量大时可能较慢；若实测超时，再考虑 `spreadsheets.values.batchUpdate` 聚合成单次请求（已在 §6.1 的区间合并里留了余地）。
+5. **一次同步的请求耗时。** ~~全量 push 会逐行调 Sheets API。~~ **v1.31 修订：聚合作业已完成，不再是待办。** `update_rows_by_account_id` 现把全部行的写入区间合并进**一次** `spreadsheets.values.batchUpdate`（§6.1 v1.31 修订、§6.4 第二项），全量 push 的 Sheets 请求数与行数**无关**，恒为 1 次（读索引那次 `read_sheet_values` 另计）。因此**不做并发**：并发的收益（省 HTTP 往返）已经由整批单次拿到，再加线程只会把「原子整批」拆回多个可半写的事务。分段（`data` 超请求体上限）同样不实现——几百行 × 十几列远小于上限，真撞上再说，属过度设计。
 
 ---
 

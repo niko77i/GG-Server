@@ -876,6 +876,15 @@ def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
     return {"updated": updated, "not_found": not_found}
 ```
 
+> **⚠️ v1.31 修订 —— 上面这段代码已被实现推翻，照抄会重新引入缺陷。**
+> 落地版（`py/google_sheets_service.py:685-723`）把**所有行**的写入区间收集进一个 `data`，
+> 在循环**外**发**一次** `values().batchUpdate`；`data` 为空则一次都不调用。
+> 上面这版在循环**内**每行发一次请求、且异常在循环内 `raise` —— 后果是
+> **前面的行已落表**（半写、无回滚，错误文案还会把责任缩到单个 `account_id`）。
+> 单次 `values.batchUpdate` 是原子的，所以「整批单次」不只是性能优化，它是
+> 「失败即 0 行」这一契约的前提。**按落地版实现，不要照抄本块。**
+> 细节见 `docs/superpowers/specs/2026-09-23-huguan-sheet-design.md` §6.1 / §6.4 / §12.5 的 v1.31 修订。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd py && python -m pytest tests/test_huguan_dashboard.py -q`
