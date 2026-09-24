@@ -1345,6 +1345,227 @@ git commit -m "fix(delist): 超时/连接失败/解析失败/代理失败统一�
 
 ---
 
+## Task 3c: 5xx 判定由「枚举集合」改为「429 或任意 5xx」
+
+> 用户 2026-09-24 裁定：「代码补齐：429 或任意 5xx」（spec §12.5）。
+> 这是 §2.3 同族缺陷的**第四个实例**。
+
+**Files:**
+- Modify: `py/delist_checker.py`（`:22-27` 常量、`:47` docstring、`:62` 使用点）
+- Modify: `py/tests/test_delist_checker.py`（新增 3 条用例）
+
+**Interfaces:**
+- Consumes: 无
+- Produces: `_is_indeterminate_status(status_code) -> bool`（模块私有）；
+  `_RETRYABLE_STATUS` **被删除**，不再对外存在
+
+**实测前置事实**：`_RETRYABLE_STATUS` 全仓仅三处引用（`delist_checker.py:27` 定义、
+`:47` docstring、`:62` 使用），**没有任何测试导入或断言它** —— 已 grep 核实。
+故删除该常量不会破坏既有测试。
+
+- [ ] **Step 1: 写失败的测试**
+
+在 `tests/test_delist_checker.py` 的 `TestIndeterminateStatus` 内追加三条：
+
+```python
+    def test_501_is_indeterminate_not_normal(self):
+        """501 也是 5xx，同样拿不到判定 —— 原枚举集合漏了它，会判成「正常」抹掉掉包记录。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=501, text="<html>not implemented</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is None
+        assert error != ""
+
+    def test_505_is_indeterminate_not_normal(self):
+        """505 HTTP Version Not Supported 同理。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=505, text="<html>http version not supported</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is None
+        assert error != ""
+
+    def test_499_is_not_indeterminate(self):
+        """边界：4xx 中只有 429 算未知，499 不属于本族（沿用既有口径，不得顺手拓宽）。"""
+        from delist_checker import check_url_delisted
+
+        resp = MagicMock(status_code=499, text="<html>client closed request</html>")
+        with patch("delist_checker.requests.get", return_value=resp):
+            is_delisted, error = check_url_delisted("https://play.google.com/store/apps/details?id=com.a.b")
+
+        assert is_delisted is False
+        assert error == ""
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `cd py && python -m pytest tests/test_delist_checker.py::TestIndeterminateStatus -v`
+
+Expected: 新增的 `test_501_...`、`test_505_...` FAIL（实际 `is False`，期望 `None`）；
+`test_499_...` PASS。**失败必须亲眼确认**，否则测试钉不住东西。
+
+- [ ] **Step 3: 实现**
+
+`py/delist_checker.py` 第 22-27 行，整块替换（注释一并按新口径改写）：
+
+```python
+# 判定未知的响应状态码：429（限流）与**任意** 5xx（500-599，服务端异常）。
+# 命中时本次无法判定，交由调用方换代理重试。
+# 实测依据：App Store 对掉包链接返回 404，被限流时返回 429，两者响应体同为
+# 2383 字节，只能靠状态码区分；旧逻辑只认 404，会把 429 当成「正常」，
+# 进而用 INSERT OR REPLACE 抹掉上一轮正确的掉包记录。
+# 原实现是枚举集合 {429, 500, 502, 503, 504}，501/505 等冷门 5xx 会漏成「正常」，
+# 后果同型 —— 故改为按区间判定。
+def _is_indeterminate_status(status_code: int) -> bool:
+    """429 或任意 5xx 均视为「拿不到判定」。"""
+    return status_code == 429 or 500 <= status_code < 600
+```
+
+`:47` 的 docstring 改为：
+
+```python
+        DelistIndeterminate: 状态码为 429 或任意 5xx（500-599），本次无法判定
+```
+
+`:62` 改为：
+
+```python
+    if _is_indeterminate_status(resp.status_code):
+```
+
+`DelistIndeterminate` 的类 docstring（`:32-36`）首句改为：
+
+```python
+    """响应状态为 429 或任意 5xx，本次判定结果未知。
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `cd py && python -m pytest tests/test_delist_checker.py -v`
+
+Expected: 全绿。**特别确认** `test_returns_false_when_app_page_normal`、
+`test_200_normal_still_false`、`test_200_normal_still_false_after_unknown_widening`、
+`test_proxy_retries_to_next_after_429`、`test_retries_next_proxy_after_failure`、
+`test_no_pool_keeps_direct_connection` 六条**未做任何改动**且仍通过 ——
+它们是「拿到了判定仍是 False」的反面边界。
+
+- [ ] **Step 5: 跑掉包相关全套**
+
+Run: `cd py && python -m pytest tests/test_delist_checker.py tests/test_delist_indeterminate.py tests/test_delist_api.py tests/test_tt_delist_notification.py tests/test_tt_appstore_package.py -q`
+
+Expected: 全绿。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add py/delist_checker.py py/tests/test_delist_checker.py
+git commit -m "fix(delist): 5xx 判定改为「429 或任意 5xx」，501/505 不再漏判为正常"
+```
+
+---
+
+## Task 3d: TT 手动检测改走代理池
+
+> 用户 2026-09-24 裁定：「改代码：TT 手动也走代理池」（spec §12.6）。
+
+**Files:**
+- Modify: `py/routes/tt_routes.py:665`
+- Modify: `py/tests/test_tt_delist_notification.py`（在 `TestTtManualCheckNotify` 内新增 1 条）
+
+**Interfaces:**
+- Consumes: `main._build_delist_proxy_pool()`（定义于 `py/main.py:3593`，返回
+  `ProxyPool | None`）
+- Produces: 无对外新接口
+
+**必须局部导入**：`tt_routes.py` 不在模块层导入 `main`（`main.py` 导入并注册本
+Blueprint，模块级互导成环）。先例：`routes/tt_accounts_routes.py:717/1050/1216`、
+`routes/huguan_dashboard_routes.py:52/88/168/219/224`。
+
+**既有测试不受影响**：`tests/test_tt_delist_notification.py:444/464/491` 三条 TT 手动
+用例都 monkeypatch 了 `delist_checker.check_product_packages`，第三个参数被忽略。
+（`_build_delist_proxy_pool()` 仍会被求值，但它只构造对象、不发网络请求。）
+
+- [ ] **Step 1: 写失败的测试**
+
+在 `tests/test_tt_delist_notification.py` 的 `TestTtManualCheckNotify` 内追加：
+
+```python
+    def test_manual_check_passes_proxy_pool(self, client, tt_headers, monkeypatch):
+        """TT 手动检测必须把代理池透传给 check_product_packages（口径同 GG 手动 / TT 定时）。
+
+        原实现在 tt_routes.py 传 None（直连），与 AGENTS.md 描述及另外三处调用不一致。
+        """
+        import main
+
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+        pid = _mk_product(db, uid, "代理池产品")
+        _mk_package(db, pid, "系列P")
+        db.close()
+
+        sentinel = object()
+        monkeypatch.setattr(main, "_build_delist_proxy_pool", lambda: sentinel)
+
+        seen = {}
+
+        def _fake_check_product(pid_, pkgs, pool):
+            seen["pool"] = pool
+            return [{"package_id": p["id"], "product_id": pid_,
+                     "is_delisted": False, "error": ""} for p in pkgs]
+
+        monkeypatch.setattr(delist_checker, "check_product_packages", _fake_check_product)
+
+        resp = client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+
+        assert resp.status_code == 200
+        assert seen["pool"] is sentinel
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `cd py && python -m pytest "tests/test_tt_delist_notification.py::TestTtManualCheckNotify::test_manual_check_passes_proxy_pool" -v`
+
+Expected: FAIL —— `assert None is sentinel`（当前传的是 `None`）。
+
+- [ ] **Step 3: 实现**
+
+`py/routes/tt_routes.py:665`，把
+
+```python
+    results = delist_checker.check_product_packages(pid, pkg_list, None)
+```
+
+改为
+
+```python
+    # 与 GG 手动 / GG 定时 / TT 定时口径一致：走代理池，降低限流概率。
+    # 局部导入：main.py 导入并注册本 Blueprint，模块级互导会成环。
+    from main import _build_delist_proxy_pool
+    results = delist_checker.check_product_packages(pid, pkg_list, _build_delist_proxy_pool())
+```
+
+其余一字不动（空包分支、None 分支 `continue`、通知闸门均在原处）。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `cd py && python -m pytest tests/test_tt_delist_notification.py tests/test_tt_routes.py -q`
+
+Expected: 全绿（含新增 1 条 + 既有 3 条 TT 手动用例 + 权限用例）。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add py/routes/tt_routes.py py/tests/test_tt_delist_notification.py
+git commit -m "fix(tt): 手动掉包检测改走代理池，与 GG 手动及两处定时检测对齐"
+```
+
+---
+
 ## Task 4: 前端录入放行与 iOS 标识
 
 **Files:**
@@ -1535,6 +1756,102 @@ git commit -m "docs: AGENTS.md 补充 TT 支持 App Store 链接与掉包判定�
 
 ---
 
+## Task 6: 文档措辞收紧（Task 5 审查的 M-1 / M-2 / M-4）与 Task 3c/3d 同步
+
+> Task 5 审查（spec ✅ / 质量 Approved）提出三条与本任务同批的措辞问题。
+> 本任务在 Task 3c、3d 落地**之后**执行 —— 3c 改写了 5xx 口径，3d 让 AGENTS.md
+> 原有的「TT 手动检测同样走代理池」这句**从失真变成正确**，两处新增文本要一并核对。
+
+**Files:**
+- Modify: `AGENTS.md`（掉包检测段 ~446-456、TT 掉包通知段 ~623）
+
+**Interfaces:**
+- Consumes: Task 3c（5xx 口径）、Task 3d（TT 手动走代理池）的最终行为
+- Produces: 无
+
+- [ ] **Step 1: M-1 + M-2：把「一律不写库」改成准确的「一律不写判定结果」**
+
+`AGENTS.md` 掉包检测段的这一句：
+
+```markdown
+  消费方（GG 定时 / GG 手动 / TT 定时 / TT 手动四处）遇 `None` **一律不写库**，
+  保留上一轮判定结果，也不触发掉包通知。
+```
+
+措辞失真：GG 手动路径在 `None` 分支会执行
+`UPDATE delist_checks SET error_msg=? WHERE package_id=?`（`main.py`）。
+「不写库」不准确。改为：
+
+```markdown
+  消费方（GG 定时 / GG 手动 / TT 定时 / TT 手动四处）遇 `None` **一律不写判定结果**，
+  保留上一轮判定结果，也不触发掉包通知。
+  例外：GG 侧会把原因写进 `delist_checks.error_msg`（该表有这一列，TT 的
+  `tt_delist_checks` 没有）；该 UPDATE 只更新**已存在的行**，没有行时不会新建，
+  因此「无判定不产生新记录」的语义不变。
+```
+
+- [ ] **Step 2: M-3：代理池为空是「几乎不可达」而非一条并列路径**
+
+同一段的七类枚举处：
+
+```markdown
+  「拿不到判定」的七类一律归为 `None`：HTTP 429/5xx、请求超时、网络连接失败、
+  链接解析失败（畸形 url）、代理池为空、代理全部失败、url 为空。
+```
+
+「代理池为空」实测不可达 —— `_build_delist_proxy_pool()`（`main.py:3593`）在
+「未启用」或「proxies 为空」时返回 `None`，而 `None` 走直连分支，**不会**进入
+`proxy_pool.count == 0` 那一段。保留它在列表里是为了说明分支语义，但需标注：
+
+```markdown
+  「拿不到判定」的七类一律归为 `None`：HTTP 429/5xx、请求超时、网络连接失败、
+  链接解析失败（畸形 url）、代理池为空、代理全部失败、url 为空。
+  （其中「代理池为空」分支实测不可达：`_build_delist_proxy_pool()` 在未启用或
+  代理列表为空时返回 `None`，直接走直连分支；保留它只为说明该分支语义。）
+```
+
+- [ ] **Step 3: M-4：补记前端「本轮未能判定」提示**
+
+Task 4 / M4 收尾给两个卡片加了四分支提示，AGENTS.md 未记。在掉包检测段
+「**判定第三态（未知）**」那一条之后追加一条：
+
+```markdown
+- **前端检测提示分四态**：GG/TT 产品卡片点「是否掉包」后，按本轮结果分四种提示 ——
+  无包可检提示「没有需要检测的包/跑包」；有掉包提示「检测到 N 个包已掉包！」；
+  无掉包但有未知提示「N 个包本轮未能判定（限流或网络异常），已保留上次判定结果」；
+  全部拿到判定且正常才提示「所有包均正常 ✓」。
+  起因：整批 429 限流时本轮结果全是 `None`，原实现仍弹「所有包均正常 ✓」，属失真提示。
+```
+
+- [ ] **Step 4: 核对 Task 3d 让原句从失真变正确**
+
+`AGENTS.md` TT 掉包通知段原有：
+
+```markdown
+- **手动检测**：`POST /api/tt/products/:pid/check-delist`，同样走代理池
+```
+
+Task 3d 落地后该句**已属实**，不改文本。但需**逐字核对** `tt_routes.py` 确实调用了
+`_build_delist_proxy_pool()`（`grep -n "_build_delist_proxy_pool" py/routes/tt_routes.py`
+应有 1 处命中）。若 Task 3d 未落地或落地方式不同，改回与代码一致的措辞并在报告中说明。
+
+- [ ] **Step 5: 核对 Task 3c 未让 5xx 措辞失真**
+
+`grep -n "429" AGENTS.md`，确认描述 5xx 的位置（若有）与
+`_is_indeterminate_status` 的「429 或任意 5xx」一致；`_RETRYABLE_STATUS` 已删除，
+文档中不得再出现该常量名。
+
+Run: `grep -n "_RETRYABLE_STATUS" AGENTS.md py/delist_checker.py` — Expected: 无输出。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add AGENTS.md
+git commit -m "docs: 收紧掉包判定措辞（不写判定结果 / 代理池为空不可达 / 前端四态提示）"
+```
+
+---
+
 ## 收尾（不属于任何 Task，交付前逐条确认）
 
 - [ ] `cd py && python -m pytest tests/ -q` 全绿
@@ -1554,4 +1871,8 @@ git commit -m "docs: AGENTS.md 补充 TT 支持 App Store 链接与掉包判定�
   连接失败、解析失败（畸形 url）、代理池为空、代理全部失败、空 url 共七类。
   反面仍然成立：**200 正常页面 / 404 掉包页面这类「拿到了判定」的结果一律不得改判 `None`**。
 - 不动 `tt_data_import` 的 JSON 重建逻辑
-- 不修 `tt_routes.py:644` 手动检测走直连（`proxy_pool=None`）这一现状 —— 与 `AGENTS.md` 描述不符，已作为疑问提出，待用户裁定
+- ~~不修 `tt_routes.py:665` 手动检测走直连（`proxy_pool=None`）这一现状~~ ——
+  **此项已被 Task 3d 推翻**（用户 2026-09-24 裁定：改代码，TT 手动也走代理池）。该文件是
+  `routes/tt_routes.py:665`（早前记为 `:644` 有误）。
+- **不拓宽 404 之外的 4xx**（403 反爬 / 410 / 499 等）判定 —— 属同族可疑面，
+  但改判它等于整体拓宽「只认 404 为掉包」的口径，超出本次裁定范围（spec §12.5 记为已知边界）。

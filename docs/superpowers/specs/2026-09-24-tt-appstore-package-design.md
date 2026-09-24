@@ -365,3 +365,77 @@ Task 1 起即可达，Task 3 扩大了可达面。
 
 **处置**：折进 Task 4 一并修正（Task 4 本就要改 `TtProductCard.vue`），提示语需区分
 「全部正常」与「本轮有 N 个未能判定」。用户 2026-09-24 裁定。
+
+### 12.5 5xx 只认了 500/502/503/504，其余 5xx 会漏成「正常」
+
+§2.3 同族缺陷的**第四个实例**。`delist_checker.py:27`：
+
+```python
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+```
+
+命中该集合的状态码抛 `DelistIndeterminate` → `None`（未知）；**不在集合里的 5xx**
+（501 Not Implemented、505 HTTP Version Not Supported、506/508/510/511 等）
+则继续往下走：既然不是 404，就落到关键词扫描 —— 拿一个「服务器错误页」去匹配
+`_DELISTED_PATTERNS`，几乎必然不命中 → `return False, ""` → 判为「正常」，
+再经消费方 `INSERT OR REPLACE` 抹掉上一轮正确的掉包记录。后果与 429 完全同型。
+
+可达性弱于前三例：需要上游（商店 / 中间代理 / CDN）真的返回这些冷门状态码，
+实测样本中未出现。但「503 判未知、501 判正常」这个不对称没有任何依据，
+且修复成本是一行。`_RETRYABLE_STATUS` 实测**仅被本模块三处引用**
+（`:27` 定义、`:47` docstring、`:62` 使用），**没有任何测试导入或断言它**，改写安全。
+
+**处置**：判定从「枚举集合」改为「429 或任意 5xx」：
+
+```python
+def _is_indeterminate_status(status_code: int) -> bool:
+    """429 或任意 5xx 均视为「拿不到判定」，应换代理重试。"""
+    return status_code == 429 or 500 <= status_code < 600
+```
+
+删除 `_RETRYABLE_STATUS`，`:62` 改为 `if _is_indeterminate_status(resp.status_code):`，
+`:47` docstring 与 `DelistIndeterminate` 类 docstring 同步措辞。
+**反面必须保持不变**：404 → `True`（掉包），200 正常页 → `False`（正常）；
+新增一条 200 对照用例，防止「把判定拓宽成未知」。
+
+**已知边界（本任务不动，另议）**：404 之外的 4xx 当前同样落到 `False`。
+其中 **403 在数据中心 IP 上是现实存在的**（商店返回反爬页），与本族缺陷同型；
+但改判它等于把「只认 404 为掉包」的口径整体拓宽，超出本次裁定范围 ——
+记为已知风险，不夹带进本任务。
+
+### 12.6 TT 手动检测实际走直连，与文档及另外三处调用不一致
+
+AGENTS.md 写「TT 手动检测 `POST /api/tt/products/:pid/check-delist`，同样走代理池」，
+但 `tt_routes.py:665` 传的是 `None`：
+
+```python
+results = delist_checker.check_product_packages(pid, pkg_list, None)   # ← 直连
+```
+
+四处同族调用的实际状态：
+
+| 调用点 | 代理池 |
+|--------|--------|
+| GG 手动 `main.py:3632` | ✅ `_build_delist_proxy_pool()` |
+| GG 定时 `main.py:8676` | ✅ |
+| TT 定时 `main.py:8857` | ✅ |
+| **TT 手动 `tt_routes.py:665`** | ❌ `None`（直连） |
+
+后果：TT 手动检测是唯一绕过代理池的路径，而它恰是最容易被限流的使用方式
+（用户手动连点）。429 实测频率约 1/5，直连等于把限流概率拉到最高 ——
+而限流一旦发生，正是本设计要收口的「未知态」源头。
+
+**处置**：改为 `_build_delist_proxy_pool()`，与其余三处对齐。
+`tt_routes.py` **不在模块层导入 `main`**（`main.py` 导入并注册本 Blueprint，
+模块级互导会成环），因此**在函数内部局部导入** —— 仓库既有先例：
+`routes/tt_accounts_routes.py:717/1050/1216`、`routes/huguan_dashboard_routes.py:52/88/168/219/224`。
+
+```python
+    from main import _build_delist_proxy_pool
+    results = delist_checker.check_product_packages(pid, pkg_list, _build_delist_proxy_pool())
+```
+
+既有 TT 手动检测的用例全部 monkeypatch 了 `delist_checker.check_product_packages`
+（`tests/test_tt_delist_notification.py:444/464/491`），第三个参数被忽略，结论不受影响；
+新增一条用例断言代理池被**透传**（monkeypatch `main._build_delist_proxy_pool`
+返回哨兵对象，断言 `check_product_packages` 收到的第三个参数正是该哨兵）。
