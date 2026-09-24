@@ -484,8 +484,13 @@ def update_package(pkg_id):
     # re-enforce type 规则：package 必须填写包名（App Store 链接除外，与 add_package 语义一致）
     pkg_type = updates.get('type', existing['type'])
     if pkg_type == 'package' and 'package_name' in updates and not updates['package_name']:
-        # 本次没传 url 时，用库里既有的 url 判断是不是苹果链接
-        if not _is_appstore_url(updates.get('url') or existing['url']):
+        # 本次显式传了 url 就用本次的（空串即「清空」→ 不放行）；
+        # 本次没传 url 才回落库里的 url 判断是不是苹果链接。
+        if 'url' in updates:
+            effective_url = updates['url']
+        else:
+            effective_url = existing['url']
+        if not _is_appstore_url(effective_url):
             return err('跑包必须填写包名', 400)
 
     if not updates:
@@ -662,6 +667,9 @@ def check_delist(pid):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dropped = []
     for r in results:
+        # 判定未知（限流/服务端异常）：不写库，保留上一轮判定结果
+        if r["is_delisted"] is None:
+            continue
         db.execute(
             "INSERT OR REPLACE INTO tt_delist_checks(package_id, is_delisted, checked_at) "
             "VALUES(?, ?, ?)",

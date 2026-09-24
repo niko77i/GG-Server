@@ -196,3 +196,34 @@ class TestImportTextAppstore:
         resp = client.post("/api/tt/products/import-text", headers=tt_headers,
                            json={"text": "看看 https://apps.apple.com/vn/charts/paid-apps"})
         assert resp.get_json()["parsed"] == []
+
+
+class TestUpdatePackageExplicitEmptyUrl:
+    """显式传空 url 时不得回落库里 url 而放行（否则落库成包名与 url 皆空）。"""
+
+    def _make_apple_pkg(self, client, tt_headers):
+        pid = client.post("/api/tt/products/create", headers=tt_headers, json={
+            "product_name": "空url收口产品",
+        }).get_json()["id"]
+        pkg_id = client.post(f"/api/tt/products/{pid}/packages", headers=tt_headers, json={
+            "type": "package", "series_name": "S1", "package_name": "", "url": APPLE_LIVE,
+        }).get_json()["id"]
+        return pid, pkg_id
+
+    def test_explicit_empty_url_rejected(self, client, tt_headers):
+        _, pkg_id = self._make_apple_pkg(client, tt_headers)
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                          json={"package_name": "", "url": ""})
+
+        assert resp.status_code == 400
+        assert "包名" in resp.get_json()["error"]
+
+    def test_omitting_url_still_allowed(self, client, tt_headers):
+        """没传 url（本次只清包名）仍按库里的苹果 url 放行 —— 既有能力不被削弱。"""
+        _, pkg_id = self._make_apple_pkg(client, tt_headers)
+
+        resp = client.put(f"/api/tt/packages/{pkg_id}", headers=tt_headers,
+                          json={"package_name": ""})
+
+        assert resp.status_code == 200

@@ -97,14 +97,18 @@ class TestCheckUrlDelisted:
         assert is_delisted is False
         assert error != ""
 
-    def test_empty_url_returns_false(self):
-        """空 URL → 直接返回未掉包。"""
+    def test_empty_url_returns_none(self):
+        """空 URL 无法判定 → 返回 None（调用方不得据此写「正常」）。
+
+        语义变更（2026-09-24）：原返回 (False, "")，会被消费方无条件写库成
+        is_delisted=0，抹掉上一轮正确的掉包记录 —— 与 429 属同一缺陷家族。
+        """
         from delist_checker import check_url_delisted
 
         is_delisted, error = check_url_delisted("")
 
-        assert is_delisted is False
-        assert error == ""
+        assert is_delisted is None
+        assert "无法判定" in error
 
     def test_uses_mobile_user_agent(self):
         """验证使用了移动端 User-Agent。"""
@@ -131,7 +135,11 @@ class TestCheckProductPackages:
     """测试批量检测产品下所有包的逻辑。"""
 
     def test_skips_packages_without_url(self):
-        """没有 URL 的包跳过检测。"""
+        """没有 URL 的包跳过检测，且判为「未知」而非「正常」。
+
+        语义变更（2026-09-24）：原 is_delisted=False，同样会被消费方写库成
+        is_delisted=0 而抹掉既有掉包记录。空 url 仍不发请求（mock_get 不被调用）。
+        """
         from delist_checker import check_product_packages
 
         packages = [
@@ -144,7 +152,7 @@ class TestCheckProductPackages:
 
         mock_get.assert_not_called()
         assert len(results) == 2
-        assert all(r["is_delisted"] is False for r in results)
+        assert all(r["is_delisted"] is None for r in results)
 
     def test_checks_packages_with_url(self):
         """有 URL 的包正常检测。"""

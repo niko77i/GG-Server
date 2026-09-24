@@ -577,3 +577,34 @@ class TestTtDelistScheduler:
         result = main._run_tt_delist_check_once()
         assert result["total"] == 0
         assert result["delisted"] == 0
+
+    def test_indeterminate_does_not_overwrite_existing_delisted(self, client, tt_headers, monkeypatch):
+        """429 等未知态不得把上一轮「已掉包」覆盖成正常。"""
+        import main
+
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+        pid = _mk_product(db, uid, "未知态产品")
+        pkg_id = _mk_package(db, pid, "未知包")
+        _mark_delisted(db, pkg_id, is_delisted=1)   # 上一轮已判定掉包
+        db.close()
+
+        # 本轮检测返回「未知」
+        monkeypatch.setattr(delist_checker, "check_url_delisted", lambda url, pool=None: (None, "HTTP 429 限流，判定未知"))
+        monkeypatch.setattr(main, "_build_delist_proxy_pool", lambda: None)
+        notified = []
+        monkeypatch.setattr(tt_routes, "send_tt_delist_notifications",
+                            lambda db_, pkgs, title="TT-Server": notified.append(pkgs) or len(pkgs))
+
+        result = main._run_tt_delist_check_once()
+
+        db = database.get_db()
+        row = db.execute("SELECT is_delisted FROM tt_delist_checks WHERE package_id=?",
+                         (pkg_id,)).fetchone()
+        db.close()
+
+        assert row["is_delisted"] == 1          # 既有判定被保留
+        assert notified == []                   # 未知态不触发通知
+        assert result["delisted"] == 0
+        assert result["results"][0]["is_delisted"] is None
+        assert "429" in result["results"][0]["error"]

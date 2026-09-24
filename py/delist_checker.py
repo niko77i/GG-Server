@@ -85,7 +85,7 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool | None, str]:
           None  → 判定未知（限流或服务端异常且重试耗尽），调用方应保留上一次判定结果
     """
     if not url or not url.strip():
-        return False, ""
+        return None, "URL 为空，无法判定"
 
     # 无代理池：直连，行为与历史版本一致（新增：限流/服务端异常返回「未知」）
     if proxy_pool is None:
@@ -150,8 +150,8 @@ def check_product_packages(product_id: int, packages: list[dict], proxy_pool=Non
             results.append({
                 "package_id": pkg_id,
                 "product_id": product_id,
-                "is_delisted": False,
-                "error": "",
+                "is_delisted": None,
+                "error": "URL 为空，无法判定",
             })
             continue
 
