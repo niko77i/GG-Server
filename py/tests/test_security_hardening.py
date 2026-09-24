@@ -650,3 +650,41 @@ class TestB3DownloadsRequireAuthOrSignature:
         assert resp.status_code != 401, (
             f"{path} 带 token 仍返回 401 —— 收口过头了"
         )
+
+    @pytest.mark.parametrize("path,_args", CASES)
+    def test_issued_signature_is_accepted(self, client, app, path, _args):
+        """闭环承重：`sign_query` 签发的 URL 必须能被同一端点放行。
+
+        为什么必须有这条：上面三条只钉住了「无签名 ⇒ 401」「假签名 ⇒ 401」
+        「带 token ⇒ 非 401」，**唯独没有一条证明「合法签名 ⇒ 放行」**。
+        于是只要签发侧与校验侧的约定不一致（参数名 `exp` 对不上 `expires`、
+        端点串写错、编码方式不同），**签名 URL 会全线 401 而上面三条依然全绿**
+        —— 这是典型的假绿：功能完全不可用，测试却零信号。
+
+        断言「非 401」而非 200：`whatever` 路径不存在，业务层应回 404。
+        """
+        from url_signing import sign_query
+
+        qs = sign_query(path, "whatever", app.config["JWT_SECRET_KEY"])
+        resp = client.get(path + "?" + qs)
+        assert resp.status_code != 401, (
+            f"{path} 拒绝了自己签发的 URL（{resp.status_code}）—— "
+            f"签发侧与校验侧的约定不一致。query={qs}"
+        )
+
+    def test_signature_is_bound_to_its_endpoint_at_route_level(self, client, app):
+        """一个端点的签名不能挪用到另一个端点 —— 在**路由层**验证绑定生效。
+
+        `test_url_signing.py::test_cross_endpoint_reuse_rejected` 只证明
+        `verify_query` 本身会拒绝跨端点复用；它管不到**端点有没有把正确的
+        endpoint 串传给 `_download_authorized`**。若某条端点写错了串
+        （例如 scrape/download 传了 "/api/video/download"），单测全绿而这条必红。
+        """
+        from url_signing import sign_query
+
+        qs = sign_query("/api/video/download", "whatever", app.config["JWT_SECRET_KEY"])
+        resp = client.get("/api/scrape/download?" + qs)
+        assert resp.status_code == 401, (
+            f"video/download 的签名挪用到 scrape/download 后被放行"
+            f"（{resp.status_code}）—— 端点的 endpoint 串绑定失效"
+        )
