@@ -170,7 +170,7 @@ TT 生产数据共 **12 个产品**（1 个已归档）：
 | `py/tests/test_tt_delist_notification.py` | 改写 `test_developer_sees_all`（见 §7） |
 | `docs/.../2026-09-24-tt-delist-notification-design.md` | 修正 `:93` / `:159` 两处相反表述 |
 | `AGENTS.md` | TT 掉包通知段补「可见性无角色特权」口径 |
-| `frontend/` | **不改** —— 无需 `npm run build` |
+| `frontend/` | **不改** —— **就本次改动而言**无需 `npm run build`；若工作区另有并行会话在途的前端改动，仍需另行构建（与本设计无关） |
 
 **API 契约不变**：路由、方法、响应结构（含 `platform: "tt"` 标记）全部不动，仅**返回集合收窄**。
 
@@ -227,3 +227,14 @@ TT 生产数据共 **12 个产品**（1 个已归档）：
 - **`role` 变量删除**已核实无其他引用，不会引入 NameError。
 - **与 GG 的差异点（有意保留）**：TT 多一条 owner 轴。这是 TT 产品有归属人而 GG 产品共享
   所致，属**结构性差异**，不是特权，故不在本次收窄范围。
+- **孤儿产品对所有人不可见（已裁定，知悉其可达路径）**：`owner_id IS NULL` 且无在跑人员的
+  TT 产品，其掉包在 `delist-status` 与 `delist/pending` 里对**任何人**（含 developer）都不可见。
+  这是裁定 2 复查时用户明确选择的项（问：「若某个 TT 产品既无 owner 也无在跑人员，它的掉包
+  该让 developer 看到吗？」答：「不可见」）。**但该状态不是理论态** —— `py/main.py:8233-8234`
+  在删除用户时会 `DELETE FROM tt_product_runners WHERE user_id = ?` 且
+  `UPDATE tt_products SET owner_id = NULL WHERE owner_id = ?`，故**删掉一个离职用户即可
+  产生孤儿产品**。届时该产品掉包后：`tt_delist_checks` 照常写入、Telegram 照发，但前端弹窗
+  无人收到，通知链断在最后一跳。
+  生产库当前无此类产品（§4：无在跑人员的产品 0 个、owner 未在跑名单的 1 个已归档且掉包数 0）。
+  如日后需要兜底，最小改法是给 developer 在**无主产品**上留一条可见路径，而非恢复全局特权 ——
+  但那会改变已裁定口径，需重新确认。
