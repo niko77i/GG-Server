@@ -730,10 +730,9 @@ def check_delist(pid):
 @jwt_required()
 @tt_required
 def delist_status():
-    """获取当前用户可见的掉包检测状态。"""
+    """获取当前用户可见的掉包检测状态（按归属/在跑人员，无角色特权）。"""
     db = get_db()
     uid = get_uid()
-    role = _get_role(db, uid)
 
     base_sql = (
         "SELECT dc.package_id, dc.is_delisted, dc.checked_at, "
@@ -743,18 +742,13 @@ def delist_status():
         "JOIN tt_packages pkg ON dc.package_id = pkg.id "
         "JOIN tt_products prod ON pkg.product_id = prod.id "
     )
-    if role in ('developer', 'admin'):
-        where = "WHERE dc.is_delisted = 1 AND prod.is_archived = 0 "
-        params = []
-    else:
-        where = (
-            "WHERE dc.is_delisted = 1 AND prod.is_archived = 0 AND "
-            "(prod.owner_id = ? OR pkg.product_id IN "
-            "(SELECT product_id FROM tt_product_runners WHERE user_id=?)) "
-        )
-        params = [uid, uid]
+    where = (
+        "WHERE dc.is_delisted = 1 AND prod.is_archived = 0 AND "
+        "(prod.owner_id = ? OR pkg.product_id IN "
+        "(SELECT product_id FROM tt_product_runners WHERE user_id=?)) "
+    )
 
-    rows = db.execute(base_sql + where + "ORDER BY dc.checked_at DESC", params).fetchall()
+    rows = db.execute(base_sql + where + "ORDER BY dc.checked_at DESC", [uid, uid]).fetchall()
     delisted = [dict(r) for r in rows]
     return ok({'delisted_packages': delisted})
 

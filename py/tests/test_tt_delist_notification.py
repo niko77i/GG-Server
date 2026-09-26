@@ -251,6 +251,70 @@ class TestTtDelistPending:
         assert notifs[0]["reminder_count"] == 0
 
 
+# ==================== delist-status 接口（可见性） ====================
+
+class TestTtDelistStatusScope:
+    """delist-status 可见性：归属人 ∪ 在跑人员，无 developer/admin 特权。"""
+
+    def test_developer_no_longer_sees_others(self, client, dev_headers):
+        """根因回归：developer 非 owner 非在跑 → 看不到他人产品的掉包。
+
+        改动前本接口对 developer 返回全部（carl567 误收弹窗即此因），故本用例先红后绿。
+        """
+        _, uid = _make_tt_user(client, "tt_dl_dev_a")
+        db = database.get_db()
+        pid = _mk_product(db, uid)
+        _mark_delisted(db, _mk_package(db, pid))
+        db.close()
+
+        resp = client.get("/api/tt/products/delist-status", headers=dev_headers)
+        assert resp.status_code == 200
+        assert resp.get_json()["delisted_packages"] == []
+
+    def test_developer_sees_when_runner(self, client, dev_headers):
+        """正向对照：developer 被列为在跑人员时确实能看到。
+
+        防「接口对 developer 整体返空」的假绿 —— 上一条用例单独存在时，
+        把函数写成 `return ok({'delisted_packages': []})` 也能骗过它。
+        """
+        _, uid = _make_tt_user(client, "tt_dl_dev_b")
+        db = database.get_db()
+        dev_uid = db.execute("SELECT id FROM users WHERE username='devuser'").fetchone()["id"]
+        pid = _mk_product(db, uid)
+        db.execute("INSERT INTO tt_product_runners(product_id, user_id) VALUES(?,?)", (pid, dev_uid))
+        _mark_delisted(db, _mk_package(db, pid))
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/tt/products/delist-status", headers=dev_headers)
+        assert resp.status_code == 200
+        assert len(resp.get_json()["delisted_packages"]) == 1
+
+    def test_owner_axis_kept(self, client, tt_headers):
+        """owner 轴保留（用户 2026-09-26 复查裁定）：归属人无在跑人员时仍可见。"""
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+        pid = _mk_product(db, uid)
+        _mark_delisted(db, _mk_package(db, pid))
+        db.close()
+
+        resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
+        assert resp.status_code == 200
+        assert len(resp.get_json()["delisted_packages"]) == 1
+
+    def test_other_user_cannot_see(self, client, tt_headers):
+        """补 test_tt_routes.py 注释段留下的越权回归缺口：非 owner/runner 看不到他人掉包。"""
+        _, uid = _make_tt_user(client, "tt_dl_other_d")
+        db = database.get_db()
+        pid = _mk_product(db, uid)
+        _mark_delisted(db, _mk_package(db, pid))
+        db.close()
+
+        resp = client.get("/api/tt/products/delist-status", headers=tt_headers)
+        assert resp.status_code == 200
+        assert resp.get_json()["delisted_packages"] == []
+
+
 # ==================== dismiss 接口 ====================
 
 class TestTtDelistDismiss:
