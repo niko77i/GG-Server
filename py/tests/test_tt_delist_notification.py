@@ -106,7 +106,11 @@ class TestTtDelistPending:
         assert len(notifs) == 1
         assert notifs[0]["product_id"] == pid
 
-    def test_developer_sees_all(self, client, dev_headers):
+    def test_developer_no_longer_sees_all(self, client, dev_headers):
+        """改自 test_developer_sees_all：developer 不再因角色看到全部。
+
+        收窄后与普通用户同口径 —— developer 非 owner、非在跑人员 → 空。
+        """
         _, uid = _make_tt_user(client, "ttuser_dev")
         db = database.get_db()
         pid = _mk_product(db, uid)
@@ -115,7 +119,26 @@ class TestTtDelistPending:
 
         resp = client.get("/api/tt/delist/pending", headers=dev_headers)
         assert resp.status_code == 200
-        assert len(resp.get_json()["notifications"]) == 1
+        assert resp.get_json()["notifications"] == []
+
+    def test_developer_sees_when_runner(self, client, dev_headers):
+        """正向对照：developer 作为在跑人员时确实收到通知。
+
+        防「接口对 developer 整体返空」的假绿。
+        """
+        _, uid = _make_tt_user(client, "ttuser_dev_runner")
+        db = database.get_db()
+        dev_uid = db.execute("SELECT id FROM users WHERE username='devuser'").fetchone()["id"]
+        pid = _mk_product(db, uid)
+        db.execute("INSERT INTO tt_product_runners(product_id, user_id) VALUES(?,?)", (pid, dev_uid))
+        _mark_delisted(db, _mk_package(db, pid))
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/tt/delist/pending", headers=dev_headers)
+        notifs = resp.get_json()["notifications"]
+        assert len(notifs) == 1
+        assert notifs[0]["product_id"] == pid
 
     def test_dropped_package_excluded(self, client, tt_headers):
         # 包状态已设为「掉包」→ 不再通知

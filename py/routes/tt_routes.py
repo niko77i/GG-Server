@@ -762,7 +762,7 @@ def delist_pending():
     - type='first': 首次通知（该包尚未弹出过）
     - type='reminder': 提醒通知（已关闭超过 3 分钟且未处理）
 
-    可见性与 delist_status 一致：跨用户角色看全部，其余按 owner_id 或在跑人员。
+    可见性与 delist_status 一致：按 owner_id 或在跑人员，无 developer/admin 特权。
     """
     import datetime
     db = get_db()
@@ -771,12 +771,11 @@ def delist_pending():
     # 平台闸门与 /api/tt/products/delist-status（@tt_required）完全一致：
     # 非 TT 平台用户（含 GG/FB 的 admin）不受理。区别在于这里静默返回空，
     # 不抛 403 —— 本接口被前端每 30s 轮询，抛错会在浏览器留下持续报错噪声。
-    # developer / 户管 属 PLATFORM_SWITCH_ROLES 直接放行，户管不命中任何
-    # TT 产品 → 天然返回空。
+    # developer / 户管 属 PLATFORM_SWITCH_ROLES 直接放行；二者通常不命中任何
+    # TT 产品（除非确为归属人或在跑人员）→ 天然返回空。闸门仍不可去掉：
+    # 非 TT 且不可切平台的用户（如 GG 的 admin）必须在此被挡下。
     if require_platform('tt') is not None:
         return ok({'notifications': []})
-
-    role = _get_role(db, uid)
 
     base_sql = (
         "SELECT dc.package_id, dc.is_delisted, dc.checked_at, "
@@ -794,14 +793,11 @@ def delist_pending():
         "AND (prod.status IS NULL OR prod.status = '' OR prod.status = 'active') "
         "AND (prod.is_archived IS NULL OR prod.is_archived = 0) "
     )
-    if role in ('developer', 'admin'):
-        params = [uid]
-    else:
-        base_sql += (
-            "AND (prod.owner_id = ? OR pkg.product_id IN "
-            "(SELECT product_id FROM tt_product_runners WHERE user_id=?)) "
-        )
-        params = [uid, uid, uid]
+    base_sql += (
+        "AND (prod.owner_id = ? OR pkg.product_id IN "
+        "(SELECT product_id FROM tt_product_runners WHERE user_id=?)) "
+    )
+    params = [uid, uid, uid]
 
     rows = db.execute(base_sql + "ORDER BY dc.checked_at DESC", params).fetchall()
 
