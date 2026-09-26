@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_tt_delist_notif_user ON tt_delist_notifications(u
 #### (3) `routes/tt_routes.py` — 接口补齐
 - **手动检测补通知**：`check_delist` 检测到掉包后，调用 `send_tt_delist_notifications()` 发 Telegram（对齐 GG `products_check_delist`）。**同时把检测范围收紧为「正常状态跑包」**（`status IS NULL/''/'0'/'normal'`，与 GG 手动检测 `products_check_delist` 的 WHERE 完全一致）——原先无状态过滤会把已掉包/暂停的包一并检测，补上通知后会变成噪声通知。
 - **新增 `send_tt_delist_notifications(db, pkgs, title="TT-Server")`**：按产品聚合，在跑人员从 `tt_product_runners` 查（JOIN `users` 取 `telegram_username`），调 `telegram_sender` 传 `title` 前缀。**放在 `tt_routes.py` 而非 `main.py`**：`main.py` 在模块级 import 蓝图，`tt_routes` 反向 import `main` 会造成循环导入；`main.py` 的定时检测改为函数内延迟 import。
-- **新增 `GET /api/tt/delist/pending`**（`@jwt_required()`，不加 `@tt_required`，与 GG `pending` 行为一致）：查 `tt_delist_checks` JOIN `tt_packages` JOIN `tt_products` LEFT JOIN `tt_delist_notifications`，返回当前用户可见（`owner_id` 命中或在 `tt_product_runners` 中；developer/admin 全部）的 first/reminder 通知，按产品聚合。返回结构对齐 GG `pending`。
+- **新增 `GET /api/tt/delist/pending`**（`@jwt_required()`，不加 `@tt_required`，与 GG `pending` 行为一致）：查 `tt_delist_checks` JOIN `tt_packages` JOIN `tt_products` LEFT JOIN `tt_delist_notifications`，返回当前用户可见（`owner_id` 命中或在 `tt_product_runners` 中）的 first/reminder 通知，按产品聚合。返回结构对齐 GG `pending`。**（⚠️ 2026-09-26 修订：原「developer/admin 全部」特权已按用户裁定移除 —— developer 即使不在跑也会收到弹窗；现口径为「归属人 ∪ 在跑人员」，详见 [`2026-09-26-tt-delist-visibility-scope-design.md`](2026-09-26-tt-delist-visibility-scope-design.md)）**
 - **新增 `POST /api/tt/delist/dismiss`**（`@jwt_required()`）：写 `tt_delist_notifications`（支持批量 package_ids），逻辑对齐 GG `delist_dismiss`。
 
 > **检测范围口径（实现时确认）**：TT 包状态与 GG 同名同值（`normal/no_events/paused/dropped/rejected`，「正常」在库里存 `''`）。定时检测与手动检测均只跑**正常状态**的包（白名单 `IS NULL / '' / '0' / 'normal'`），与 GG 两处检测完全一致；已掉包/暂停/没事件/拒登的包既不检测也不通知。`pending` 接口的包状态过滤沿用 GG 的写法（`NOT IN ('dropped','paused')` 兜底），实际生效范围由检测侧白名单决定。
@@ -156,7 +156,7 @@ dismissDelist: (packageIds) => client.post('/tt/delist/dismiss', { package_ids: 
 ## 7. 风险与注意
 
 - **机器人配置未提供前**：`tt_telegram.bot_token` 为空时，`send_tt_delist_notifications` 静默跳过（对齐 GG 的 `if not (bot_token and chat_id) return`），不影响定时检测与前端弹窗。
-- **户管（huguan）**：产品/包/素材域对户管拒绝（`no_huguan`），TT 掉包 pending 沿用 `delist_status` 的角色过滤（developer/admin 看全部，其余按 `owner_id` 或在跑人员），户管天然命中不到任何产品 → 返回空，不额外抛 403（避免前端每 30s 一次无意义报错）。
+- **户管（huguan）**：产品/包/素材域对户管拒绝（`no_huguan`），TT 掉包 pending 与 `delist_status` 同口径（按 `owner_id` 或在跑人员），户管天然命中不到任何产品 → 返回空，不额外抛 403（避免前端每 30s 一次无意义报错）。**（⚠️ 2026-09-26 修订：原「developer/admin 看全部」特权已按用户裁定移除 —— developer 即使不在跑也会收到弹窗；现口径为「归属人 ∪ 在跑人员」，详见 [`2026-09-26-tt-delist-visibility-scope-design.md`](2026-09-26-tt-delist-visibility-scope-design.md)）**
 - **不碰 GG 原有逻辑**：所有改动为增量（新表、新接口、`telegram_sender` 参数默认值保持兼容），不改动 GG 掉包链路。
 - **前端通知去重 key 加平台前缀**（`gg-5-first` / `tt-5-first`）：GG 与 TT 的 `product_id` 各自独立自增，不加前缀会误去重。
 - **未在本次对齐项**：TT 手动检测仍走直连（`check_product_packages(..., None)`），GG 手动检测走代理池——属于本次改动之前就存在的差异，未纳入本次范围，如需对齐可单独提出。
