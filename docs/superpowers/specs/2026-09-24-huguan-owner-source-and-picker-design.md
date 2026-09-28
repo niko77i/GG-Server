@@ -112,6 +112,12 @@
 
 而「改归属」需要的是**全量用户**。后果（实测确认）：**户管无法把一个 GG 账户转给一个只在 TT 有账户的合法用户**——那个人不出现在下拉里。
 
+> **⚠️ 2026-09-28 修订：「全量（不限平台）」这半句已被取代。** 该「跨平台转户」场景在生产数据里
+> 实测 **0 例**（GG 275 户 / TT 403 户的归属人 100% 是本平台用户），而代价是 GG 看板混入
+> FB 6 人 + TT 8 人。本端点现按 `?platform=` 隔离。**须保留的结论只有「不要求名下已有账户」**
+> 这半句（它才是与 `/api/platform/users` 的真正差别）。见
+> [2026-09-28-huguan-owner-options-platform-isolation-design.md](2026-09-28-huguan-owner-options-platform-isolation-design.md)。
+
 这违反用户的原始要求「户管随时可以更改运营归属」。父设计 §9.2 写「复用 `/platform/users`」是**错的**，本设计予以更正。
 
 **这不是推翻既有决策，而是补上另一半**：`2026-09-23-owner-filter-hide-empty-users-design.md`（账户面板「归属人」下拉只列出有账户的用户）是**为筛选**有意做的取舍，那个决策在筛选场景下依然正确。出错的是父设计把它**顺手套用**到了编辑场景。⇒ 两个端点各服务一个场景，都保留。
@@ -154,7 +160,14 @@ def dashboard_owner_options():
     return ok({"users": [dict(r) for r in rows]})
 ```
 
-> **实现时须核**：（a）本蓝图文件的既有 import 与 `ok(...)` 用法；（b）`database.get_db()` 的取用方式以本文件既有写法为准；（c）`users.platform` 允许 `'gg'|'tt'|'fb'`，developer 为双平台——本端点**不按平台过滤**，这是有意的。
+> **实现时须核**：（a）本蓝图文件的既有 import 与 `ok(...)` 用法；（b）`database.get_db()` 的取用方式以本文件既有写法为准；（c）`users.platform` 允许 `'gg'|'tt'|'fb'`，developer 为双平台。
+>
+> **⚠️ 2026-09-28 修订：（c）末句「本端点**不按平台过滤**，这是有意的」已作废。** 现按
+> `platform = ?platform` 过滤（白名单 `hd.PLATFORMS` 之外回落 `gg`）；`developer` 不特判 ——
+> 其 `platform='gg'`，故 GG 看板自然保留（生产 265 户挂他名下，缺了他那些行的归属格会退化成
+> 禁用态）、TT 看板自然排除。
+> 上面那段示例代码同理作废，现行实现见
+> [2026-09-28-huguan-owner-options-platform-isolation-design.md](2026-09-28-huguan-owner-options-platform-isolation-design.md)。
 
 ### 2.3 数据结构
 

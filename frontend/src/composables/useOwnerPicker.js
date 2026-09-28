@@ -1,7 +1,7 @@
 /**
  * 「户归属」列 composable —— 账户面板（GG / TT）共用。
  *
- * 拥有：下拉数据源（全量用户）、水合感知的惰性加载、逐行改归属的乐观更新 + 回滚 + 反馈。
+ * 拥有：下拉数据源（当前看板平台的用户）、水合感知的惰性加载、逐行改归属的乐观更新 + 回滚 + 反馈。
  * **不**拥有：单元格模板与 CSS —— 两者留在各面板，因为 aria-label 的标识符字段按平台不同
  * （GG 用 `row.account_id`、TT 用 `row.advertiser_id`）。
  *
@@ -18,7 +18,7 @@ import { huguanApi } from '@/api/huguan'
 export function useOwnerPicker(reassign) {
   const authStore = useAuthStore()
 
-  const ownerOptions = ref([])           // 下拉数据源：全量用户（**编辑**用途）
+  const ownerOptions = ref([])           // 下拉数据源：当前看板平台的用户（**编辑**用途，不要求已有账户）
   const ownerOptionsLoaded = ref(false)  // 请求是否已落定（成功或失败）；落定后不再显示骨架
   const ownerOptionsFailed = ref(false)  // 请求失败：该列所有下拉禁用并提示（§5.6，写操作不许静默失败）
   const ownerPending = ref(new Set())    // 正在提交的行 id，防重入（§5.5）
@@ -38,11 +38,11 @@ export function useOwnerPicker(reassign) {
     { immediate: true }
   )
 
-  // 数据源必须是户管专用的 owner-options，**不是** /platform/users：后者是给上方「归属人」
-  // 筛选器用的，只列**该平台有未删除账户**的用户（那是筛选场景的有意设计，见
-  // docs/superpowers/specs/2026-09-23-owner-filter-hide-empty-users-design.md）。拿它当改归属
-  // 的选项源，户管就没法把 GG 的户转给一个只在 TT 有户的合法用户（实测缺口）。
-  // 依据：docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md §2.4
+  // 数据源必须是户管专用的 owner-options，**不是** /platform/users：后者要求「名下已有
+  // 未删除账户」，拿它当改归属的选项源，户管就没法把户转给刚建号、还没分到户的新人。
+  // 两者现在**都按平台隔离**（2026-09-28 起，owner-options 也加了 ?platform= 过滤），
+  // 差别只剩这一条「是否要求已有账户」。
+  // 依据：docs/superpowers/specs/2026-09-28-huguan-owner-options-platform-isolation-design.md
   async function loadOwnerOptions() {
     // 非户管一个请求也不发（§5.6）。这道守卫必须留在 loader 内部：watch 由 user.id 触发，
     // 而 user.id 对任何角色都会有值。
