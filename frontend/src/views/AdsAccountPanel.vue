@@ -291,7 +291,9 @@ onMounted(() => {
 async function load() {
   const res = await store.loadAccounts()
   mccOptions.value = res.mcc_options || []
-  agentOptions.value = store.options.agents.map(a => ({ id: a.id, name: a.name }))
+  // 代理下拉改取 accounts/list 的 agents：口径与当前列表一致，且跨用户角色（户管/admin）也有值。
+  // 原先取 store.options.agents（= 自己名下的全部代理），户管名下没有代理 → 下拉恒为空。
+  agentOptions.value = res.agents || []
   timezoneOptions.value = res.timezone_options || []
   if (res.status_counts) statusCounts.value = res.status_counts
 }

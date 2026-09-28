@@ -24,6 +24,16 @@ def _huguan(client, username="_hg_main", platform="gg"):
     return _create_user(client, username, role="huguan", platform=platform)
 
 
+def _agent_names(payload):
+    """取 /api/accounts/list 返回的 agents 下拉里的**代理名**。
+
+    该字段形状为 [{"id","name"}]（与 TT 的 /api/tt/... 同构）—— 行内编辑下拉需要 agent_id，
+    纯名字数组喂不了它。本 helper 让下面这些断言只关心「有哪几个代理名」，
+    形状再变时只需改这一处。
+    """
+    return [a["name"] for a in payload["agents"]]
+
+
 class TestHuguanCrossPlatformAccess:
     def test_huguan_can_call_tt_endpoint(self, client):
         """户管的 users.platform 是 gg，但切到 TT 后调 TT 接口不应被 403。"""
@@ -660,8 +670,44 @@ class TestGgAccountListDropdownOwnerLeak:
         assert data["accounts"] == []
         # 三个下拉字段才是守卫真正保护的地方
         assert [m["name"] for m in data["mcc_options"]] == []
-        assert data["agents"] == []
+        assert _agent_names(data) == []
         assert data["timezone_options"] == []
+
+
+class TestGgAgentsDropdownShapeForCrossUser:
+    """户管（跨用户角色）的「代理」下拉必须有值，且每项带 id。
+
+    背景：账户面板的代理下拉原取自 `/api/agents/list`（= **自己名下**的全部代理），
+    户管名下没有代理 → 跨平台进入 GG 后「全部代理」下拉恒为空。现改取
+    `/api/accounts/list` 的 agents 字段 —— 该字段对跨用户角色返回「被账户用过的全部代理」。
+
+    形状同时由 `["名字"]` 升为 `[{"id","name"}]`：行内编辑那颗下拉的
+    `:value="a.id"` 要的就是 agent_id，纯名字数组喂不了它（会写入 undefined）。
+
+    本用例是这条链的守卫，两条断言分别盯住两件事：
+      · 把跨用户分支加上归属条件 → `"他人代理SHP" in by_name` 变红（下拉又空了）；
+      · 把形状改回字符串数组 → `a["name"]` 在 `{...}` 推导里直接 TypeError。
+    """
+
+    def test_huguan_sees_agents_used_by_other_users(self, client):
+        from cache import cache as _app_cache
+        _app_cache.clear()
+
+        _, a_id = _create_user(client, "_ggshp_a", role="user")   # 代理与账户的所有者
+        hg, _ = _huguan(client, "_ggshp_hg")
+        db = database.get_db()
+        _mk_account(db, a_id, "GG-SHP-1", "形状账户")
+        db.execute("INSERT INTO agents(name, owner_id, platform) VALUES('他人代理SHP', ?, 'gg')", (a_id,))
+        ag_id = db.execute("SELECT id FROM agents WHERE name='他人代理SHP'").fetchone()["id"]
+        db.execute("UPDATE accounts SET agent_id=? WHERE account_id='GG-SHP-1'", (ag_id,))
+        db.commit()
+        db.close()
+
+        data = client.get("/api/accounts/list?size=50", headers=hg).get_json()
+        by_name = {a["name"]: a for a in data["agents"]}
+        assert "他人代理SHP" in by_name
+        # 形状必须是 {id, name} —— 行内编辑下拉靠这个 id 回写 agent_id
+        assert by_name["他人代理SHP"]["id"] == ag_id
 
 
 class TestGgAgentsDropdownCacheInvalidation:
@@ -698,7 +744,7 @@ class TestGgAgentsDropdownCacheInvalidation:
 
         # 第 1 步：读到改名前的下拉值，同时把该键的缓存写热
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "改名前代理" in data["agents"]
+        assert "改名前代理" in _agent_names(data)
 
         # 第 2 步：改名
         resp = client.put(f"/api/agents/{aid}", json={"name": "改名后代理"}, headers=headers)
@@ -706,8 +752,8 @@ class TestGgAgentsDropdownCacheInvalidation:
 
         # 第 3 步：缓存必须已被失效 —— 否则这里仍是「改名前代理」
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "改名后代理" in data["agents"]
-        assert "改名前代理" not in data["agents"]
+        assert "改名后代理" in _agent_names(data)
+        assert "改名前代理" not in _agent_names(data)
 
     def test_create_invalidates_agents_dropdown_cache(self, client):
         """回归：新增代理后，账户面板「代理」下拉的缓存必须立刻失效。
@@ -738,7 +784,7 @@ class TestGgAgentsDropdownCacheInvalidation:
 
         # 第 1 步：加载面板 —— 同时把该键的缓存写热
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "原有代理" in data["agents"]
+        assert "原有代理" in _agent_names(data)
 
         # 第 2 步：新增代理（此调用必须失效缓存）
         resp = client.post("/api/agents/create", json={"name": "新建代理"}, headers=headers)
@@ -753,7 +799,7 @@ class TestGgAgentsDropdownCacheInvalidation:
 
         # 第 4 步：缓存必须已被第 2 步失效 —— 否则这里仍是第 1 步的旧列表
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "新建代理" in data["agents"]
+        assert "新建代理" in _agent_names(data)
 
 
 def _agents_dropdown_key(uid):
@@ -800,7 +846,7 @@ class TestAnyAgentsInsertInvalidatesDropdownCache:
 
         # 第 1 步：加载面板 → 把 accounts:agents:{uid}:{uid} 写热（此时列表为空）
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "T21代建代理" not in data["agents"]
+        assert "T21代建代理" not in _agent_names(data)
 
         # 第 2 步：POST /api/accounts/create 传一个从未用过的代理名
         #         → 走 INSERT INTO agents，并立刻把新账户挂到该代理上
@@ -811,7 +857,7 @@ class TestAnyAgentsInsertInvalidatesDropdownCache:
 
         # 第 3 步：不手动清缓存 —— 若第 2 步没失效，这里仍是第 1 步的旧列表
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "T21代建代理" in data["agents"]
+        assert "T21代建代理" in _agent_names(data)
 
     def test_accounts_batch_create_invalidates_agents_dropdown_cache(self, client):
         """A2 `py/main.py` `accounts_batch_create`：逐账户 agent 文本回退分支。"""
@@ -821,7 +867,7 @@ class TestAnyAgentsInsertInvalidatesDropdownCache:
         headers, _ = _create_user(client, "_t21_a2_u", role="user")
 
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "T21批量代理" not in data["agents"]
+        assert "T21批量代理" not in _agent_names(data)
 
         resp = client.post("/api/accounts/batch-create", json={
             "account_ids": ["T21-A2-1"], "agent": "T21批量代理",
@@ -829,7 +875,7 @@ class TestAnyAgentsInsertInvalidatesDropdownCache:
         assert resp.status_code == 200
 
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "T21批量代理" in data["agents"]
+        assert "T21批量代理" in _agent_names(data)
 
     def test_sync_create_invalidates_agents_dropdown_cache(self, client, monkeypatch):
         """A3 `_execute_sync_create`：`POST /api/accounts/sync-from-sheet` 的
@@ -859,7 +905,7 @@ class TestAnyAgentsInsertInvalidatesDropdownCache:
 
         # 第 1 步：把缓存写热
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "T21同步代理" not in data["agents"]
+        assert "T21同步代理" not in _agent_names(data)
 
         # 看板行格式（A:H）：A运营 B账户ID C代理 D- E时区 F备注 G是否封户 H解绑
         rows = [
@@ -882,7 +928,7 @@ class TestAnyAgentsInsertInvalidatesDropdownCache:
 
         # 第 3 步：缓存必须已被调用方的清缓存行失效
         data = client.get("/api/accounts/list?size=50", headers=headers).get_json()
-        assert "T21同步代理" in data["agents"]
+        assert "T21同步代理" in _agent_names(data)
 
     # ---------- A 组不可观测的 2 处 + B 组 2 处：白盒不变量断言 ----------
 
@@ -2566,7 +2612,7 @@ class TestAgentsCacheInvalidationCrossUser:
 
         # 第 1 步：A（所有者）读列表 → 把 `accounts:agents:{A}:{A}` 写热
         data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
-        assert "改名前代理" in data["agents"]
+        assert "改名前代理" in _agent_names(data)
 
         # 第 2 步：**户管**（非所有者）改名
         resp = client.put(f"/api/agents/{ag}?platform=gg", json={"name": "改名后代理"}, headers=hg)
@@ -2574,8 +2620,8 @@ class TestAgentsCacheInvalidationCrossUser:
 
         # 第 3 步：A 再读 —— 缓存必须已失效，否则仍是旧名
         data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
-        assert "改名后代理" in data["agents"]
-        assert "改名前代理" not in data["agents"]
+        assert "改名后代理" in _agent_names(data)
+        assert "改名前代理" not in _agent_names(data)
 
     def test_delete_by_huguan_invalidates_owner_dropdown_cache(self, client):
         """A 先读列表把缓存写热 → 户管删 A 的代理 → A 再读不得再有该旧名。
@@ -2599,7 +2645,7 @@ class TestAgentsCacheInvalidationCrossUser:
 
         # 第 1 步：A 读列表 → 缓存写热，含「待删代理」
         data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
-        assert "待删代理" in data["agents"]
+        assert "待删代理" in _agent_names(data)
 
         # 解除引用，使删除可通过账户引用检查
         db = database.get_db()
@@ -2613,7 +2659,7 @@ class TestAgentsCacheInvalidationCrossUser:
 
         # 第 3 步：A 再读 —— 缓存必须已失效，旧名不得再出现
         data = client.get("/api/accounts/list?size=50", headers=hdr_a).get_json()
-        assert "待删代理" not in data["agents"]
+        assert "待删代理" not in _agent_names(data)
 
 
 class TestGgAccountListDropdownScope:
@@ -2667,7 +2713,7 @@ class TestGgAccountListDropdownScope:
         assert {a["account_id"] for a in data["accounts"]} == {"GG-SC-1", "GG-SC-2"}
         # 三个下拉必须覆盖全量，与列表口径一致
         assert {"U1的MCC", "U2的MCC"} <= {m["name"] for m in data["mcc_options"]}
-        assert {"代理S1", "代理S2"} <= set(data["agents"])
+        assert {"代理S1", "代理S2"} <= set(_agent_names(data))
         assert {"Asia/Shanghai", "America/New_York"} <= set(data["timezone_options"])
 
     def test_huguan_owner_filter_narrows_dropdowns(self, client):
@@ -2676,7 +2722,7 @@ class TestGgAccountListDropdownScope:
         resp = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hg)
         data = resp.get_json()
         assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
-        assert data["agents"] == ["代理S1"]
+        assert _agent_names(data) == ["代理S1"]
         assert data["timezone_options"] == ["Asia/Shanghai"]
 
     def test_regular_user_dropdowns_stay_scoped_to_self(self, client):
@@ -2686,7 +2732,7 @@ class TestGgAccountListDropdownScope:
         data = resp.get_json()
         assert {a["account_id"] for a in data["accounts"]} == {"GG-SC-1"}
         assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
-        assert data["agents"] == ["代理S1"]
+        assert _agent_names(data) == ["代理S1"]
         assert data["timezone_options"] == ["Asia/Shanghai"]
 
     def test_regular_user_ignores_owner_id_on_dropdowns(self, client):
@@ -2696,5 +2742,5 @@ class TestGgAccountListDropdownScope:
         data = resp.get_json()
         assert {a["account_id"] for a in data["accounts"]} == {"GG-SC-1"}
         assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
-        assert data["agents"] == ["代理S1"]
+        assert _agent_names(data) == ["代理S1"]
         assert data["timezone_options"] == ["Asia/Shanghai"]

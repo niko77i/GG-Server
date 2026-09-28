@@ -4151,18 +4151,38 @@ def accounts_list():
     agents_cache_key = f"accounts:agents:{user_id}:{scope}"
     agents = _app_cache.get(agents_cache_key)
     if agents is None:
+        # 形状 [{id, name}]：筛选下拉取 name，行内编辑取 agent_id —— 纯名字数组喂不了后者。
+        # 名字集合对**两个分支都与改形状前逐字相同**，只多带 id —— 修「户管下拉为空」
+        # 不靠放宽可见范围，所以不引入 platform 条件、也不含从未被分配过的代理。
+        # 唯一的集合变化在 else 分支：由「账户用过的代理」扩为它与「该归属名下全部代理」的并集。
+        #   并集是为了两边都不退化 —— ① 覆盖刚建好、还没分配给任何账户的代理（行内编辑要用，
+        #   也是旧来源 /api/agents/list 给普通用户的口径）；② 覆盖「账户用了别人名下代理」的
+        #   情形（筛选要用，也是旧 res.agents 的口径）。只取其一都会让某一方变窄。
+        # 按 name 去重、同名取最小 id：agents 表存在同名多 id 的脏数据（8 组），
+        # 不去重下拉会出重复项；取最小 id 与旧行为一致（旧来源按 id 升序，find(name) 命中的就是它）。
         if sub_owner is None:
-            # 跨用户 + 未筛选具体用户：与列表口径一致，不加归属条件
-            agents = [r["name"] for r in db.execute(
-                "SELECT DISTINCT ag.name FROM agents ag "
+            # 跨用户 + 未筛选具体用户：与列表口径一致，不加归属条件。
+            # 仍是「被账户用过的代理」——不加 platform 条件、不含从未被分配过的代理，
+            # 与改形状之前返回的名字集合逐字相同（只多带了 id）。
+            agents = [dict(r) for r in db.execute(
+                "SELECT MIN(ag.id) AS id, ag.name AS name FROM agents ag "
                 "INNER JOIN accounts a ON a.agent_id = ag.id "
-                "ORDER BY 1").fetchall()]
+                "GROUP BY ag.name ORDER BY ag.name").fetchall()]
         else:
-            agents = [r["name"] for r in db.execute(
-                "SELECT DISTINCT ag.name FROM agents ag "
-                "INNER JOIN accounts a ON a.agent_id = ag.id "
-                "WHERE a.owner_id=? "
-                "ORDER BY 1", (sub_owner,)).fetchall()]
+            # ① 该归属名下的全部代理（含建好但还没分配给任何账户的 —— 行内编辑要用）
+            # ② 该归属的账户用过的代理（可能是别人名下的 —— 筛选要用）
+            merged = {}
+            for r in db.execute(
+                    "SELECT id, name FROM agents WHERE platform='gg' AND owner_id=? ORDER BY id",
+                    (sub_owner,)):
+                merged.setdefault(r["name"], {"id": r["id"], "name": r["name"]})
+            for r in db.execute(
+                    "SELECT ag.id, ag.name FROM agents ag "
+                    "INNER JOIN accounts a ON a.agent_id = ag.id "
+                    "WHERE a.owner_id=? ORDER BY ag.id",
+                    (sub_owner,)):
+                merged.setdefault(r["name"], {"id": r["id"], "name": r["name"]})
+            agents = sorted(merged.values(), key=lambda x: x["name"])
         _app_cache.set(agents_cache_key, agents, ttl=120)
     tz_cache_key = f"accounts:tz:{user_id}:{scope}"
     timezone_options = _app_cache.get(tz_cache_key)
