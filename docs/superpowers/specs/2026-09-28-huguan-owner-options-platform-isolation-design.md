@@ -1,9 +1,9 @@
 # 「户归属」下拉按平台隔离 — 设计文档
 
 > 日期：2026-09-28
-> 状态：**待用户确认**
+> 状态：**已实现**（`4eaa954` 实现、`853c6cf` 口径同步；§3.2 经同日 code-review 收口后修订）
 > 修订：[2026-09-24-huguan-owner-source-and-picker-design.md](2026-09-24-huguan-owner-source-and-picker-design.md)
-> §2.4（「不按平台过滤」的口径由本文取代）
+> §2.1 / §2.2（「不按平台过滤」的口径由本文取代；§2.4 是 UI 改动，本无此口径）
 
 ## 1. 需求描述
 
@@ -39,12 +39,12 @@
 | 项 | 值 |
 |---|---|
 | 生效平台 | `?platform=`，缺省 `gg`，**白名单校验**（非 `gg`/`tt` 一律回落 `gg`） |
-| 过滤条件 | `role NOT IN ('viewer','hidden') AND platform = ?` |
-| `developer` | **不特判**。其 `users.platform='gg'` → GG 看板自然保留、TT 看板自然排除 |
+| 过滤条件 | `role NOT IN ('viewer','hidden') AND (platform = ? OR role IN PLATFORM_SWITCH_ROLES)` |
+| `PLATFORM_SWITCH_ROLES`（developer / 户管） | **无条件保留**，不随平台过滤（§3.2 的收口，见下） |
 | `viewer` / `hidden` | 维持排除（原口径不变） |
 | 「必须已有账户」 | **不加**。保留户管把户转给「刚建号、还没户」的新人这一能力 |
 
-### 3.1 developer 为什么不特判
+### 3.1 developer 为什么不显式排除
 
 `developer` 的 `users.platform` 就是 `gg`（生产库 2 个 developer 均是），
 所以 `platform = 'gg'` 天然把他留在 GG 看板的名单里 —— 这正是必需的：
@@ -55,14 +55,35 @@
 的「未知归属」分支会被触发 —— 这 265 行的户归属格会集体退化成**禁用的
 「用户 #1」**，户管一个都改不了。这是本次设计里最容易踩空的一处。
 
-反向也成立：TT 看板按 `platform='tt'` 过滤后，developer 自然不在名单里，
-而 TT 的 403 个账户**没有任何一个**挂在 developer 名下 —— 零影响。
+### 3.2 跨平台角色必须无条件保留（code-review 收口，取代初稿的「已知后果」）
 
-### 3.2 已知后果（用户已知晓）
+**初稿的结论是错的，此处更正。** 初稿写「TT 看板按 `platform='tt'` 过滤后 developer
+自然不在名单里……零影响」「户管本人在 TT 看板不可选，当前无实例，将来需要再改」——
+这只核对了**存量**行的归属人平台，漏掉了一条**可达路径**：
 
-户管本人的 `platform` 也是 `gg`，因此**在 TT 看板不可选**（无法把 TT 户转给户管自己）。
-当前无实例（TT 无 huguan 持有的户）。若将来需要，把口径改为
-`platform = ? OR role IN PLATFORM_SWITCH_ROLES` 即可，但本次不做。
+> 户管 / developer 的 `users.platform` 是 `gg`，却能在 TT 看板建户 ——
+> 「新增账户 / 批量导入 / 从表格同步」三条路径都把 `owner_id` 设成**操作者自己**
+> （`py/routes/tt_accounts_routes.py:122 / 405 / 1122`），而
+> `decorators.require_platform('tt')` 对 `PLATFORM_SWITCH_ROLES` **直接放行**。
+
+于是纯 `platform = 'tt'` 过滤下，这些 TT 户的归属人不在名单里 →
+`TtAccountPanel.vue:189` 的「未知归属」分支触发 → 归属格渲染成**禁用的「用户 #N」**，
+而 `components/tt/TtAccountModal.vue` **没有归属字段** ⇒ 户管没有任何 UI 能把它改回来
+（改归属正是这一列存在的唯一目的）。存量 0 例，但 developer 点一次「同步」就会批量产生。
+
+**故口径定为 `platform = ? OR role IN PLATFORM_SWITCH_ROLES`。** 代价仅限 TT 看板多出
+跨平台角色（生产 3 人：2 developer + 1 户管），**GG 看板名单逐字不变** ——
+生产里这 3 人全是 `platform='gg'`，本就在 GG 名单内（实测核对）。
+
+回归钉：`test_cross_platform_roles_stay_on_tt_board`（变异「去掉 OR」恰好 1 红）。
+
+### 3.3 与 `_get_effective_platform` 的有意差异
+
+本端点的平台取名函数对 `?platform=fb` **回落 `gg`**，而
+`main._get_effective_platform` 会原样返回 `'fb'`（账户表随之切到 `fb_accounts`）。
+这是有意的：本端点只服务 GG/TT 两份看板（`hd.PLATFORMS`），FB 没有看板表配置。
+**将来若给 FB 面板接上归属下拉，必须先扩展 `hd.PLATFORMS`**，否则会出现
+「列表是 FB 户、改归属下拉是 GG 人」的错配（`fb_routes` 的 reassign 只校验目标用户存在）。
 
 ## 4. 技术方案
 
@@ -81,27 +102,42 @@
 def _owner_option_platform():
     """owner-options 要按哪个平台隔离。
 
-    户管是 PLATFORM_SWITCH_ROLES 成员，其「有效平台」就等于 ?platform=（缺省 gg）
-    —— 与 main._get_effective_platform 对户管的取值逐字相同。本模块不 import main
-    （main 注册本 blueprint，反向 import 会循环），故就地实现这一条。
+    户管是 PLATFORM_SWITCH_ROLES 成员，其「有效平台」在 GG/TT 两份看板上就等于
+    ?platform=（缺省 gg）—— 与 main._get_effective_platform 对户管的取值相同。
+    本模块不 import main（main 注册本 blueprint，反向 import 会循环），故就地实现。
 
-    白名单是必要的：platform 直接进 SQL 的参数位，但更关键的是 `hd.PLATFORMS`
-    之外的值会让名单变空，而不是回落成「全部」。
+    ⚠️ 与 `_get_effective_platform` 有一处**有意**的差异：那个函数对 `?platform=fb`
+    原样返回 'fb'（账户表随之切到 `fb_accounts`），本函数却回落 'gg' —— 因为本端点
+    只服务 GG/TT 两份看板（`hd.PLATFORMS`），FB 没有看板表配置。**将来若给 FB 面板
+    接上归属下拉，必须先扩展 `hd.PLATFORMS`**，否则会出现「列表是 FB 户、改归属
+    下拉是 GG 人」的错配（`fb_routes` 的 reassign 只校验目标用户存在）。
+
+    白名单的方向也要看清：白名单外的值必须回落 gg，而不是「不过滤」—— 后者会把
+    FB/TT 的人漏回名单里，正好抵消本次隔离。
     """
     p = request.args.get("platform", "gg")
     return p if p in hd.PLATFORMS else "gg"
 ```
 
+> **⚠️ 初稿理由有误，已更正**：初稿写「`hd.PLATFORMS` 之外的值会让名单变空」——
+> 事实相反。实测生产库，`platform='fb'` 会返回 **6 个 fb 用户**（`admin-fb` 1 + `user-fb` 5），
+> 既不空也不回落。真正的理由如上：必须显式回落 `gg`，否则等于撤回了本次隔离。
+
 `dashboard_owner_options` 改为：
 
 ```python
     platform = _owner_option_platform()
+    # SQL 里只拼接「? 的个数」，角色名仍走参数位 —— 不是把用户输入拼进 SQL。
+    switch_roles = ", ".join("?" for _ in PLATFORM_SWITCH_ROLES)
     db = database.get_db()
     try:
         rows = db.execute(
             "SELECT id, username, display_name, platform FROM users "
-            "WHERE role NOT IN ('viewer', 'hidden') AND platform = ? "
-            "ORDER BY display_name, username", (platform,)).fetchall()
+            "WHERE role NOT IN ('viewer', 'hidden') "
+            f"AND (platform = ? OR role IN ({switch_roles})) "
+            "ORDER BY display_name, username",
+            (platform, *PLATFORM_SWITCH_ROLES)
+        ).fetchall()
     finally:
         db.close()
 ```
@@ -145,10 +181,12 @@ def _owner_option_platform():
 造的正是 `platform='tt'` 的无户用户，并断言户管（GG）调用时**他必须在结果里** ——
 这条钉子钉的就是旧口径，本次会把它打红。**并列的类 docstring 也必须重写。**
 
-改写原则：**保住原意，加上隔离这一面**。该用例真正要守的是
-「无账户的用户也能被选中」（防止有人给它加 `EXISTS(账户)`），
-这一点与平台无关，继续守；同时新增一条「非本平台用户不得出现」。
-故改为：造一个 `platform='gg'` 的无户用户 → 断言在；造一个 `platform='tt'` 的 → 断言不在。
+改写原则：**保住原意**。该用例真正要守的是「无账户的用户也能被选中」（防止有人给它加
+`EXISTS(账户)`），这一点与平台无关，继续守。故改为：造一个 `platform='gg'` 的无户用户
+→ 断言在，`platform` 字段断言同步由 `'tt'` 改为 `'gg'`。
+
+「非本平台用户不得出现」由 §5.2 新类的 `test_gg_board_excludes_other_platforms` 承担，
+不往这条里塞 —— 一条用例守一件事。
 
 `test_viewer_and_hidden_are_excluded` 的对照行 `normal` 走 `_seed` 默认
 `platform='gg'`，**不受影响**，无需改动。
@@ -160,19 +198,33 @@ def _owner_option_platform():
 | 非本平台用户不出现（GG） | 造 fb 用户 + tt 用户（各带一个账户）→ 户管不带参数调用 → **两个都不在**结果里 |
 | GG 看板含 gg 用户 | 造 gg 用户 → 在结果里（对照行，防「过滤过猛全滤掉」也绿） |
 | `?platform=tt` 切换名单 | 同一次调用带 `?platform=tt` → tt 用户在、gg 用户不在 |
-| 非法 platform 回落 gg | `?platform=fb` / `?platform=xx` → 等同不带参数 |
+| 非法 platform 回落 gg | `?platform=fb` / `?platform=xx` / `?platform=`（空串）→ 等同不带参数 |
 | developer 在 GG 看板保留 | 造 developer（platform='gg'）→ 在结果里（§3.1 的回归钉） |
+| **跨平台角色在 TT 看板保留** | 造 developer(gg) + 户管(gg) + tt 普通用户 → `?platform=tt` → tt 用户与跨平台角色**都在**（§3.2 的回归钉） |
 
-最后一条尤其重要：它同时守住「265 户挂 developer 名下不会退化成禁用格」这个真实代价。
+后两条尤其重要，它们各守一个方向的真实代价：前者守「265 户挂 developer 名下不会退化成
+禁用格」，后者守「跨平台角色在 TT 建出的户不会锁死」。
+
+变异实测（两方向各一次）：
+- 去掉 `AND platform = ?` 整段 → **3 红**（隔离那一面失效）；
+- 去掉 `OR role IN (...)` 只留 `platform = ?` → **1 红**（`test_cross_platform_roles_stay_on_tt_board`）；
+- 把 helper 改成 `return "nonexistent"`（过滤过猛）→ **6 红**（对照腿全部生效）。
+
+> 删 `OR` 时**必须同时删掉参数位的 `*PLATFORM_SWITCH_ROLES`**，否则占位符与参数个数
+> 失配、整组报 `Incorrect number of bindings` —— 那是假红，会把变异结论带偏
+> （第一次变异就踩到了这个坑）。
 
 ## 6. 涉及文件
 
 | 文件 | 改动 |
 |---|---|
-| `py/routes/huguan_dashboard_routes.py` | 新增 `_owner_option_platform()`；`dashboard_owner_options` 加平台条件 + 重写 docstring |
-| `py/tests/test_huguan_dashboard.py` | 改写 1 个用例 + 类 docstring；新增 5 条用例 |
-| `frontend/src/composables/useOwnerPicker.js` | 仅注释 |
-| `docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md` | §2.4 标注被本文取代 |
-| `AGENTS.md` | 设计文档索引 + TT/户管相关段落的口径同步 |
+| `py/routes/huguan_dashboard_routes.py` | 新增 `_owner_option_platform()`；`dashboard_owner_options` 加平台条件 + `OR role IN PLATFORM_SWITCH_ROLES` + 重写 docstring |
+| `py/tests/test_huguan_dashboard.py` | 改写 1 个用例 + 类 docstring；`TestOwnerOptionsPlatformIsolation` 新增 5 条用例 |
+| `frontend/src/composables/useOwnerPicker.js` | 仅注释（3 处「全量用户」措辞） |
+| `frontend/src/api/huguan.js` | 仅注释（`ownerOptions` 上方同款旧告诫） |
+| `docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md` | §2.1 / §2.2 标注被本文取代（§2.4 是 UI 改动，本无该口径） |
+| `docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md` | §5.4「✅ 更正」段加修订标注 |
+| `docs/superpowers/specs/2026-07-31-spring-boot-migration-design.md` | 迁移参考的 2 处端点口径同步（前瞻文档，照旧写会丢隔离） |
+| `AGENTS.md` | 设计文档索引 |
 
 前端零代码改动 → **无需 `npm run build`**；后端改动 → **需重启 Flask**。

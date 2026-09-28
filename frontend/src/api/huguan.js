@@ -13,9 +13,10 @@ export const huguanApi = {
   /** 表 → 系统：dry_run=true 出差异报告，false 才落库 */
   sync: (body) => api.post('/huguan/dashboard/sync', body),
 
-  // 「户归属」下拉的数据源（编辑用途，全量用户）。**不要**换回 /platform/users：
-  // 那个端点是给「归属人」筛选器用的，只列该平台有未删除账户的人；拿它当改归属的
-  // 选项源，户管就没法把 GG 的户转给一个只在 TT 有户的合法用户（实测缺口）。
-  // 见 docs/superpowers/specs/2026-09-24-huguan-owner-source-and-picker-design.md §2。
+  // 「户归属」下拉的数据源（**编辑**用途：当前看板平台的用户 + developer/户管）。
+  // **不要**换回 /platform/users：那个端点是给「归属人」筛选器用的，只列该平台有未
+  // 删除账户的人；拿它当改归属的选项源，户管就没法把户转给刚建号、还没分到户的新人。
+  // 两者现在都按平台隔离（2026-09-28 起），差别只剩这一条「是否要求已有账户」。
+  // 见 docs/superpowers/specs/2026-09-28-huguan-owner-options-platform-isolation-design.md。
   ownerOptions: () => api.get('/huguan/dashboard/owner-options'),
 }

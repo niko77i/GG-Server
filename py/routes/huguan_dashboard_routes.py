@@ -11,7 +11,7 @@ import database
 import huguan_dashboard as hd
 from cache import cache as _app_cache
 
-from .helpers import ok, err, get_uid
+from .helpers import ok, err, get_uid, PLATFORM_SWITCH_ROLES
 from .decorators import huguan_required
 
 huguan_dashboard_bp = Blueprint("huguan_dashboard", __name__)
@@ -176,12 +176,18 @@ def dashboard_push():
 def _owner_option_platform():
     """owner-options 要按哪个平台隔离。
 
-    户管是 PLATFORM_SWITCH_ROLES 成员，其「有效平台」就等于 ?platform=（缺省 gg）
-    —— 与 main._get_effective_platform 对户管的取值逐字相同。本模块不 import main
-    （main 注册本 blueprint，反向 import 会循环），故就地实现这一条。
+    户管是 PLATFORM_SWITCH_ROLES 成员，其「有效平台」在 GG/TT 两份看板上就等于
+    ?platform=（缺省 gg）—— 与 main._get_effective_platform 对户管的取值相同。
+    本模块不 import main（main 注册本 blueprint，反向 import 会循环），故就地实现。
 
-    白名单是必要的，且方向要看清：白名单外的值必须回落 gg，而不是「不过滤」——
-    后者会把 FB/TT 的人漏回名单里，正好抵消本次隔离。
+    ⚠️ 与 `_get_effective_platform` 有一处**有意**的差异：那个函数对 `?platform=fb`
+    原样返回 'fb'（账户表随之切到 `fb_accounts`），本函数却回落 'gg' —— 因为本端点
+    只服务 GG/TT 两份看板（`hd.PLATFORMS`），FB 没有看板表配置。**将来若给 FB 面板
+    接上归属下拉，必须先扩展 `hd.PLATFORMS`**，否则会出现「列表是 FB 户、改归属
+    下拉是 GG 人」的错配（`fb_routes` 的 reassign 只校验目标用户存在）。
+
+    白名单的方向也要看清：白名单外的值必须回落 gg，而不是「不过滤」—— 后者会把
+    FB/TT 的人漏回名单里，正好抵消本次隔离。
     """
     p = request.args.get("platform", "gg")
     return p if p in hd.PLATFORMS else "gg"
@@ -204,9 +210,16 @@ def dashboard_owner_options():
     （被停用、无法登录）。**按当前看板平台过滤**（`?platform=`，白名单外回落 gg）：
     GG 看板只列 gg 平台用户，TT 看板只列 tt 平台用户。
 
-    `developer` 不做特判：其 `users.platform` 本就是 `gg`，故在 GG 看板自然保留
-    （生产 265 户挂他名下，缺了他那些行的归属格会退化成禁用态）、在 TT 看板自然排除
-    （TT 无任何户挂他名下）。**别在这里加「显式排除 developer」**。
+    但 `PLATFORM_SWITCH_ROLES`（developer / 户管）**无条件保留**，不随平台过滤 ——
+    他们的 `users.platform` 是 `gg`，却能在 TT 看板建户：「新增账户 / 批量导入 /
+    从表格同步」三条路径都把 `owner_id` 设成操作者自己，而 `require_platform` 对这两个
+    角色直接放行。名单里没有他们，这些行的归属格就退化成禁用的「用户 #N」，且
+    `TtAccountModal` 没有归属字段 ⇒ 户管没有任何 UI 能把这一列改回来（改归属正是该列
+    存在的唯一目的）。存量 0 例，但 developer 点一次「同步」就会批量产生。
+    GG 看板名单因此**逐字不变**（生产里这两个角色全是 `platform='gg'`，本就在名单内），
+    只有 TT 看板多出他们 3 人。**别把这个 OR 去掉**。
+    `developer` 在 GG 看板上靠的也是这个 OR（265 户挂他名下，缺了他那些行会退化成
+    禁用态）—— 别在这里加「显式排除 developer」。
 
     本端点此前**不**按平台过滤，理由是「户管可能要把 GG 户转给只在 TT 有户的合法
     用户」。2026-09-28 用生产数据核销了这条理由（GG 275 户 / TT 403 户的归属人 100%
@@ -214,12 +227,16 @@ def dashboard_owner_options():
     docs/superpowers/specs/2026-09-28-huguan-owner-options-platform-isolation-design.md。
     """
     platform = _owner_option_platform()
+    # SQL 里只拼接「? 的个数」，角色名仍走参数位 —— 不是把用户输入拼进 SQL。
+    switch_roles = ", ".join("?" for _ in PLATFORM_SWITCH_ROLES)
     db = database.get_db()
     try:
         rows = db.execute(
             "SELECT id, username, display_name, platform FROM users "
-            "WHERE role NOT IN ('viewer', 'hidden') AND platform = ? "
-            "ORDER BY display_name, username", (platform,)
+            "WHERE role NOT IN ('viewer', 'hidden') "
+            f"AND (platform = ? OR role IN ({switch_roles})) "
+            "ORDER BY display_name, username",
+            (platform, *PLATFORM_SWITCH_ROLES)
         ).fetchall()
     finally:
         db.close()

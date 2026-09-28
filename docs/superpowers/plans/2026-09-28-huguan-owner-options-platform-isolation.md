@@ -10,6 +10,13 @@
 
 **设计文档：** [2026-09-28-huguan-owner-options-platform-isolation-design.md](../specs/2026-09-28-huguan-owner-options-platform-isolation-design.md)
 
+> **⚠️ 本计划已被 code-review 收口，Task 2 的代码块不再是最新。** 实现落地后审查发现纯
+> `platform = ?` 会让跨平台角色（developer / 户管）在 TT 看板建的户锁死（归属格退化成
+> 禁用态且无 UI 可修），口径最终定为 `platform = ? OR role IN PLATFORM_SWITCH_ROLES`。
+> **以设计文档 §3.2 为准**，Task 2 的 SQL 与 helper docstring 均已过时；Task 1 描述的
+> 测试改动仍有效（另多了一条 `test_cross_platform_roles_stay_on_tt_board`）。
+> 变异结论也以设计文档 §5.2 为准（本文 Step 4 只做了「去掉过滤」一个方向）。
+
 ## Global Constraints
 
 - 前端**零代码改动**（只改 `useOwnerPicker.js` 的注释）→ 本次**不需要** `npm run build`

@@ -2892,6 +2892,29 @@ class TestOwnerOptionsPlatformIsolation:
         db.close()
         assert dev in self._ids(client, hg)
 
+    def test_cross_platform_roles_stay_on_tt_board(self, client):
+        """TT 看板必须保留 developer 与户管本人（2026-09-28 审查收口）。
+
+        可达路径：二者 `users.platform='gg'`，却能在 TT 看板建户 ——「新增账户 /
+        批量导入 / 从表格同步」三条路径都把 `owner_id` 设成操作者自己
+        （`routes/tt_accounts_routes.py:122/405/1122`），且 `require_platform` 对
+        `PLATFORM_SWITCH_ROLES` 直接放行。名单里没有他们，这些行的归属格就退化成
+        禁用的「用户 #N」，而 `TtAccountModal` 没有归属字段 ⇒ 没有任何 UI 能改回来。
+        存量 0 例，但 developer 点一次「同步」就会批量产生。
+
+        代价仅限 TT 看板多出这 3 人（2 developer + 1 户管）：GG 看板名单**逐字不变**
+        —— 生产里跨平台角色 3 人全是 `platform='gg'`，本就在 GG 名单内。
+        """
+        hg, hg_uid = _create_user(client, "_opi_hg5", role="huguan", platform="gg")
+        db = database.get_db()
+        dev = _seed(db, "_opi_dev5", "开发者", role="developer", platform="gg")
+        tt = _seed(db, "_opi_tt5", "TT人5", role="user", platform="tt")
+        db.close()
+        ids = self._ids(client, hg, platform="tt")
+        assert tt in ids, "对照腿：本平台普通用户照常列出"
+        assert dev in ids, "developer 能在 TT 看板建户，其归属格必须可编辑"
+        assert hg_uid in ids, "户管本人同理（他就是 TT 看板最常见的建户者）"
+
 
 # ---------- Task 8 Part 2: GG 触发点 + 缺口覆盖 ----------
 

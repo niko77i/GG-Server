@@ -839,12 +839,18 @@ const ownerOptionMap = computed(() => Object.fromEntries(ownerOptions.value.map(
 >
 > **✅ 更正（2026-09-24）**：§5.3 的下拉数据源已不再是 `/platform/users`。用户裁定
 > 「在户管蓝图里加专用端点」，后端已实现 `GET /api/huguan/dashboard/owner-options`
-> （`py/routes/huguan_dashboard_routes.py:177`），返回**全量**用户（仅排除 `viewer` 与
-> `hidden`，**不按平台过滤**）——即本节描述的缺口已从根上补掉。因此两处文案随之上修：
+> （`py/routes/huguan_dashboard_routes.py:177`），返回除 `viewer` 与
+> `hidden` 外的用户 —— 即本节描述的缺口已从根上补掉。因此两处文案随之上修：
 > `#empty` 不再宣称「只有在本平台已有账户的用户…会出现在这里」（那是旧端点口径，在成品
 > 上是假话）；「未知归属」的 tooltip 也不再提「属于其他平台」（全量列表下不可能发生，
 > 该形态现在只剩「账号已停用／已删除」一种成因）。
 > **「未知归属」形态本身保留** —— `hidden` 用户仍不在列表里，该分支仍可达。
+>
+> **⚠️ 2026-09-28 修订**：上句「**不按平台过滤**」已作废 —— 该端点现按 `?platform=`
+> 隔离，但 `PLATFORM_SWITCH_ROLES`（developer / 户管）**无条件保留**（否则他们跨平台
+> 建的户会退化成禁用格）。**本节下游的两条结论不受影响、反而更成立**：隔离后
+> 「属于其他平台」更不可能出现，「未知归属」只剩「账号已停用／已删除」一种成因。
+> 见 [2026-09-28-huguan-owner-options-platform-isolation-design.md](2026-09-28-huguan-owner-options-platform-isolation-design.md)。
 
 ### 5.5 编辑交互与反馈
 

@@ -2024,7 +2024,13 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - `POST /api/huguan/dashboard` → 保存某平台配置。`platform` 必须 ∈ `("gg","tt")`（否则 400 `platform 必须是 gg 或 tt`，**不含 fb**）；`spreadsheet_id` 过 `_parse_sheet_id` 接受裸 ID 或完整 URL；字段一律先 `str()` 兜底（给数字/null 不该炸 500）。
 > - `POST /api/huguan/dashboard/sync` → **表 → 系统**。未配置时 400 `请先在设置页配置户管看板的表格 ID 与工作表名`。跳表头第 1 行、**不跳任何数据行**（户管看板没有「是否解绑」列可用作跳过标记）；`read_range` 按平台取（GG `A:N` / TT `A:M`），读回**忽略**定位键列（C）与户管自维护列，但**不忽略**归属通道列。`dry_run is not False` 即只读返回 `{diff}`；落库后（`confirmed` 必须是对象、三个 key 各自的值为数组或 null，否则 400）清缓存 `accounts:agents:` 前缀、必要时清 `accounts:statuses:<uid>`，并回写运营列 + 清空归属通道列。响应 `{result, diff}`。
 > - `POST /api/huguan/dashboard/push` → **系统 → 表**全量刷新，**同步执行**。响应形状是 **`{success, result:{rows, updated, not_found}}`**（注意 `result` 这层包裹，不是平铺的 `{rows,updated,not_found}`）。`rows` = 候选行数，`updated` = 真正写进该户管表里的行数（⊆ rows），**表里找不到该账户不算错误**（户管的表不必包含所有账户）而进 `not_found`。
-> - `GET /api/huguan/dashboard/owner-options` → 「户归属」下拉数据源：**全部非 `viewer`/`hidden` 用户，不按平台过滤**。与 `GET /api/platform/users`（只列该平台有未删除账户的人）**分工不同、都保留**：前者服务**编辑**（转给谁的真实全集），后者服务**筛选**（名下无户的选项筛不出东西）。
+> - `GET /api/huguan/dashboard/owner-options` → 「户归属」下拉数据源：**全部非 `viewer`/`hidden` 用户**。与 `GET /api/platform/users`（只列该平台有未删除账户的人）**分工不同、都保留**：前者服务**编辑**（不要求名下已有账户），后者服务**筛选**（名下无户的选项筛不出东西）。
+>
+>   ⚠️ **2026-09-28 修订（迁移实现须照此写）**：本行原写「不按平台过滤」，已作废。现行口径是
+>   `platform = ?platform`（缺省 `gg`，白名单 `hd.PLATFORMS` 之外回落 `gg`）**OR `role IN ('developer','huguan')`** ——
+>   跨平台角色必须无条件保留，否则他们在 TT 看板建的户（`owner_id` 自动设为自己、
+>   `require_platform` 对其放行）会退化成禁用的「用户 #N」且无 UI 可修。
+>   见 [2026-09-28-huguan-owner-options-platform-isolation-design.md](2026-09-28-huguan-owner-options-platform-isolation-design.md)。
 > - **归属门禁不复用**：同步/刷新的表地址**只从该户管自己的 `huguan_dashboard_{uid}` 配置取**，请求体不接受表地址 —— 若复用 `/api/accounts` 那套归属校验，等于同时给出「对着别人的表发起同步」这条路。
 > - **后台回写**（`_write_background`）：`service` 必须**在线程内的闭包里 build**，不可由调用方传入 —— 该函数经 `_sync_sheets_background` 起后台线程且失败 30s 后重试，而 `dashboard_sync` 会**背靠背调两次**，两个线程并发复用同一个 httplib2 客户端（**非线程安全**）。仓库既有写法统一是这个形状，照抄即可。
 
@@ -2693,7 +2699,7 @@ String raw = (data instanceof Map) ? String.valueOf(((Map<?,?>) data).getOrDefau
 | 端点 | 数据源 | 服务于 |
 |------|--------|--------|
 | `GET /api/platform/users` | 该平台**有未删除账户**的人 | **筛选**（「归属人」筛选器）——选中一个名下无户的人必然得到空表，没有筛选价值 |
-| `GET /api/huguan/dashboard/owner-options` | 全部用户，排除 `role in ('viewer','hidden')`，**不按平台过滤** | **编辑**（改归属）——必须是「转给谁」的真实全集，否则户管没法把 GG 账户转给一个只在 TT 有户的合法用户 |
+| `GET /api/huguan/dashboard/owner-options` | 排除 `role in ('viewer','hidden')`，且 `platform = ?platform`（缺省 gg，白名单外回落 gg）**OR `role in ('developer','huguan')`** ⚠️ 2026-09-28 起按平台隔离，见上一节修订 | **编辑**（改归属）——不要求名下已有账户，否则户管没法把户转给刚建号、还没分到户的新人 |
 
 **两者都保留，不要互相替代**（曾计划合并，实测发现缺口）。
 
