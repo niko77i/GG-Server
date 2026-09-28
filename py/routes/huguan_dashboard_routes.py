@@ -173,28 +173,53 @@ def dashboard_push():
                           "not_found": res["not_found"]}})
 
 
+def _owner_option_platform():
+    """owner-options 要按哪个平台隔离。
+
+    户管是 PLATFORM_SWITCH_ROLES 成员，其「有效平台」就等于 ?platform=（缺省 gg）
+    —— 与 main._get_effective_platform 对户管的取值逐字相同。本模块不 import main
+    （main 注册本 blueprint，反向 import 会循环），故就地实现这一条。
+
+    白名单是必要的，且方向要看清：白名单外的值必须回落 gg，而不是「不过滤」——
+    后者会把 FB/TT 的人漏回名单里，正好抵消本次隔离。
+    """
+    p = request.args.get("platform", "gg")
+    return p if p in hd.PLATFORMS else "gg"
+
+
 @huguan_dashboard_bp.route("/api/huguan/dashboard/owner-options", methods=["GET"])
 @jwt_required()
 @huguan_required
 def dashboard_owner_options():
-    """「户归属」下拉的数据源：可以直接把户转给他的**全部**用户。
+    """「户归属」下拉的数据源：可以直接把户转给他的**本平台**用户。
 
     与 `/api/platform/users` 的分工（父设计 §9.2 的更正）：
     - `/api/platform/users` 服务**筛选**（「归属人」筛选器）——只列该平台有未删除
       账户的人，选中一个名下无户的人必然得到空表，这种选项没有筛选价值；
-    - 本端点服务**编辑**（改归属）——必须全量，否则户管没法把 GG 账户转给一个
-      只在 TT 有户的合法用户（实测缺口）。
+    - 本端点服务**编辑**（改归属）——不要求名下已有账户，否则户管没法把户转给一个
+      刚建号、还没分到户的新人。
     两者都保留，各有各的用途，不要互相替代。
 
     排除 `viewer`（只读角色，转给它在业务上无意义，用户已裁定）与 `hidden`
-    （被停用、无法登录）。**不按平台过滤**：这是「转给谁」的真实全集。
+    （被停用、无法登录）。**按当前看板平台过滤**（`?platform=`，白名单外回落 gg）：
+    GG 看板只列 gg 平台用户，TT 看板只列 tt 平台用户。
+
+    `developer` 不做特判：其 `users.platform` 本就是 `gg`，故在 GG 看板自然保留
+    （生产 265 户挂他名下，缺了他那些行的归属格会退化成禁用态）、在 TT 看板自然排除
+    （TT 无任何户挂他名下）。**别在这里加「显式排除 developer」**。
+
+    本端点此前**不**按平台过滤，理由是「户管可能要把 GG 户转给只在 TT 有户的合法
+    用户」。2026-09-28 用生产数据核销了这条理由（GG 275 户 / TT 403 户的归属人 100%
+    是本平台用户，跨平台持有 0 例），而代价是 GG 看板混入 FB 6 人 + TT 8 人。见
+    docs/superpowers/specs/2026-09-28-huguan-owner-options-platform-isolation-design.md。
     """
+    platform = _owner_option_platform()
     db = database.get_db()
     try:
         rows = db.execute(
             "SELECT id, username, display_name, platform FROM users "
-            "WHERE role NOT IN ('viewer', 'hidden') "
-            "ORDER BY display_name, username"
+            "WHERE role NOT IN ('viewer', 'hidden') AND platform = ? "
+            "ORDER BY display_name, username", (platform,)
         ).fetchall()
     finally:
         db.close()

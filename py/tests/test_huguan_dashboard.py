@@ -2768,18 +2768,28 @@ class TestOwnerOptionsEndpoint:
     """「改归属」下拉的专用数据源 `/api/huguan/dashboard/owner-options`（设计文档 §2）。
 
     它与 `/api/platform/users` 各服务一个场景：那个服务**筛选**（只列该平台有未删除
-    账户的人，选项才有筛选价值），本端点服务**编辑**（必须全量）。否则户管没法把一个
-    GG 户转给一个只在 TT 有户的合法用户 —— 那个人根本不出现在下拉里。
+    账户的人，选项才有筛选价值），本端点服务**编辑**（不要求名下已有账户 ——
+    刚建号、还没分到户的新人也要能选）。
+
+    ⚠️ 平台隔离自 2026-09-28 起生效（见同日期设计文档）：本端点只返回**当前看板
+    平台**的用户。此前它返回全部非 viewer/hidden 用户，理由是「转给谁的真实全集」——
+    该理由在 2026-09-28 被实测推翻（GG 275 户 / TT 403 户的归属人 100% 是本平台用户，
+    跨平台持有 0 例），而代价是 GG 看板混入 FB 6 人 + TT 8 人。
     """
 
     _URL = "/api/huguan/dashboard/owner-options"
 
     def test_huguan_gets_all_users_including_account_less(self, client):
-        """户管调用 → 200，且列表包含「在该平台没有任何账户」的用户（缺口的回归钉）。"""
+        """户管调用 → 200，且列表包含「在该平台没有任何账户」的用户。
+
+        这条钉的是**无账户也能被选中**：一旦有人给它加上 EXISTS(账户) 限制，
+        刚建号、还没分到户的新人就选不到了。平台取 gg（= GG 看板平台）——
+        平台本身的口径由 TestOwnerOptionsPlatformIsolation 负责。
+        """
         hg, _ = _create_user(client, "_oo_hg", role="huguan", platform="gg")
         db = database.get_db()
-        # 平台是 tt 且名下**一个户都没有**：按平台 + 有无账户过滤的老端点必然漏掉他
-        no_acc = _seed(db, "_oo_noacc", "无户用户", role="user", platform="tt")
+        # 平台是 gg、名下**一个户都没有**：按有无账户过滤的老端点必然漏掉他
+        no_acc = _seed(db, "_oo_noacc", "无户用户", role="user", platform="gg")
         db.close()
         resp = client.get(self._URL, headers=hg)
         assert resp.status_code == 200
@@ -2791,7 +2801,7 @@ class TestOwnerOptionsEndpoint:
         assert set(by_id[no_acc]) == {"id", "username", "display_name", "platform"}
         assert by_id[no_acc]["username"] == "_oo_noacc"
         assert by_id[no_acc]["display_name"] == "无户用户"
-        assert by_id[no_acc]["platform"] == "tt"
+        assert by_id[no_acc]["platform"] == "gg"
 
     def test_non_huguan_gets_403(self, client):
         """与蓝图里既有 4 个端点同款门禁：仅户管可达。"""
@@ -2816,6 +2826,71 @@ class TestOwnerOptionsEndpoint:
         assert viewer not in ids
         assert hidden not in ids
         assert normal in ids
+
+
+class TestOwnerOptionsPlatformIsolation:
+    """「户归属」下拉按当前看板平台隔离（2026-09-28 设计文档）。
+
+    口径：`platform = ?platform`（缺省 gg；白名单 hd.PLATFORMS=("gg","tt") 之外的值
+    一律回落 gg，**不是**返回全部）。developer 不特判 —— 他的 users.platform 本就是
+    gg，故 GG 看板自然保留、TT 看板自然排除。
+    """
+
+    _URL = "/api/huguan/dashboard/owner-options"
+
+    def _ids(self, client, hg, **params):
+        resp = client.get(self._URL, headers=hg, query_string=params)
+        assert resp.status_code == 200
+        return {u["id"] for u in resp.get_json()["users"]}
+
+    def test_gg_board_excludes_other_platforms(self, client):
+        """用户报的就是这一条：GG 看板里混着 FB / TT 平台的人。"""
+        hg, _ = _create_user(client, "_opi_hg", role="huguan", platform="gg")
+        db = database.get_db()
+        gg = _seed(db, "_opi_gg", "GG人", role="user", platform="gg")
+        fb = _seed(db, "_opi_fb", "FB人", role="user", platform="fb")
+        tt = _seed(db, "_opi_tt", "TT人", role="user", platform="tt")
+        db.close()
+        ids = self._ids(client, hg)
+        assert gg in ids, "对照腿：本平台用户不得被一并滤掉"
+        assert fb not in ids
+        assert tt not in ids
+
+    def test_platform_param_switches_board(self, client):
+        """带 ?platform=tt → 换成 TT 看板的名单。"""
+        hg, _ = _create_user(client, "_opi_hg2", role="huguan", platform="gg")
+        db = database.get_db()
+        gg = _seed(db, "_opi_gg2", "GG人2", role="user", platform="gg")
+        tt = _seed(db, "_opi_tt2", "TT人2", role="user", platform="tt")
+        db.close()
+        ids = self._ids(client, hg, platform="tt")
+        assert tt in ids
+        assert gg not in ids
+
+    def test_unknown_platform_falls_back_to_gg(self, client):
+        """白名单外的值回落 gg，而不是「不过滤」（后者会把 FB/TT 的人漏回来）。"""
+        hg, _ = _create_user(client, "_opi_hg3", role="huguan", platform="gg")
+        db = database.get_db()
+        gg = _seed(db, "_opi_gg3", "GG人3", role="user", platform="gg")
+        tt = _seed(db, "_opi_tt3", "TT人3", role="user", platform="tt")
+        db.close()
+        for bad in ("fb", "xx", ""):
+            ids = self._ids(client, hg, platform=bad)
+            assert gg in ids, bad
+            assert tt not in ids, bad
+
+    def test_developer_kept_on_gg_board(self, client):
+        """回归钉：GG 看板必须保留 developer。
+
+        生产 265 个活跃 GG 账户（96%）挂在 developer 名下。他一旦不在名单里，
+        AdsAccountPanel.vue 的「未知归属」分支会被触发，那些行的户归属格退化成
+        禁用的「用户 #N」，户管一个都改不了。
+        """
+        hg, _ = _create_user(client, "_opi_hg4", role="huguan", platform="gg")
+        db = database.get_db()
+        dev = _seed(db, "_opi_dev", "开发者", role="developer", platform="gg")
+        db.close()
+        assert dev in self._ids(client, hg)
 
 
 # ---------- Task 8 Part 2: GG 触发点 + 缺口覆盖 ----------
