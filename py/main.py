@@ -9174,11 +9174,18 @@ def youtube_product_assets():
 @app.route("/api/ad-reports/products", methods=["GET"])
 @jwt_required()
 def ad_reports_products():
-    """返回当前用户有权限的产品（用于保存弹窗下拉）。"""
+    """返回当前用户有权限的产品（用于保存弹窗下拉）。
+
+    **返回全量（含已暂停）**，由前端按 status 过滤显示 —— 已暂停产品必须留在
+    响应里：做表页选中它做「更新表格」时，前端要从这份列表 find() 取地区、
+    代投比例（ToolkitView 用的是 `p?.sales_person || ''` 可选链，取不到不会报错，
+    而是静默往 Google Sheets 写空值）。
+    """
     user_id = int(get_jwt_identity())
     db = _yt_db()
     rows = db.execute("""
-        SELECT DISTINCT p.id, p.product_name, p.region, COALESCE(sp.name, '') as sales_person, p.agency_ratio
+        SELECT DISTINCT p.id, p.product_name, p.region, COALESCE(sp.name, '') as sales_person, p.agency_ratio,
+               COALESCE(p.status, '') as status
         FROM products p
         LEFT JOIN sales_persons sp ON p.sales_person_id = sp.id
         LEFT JOIN product_runners pr ON p.id = pr.product_id

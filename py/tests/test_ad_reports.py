@@ -359,6 +359,38 @@ class TestAdReportsProducts:
         names = [p["product_name"] for p in data["products"]]
         assert "test_acc_prod" in names
 
+    def test_paused_products_stay_in_payload_with_status(self, client, auth_headers):
+        """已暂停产品仍要返回，且必须带 status —— 前端据此过滤显示。
+
+        返回全量是刻意的：做表页选中已暂停产品做「更新表格」时，前端要从这份
+        列表 find() 取地区/代投比例，而那里用的是可选链，取不到不报错、会静默
+        往 Google Sheets 写空值。所以后端不能替前端把已暂停的筛掉。
+
+        对照腿（任一改动本测试即转红）：
+        - 去掉 SELECT 里的 COALESCE(p.status, '') → status 取不到，断言 KeyError；
+        - 后端直接 WHERE 掉 status='paused' → 保底开关失效，第一条断言失败。
+        """
+        import database
+
+        for name in ("test_paused_prod", "test_normal_prod"):
+            client.post("/api/products/create", json={
+                "product_name": name, "kpi": "test", "region": "巴西",
+            }, headers=auth_headers)
+
+        db = database.get_db()
+        db.execute("UPDATE products SET status='paused' WHERE product_name=?",
+                   ("test_paused_prod",))
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/ad-reports/products", headers=auth_headers)
+        data = resp.get_json()
+        by_name = {p["product_name"]: p for p in data["products"]}
+
+        assert "test_paused_prod" in by_name, "已暂停产品被后端筛掉了，前端的保底开关会失效"
+        assert by_name["test_paused_prod"]["status"] == "paused"
+        assert by_name["test_normal_prod"]["status"] == ""
+
 
 class TestAdReportsAnalyze:
     """POST /api/ad-reports/analyze — AI 分析。"""

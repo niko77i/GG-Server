@@ -14,8 +14,9 @@
       <div style="flex-shrink:0;">
         <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;">
           <el-select v-model="zbSelectedProduct" placeholder="搜索并选择产品..." filterable clearable style="width:220px;" :loading="zbProductsLoading">
-            <el-option v-for="p in zbProducts" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '') + (p.sales_person ? ' - ' + p.sales_person : '')" :value="p.product_name" />
+            <el-option v-for="p in zbProductOptions" :key="p.id" :label="p.product_name + (p.region ? ' (' + p.region + ')' : '') + (p.sales_person ? ' - ' + p.sales_person : '') + (isPausedProduct(p) ? '（已暂停）' : '')" :value="p.product_name" />
           </el-select>
+          <el-checkbox v-model="zbShowPaused" size="small">显示已暂停产品</el-checkbox>
           <el-date-picker v-model="zbSelectedDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" style="width:150px;" />
           <el-select v-model="zbYanghuKeywords" multiple filterable allow-create placeholder="养户关键词（匹配到的行→养户/止戈）" style="flex:1;min-width:250px;" size="small" />
         </div>
@@ -309,6 +310,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
+import { isPausedProduct, visibleProducts } from '@/utils/productOptions'
 import { parseAdsData } from '@/utils/adsParser'
 import { translateApi } from '@/api/youtube'
 import { videoApi } from '@/api/video'
@@ -339,6 +341,12 @@ const zbSelectedProduct = ref('')
 const zbSelectedDate = ref(_yesterday())
 const zbProducts = ref([])
 const zbProductsLoading = ref(false)
+// 下拉默认只列「未暂停」产品。zbProducts 必须保持全量 —— zbUpdateSheet/保存 里
+// 靠它 find() 取地区、代投比例（用的是可选链，取不到会静默写空值）。
+// 已暂停产品之所以还给一个开关，是因为库里有几十个暂停产品带着历史做表数据，
+// 补录和「更新表格」仍然需要能选到它们。
+const zbShowPaused = ref(false)
+const zbProductOptions = computed(() => visibleProducts(zbProducts.value, zbShowPaused.value))
 const zbUpdatingSheet = ref(false)
 const zbSyncStatus = ref(null)        // { status, error_msg, rows, retry_count, updated_at }
 const zbSyncChecking = ref(false)
