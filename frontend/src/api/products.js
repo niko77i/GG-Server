@@ -16,7 +16,11 @@ export const productsApi = {
   merge:       (body)   => api.post('/products/merge', body),
   updateRunners: (pid, body) => api.put(`/products/${pid}/runners`, body),
   // 掉包检测
-  checkDelist:  (pid)    => api.post(`/products/${pid}/check-delist`),
+  // check-delist 后端并发按代理池容量自适应（2 个代理时 4 并发）：正常几秒返回，
+  // 但单包最坏 20s（连接/读取各 5s × 2 次代理尝试），24 包 6 批最坏 120s；
+  // 默认 30s 超时连正常路径都不够。
+  // 单条放宽到 180s，否则前端先报超时、后端仍在跑并照常写库发通知。
+  checkDelist:  (pid)    => api.post(`/products/${pid}/check-delist`, null, { timeout: 180000 }),
   getDelistStatus: ()    => api.get('/products/delist-status'),
   dismissDelist: (packageIds) => api.post('/delist/dismiss', { package_ids: packageIds }),
   getPendingDelist: ()   => api.get('/delist/pending'),
