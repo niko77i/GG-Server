@@ -165,7 +165,7 @@ except Exception as e:
 | 户管看板 3 处（回调只 `log.warning`） | 成功时 `e` 为空串，`if e` 为假，不写日志 | ✅ 无变化 |
 | 6 个「我的看板」单格（回调只 `log.warning`） | 同上 | ✅ 无变化 |
 
-参数名 `on_fail_fn` 在此之后名不副实（成功也会调）。**不改名** —— 21 个改名的收益不抵改动面，改为在 docstring 首行显著说明语义是「结果回调」。
+参数名 `on_fail_fn` 在此之后名不副实（成功也会调）。**不改名** —— 经 `_sync_sheets_background` 的异步写表点是 **15 个**（同步点与 FB 自建线程不走此函数，见 §4.4），为这 15 处改名的收益不抵改动面，改为在 docstring 首行显著说明语义是「结果回调」。
 
 缺陷 B：三处 `except Exception: pass` 改为**至少落 `log.error`**。
 

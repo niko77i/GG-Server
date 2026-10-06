@@ -202,6 +202,11 @@ def test_background_calls_back_on_first_success(monkeypatch):
 def test_background_reports_retry_failed(monkeypatch):
     """重试也失败 => 终态 retry_failed，且错误信息非空。"""
     import main
+    import time
+    # 先抓一份真 sleep：下面的 monkeypatch 打的是全局 time.sleep，会连本测试自己的
+    # 轮询 sleep 一起打成空转 —— 主线程就再也不 yield，daemon 线程拿不到 GIL，
+    # 断言在后台线程落任何回调之前就跑了（实测确定性 calls==[]）。
+    _real_sleep = time.sleep
     monkeypatch.setattr("time.sleep", lambda _s: None)   # 跳过 30s
 
     calls = []
@@ -210,11 +215,10 @@ def test_background_reports_retry_failed(monkeypatch):
         raise RuntimeError("Sheets 挂了")
 
     main._sync_sheets_background(_boom, lambda s, e: calls.append((s, e)))
-    import time
     for _ in range(100):
-        if len(calls) >= 3:
+        if len(calls) >= 2:
             break
-        time.sleep(0.02)
+        _real_sleep(0.02)
 
     assert [c[0] for c in calls] == ["failed", "retry_failed"]
     assert "Sheets 挂了" in calls[-1][1]
@@ -249,6 +253,14 @@ def test_background_logs_callback_exception(caplog):
 
 Run: `cd py && python -m pytest tests/test_sheet_write.py -v -k background`
 Expected: `test_background_calls_back_on_first_success` FAIL（`calls == []`）
+
+> **勘误（2026-10-06，Task 2 审查发现）**：本计划初稿的
+> `test_background_reports_retry_failed` **本身是坏的、恒定失败** ——
+> `monkeypatch.setattr("time.sleep", ...)` 打的是全局 `time.sleep`，会连测试自己的
+> 轮询 sleep 一起打成空转：主线程再也不 yield GIL，daemon 线程拿不到执行机会，
+> 断言在后台线程落任何回调之前就跑了（实测确定性 `calls == []`）。且循环的
+> 中断条件 `>= 3` 在只预期 2 次回调时**永远不可达**。已改为先抓一份真 sleep
+> 用于轮询、中断条件改 `>= 2`（提交 `9a3f79a`）。
 
 - [ ] **Step 3: 修改 `_sync_sheets_background`**
 
