@@ -2,8 +2,6 @@
 
 设计见 docs/superpowers/specs/2026-10-06-sheet-write-failure-governance-design.md
 """
-import pytest
-
 import database
 
 
