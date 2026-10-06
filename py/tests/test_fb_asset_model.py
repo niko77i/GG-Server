@@ -387,3 +387,91 @@ class TestFbAccountApi:
                          (aid,)).fetchone()
         db.close()
         assert row is not None and row["bm_id"] == bms[1]
+
+
+class TestFbReassign:
+    @pytest.fixture
+    def fb_user_headers_factory(self, client):
+        """注册两个 FB 用户并返回 (headers_dict, uid) 的工厂。"""
+        def _make(username):
+            client.post("/api/auth/register", json={"username": username, "password": "t123"})
+            db = database.get_db()
+            db.execute("UPDATE users SET platform='fb' WHERE username=?", (username,))
+            db.commit()
+            uid = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()[0]
+            db.close()
+            token = client.post("/api/auth/login",
+                                json={"username": username, "password": "t123"}
+                                ).get_json()["access_token"]
+            return {"Authorization": f"Bearer {token}"}, uid
+        return _make
+
+    def _make_account(self, client, headers, account_id):
+        r = client.post("/api/fb/accounts/create", headers=headers,
+                        json={"name": f"户{account_id}", "account_id": account_id})
+        return r.get_json()["id"]
+
+    def test_developer_can_transfer_to_another_user(self, client, fb_user_headers_factory):
+        dev_h, _ = fb_user_headers_factory("fb_dev")
+        db = database.get_db()
+        db.execute("UPDATE users SET role='developer', platform='fb' WHERE username='fb_dev'")
+        db.commit()
+        db.close()
+        # 重新登录拿带新角色的 token
+        token = client.post("/api/auth/login",
+                            json={"username": "fb_dev", "password": "t123"}
+                            ).get_json()["access_token"]
+        dev_h = {"Authorization": f"Bearer {token}"}
+        _, target_uid = fb_user_headers_factory("fb_target")
+
+        aid = self._make_account(client, dev_h, "7001")
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=dev_h,
+                       json={"owner_id": target_uid})
+        assert r.status_code == 200
+        db = database.get_db()
+        owner = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()[0]
+        db.close()
+        assert owner == target_uid
+
+    def test_plain_user_without_owner_id_claims_for_self(self, client, fb_user_headers_factory):
+        h, uid = fb_user_headers_factory("fb_solo")
+        aid = self._make_account(client, h, "7002")
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=h, json={})
+        # 已经属于自己 → 409（与 TT 同口径）
+        assert r.status_code == 409
+
+    def test_plain_user_cannot_steal_another_users_account(self, client, fb_user_headers_factory):
+        """非跨用户角色按 id 改别人名下的户 → 403。"""
+        h1, _ = fb_user_headers_factory("fb_a")
+        h2, _ = fb_user_headers_factory("fb_b")
+        aid = self._make_account(client, h1, "7003")
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=h2, json={})
+        assert r.status_code == 403
+
+    def test_nonexistent_target_user_returns_400_not_500(self, client, fb_user_headers_factory):
+        """目标用户不存在必须在写库前挡成 400 —— 否则 FK IntegrityError → 500。"""
+        dev_h, _ = fb_user_headers_factory("fb_dev2")
+        db = database.get_db()
+        db.execute("UPDATE users SET role='developer' WHERE username='fb_dev2'")
+        db.commit()
+        db.close()
+        token = client.post("/api/auth/login",
+                            json={"username": "fb_dev2", "password": "t123"}
+                            ).get_json()["access_token"]
+        dev_h = {"Authorization": f"Bearer {token}"}
+        aid = self._make_account(client, dev_h, "7004")
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=dev_h,
+                       json={"owner_id": 999999})
+        assert r.status_code == 400
+
+    def test_non_numeric_owner_id_returns_400(self, client, fb_user_headers_factory):
+        h, _ = fb_user_headers_factory("fb_solo2")
+        aid = self._make_account(client, h, "7005")
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=h,
+                       json={"owner_id": "abc"})
+        assert r.status_code == 400
+
+    def test_missing_account_returns_404(self, client, fb_user_headers_factory):
+        h, _ = fb_user_headers_factory("fb_solo3")
+        r = client.put("/api/fb/accounts/999999/reassign", headers=h, json={})
+        assert r.status_code == 404

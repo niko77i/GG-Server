@@ -486,6 +486,79 @@ def list_deleted_accounts():
     return ok({'items': result_items, 'total': total, 'page': page, 'size': size})
 
 
+@fb_bp.route('/api/fb/accounts/<int:aid>/reassign', methods=['PUT'])
+@jwt_required()
+@fb_required
+def reassign_account(aid):
+    """改 FB 账户的归属（「在用运营」= owner_id）。
+
+    形状照 TT 的 `reassign_account`（routes/tt_accounts_routes.py:466）：
+    - 默认路径（不带 owner_id，或调用者非 CROSS_USER_ROLES）→ 转给调用者自己
+    - 跨用户路径：CROSS_USER_ROLES + 合法 owner_id → 转给该用户
+
+    注：本端点由子项目 ① 新增。TT / GG 版本在这里还会调 `hd.writeback_*`
+    回写户管看板 —— FB 的看板回写属于子项目 ②，**此处刻意不调**，
+    等 ② 落地时再补，不要提前接上。
+    """
+    db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    data = parse_body()
+
+    # 目标归属：跨用户角色可用 owner_id 转给指定用户，其余角色恒为调用者自己。
+    # `or ""` 不能省：owner_id 给 0 时 `"0".isdigit()` 为真，会被当成合法目标。
+    target_owner = uid
+    if role in CROSS_USER_ROLES:
+        # parse_body() 对「真值非 dict」的 body（如 JSON 数组）原样返回，
+        # 不判类型直接 .get 会 AttributeError → 500。
+        raw_owner = (data.get("owner_id") or "") if isinstance(data, dict) else ""
+        raw_owner_str = str(raw_owner).strip()
+        if raw_owner_str:
+            if not (raw_owner_str.isascii() and raw_owner_str.isdigit()):
+                return err("owner_id 不合法", 400)
+            target_owner = int(raw_owner_str)
+            if target_owner > 2**63 - 1:
+                return err("owner_id 不合法", 400)
+
+    existing = db.execute(
+        "SELECT a.*, u.username, u.display_name FROM fb_accounts a "
+        "LEFT JOIN users u ON a.owner_id = u.id WHERE a.id = ?", (aid,)
+    ).fetchone()
+    if not existing:
+        return err("账户不存在", 404)
+
+    # 归属校验（与同文件 delete_account 同口径）：非跨用户角色只能操作自己的账户。
+    # 少了这道闸，普通 user / viewer 按 id 就能把**别人名下**的账户改成自己的。
+    if role not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
+
+    # 目标用户存在性校验是**必需**的：fb_accounts.owner_id 是
+    # INTEGER REFERENCES users(id)，连接开着 PRAGMA foreign_keys=ON
+    # ⇒ 指向不存在的用户会在 UPDATE 处抛 IntegrityError 变成 500。
+    if target_owner != uid:
+        if not db.execute("SELECT 1 FROM users WHERE id=?", (target_owner,)).fetchone():
+            return err("目标用户不存在", 400)
+
+    if int(existing["owner_id"] or 0) == target_owner:
+        return err("该账户已属于当前用户，无需转移" if target_owner == uid
+                   else "该账户已属于目标用户，无需转移", 409)
+
+    db.execute("UPDATE fb_accounts SET owner_id=?, updated_at=datetime('now','localtime') "
+               "WHERE id=?", (target_owner, aid))
+    db.commit()
+
+    if target_owner == uid:
+        return ok({"message": f"账户「{existing['name'] or existing['account_id']}」"
+                              f"已转移至当前用户"})
+    old_owner = existing["display_name"] or existing["username"] or "未知"
+    t = db.execute("SELECT display_name, username FROM users WHERE id=?",
+                   (target_owner,)).fetchone()
+    new_owner = (t["display_name"] or t["username"] or "") if t else ""
+    # 文案与 TT 侧的分支结构对称：只有跨用户分支补「已从 A」。
+    return ok({"message": f"账户「{existing['name'] or existing['account_id']}」"
+                          f"已从 {old_owner} 转移至 {new_owner}"})
+
+
 @fb_bp.route('/api/fb/accounts/<int:aid>/restore', methods=['POST'])
 @jwt_required()
 @fb_required
