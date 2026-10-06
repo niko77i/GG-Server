@@ -949,7 +949,11 @@ def read_operator_remark_map(db, owner_id: int) -> dict:
         out = {}
         for r in rows:
             # D 列（下标 3）是账户ID，J 列（下标 9）是备注
-            aid = _cell(r, 3).lstrip("'")   # D 列剥 Sheets 文本前缀 '，J 列不需要
+            # D 列剥 Sheets 文本前缀 '，J 列不需要。末尾必须再 .strip() ——
+            # 与 parse_row / update_rows_by_account_id 的两段式解析对齐：
+            # 对 "' 123" 这类格，少了这次 strip 会得到键 " 123"，而那边得到
+            # "123"，apply_diff 的 .get(account_id) 静默 miss 后降级为「户管赢」。
+            aid = _cell(r, 3).lstrip("'").strip()
             if not aid or aid in out:
                 continue
             out[aid] = _cell(r, 9)

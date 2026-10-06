@@ -1306,13 +1306,19 @@ class TestBuildDiff:
         是 `(acquired_date, country, timezone, consumption, remark, owner_change_note)`，
         与字典序不同 —— 必须用 TT 造一条**多列同时被清空**的用例才钉得住。列下标以
         COLUMN_SPEC 为准：A=0 acquired_date、E=4 country、H=7 timezone、J=9 consumption、
-        M=12 remark、M 之后 owner_change_note（`_PLAIN_TEXT_FIELDS["tt"]` 现有六项）。
+        M=12 remark
+        （另：_PLAIN_TEXT_FIELDS["tt"] 元组里 remark 之后还有 owner_change_note，
+         但它对应的列是 L=11，在 M 之前 —— 勿按元组序推断列位置）。
 
         ⚠️ 2026-10-06 规格：TT 的 remark（M 列）对**已存在**账户不再进 to_update，
         故也不出现在 clears —— 本用例因此不再包含 remark，且 seed 里的 remark 非空、
-        表里 M 留空，正好一并钉住「表里清空 remark 也不进 clears」。剩余四列的
-        插入序（acquired_date, country, timezone, consumption）仍 ≠ 字典序（
-        acquired_date, consumption, country, timezone），`sorted()` 的判别力不减。
+        表里 M 留空，正好一并钉住「表里清空 remark 也不进 clears」。
+
+        owner_change_note（L 列）**没有**这条 TT 专属豁免，表里有值、表里空时一般会进
+        clears；但本用例 seed 未给 owner_change_note、空表行也是空，两侧同为 ""，故它
+        不出现 —— 实际被清空的确为四列，其插入序（acquired_date, country, timezone,
+        consumption）仍 ≠ 字典序（acquired_date, consumption, country, timezone），
+        `sorted()` 的判别力不减。
         """
         from huguan_dashboard import build_diff, parse_row
         db, u1, _ = self._prepare(client)
@@ -3811,6 +3817,33 @@ class TestReadOperatorRemarkMap:
         hd.read_operator_remark_map(db, u)
         db.close()
         assert seen["sheet_name"] == "私有看板", "私有配置必须压过全局兜底"
+
+    def test_private_dashboard_name_preserves_whitespace(self, client, monkeypatch):
+        """私有配置值必须**原样**透传（含首尾空白）—— 与 sync_from_sheet 逐字对齐。
+
+        若有人把它改回 .strip()，读写会指向不同的 tab，故必须锁住。
+        """
+        import google_sheets_service as gs
+        db = database.get_db()
+        u = _seed(db, "_orm_ws", "投手ws", platform="tt")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','SS-TT')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{u}", json.dumps({"my_dashboard": " 私有看板 "})))
+        db.commit()
+        db.close()
+        seen = {}
+
+        def _capture(service, spreadsheet_id, sheet_name, rng):
+            seen["sheet_name"] = sheet_name
+            return []
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "read_sheet_values", _capture)
+        import huguan_dashboard as hd
+        db = database.get_db()
+        hd.read_operator_remark_map(db, u)
+        db.close()
+        assert seen["sheet_name"] == " 私有看板 ", "私有配置值必须原样透传，不得 strip"
 
 
 class TestApplyDiffRemarkPrecedence:

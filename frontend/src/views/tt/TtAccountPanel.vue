@@ -672,6 +672,7 @@ async function saveConsumption(row) {
   cancelConsumptionEdit()
 }
 
+// ===== 备注内联编辑 =====
 function startEditRemark(row) {
   editingRemarkId.value = row.id
   editRemarkValue.value = row.remark || ''
