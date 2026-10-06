@@ -13,7 +13,9 @@
 - 设计依据：`docs/superpowers/specs/2026-10-06-fb-asset-data-model-design.md`。与本文冲突时以该 spec 为准。
 - **纯增量**：不得修改 `fb_accounts` / `fb_account_bm` 建表语句里的既有列，只做 `ADD COLUMN` 与新建表。
 - **UI 不走 `/frontend-design`**（spec 决策 9，用户 2026-10-06 明确豁免）：沿用 GG/TT 既有样式。
-- 所有新增列一律**可空**（`TEXT DEFAULT ''` 或 `NULL`），存量行取默认值，行为与改动前一致。
+- `fb_accounts` 新增的 10 列一律**可空**（`TEXT DEFAULT ''` 或 `NULL`），存量行取默认值，行为与改动前一致。
+  （`fb_account_bm.is_primary` 是另一张表上的 `INTEGER NOT NULL DEFAULT 0` —— 它是新列，
+  存量行一律取 0，同样不改变既有行为；不适用「可空」这条。）
 - SQL 里插值的表名 / 列名**必须是代码内常量**（`fb_channels`、`channel_id` 等），绝不来自请求体。参数一律走 `?` 占位符。
 - 测试门禁：`cd py && python -m pytest tests/ -q`，只增不减。
 - 前端门禁：`cd frontend && npm run build` 通过。
