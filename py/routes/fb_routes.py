@@ -309,16 +309,17 @@ def list_accounts():
         params + [size, offset]
     ).fetchall()
 
-    # 批量获取关联的 BM 名称
+    # 批量获取关联的 BM 名称，并标出主 BM（即看板「位置」列，规格 4.3）
     result_items = []
     for r in rows:
         item = dict(r)
         bms = db.execute(
-            "SELECT b.name, b.id, b.bm_id FROM fb_bms b "
+            "SELECT b.name, b.id, b.bm_id, ab.is_primary FROM fb_bms b "
             "JOIN fb_account_bm ab ON ab.bm_id = b.id "
             "WHERE ab.account_id = ?", (r['id'],)
         ).fetchall()
         item['bms'] = [dict(b) for b in bms]
+        item['primary_bm_name'] = next((b['name'] for b in item['bms'] if b['is_primary']), '')
         result_items.append(item)
 
     return ok({'items': result_items, 'total': total, 'page': page, 'size': size})
@@ -336,6 +337,17 @@ def create_account():
     timezone = data.get('timezone', '')
     status_id = data.get('status_id', None)
     acquired_date = data.get('acquired_date', '')
+    # 子项目 ① 新增字段（规格 4.1）
+    channel_id = data.get('channel_id') or None
+    asset_type_id = data.get('asset_type_id') or None
+    unit_price = data.get('unit_price', '')
+    inbound_qty = data.get('inbound_qty', '')
+    acceptor_id = data.get('acceptor_id') or None
+    outbound_date = data.get('outbound_date', '')
+    outbound_qty = data.get('outbound_qty', '')
+    consumption = data.get('consumption', '')
+    remark = data.get('remark', '')
+    primary_bm_id = data.get('primary_bm_id') or None
 
     if not name or not account_id:
         return err('账户名称和账户ID不能为空'), 400
@@ -343,14 +355,24 @@ def create_account():
         return err('账户ID必须是纯数字'), 400
 
     uid = get_uid()
+    # operator 是**冻结字段**（规格 6.1）：服务端填创建者的名字快照，
+    # 请求体里的同名字段一律忽略。
+    operator = _display_name(db, uid)
     try:
         db.execute(
-            "INSERT INTO fb_accounts (name, account_id, timezone, status_id, acquired_date, owner_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (name, account_id, timezone, status_id, acquired_date, uid))
+            "INSERT INTO fb_accounts (name, account_id, timezone, status_id, acquired_date, "
+            "owner_id, operator, channel_id, asset_type_id, unit_price, inbound_qty, "
+            "acceptor_id, outbound_date, outbound_qty, consumption, remark) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, account_id, timezone, status_id, acquired_date, uid, operator,
+             channel_id, asset_type_id, unit_price, inbound_qty,
+             acceptor_id, outbound_date, outbound_qty, consumption, remark))
         acc_pk = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         for bm_id in bm_ids:
-            db.execute("INSERT OR IGNORE INTO fb_account_bm (account_id, bm_id) VALUES (?, ?)", (acc_pk, bm_id))
+            db.execute("INSERT OR IGNORE INTO fb_account_bm (account_id, bm_id) VALUES (?, ?)",
+                       (acc_pk, bm_id))
+        if primary_bm_id:
+            _set_primary_bm(db, acc_pk, primary_bm_id)
         db.commit()
         return ok({'id': acc_pk})
     except Exception as e:
@@ -368,17 +390,40 @@ def update_account(aid):
     status_id = data.get('status_id', None)
     acquired_date = data.get('acquired_date', '')
     bm_ids = data.get('bm_ids', None)
+    # 子项目 ① 新增字段。
+    # ⚠️ **operator 刻意不在此列，也不出现在下面的 UPDATE 语句里** ——
+    # 冻结口径是「让它没有写入路径」，而不是「在接口层过滤请求体」（规格 6.1）。
+    # 想加这一列的请先读规格：它记录的是接户那一刻的户管名，事后不应变化。
+    channel_id = data.get('channel_id') or None
+    asset_type_id = data.get('asset_type_id') or None
+    unit_price = data.get('unit_price', '')
+    inbound_qty = data.get('inbound_qty', '')
+    acceptor_id = data.get('acceptor_id') or None
+    outbound_date = data.get('outbound_date', '')
+    outbound_qty = data.get('outbound_qty', '')
+    consumption = data.get('consumption', '')
+    remark = data.get('remark', '')
+    primary_bm_id = data.get('primary_bm_id') or None
 
     if name:
         db.execute(
             "UPDATE fb_accounts SET name=?, timezone=?, status_id=?, acquired_date=?, "
+            "channel_id=?, asset_type_id=?, unit_price=?, inbound_qty=?, acceptor_id=?, "
+            "outbound_date=?, outbound_qty=?, consumption=?, remark=?, "
             "updated_at=datetime('now','localtime') WHERE id=?",
-            (name, timezone, status_id, acquired_date, aid))
+            (name, timezone, status_id, acquired_date,
+             channel_id, asset_type_id, unit_price, inbound_qty, acceptor_id,
+             outbound_date, outbound_qty, consumption, remark, aid))
 
     if bm_ids is not None:
+        # 全量替换关联（既有行为）。这一步会把所有 is_primary 一并清掉 ——
+        # 因此下面必须按 primary_bm_id 重建主 BM；前端应始终同时提交两个字段。
         db.execute("DELETE FROM fb_account_bm WHERE account_id=?", (aid,))
         for bm_id in bm_ids:
-            db.execute("INSERT OR IGNORE INTO fb_account_bm (account_id, bm_id) VALUES (?, ?)", (aid, bm_id))
+            db.execute("INSERT OR IGNORE INTO fb_account_bm (account_id, bm_id) VALUES (?, ?)",
+                       (aid, bm_id))
+    if primary_bm_id:
+        _set_primary_bm(db, aid, primary_bm_id)
 
     db.commit()
     return ok()
@@ -1581,3 +1626,32 @@ def list_fb_users():
 def _get_role(db, uid):
     user = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
     return user['role'] if user else 'user'
+
+
+def _display_name(db, uid):
+    """用户显示名快照：display_name 优先，空则回退 username。
+
+    与 `resolve_owner_id` 用的同一个 COALESCE(NULLIF(...)) 口径。
+    用于 `fb_accounts.operator` —— 那一列存的是**名字快照**不是外键（规格 6.1）。
+    """
+    r = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username, '') AS n "
+                   "FROM users WHERE id=?", (uid,)).fetchone()
+    return r['n'] if r else ''
+
+
+def _set_primary_bm(db, acc_pk, bm_id):
+    """把某账户的主 BM 换成 bm_id。**不 commit**，事务边界由调用方负责。
+
+    ⚠️ **必须先清后设，顺序不能反。** `idx_fb_account_bm_primary` 是
+    `WHERE is_primary = 1` 的部分唯一索引，保证同一账户至多一行主 BM。
+    SQLite 的唯一索引是**逐语句**检查的，不是事务提交时统一检查 ——
+    先设新的（此刻旧的主 BM 还是 1）会立刻 UNIQUE constraint failed。
+    这是正确性问题，不是代码风格问题。
+    """
+    db.execute("UPDATE fb_account_bm SET is_primary=0 WHERE account_id=?", (acc_pk,))
+    cur = db.execute("UPDATE fb_account_bm SET is_primary=1 WHERE account_id=? AND bm_id=?",
+                     (acc_pk, bm_id))
+    if cur.rowcount == 0:
+        # 该 BM 尚未与该账户关联
+        db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,1)",
+                   (acc_pk, bm_id))

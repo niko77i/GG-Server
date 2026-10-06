@@ -276,3 +276,112 @@ class TestSharedOptionApi:
         gone = db.execute("SELECT COUNT(*) FROM fb_channels WHERE id=?", (cid,)).fetchone()[0]
         db.close()
         assert left is None and gone == 0
+
+
+class TestFbAccountApi:
+    @pytest.fixture
+    def fb_user(self, client):
+        client.post("/api/auth/register", json={"username": "fb_owner", "password": "t123"})
+        db = database.get_db()
+        db.execute("UPDATE users SET platform='fb', display_name='张三' "
+                   "WHERE username='fb_owner'")
+        db.commit()
+        db.close()
+        token = client.post("/api/auth/login",
+                            json={"username": "fb_owner", "password": "t123"}
+                            ).get_json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_create_writes_new_fields(self, client, fb_user):
+        r = client.post("/api/fb/accounts/create", headers=fb_user, json={
+            "name": "户一", "account_id": "9001", "timezone": "Asia/Shanghai",
+            "unit_price": "12.5", "inbound_qty": "3", "outbound_qty": "1",
+            "outbound_date": "2026-10-01", "consumption": "88", "remark": "备注A",
+        })
+        assert r.status_code == 200
+        aid = r.get_json()["id"]
+        db = database.get_db()
+        row = db.execute("SELECT * FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert row["unit_price"] == "12.5"
+        assert row["inbound_qty"] == "3"
+        assert row["outbound_qty"] == "1"
+        assert row["outbound_date"] == "2026-10-01"
+        assert row["consumption"] == "88"
+        assert row["remark"] == "备注A"
+
+    def test_operator_is_frozen_to_creator_and_ignores_request_body(self, client, fb_user):
+        """operator 由服务端填；请求体里的同名字段必须被忽略。"""
+        r = client.post("/api/fb/accounts/create", headers=fb_user, json={
+            "name": "户二", "account_id": "9002", "operator": "伪造的操作人",
+        })
+        aid = r.get_json()["id"]
+        db = database.get_db()
+        row = db.execute("SELECT operator FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert row["operator"] == "张三"
+
+    def test_operator_cannot_be_changed_by_update(self, client, fb_user):
+        """PUT 里根本没有 operator 这一列的写入路径。"""
+        r = client.post("/api/fb/accounts/create", headers=fb_user,
+                        json={"name": "户三", "account_id": "9003"})
+        aid = r.get_json()["id"]
+        client.put(f"/api/fb/accounts/{aid}", headers=fb_user, json={
+            "name": "户三改", "operator": "改过的操作人",
+        })
+        db = database.get_db()
+        row = db.execute("SELECT name, operator FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+        db.close()
+        assert row["name"] == "户三改"
+        assert row["operator"] == "张三"
+
+    def test_update_writes_new_fields(self, client, fb_user):
+        r = client.post("/api/fb/accounts/create", headers=fb_user,
+                        json={"name": "户四", "account_id": "9004"})
+        aid = r.get_json()["id"]
+        client.put(f"/api/fb/accounts/{aid}", headers=fb_user, json={
+            "name": "户四", "unit_price": "99", "remark": "改后备注",
+        })
+        db = database.get_db()
+        row = db.execute("SELECT unit_price, remark FROM fb_accounts WHERE id=?",
+                         (aid,)).fetchone()
+        db.close()
+        assert row["unit_price"] == "99"
+        assert row["remark"] == "改后备注"
+
+    def test_primary_bm_visible_in_list(self, client, fb_user):
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username='fb_owner'").fetchone()[0]
+        db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES('BM主','bmz',?)", (uid,))
+        bm = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.close()
+        r = client.post("/api/fb/accounts/create", headers=fb_user, json={
+            "name": "户五", "account_id": "9005", "bm_ids": [bm], "primary_bm_id": bm,
+        })
+        assert r.status_code == 200
+        r = client.get("/api/fb/accounts/list", headers=fb_user,
+                       query_string={"search": "9005"})
+        item = r.get_json()["items"][0]
+        assert item["primary_bm_name"] == "BM主"
+
+    def test_switching_primary_bm_via_update(self, client, fb_user):
+        """换 BM 走接口也必须成功（先清后设）。"""
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username='fb_owner'").fetchone()[0]
+        for nm, bid in (("BM一", "bx1"), ("BM二", "bx2")):
+            db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES(?,?,?)", (nm, bid, uid))
+        bms = [r[0] for r in db.execute("SELECT id FROM fb_bms ORDER BY id").fetchall()]
+        db.close()
+        r = client.post("/api/fb/accounts/create", headers=fb_user, json={
+            "name": "户六", "account_id": "9006", "bm_ids": bms, "primary_bm_id": bms[0],
+        })
+        aid = r.get_json()["id"]
+        r = client.put(f"/api/fb/accounts/{aid}", headers=fb_user, json={
+            "name": "户六", "bm_ids": bms, "primary_bm_id": bms[1],
+        })
+        assert r.status_code == 200
+        db = database.get_db()
+        row = db.execute("SELECT bm_id FROM fb_account_bm WHERE account_id=? AND is_primary=1",
+                         (aid,)).fetchone()
+        db.close()
+        assert row is not None and row["bm_id"] == bms[1]
