@@ -272,18 +272,41 @@ cd py && python -m pytest tests/test_fb_huguan_dashboard.py -q
 
 Expected: PASS（Step 1 的全部用例）。
 
-- [ ] **Step 7: 跑全量回归**
+- [ ] **Step 7: re-baseline 4 条把 "fb" 钉成非法平台的既有用例**
+
+`py/tests/test_huguan_dashboard.py` 里有 **4** 条用例断言 `"fb"` 是非法平台 ——
+而本任务的目的正是让 fb 合法。**这是计划初稿的漏项**（Task 1 原先没认领这一步，实施时由
+实现者发现）。它们不是 GG/TT 行为回归，是断言本身被本次改动作废。
+
+逐条改，**保强度不变**：
+
+| 用例 | 改法 |
+|---|---|
+| `test_parsed_key_name_is_normalized_to_account_id`（断言 `ACCOUNT_KEY_FIELD == {...}` 精确相等） | 期望字典补 `"fb": "account_id"` |
+| `test_invalid_platform_rejected`（POST `platform="fb"` 期望 400） | `"fb"` → `"xx"`（仍非法的值） |
+| `test_malformed_body_is_400_not_500`（循环含 `{"platform": "fb"}`） | 同上，`"fb"` → `"xx"` |
+| `test_unknown_platform_falls_back_to_gg`（`for bad in ("fb", "xx", "")`） | 循环里去掉 `"fb"` |
+
+> ⚠️ **另有一条也 POST `platform="fb"` 期望 400 的用例不要动** —— 它在 malformed-body
+> 那一段附近，注释写着「必然先命中『未配置 → 400』」。那条 400 的原因是**未配置**而非平台非法，
+> fb 变合法后它仍然是 400。动了反而错。
+
+**改之前先确认该文件干净**：`git diff --stat py/tests/test_huguan_dashboard.py`
+（本仓库有并行会话，该文件被多轮改过）。有未提交改动就停下来报告。
+
+- [ ] **Step 8: 跑全量回归**
 
 ```bash
 cd py && python -m pytest tests/ -q
 ```
 
-Expected: 全绿，总数 ≥ 开工时的基线（**回归点**：GG/TT 行为必须逐字节不变）。
+Expected: 全绿（含 Step 7 改过的 4 条），总数 ≥ 开工时的基线。
+**回归点**：GG/TT 行为必须逐字节不变 —— 除了那 4 条被本次改动作废的断言。
 
-- [ ] **Step 8: 提交**
+- [ ] **Step 9: 提交**
 
 ```bash
-git add py/huguan_dashboard.py py/tests/test_fb_huguan_dashboard.py
+git add py/huguan_dashboard.py py/tests/test_fb_huguan_dashboard.py py/tests/test_huguan_dashboard.py
 git commit -m "feat(fb): 户管看板扩到三平台：消除二元回落 + FB 列规格与行查询
 
 - PLATFORMS 加 fb；5 处 'tt_accounts if platform == \"tt\" else accounts'
@@ -488,11 +511,15 @@ class TestFbApplyDeathIsNoop:
                    (uid,))
         pk = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.commit()
-        # 不抛异常即通过
+        before = dict(db.execute("SELECT * FROM fb_accounts WHERE id=?", (pk,)).fetchone())
+        # 两个方向都不能抛异常（走到 UPDATE death_date 就会 OperationalError）
         hd._apply_death(db, "fb", pk, True)
         hd._apply_death(db, "fb", pk, False)
         db.commit()
+        after = dict(db.execute("SELECT * FROM fb_accounts WHERE id=?", (pk,)).fetchone())
         db.close()
+        # 真的什么都没改 —— 不只是「没崩」
+        assert after == before
 
     def test_gg_apply_death_still_works(self, client):
         """回归点：GG / TT 的死亡标记行为不变。"""
