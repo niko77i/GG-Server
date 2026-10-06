@@ -55,6 +55,22 @@
         <el-table-column label="所属BM" min-width="140">
           <template #default="{ row }">{{ row.bms?.map(b=>b.name).join(', ') }}</template>
         </el-table-column>
+        <el-table-column label="位置" min-width="120">
+          <template #default="{ row }">
+            <span v-if="row.primary_bm_name">{{ row.primary_bm_name }}</span>
+            <span v-else style="color:#c0c4cc;">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="所属渠道" width="110">
+          <template #default="{ row }">{{ optName(channelOptions, row.channel_id) }}</template>
+        </el-table-column>
+        <el-table-column label="资产类型" width="110">
+          <template #default="{ row }">{{ optName(assetTypeOptions, row.asset_type_id) }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">{{ optName(statusOptions, row.status_id) }}</template>
+        </el-table-column>
+        <el-table-column prop="operator" label="操作人" width="100" />
         <el-table-column prop="timezone" label="时区" width="100" />
         <el-table-column prop="acquired_date" label="到手时间" width="110" />
         <el-table-column label="操作" width="140" fixed="right">
@@ -95,6 +111,46 @@
             <el-option v-for="s in statusOptions" :key="s.id" :label="s.name" :value="s.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="主BM（位置）">
+          <el-select v-model="form.primary_bm_id" clearable placeholder="从已关联的BM中选择" style="width:100%">
+            <el-option v-for="b in form.bm_ids" :key="b"
+                       :label="(bmOptions.find(x=>x.id===b)||{}).name || ('BM#'+b)" :value="b" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="所属渠道">
+          <el-select v-model="form.channel_id" clearable placeholder="请选择渠道" style="width:100%">
+            <el-option v-for="c in channelOptions" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="资产类型">
+          <el-select v-model="form.asset_type_id" clearable placeholder="请选择资产类型" style="width:100%">
+            <el-option v-for="t in assetTypeOptions" :key="t.id" :label="t.name" :value="t.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="接户运营">
+          <el-select v-model="form.acceptor_id" clearable filterable placeholder="选择接户运营" style="width:100%">
+            <el-option v-for="u in fbUsers" :key="u.id"
+                       :label="u.display_name || u.username" :value="u.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="单价">
+          <el-input v-model="form.unit_price" placeholder="数字" />
+        </el-form-item>
+        <el-form-item label="入库">
+          <el-input v-model="form.inbound_qty" placeholder="数量" />
+        </el-form-item>
+        <el-form-item label="出库时间">
+          <el-input v-model="form.outbound_date" placeholder="YYYY-MM-DD" />
+        </el-form-item>
+        <el-form-item label="出库">
+          <el-input v-model="form.outbound_qty" placeholder="数量" />
+        </el-form-item>
+        <el-form-item label="消耗">
+          <el-input v-model="form.consumption" />
+        </el-form-item>
+        <el-form-item label="产品信息">
+          <el-input v-model="form.remark" type="textarea" :rows="2" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <div class="dialog-footer">
@@ -116,8 +172,26 @@ import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
 const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selectedIds = ref([])
 const bmOptions = ref([]); const statusOptions = ref([]); const dialogVisible = ref(false)
+const channelOptions = ref([]); const assetTypeOptions = ref([]); const fbUsers = ref([])
 const editingId = ref(null); const saving = ref(false)
-const form = reactive({ name:'', account_id:'', bm_ids:[], timezone:'', acquired_date:'', status_id:null })
+
+// 选项 id → 名字。后端 list_accounts 只返回 *_id，不返回名字（见 Step 2 的说明），
+// 用本页已加载的选项表映射，避免为此改后端查询。
+//
+// ⚠️ 形参 list 收的是**普通数组**不是 ref：本函数只在模板里调用，而 `<script setup>`
+// 的顶层 ref 在模板中会自动解包，传进来的是 `channelOptions.value` 那个数组。
+// 写成 `list.value.find(...)` 会 TypeError。
+function optName(list, id) {
+  if (id === null || id === undefined || id === '') return ''
+  const o = (list || []).find(x => x.id === id)
+  return o ? o.name : ''
+}
+
+const form = reactive({
+  name:'', account_id:'', bm_ids:[], primary_bm_id:null, timezone:'', acquired_date:'',
+  status_id:null, channel_id:null, asset_type_id:null, unit_price:'', inbound_qty:'',
+  acceptor_id:null, outbound_date:'', outbound_qty:'', consumption:'', remark:'',
+})
 
 let searchTimer = null
 function onSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(loadData, 300) }
@@ -144,15 +218,32 @@ function onOwnerChange() {
 async function loadOptions() {
   try { const r = await fbApi.bmOptions(); bmOptions.value = r.data || [] } catch(e) { console.warn('loadOptions bm', e) }
   try { const r = await client.get('/statuses/list'); statusOptions.value = r.statuses || r.data || [] } catch(e) { console.warn('loadOptions statuses', e) }
+  try { const r = await fbApi.listChannels(); channelOptions.value = r.items || [] } catch(e) { console.warn('loadOptions channels', e) }
+  try { const r = await fbApi.listAssetTypes(); assetTypeOptions.value = r.items || [] } catch(e) { console.warn('loadOptions assetTypes', e) }
+  try { const r = await fbApi.listFbUsers(); fbUsers.value = r.users || [] } catch(e) { console.warn('loadOptions users', e) }
 }
 
 function openCreate() {
-  editingId.value = null; form.name=''; form.account_id=''; form.bm_ids=[]; form.timezone=''; form.acquired_date=''; form.status_id=null
+  editingId.value = null
+  Object.assign(form, {
+    name:'', account_id:'', bm_ids:[], primary_bm_id:null, timezone:'', acquired_date:'',
+    status_id:null, channel_id:null, asset_type_id:null, unit_price:'', inbound_qty:'',
+    acceptor_id:null, outbound_date:'', outbound_qty:'', consumption:'', remark:'',
+  })
   dialogVisible.value = true
 }
 function openEdit(row) {
-  editingId.value = row.id; form.name = row.name; form.account_id = row.account_id; form.bm_ids = (row.bms||[]).map(b=>b.id)
-  form.timezone = row.timezone; form.acquired_date = row.acquired_date; form.status_id = row.status_id
+  editingId.value = row.id
+  Object.assign(form, {
+    name: row.name, account_id: row.account_id,
+    bm_ids: (row.bms||[]).map(b=>b.id),
+    primary_bm_id: (row.bms||[]).find(b=>b.is_primary)?.id || null,
+    timezone: row.timezone, acquired_date: row.acquired_date, status_id: row.status_id,
+    channel_id: row.channel_id, asset_type_id: row.asset_type_id,
+    unit_price: row.unit_price, inbound_qty: row.inbound_qty,
+    acceptor_id: row.acceptor_id, outbound_date: row.outbound_date,
+    outbound_qty: row.outbound_qty, consumption: row.consumption, remark: row.remark,
+  })
   dialogVisible.value = true
 }
 async function handleSave() {

@@ -19,6 +19,7 @@ export const fbApi = {
   restoreAccount(id) { return client.post(`/fb/accounts/${id}/restore`) },
   permanentDeleteAccount(id) { return client.delete(`/fb/accounts/${id}/permanent`) },
   accountBmHistory(id) { return client.get(`/fb/accounts/${id}/bm-history`) },
+  reassignAccount(id, data) { return client.put(`/fb/accounts/${id}/reassign`, data) },
 
   // 产品管理
   listProducts(params = {}) { return client.get('/fb/products/list', { params }) },
@@ -52,6 +53,14 @@ export const fbApi = {
   parseExtract(data) { return client.post('/fb/extract/parse', data) },
   checkDuplicates(data) { return client.post('/fb/extract/check-duplicates', data) },
   saveExtract(data) { return client.post('/fb/extract/save', data) },
+
+  // 公用词表（所属渠道 / 资产类型）
+  listChannels() { return client.get('/fb-channels/list') },
+  createChannel(name) { return client.post('/fb-channels/create', { name }) },
+  deleteChannel(id) { return client.delete(`/fb-channels/${id}`) },
+  listAssetTypes() { return client.get('/fb-asset-types/list') },
+  createAssetType(name) { return client.post('/fb-asset-types/create', { name }) },
+  deleteAssetType(id) { return client.delete(`/fb-asset-types/${id}`) },
 
   // 用户查询
   listFbUsers() { return client.get('/fb/users') },
