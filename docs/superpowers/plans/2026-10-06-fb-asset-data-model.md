@@ -702,6 +702,7 @@ class TestFbAccountApi:
         uid = db.execute("SELECT id FROM users WHERE username='fb_owner'").fetchone()[0]
         db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES('BM主','bmz',?)", (uid,))
         bm = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()   # 不 commit 就 close 会回滚，BM 行丢失，后面的 create 会撞 FK
         db.close()
         r = client.post("/api/fb/accounts/create", headers=fb_user, json={
             "name": "户五", "account_id": "9005", "bm_ids": [bm], "primary_bm_id": bm,
@@ -718,6 +719,7 @@ class TestFbAccountApi:
         for nm, bid in (("BM一", "bx1"), ("BM二", "bx2")):
             db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES(?,?,?)", (nm, bid, uid))
         bms = [r[0] for r in db.execute("SELECT id FROM fb_bms ORDER BY id").fetchall()]
+        db.commit()   # 同上：不 commit 就 close 会回滚
         db.close()
         r = client.post("/api/fb/accounts/create", headers=fb_user, json={
             "name": "户六", "account_id": "9006", "bm_ids": bms, "primary_bm_id": bms[0],
