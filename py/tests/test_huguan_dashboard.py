@@ -3167,7 +3167,56 @@ class TestTtReassignChannelWrite:
         assert resp.status_code == 200
         chan = [r for c in captured for r in c["rows"] if "L" in r["cells"]]
         assert chan, "reassign 应写换绑情况列 L"
-        assert {r["account_id"]: r["cells"]["L"] for r in chan}["TTTRIG-CHAN"] == "新归属"
+        note = {r["account_id"]: r["cells"]["L"] for r in chan}["TTTRIG-CHAN"]
+        assert note.startswith("旧归属转新归属"), f"格式应为「旧转新月.日」，实得 {note!r}"
+        assert re.fullmatch(r"旧归属转新归属\d{1,2}\.\d{1,2}", note), note
+        db = database.get_db()
+        stored = db.execute(
+            "SELECT owner_change_note FROM tt_accounts WHERE advertiser_id='TTTRIG-CHAN'"
+        ).fetchone()["owner_change_note"]
+        assert stored == note, "落库值与写表值必须是同一份文本"
+        db.close()
+
+    def test_tt_reassign_with_null_old_owner_uses_placeholder(self, client, monkeypatch):
+        """旧归属为空时文本以「未分配转」开头。"""
+        hg, uid = _create_user(client, "_tt_ocn_null", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        target = _seed(db, "_tt_ocn_null_t", "黎明", platform="tt")
+        aid = _seed_tt(db, "OCN-NULL", None)   # owner_id 为 NULL
+        db.commit()
+        db.close()
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": target})
+        assert resp.status_code == 200
+        chan = [r for c in captured for r in c["rows"] if "L" in r["cells"]]
+        assert chan[0]["cells"]["L"].startswith("未分配转黎明")
+
+    def test_tt_reassign_note_is_pure_ascii_month_day_no_padding(self, client, monkeypatch):
+        """月日不补零、不用 strftime('%-m')（Windows 不支持该格式符）。"""
+        hg, uid = _create_user(client, "_tt_ocn_fmt", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        old = _seed(db, "_tt_ocn_fmt_o", "阿轩", platform="tt")
+        target = _seed(db, "_tt_ocn_fmt_t", "黎明", platform="tt")
+        aid = _seed_tt(db, "OCN-FMT", old)
+        db.commit()
+        db.close()
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                   json={"owner_id": target})
+        chan = [r for c in captured for r in c["rows"] if "L" in r["cells"]]
+        note = chan[0]["cells"]["L"]
+        import datetime as _dt
+        now = _dt.datetime.now()
+        assert note == f"阿轩转黎明{now.month}.{now.day}"
 
 
 class TestSyncAndPushRoleCoverage:

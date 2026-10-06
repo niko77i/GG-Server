@@ -521,6 +521,17 @@ def reassign_account(aid):
                    else "该账户已属于目标用户，无需转移", 409)
     db.execute("UPDATE tt_accounts SET owner_id=?, updated_at=datetime('now','localtime') WHERE id=?",
                (target_owner, aid))
+    # 换绑记录（2026-10-06 规格）：文本与稍后写表的 L 列值必须同源，故在此构造一次。
+    # 月日不用 strftime("%-m") —— Windows 不支持该格式符。
+    _old_label = (existing["display_name"] or existing["username"] or "未分配").strip()
+    _new_label_row = db.execute(
+        "SELECT COALESCE(NULLIF(display_name,''), username, '') AS n FROM users WHERE id=?",
+        (target_owner,)).fetchone()
+    _new_label = ((_new_label_row["n"] if _new_label_row else "") or str(target_owner)).strip()
+    _now = datetime.datetime.now()
+    owner_change_note = f"{_old_label}转{_new_label}{_now.month}.{_now.day}"
+    db.execute("UPDATE tt_accounts SET owner_change_note=? WHERE id=?",
+               (owner_change_note, aid))
     for f in ["name", "country", "timezone", "agent_id", "status_id", "acquired_date", "consumption"]:
         if f in data and data[f] is not None:
             db.execute(f"UPDATE tt_accounts SET {f}=? WHERE id=?",
@@ -536,7 +547,8 @@ def reassign_account(aid):
     db.commit()
     # 户管看板回写（规格 §6.2 / §7.2 规则 3①）：先刷该行的可写列，再写「换绑情况」列。
     hd.writeback_rows(uid, "tt", [existing["advertiser_id"]])
-    hd.writeback_owner_channel(uid, "tt", existing["advertiser_id"], target_owner)
+    hd.writeback_owner_channel(uid, "tt", existing["advertiser_id"], target_owner,
+                               text=owner_change_note)
     if target_owner == uid:
         return ok({"message": f"账户「{existing['name'] or existing['advertiser_id']}」已转移至当前用户"})
     # 规格 §7.5：文案须区分「已转移至当前用户」与「已从 A 转移至 B」。
