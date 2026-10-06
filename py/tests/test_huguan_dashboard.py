@@ -3339,3 +3339,50 @@ class TestOwnerChangeNoteColumn:
         assert row is not None, "旧行应当保留"
         assert row["owner_change_note"] == "", "旧行读回必须是空串，不能是 None"
         db.close()
+
+
+class TestOwnerChangeNoteReadBack:
+    """L 列的值按表覆盖存进 owner_change_note（其他文本列同口径）。"""
+
+    def _prepare(self, client):
+        db = database.get_db()
+        u1 = _seed(db, "_ocn_a", "张三")
+        return db, u1
+
+    def test_new_account_carries_note(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, u1 = self._prepare(client)
+        row = [""] * 13
+        row[2], row[6], row[11] = "OCN-NEW", "张三", "阿豪转张三10.6"
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        item = diff["to_create"][0]
+        assert item["db_values"]["owner_change_note"] == "阿豪转张三10.6"
+        db.close()
+
+    def test_existing_account_note_is_overwritten(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, u1 = self._prepare(client)
+        _seed_tt_account(db, "OCN-EX", u1, name="张三")
+        db.execute("UPDATE tt_accounts SET owner_change_note='旧记录' WHERE advertiser_id='OCN-EX'")
+        db.commit()
+        row = [""] * 13
+        row[2], row[6], row[11] = "OCN-EX", "张三", "新记录A转B10.7"
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        item = diff["to_update"][0]
+        assert item["fields"]["owner_change_note"] == "新记录A转B10.7"
+        db.close()
+
+    def test_clearing_note_is_reported_in_clears(self, client):
+        """表里清空 → 系统清空，且必须出现在 clears 里让户管看见（不可逆动作）。"""
+        from huguan_dashboard import build_diff, parse_row
+        db, u1 = self._prepare(client)
+        _seed_tt_account(db, "OCN-CLR", u1, name="张三")
+        db.execute("UPDATE tt_accounts SET owner_change_note='要没了' WHERE advertiser_id='OCN-CLR'")
+        db.commit()
+        row = [""] * 13
+        row[2], row[6] = "OCN-CLR", "张三"   # L 列留空
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        item = diff["to_update"][0]
+        assert item["fields"]["owner_change_note"] == ""
+        assert "owner_change_note" in item["clears"]
+        db.close()

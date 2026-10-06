@@ -310,7 +310,8 @@ def _resolve_field(db, platform: str, field: str, value: str):
 # 可直接覆盖的文本列（不需要名称解析）
 _PLAIN_TEXT_FIELDS = {
     "gg": ("acquired_date", "timezone"),
-    "tt": ("acquired_date", "country", "timezone", "consumption", "remark"),
+    "tt": ("acquired_date", "country", "timezone", "consumption", "remark",
+           "owner_change_note"),
 }
 
 
