@@ -135,7 +135,10 @@ def dashboard_sync():
                      "cells": {hd.OWNER_COL[platform]: item["to"]}}
                     for item in applied]
             _write_background(conf, rows)
-            _write_background(conf, hd.owner_channel_cells(applied, platform, ""))
+            # 规则 3② 只对 GG 生效（2026-10-06 规格）：TT 的 L 列已是换绑记录，
+            # 同步时清空会抹掉记录，且因读回按表覆盖会连带清掉系统里的值。
+            if platform != "tt":
+                _write_background(conf, hd.owner_channel_cells(applied, platform, ""))
     finally:
         db.close()
 

@@ -3386,3 +3386,67 @@ class TestOwnerChangeNoteReadBack:
         assert item["fields"]["owner_change_note"] == ""
         assert "owner_change_note" in item["clears"]
         db.close()
+
+
+# ---------- Task 5: 取消 TT 同步后的「清空 L 列」 ----------
+
+class TestSyncChannelClearPlatformSplit:
+    """规则 3② 的清空动作按平台分叉：TT 不清（L 是换绑记录），GG 照清。"""
+
+    def _wire(self, client, platform):
+        hg, uid = _create_user(client, f"_clr_{platform}", role="huguan", platform=platform)
+        db = database.get_db()
+        target = _seed(db, f"_clr_t_{platform}", "李四", platform=platform)
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({platform: {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+        return hg, uid, target
+
+    def test_tt_sync_does_not_clear_change_note(self, client, monkeypatch):
+        hg, uid, target = self._wire(client, "tt")
+        db = database.get_db()
+        _seed_tt_account(db, "CLR-TT", uid)   # 归属起手是户管自己，表里 G 列写「李四」→ 触发变更
+        db.commit()
+        db.close()
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["入库时间", "是否回收", "账户ID", "BC", "国家", "所属渠道",
+             "接户运营", "时区", "状态", "消耗", "位置", "换绑情况", "产品信息"],
+            # C 列（账户ID）必须填，否则该行被 parse_row 判为「账户ID为空」整行跳过，
+            # applied 恒空 → 永远进不了清空分支，用例就成了空跑。
+            [""] * 2 + ["CLR-TT"] + [""] * 3 + ["李四"] + [""] * 6,
+        ])
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": False,
+                                 "confirmed": {"owner": ["CLR-TT"]}})
+        assert resp.status_code == 200
+        all_cells = [c for cap in captured for c in cap["rows"]]
+        assert not any("L" in c["cells"] for c in all_cells), \
+            "TT 同步不得写 L 列（换绑记录会被抹掉）"
+
+    def test_gg_sync_still_clears_channel_column(self, client, monkeypatch):
+        """回归护栏：GG 的清空行为一个字都不能变。"""
+        hg, uid, target = self._wire(client, "gg")
+        db = database.get_db()
+        db.execute("INSERT INTO accounts(account_id, name, owner_id) VALUES('CLR-GG','CLR-GG',?)",
+                   (uid,))
+        db.commit()
+        db.close()
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["日期", "是否封户", "账户ID", "MCC", "国家", "所属渠道", "运营", "重新分配"],
+            ["", "", "CLR-GG", "", "", "", "户管本人", "李四"],
+        ])
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "gg", "dry_run": False,
+                                 "confirmed": {"owner": ["CLR-GG"]}})
+        assert resp.status_code == 200
+        all_cells = [c for cap in captured for c in cap["rows"]]
+        assert any(c["cells"].get("H") == "" for c in all_cells), \
+            "GG 同步仍应清空 H 列"
