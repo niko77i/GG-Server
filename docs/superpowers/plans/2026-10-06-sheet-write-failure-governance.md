@@ -1626,12 +1626,89 @@ def test_mirror_target_never_rolls_back(client, monkeypatch):
     cur = db.execute("SELECT status_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()["status_id"]
     db.close()
     assert cur == dead, "镜像类不得回滚业务数据"
+
+
+def test_batch_path_captures_snapshot_and_rolls_back(client, monkeypatch):
+    """批量改状态：快照必须抓到「改前」值，最终失败时逐个条件回滚。
+
+    补这条的由来（Task 5 审查点名）：Task 5 的 4 条用例**全部只走单条 PUT 路径**，
+    批量路径 `batch_update_accounts` 零覆盖 —— 它的快照正确性只靠「`r` 是状态块
+    UPDATE 之前取的物化 Row」这一语言保证，没有护栏。此用例把该保证变成断言。
+
+    注意批量路径与单条路径的**关键差异**：单条路径必须在 `editable` 循环之前抓快照
+    （该循环含 `death_date`）；批量路径的状态块之前没有会改 `death_date` 的分支，
+    且它的 SELECT 已补上 `status_changed_date, death_date` 两列 —— 本用例正是在守这一点。
+    """
+    import google_sheets_service as gs
+    from time import sleep as _poll_sleep
+    monkeypatch.setattr("time.sleep", lambda _s: None)      # 跳过 30s 重试等待
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+
+    def _boom(*a, **k):
+        raise RuntimeError("Sheets 配额超限")
+
+    monkeypatch.setattr(gs, "append_recycle", _boom)
+
+    h, uid = _tt_admin(client, "_rc_batch")
+    db = database.get_db()
+    _setup_sheet(db)
+    alive = _status_id(db, "存活")
+    dead = _status_id(db, "封禁")
+    # 两个账户各带一个「改前」的 death_date，回滚必须还原到这里
+    for aid_key in ("adv_b1", "adv_b2"):
+        db.execute(
+            "INSERT INTO tt_accounts (advertiser_id, name, owner_id, status_id, death_date) "
+            "VALUES (?,?,?,?,'2020-01-01')", (aid_key, aid_key, uid, alive))
+    db.commit()
+    ids = [r["id"] for r in db.execute(
+        "SELECT id FROM tt_accounts WHERE advertiser_id IN ('adv_b1','adv_b2')").fetchall()]
+    db.close()
+
+    resp = client.post("/api/tt/accounts/batch-update", headers=h,
+                       json={"ids": ids, "field": "status_id", "value": dead,
+                             "recycle_reason": "封禁回收"})
+    assert resp.status_code == 200, resp.get_json()
+
+    import json
+    db = database.get_db()
+    for _ in range(300):
+        rows = db.execute(
+            "SELECT * FROM sheet_write_log WHERE user_id=? AND target='tt_recycle' "
+            "AND business_key IN ('adv_b1','adv_b2')", (uid,)).fetchall()
+        if len(rows) == 2 and all(r["status"] in ("rolled_back", "rollback_abandoned")
+                                  for r in rows):
+            break
+        _poll_sleep(0.02)
+
+    logs = db.execute(
+        "SELECT * FROM sheet_write_log WHERE user_id=? AND target='tt_recycle' "
+        "AND business_key IN ('adv_b1','adv_b2')", (uid,)).fetchall()
+    after = {r["advertiser_id"]: (r["status_id"], r["death_date"]) for r in db.execute(
+        "SELECT advertiser_id, status_id, death_date FROM tt_accounts "
+        "WHERE advertiser_id IN ('adv_b1','adv_b2')").fetchall()}
+    db.close()
+
+    assert len(logs) == 2, f"批量路径必须为每个账户各登记一条，实际 {len(logs)}"
+    snaps = {json.loads(r["snapshot_json"])["account_pk"]: json.loads(r["snapshot_json"])
+             for r in logs}
+    for aid_key, snap in snaps.items():
+        # 快照抓的必须是「改前」值 —— 若批量 SELECT 漏了这两列，这里会是 None
+        assert snap["prev_status_id"] == alive, f"{aid_key} 的 prev_status_id 抓错了"
+        assert snap["prev_death_date"] == "2020-01-01", f"{aid_key} 的 prev_death_date 抓错了"
+        assert snap["new_status_id"] == dead
+    for aid_key, (st, dd) in after.items():
+        assert st == alive, f"{aid_key} 应被条件回滚回存活"
+        assert dd == "2020-01-01", f"{aid_key} 的 death_date 应被回滚还原"
 ```
 
 - [ ] **Step 2: 跑测试**
 
 Run: `cd py && python -m pytest tests/test_tt_recycle_sheet_write.py -v`
-Expected: 7 passed
+Expected: 8 passed
+
+> **勘误（2026-10-06，Task 5 审查点名）**：本任务初稿只有 3 条用例、全走单条 PUT 路径，
+> 批量路径零覆盖。已补第 4 条（`test_batch_path_captures_snapshot_and_rolls_back`），
+> 期望值随之 7 → 8。
 
 - [ ] **Step 3: 全量后端回归**
 
