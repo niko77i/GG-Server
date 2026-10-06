@@ -217,6 +217,8 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column v-if="authStore.isHuguan" prop="owner_change_note"
+                         label="换绑情况" min-width="160" show-overflow-tooltip />
         <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showModal(row)">✏️</el-button>
