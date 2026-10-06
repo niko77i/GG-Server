@@ -3218,6 +3218,41 @@ class TestTtReassignChannelWrite:
         now = _dt.datetime.now()
         assert note == f"阿轩转黎明{now.month}.{now.day}"
 
+    def test_tt_reassign_blank_target_display_name_falls_back_to_username(self, client, monkeypatch):
+        """目标归属人 display_name 是纯空白（"   "）时，新归属名须回退到 username。
+
+        缺陷（2026-10-06 终审）：原实现 `(display_name or username or ...).strip()` 里
+        `.strip()` 发生在 `or` 兜底**之后** —— 纯空白 display_name 是 truthy，会顶掉兜底，
+        strip 后得到空串，换绑记录退化成「阿轩转10.7」（新名缺失）。本用例专门钉死这一点：
+        L 值的新归属名位置必须是非空的 username。
+        """
+        hg, uid = _create_user(client, "_tt_ocn_blank", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        old = _seed(db, "_tt_ocn_blank_o", "阿轩", platform="tt")
+        # 目标是纯空白 display_name 的用户：username 是唯一可读的兜底名
+        target = _seed(db, "_tt_ocn_blank_t", "   ", platform="tt")
+        aid = _seed_tt(db, "OCN-BLANK", old)
+        db.commit()
+        db.close()
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.put(f"/api/tt/accounts/{aid}/reassign", headers=hg,
+                          json={"owner_id": target})
+        assert resp.status_code == 200
+        chan = [r for c in captured for r in c["rows"] if "L" in r["cells"]]
+        assert chan, "reassign 应写换绑情况列 L"
+        note = {r["account_id"]: r["cells"]["L"] for r in chan}["OCN-BLANK"]
+        import datetime as _dt
+        now = _dt.datetime.now()
+        # 新归属名位置回退到 username（非空），而非空串导致的「阿轩转10.7」
+        assert note == f"阿轩转_tt_ocn_blank_t{now.month}.{now.day}", \
+            f"纯空白 display_name 应回退到 username，实得 {note!r}"
+        assert not note.startswith("阿轩转" + f"{now.month}.{now.day}"), \
+            "换绑记录不得以空归属名收尾"
+
 
 class TestSyncAndPushRoleCoverage:
     """规格：/sync 与 /push 仅户管可达 —— 补 viewer/admin/developer 的 403 覆盖。"""
@@ -3474,6 +3509,9 @@ class TestSyncChannelClearPlatformSplit:
                                  "confirmed": {"owner": ["CLR-TT"]}})
         assert resp.status_code == 200
         all_cells = [c for cap in captured for c in cap["rows"]]
+        # 正向对照：归属变更确实被应用（规则 4 回写了 G 列），否则紧随其后的负向断言是空跑。
+        assert any("G" in c["cells"] for c in all_cells), \
+            "本用例须确实走到写回分支，否则负向断言无意义"
         assert not any("L" in c["cells"] for c in all_cells), \
             "TT 同步不得写 L 列（换绑记录会被抹掉）"
 

@@ -523,11 +523,19 @@ def reassign_account(aid):
                (target_owner, aid))
     # 换绑记录（2026-10-06 规格）：文本与稍后写表的 L 列值必须同源，故在此构造一次。
     # 月日不用 strftime("%-m") —— Windows 不支持该格式符。
-    _old_label = (existing["display_name"] or existing["username"] or "未分配").strip()
+    # 先 strip 再 or：display_name 仅含空白（"   "）时它是 truthy，会顶掉 or 兜底，
+    # 若在 .strip() 里收尾就会得到空串，换绑记录退化成「阿轩转10.7」（新名缺失）。
+    # 2026-10-06 终审发现，两处 label 构造同修。
+    _old_label = ((existing["display_name"] or "").strip()
+                  or (existing["username"] or "").strip()
+                  or "未分配")
+    # SQL 侧同样先 TRIM 再判空，避免纯空白的 display_name 顶掉 username 兜底。
     _new_label_row = db.execute(
-        "SELECT COALESCE(NULLIF(display_name,''), username, '') AS n FROM users WHERE id=?",
+        "SELECT COALESCE(NULLIF(TRIM(display_name),''), NULLIF(TRIM(username),''), '') AS n "
+        "FROM users WHERE id=?",
         (target_owner,)).fetchone()
-    _new_label = ((_new_label_row["n"] if _new_label_row else "") or str(target_owner)).strip()
+    _new_label = ((_new_label_row["n"] if _new_label_row else "").strip()
+                  or str(target_owner))
     _now = datetime.datetime.now()
     owner_change_note = f"{_old_label}转{_new_label}{_now.month}.{_now.day}"
     db.execute("UPDATE tt_accounts SET owner_change_note=? WHERE id=?",
