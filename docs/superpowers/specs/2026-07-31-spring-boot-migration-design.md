@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.31  
-> **日期**: 2026-07-31（v1.31 更新于 2026-09-25）  
+> **文档版本**: v1.32  
+> **日期**: 2026-07-31（v1.32 更新于 2026-10-06）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.32 变更**: **TT 广告账户列表不再展示「账户名称」列**（纯前端 `frontend/src/views/tt/TtAccountPanel.vue`，后端与数据库**零改动**，详见附录 H）——该列此前是 TT 账户名**唯一的内联编辑入口**（hover ✏️ → `<el-input>` → `ttAccountsApi.update(row.id, { name })`）。用户 2026-10-06 裁定 TT 列表无需展示账户名，本次删除该列，并同步清掉**专为该列存在**的状态与函数（`editingNameId` / `editNameValue` / `nameInputRef` 与 `startEditName` / `cancelNameEdit` / `saveName`，已核零残留引用；`nextTick`、`.inline-name-input`、`.inline-edit-btn` 仍被国家/消耗等其他内联编辑使用，**未删**）。**改名能力未丢失**：行尾 ✏️ 打开的 `TtAccountModal` 中「账户名称」仍是必填字段（新增与编辑共用该弹窗）。**仅 TT 改动**：GG（`AdsAccountPanel.vue`，见附录 E.1）与 FB（`FbAccountPanel.vue` 的「账户名」列）**保持原样**。**搜索框存在一处刻意的不一致，交接/迁移时勿「顺手修正」**：placeholder 由「🔍 搜索名称/广告账户 ID...」改为「🔍 搜索广告账户 ID...」，但后端 `GET /api/tt/accounts/list` 内**两处** search 条件 `(a.name LIKE ? OR a.advertiser_id LIKE ?)`（主列表 `tt_accounts_routes.py:224`、各状态计数 `:269`）**一律未改**——账户名只是不在列表里显示，按名搜索的通道仍然保留（用户明确选择「只改 placeholder 文案」）。`tt_accounts.name` 字段、DDL、接口契约均未动，**不存在数据迁移动作**。**Spring 侧无需任何改动**（本文档前提是前端不变、仅替换后端 API 层）
 > **v1.31 变更**: **户管角色（户管线）整体补录**——新增 `huguan` 角色、用户权限按角色收窄、以及「户管看板」Google Sheet 双向同步。权威设计见 `2026-09-22-huguan-role-design.md`（角色与权限）、`2026-09-23-huguan-sheet-design.md`（看板双向同步）、`2026-09-24-huguan-owner-source-and-picker-design.md`（归属变更「来源」标注）、`2026-09-24-huguan-frontend-visual-design.md`（前端视觉）；Java 侧重建要点见 §7.9，Controller 见 6.3，Sheets 方法见 8.1。**① 角色与三个角色集合常量**：`py/routes/helpers.py` 集中定义 `CROSS_USER_ROLES = ("developer","admin","huguan")`（可跨用户看数据）、`GLOBAL_OPTION_ROLES = ("developer","admin","huguan")`（可改全局选项/字典表，两者当前同值但**语义不同、不得合并**）、`PLATFORM_SWITCH_ROLES = ("developer","huguan")`（可切平台命名空间，**admin 刻意不在其中**——管理员自 v1.28 起按平台隔离，见 7.7）；`py/routes/decorators.py` 新增 `@huguan_required`，语义是**严格** `role == "huguan"`（admin/developer 一律 403 `权限不足，仅户管可操作`），因为户管看板是户管的**个人**配置，不是管理功能。**② 本版更正 §7.7.4 的衔接点预测**：v1.28 当时写「`_get_effective_platform` 的 `role == 'developer'` 计划改为 `CROSS_USER_ROLES`」，实际落地用的是 **`PLATFORM_SWITCH_ROLES`**（`main.py:6364`）——若真按 CROSS_USER_ROLES 改，admin 会被重新放回「跨平台取 `request.args['platform']`」分支，v1.28 刚修掉的「FB 管理员看到 GG 选项」缺陷当场复发。**这两个集合不可互换**，7.7.2 的 `isCrossPlatform()` 已据此拆成两个谓词。**③ 用户管理按户管收窄**（不改 administrator 既有行为）：`main.py:_check_modify_user` 在 developer 短路之后、角色层级与平台判断**之前**插入户管分支——目标角色必须是 `huguan`（否则 `户管只能操作户管账号`）**且** `target.created_by == actor.id`（否则 `只能操作自己创建的户管`）；户管**不受平台维度约束**（户管本身跨平台）。配套：`ALLOWED_CREATE_ROLES = {developer:(user,admin,viewer,huguan), admin:(user,admin,viewer), huguan:(huguan,)}`，创建用户时户管**忽略请求体 role 并强制写成 `huguan`**，改角色白名单收为 `("huguan","hidden")`；用户列表的角色过滤**不在 `auth.list_users` 内部**，而在路由层（`role_filter = "huguan" if user["role"] == "huguan" else None`），`list_users` 内部只负责「户管跳过平台过滤」。**迁移时两处都要照搬**，只改一处会漏掉一种越权。**④ 户管看板双向同步**：配置存 `config` 表键 `huguan_dashboard_{uid}`，**按平台各一份**（`PLATFORMS = ("gg","tt")`；**FB 不支持**）；GG 14 列 / TT 13 列，系统只写其中一部分（GG 实际自动写 `A:D`+`F:G`+`I:K`、TT 实际自动写 `A:J`+`M:M`），**其余列由户管自己用公式维护**，靠 `update_rows_by_account_id` 的**区间合并**（只有相邻列并成区间、空洞处断开）保证「没出现在 `cells` 里的列绝不被写到」——这是公式列保命的唯一机制，**不得**用「整行覆盖」实现。归属字段**不新增数据库列**，直接复用 `accounts.owner_id` / `tt_accounts.owner_id`（可空）。**⑤ 归属变更协议四条硬规则**：变更通道列（GG「重新分配」/ TT「换绑情况」）的值**优先于**运营列；**自动回写永不碰变更通道列**；变更通道列只有**两个**写入点（户管在系统 UI 改归属 ⇒ 写新名字；「从表同步到系统」成功 ⇒ 清空为 `""`）；应用归属变更后必须**回写运营列**为新归属人名，让两列重新一致。名字→`owner_id` 走「`display_name` 精确匹配、回落 `username`，命中 0 或 ≥2 均只告警、不写归属」（唯一命中才写）。**⑥ 表→系统同步的差异契约**：`POST /api/huguan/dashboard/sync` 返回五类差异（`to_create`/`to_update`/`owner_changes`/`to_skip`/`warnings`），表内**空值即清空**系统列（`to_update` 每条带 `clears`，`summary` 带 `clears` 计数），确认绑定**按 account_id 而非行号**，`not_applied` 防静默丢弃；`dry_run` 为**fail-safe**——**只有显式布尔 `false` 才落库**（缺省 / `true` / `null` / 字符串 `"false"` / `0` 全部只读），漏掉这个 `is not False` 会让「传个空值就把库改了」；表地址**只从该户管自己的配置取，请求体不接受表地址**（归属门禁不复用，因为复用等于给了「对着别人的表发起同步」这条路）。**⑦ 本轮终审修复**：`update_rows_by_account_id` 由「每行一次 `values().batchUpdate`」改为**整批一次调用**——Google 的单次 `batchUpdate` 请求是**原子**的，「配额撞车导致前几行已落表」的半写与「几百行 = 几百次请求」的请求数爆炸一并解掉，失败文案随之从「表已部分写入、无回滚」改为**「本次已写入 0 行」**，前端用户可见文案同步为**「刷新到看板失败。本次没有写入任何数据，直接重试是安全的。」**（`HuguanDashboardCard.vue:687` 与 `2026-09-24-huguan-frontend-visual-design.md` §195/§1005），后端异常消息里带本次涉及的 `account_id` 便于定位。**迁移红线**：区间合并语义、`dry_run` 的 fail-safe、归属回写顺序、`@huguan_required` 的严格性，四项均须原样重建；**不要**把户管并入 `admin`（两者权限模型不同），**不要**把 `CROSS_USER_ROLES` 与 `PLATFORM_SWITCH_ROLES` 合并成一个集合
 > **v1.30 变更**: **爬取产物归属校验：目录名认领判据加时间维度**（对应 `py/auth.py` 的 `directory_name_error` / `_dn_released_keys` / `_dir_ctime` / `_release_row_covers_dir` / `_sentinel_row_blocks_dir` 与 `py/database.py` 的 `_migrate_scrape_dn_history`）——这套判据来自 2026-09-23「全站鉴权加固」与 2026-09-24「下载签名按需签发 + scrape 产物归属校验」，**此前未录入本文档**，v1.30 随本轮换判据一并补录（权威说明见 `2026-09-24-ondemand-download-signing-design.md` §0.9–§0.13，Java 侧重建要点见 §7.8、缺表 DDL 见 §5.2）。背景：`temp/scraped_images/<目录名>` 下是各用户的爬取产物，目录名由用户名派生、磁盘上**没有 owner 记录**，归属只能靠「目录名判据」+ 一张墓碑表 `scrape_dn_history`（无外键、刻意不进删用户清理）反推。原判据只答「谁曾用过这个名字」（last-writer-wins），挡不住「行过期、但序号最大」的形态（迁移搬来的行、admin 用 `requested_dn` 代管建出的目录、记录缺失类故障）。本轮换成**带时间维度**的判据：① **释放行须晚于目录创建时刻**才参与比较（`created_at > 目录 ctime`），自己与他人**两侧一起**过滤——于是「上线前已改名者的旧目录认领路」恢复（他的旧行晚于旧目录，仍算数），而「每周清理后旧释放行认领新目录」被挡住；② **拿不到化身**（目录不存在 / 越界 / `stat` 失败）或**时刻解析不出**（脏行）时，释放行**不过滤**、哨兵**照拦**（两侧都取严侧，fail-closed）；③ **哨兵改按「化身」生效**：`user_id = 0` 的哨兵行只拦它写下时**已存在**的那个目录（`ts >= ctime`），目录在其后**重建**则旧哨兵失效（否则本人的认领路会被永久封死）；哨兵不参与 LWW 序号比较（独立 `blocked` 集合）。同时**退役**「无主目录扫盘补墓碑」整段（`database._tombstone_orphan_scrape_dirs` 删除）——它是上一轮的兜底，换判据后不再需要，无主目录仍由「判据 3：目录占用」接住。④ **亚秒不变式（本轮修的真实缺陷）**：`scrape_dn_history.created_at` 的表默认值 `datetime('now')` **只到秒**，同一个截断方向对**释放行**是 fail-closed（`ts > ctime` 更难成立）、对**哨兵**却是 **fail-open**（`ts >= ctime` 更难成立 ⇒ 拦不住它当年所判的化身），「同一秒内先建目录、后跑迁移」会把歧义名悄悄放开。故**任何**写该表的代码都必须显式带亚秒（`strftime('%Y-%m-%d %H:%M:%f','now')`）；迁移的哨兵写入口曾漏此条，已修并补效果级用例（code-review 第 7 轮 Important #1）。⑤ 时刻列是 **UTC**，解析须用 `calendar.timegm` 而非本地解析（用 `mktime` 会整体偏一个时区）；SQLite `now` 与文件系统时钟之间存在毫秒级抖动且**跨零**，故两侧判据都不能省掉亚秒精度。**迁移红线**：Spring 侧必须在**服务层**原样重建这套判据与墓碑表，**不得**改成按 `users` 外键推导归属；`scrape_dn_history` **不得**建 `UNIQUE(dn)`、**不得**加外键、**不得**在删用户时清理；时间列精度至少毫秒且按 UTC 存
 > **v1.29 变更**: **回收原因改为全平台公用词表**（对应 `py/routes/tt_accounts_routes.py` 的四个 `recycle-reasons` 接口、`py/database.py` 的 `_ensure_columns`、前端 `frontend/src/views/tt/TtSettingsPanel.vue`）——此前 `GET /api/tt/recycle-reasons/list` **无角色拦截**（仅 `@jwt_required() @tt_required`）却按 `owner_id` 做数据隔离：`role in CROSS_USER_ROLES`（developer/admin/huguan）看全量，其余**仅本人**。但该词表在前端是「TT设置 → ♻️回收原因选项」卡片集中维护的**共享词表**，设计意图与实现不一致 → admin 建的原因普通用户下拉框恒为空（实测：库中 3 条原因 `owner_id` 全为 admin uid=23，以普通用户 uid 查询返回 `[]`），且状态变更弹窗在用户手输时会自动 `create` 一条**归自己的同名记录**，产生跨 owner 重名脏数据。同一功能本已有两条**作用域互相矛盾**的写入路径：API 路径按 `(name, owner_id)` 去重，而 `_trigger_recycle_if_dead` 走 `WHERE name=?` **全局**去重 + `INSERT OR IGNORE`。本次统一为公用语义：① `list` 删掉角色分支，所有 TT 用户（含 viewer）读全表；② `create` 去重条件 `(name, owner_id)` → 全局 `name`，`owner_id` 仅记录创建者、**不再参与鉴权**，并加 `sqlite3.IntegrityError` 兜底返回 409（防并发撞唯一索引变 500）；③ `rename`/`delete` 删掉 owner 检查，`rename` 新增全局重名检查（改到已存在名称返回 409、原值不变，前端已消费 `error` 字段）；④ `py/database.py` 的 `_ensure_columns` 新增 `CREATE UNIQUE INDEX IF NOT EXISTS idx_tt_recycle_reasons_name ON tt_recycle_reasons(name)`，**带重名防御**：存量若有重名则跳过建索引，避免唯一索引创建失败导致每次连库都抛异常；⑤ 前端把「♻️ 回收原因选项」卡片移出管理员专属 `<template v-if>`，改用 `visibleOptionCards` 计算属性按角色过滤——回收原因对所有 TT 用户可见可改，「代理名选项」「账户状态选项」仍管理员专属（管理员渲染结果逐位不变）。**权限边界**：viewer 保持只读，`@tt_write_required` 未改（可读、不可增改删）。**迁移要点**：Spring 侧回收原因不得再按 owner 过滤，`name` 唯一约束必须是**全局唯一**而非 `UNIQUE(name, owner_id)`，详见 6.3
@@ -4297,3 +4298,45 @@ INSERT INTO tags (`key`, `value`) VALUES
 ### G.4 后端影响
 
 **无**。吸顶为纯 CSS（`position: sticky`）+ DOM 位置移动，不涉及任何接口、数据或 Service 逻辑。迁移到 Spring Boot 时无需在 Controller/Service 层做任何处理。
+
+---
+
+## 附录 H: v1.32 TT 账户列表移除「账户名称」列
+
+> **日期**: 2026-10-06  
+> **性质**: 纯前端改动，后端无变更  
+> **文件**: `frontend/src/views/tt/TtAccountPanel.vue`
+
+### H.1 需求背景
+
+TT 广告账户列表（`/tt/accounts`）第 2 列是「账户名称」。用户裁定 TT 侧不需要在列表里展示账户名（**仅 TT**，GG / FB 保持原样）。
+
+### H.2 改动内容
+
+改动前该列是 TT 账户名**唯一的**内联编辑入口：hover 出现 ✏️ → 切换成 `<el-input>` → `ttAccountsApi.update(row.id, { name })` 保存。
+
+1. **删除表格列**「账户名称」（原 `min-width=140`，含其内联编辑模板）。
+   移除后列顺序为：选择框 → 广告账户 ID → 所属 BC → 时区 → 代理 → 国家 → 消耗 → 到手时间 → 状态变更时间 → 户归属（仅户管）→ 操作。
+2. **清理专为该列存在的状态与函数**：`editingNameId` / `editNameValue` / `nameInputRef`，以及 `startEditName` / `cancelNameEdit` / `saveName`（已核零残留引用）。
+   **未删**：`nextTick`、CSS 类 `.inline-name-input` 与 `.inline-edit-btn` —— 它们仍被「国家」「消耗」等其他内联编辑使用。
+3. **搜索框 placeholder** 由「🔍 搜索名称/广告账户 ID...」改为「🔍 搜索广告账户 ID...」。
+
+### H.3 刻意保留的不一致（交接/迁移时勿「顺手修正」）
+
+**搜索框提示词不再提「名称」，但后端仍按 `name` 匹配。** 用户明确选择「只改 placeholder 文案、不动后端 SQL」。
+
+`GET /api/tt/accounts/list`（`py/routes/tt_accounts_routes.py:197`）的 `list_accounts()` 内**两处** search 条件均**保持原样**：
+
+| 位置 | 用途 | 条件 |
+|---|---|---|
+| `tt_accounts_routes.py:224` | 主列表查询 | `(a.name LIKE ? OR a.advertiser_id LIKE ?)` |
+| `tt_accounts_routes.py:269` | 各状态计数（`sc_where2`，不含 status 筛选） | 同上 |
+
+即：**账户名只是不在列表里显示，按名搜索的通道仍然保留**。改成「只按 advertiser_id 搜」是另一次独立决策，不要顺带做。
+
+### H.4 改名入口与后端影响
+
+- **改名能力未丢失**：行尾 ✏️ 打开 `TtAccountModal`，其中「账户名称」仍是**必填**字段（新增与编辑共用该弹窗）。本次未动该弹窗。
+- **其余展示点未动**（用户选择「只去账户列表那一列」）：`TtAccountDetailModal.vue`（详情弹窗「账户名称：xxx」）、`TtAccountDeletedModal.vue`（已删除账户列表的「账户名称」列）**均保持原样**。
+- **GG / FB 未动**：GG 侧见附录 E.1（`AdsAccountPanel.vue` 的账户名内联编辑，本次不动）；FB 侧 `FbAccountPanel.vue` 的「账户名」列**保持原样**。
+- **后端影响：无**。`tt_accounts.name` 字段、DDL、接口契约一律未动，**不存在数据迁移动作**。迁移到 Spring Boot 时无需在 Controller / Service 层做任何处理。

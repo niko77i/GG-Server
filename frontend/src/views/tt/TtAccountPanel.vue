@@ -32,7 +32,7 @@
       </div>
 
       <div style="display:flex;gap:8px;margin-bottom:8px;">
-        <el-input v-model="search" placeholder="🔍 搜索名称/广告账户 ID..." @input="onSearch" style="flex:1;" clearable />
+        <el-input v-model="search" placeholder="🔍 搜索广告账户 ID..." @input="onSearch" style="flex:1;" clearable />
         <el-select v-model="bcId" @change="filterAndLoad" placeholder="全部 BC" style="width:180px;" clearable filterable>
           <el-option v-for="b in bcOptions" :key="b.id" :label="b.name + ' (' + b.bc_id + ')'" :value="b.id" />
         </el-select>
@@ -50,19 +50,8 @@
     <div style="flex:1;min-height:0;overflow-y:auto;">
       <el-table :data="items" @selection-change="val => selected = val" :row-class-name="bcRowClass">
         <el-table-column type="selection" width="45" />
-        <el-table-column label="账户名称" min-width="140">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingNameId === row.id">
-              <el-input v-model="editNameValue" size="small" class="inline-name-input"
-                :ref="el => { if (el) nameInputRef = el }"
-                @blur="saveName(row)" @keyup.enter="saveName(row)" @keyup.escape="cancelNameEdit" />
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.name }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditName(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
+        <!-- TT 账户列表不展示「账户名称」（用户 2026-10-06 裁定，仅 TT）。
+             改名入口保留在行尾 ✏️ 的 TtAccountModal 里。 -->
         <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="150" show-overflow-tooltip />
         <el-table-column label="所属 BC" min-width="160">
           <template #default="{ row }">
@@ -316,21 +305,18 @@ const batchStatus = ref('')
 const batchBc = ref('')
 
 // 内联编辑状态
-const editingNameId = ref(null)
 const editingBcId = ref(null)
 const editingTimezoneId = ref(null)
 const editingAgentId = ref(null)
 const editingStatusId = ref(null)
 const editingCountryId = ref(null)
 const editingConsumptionId = ref(null)
-const editNameValue = ref('')
 const editBcValue = ref(null)
 const editTimezoneValue = ref('')
 const editAgentValue = ref(null)
 const editStatusValue = ref(null)
 const editCountryValue = ref('')
 const editConsumptionValue = ref('')
-let nameInputRef = null
 let countryInputRef = null
 let consumptionInputRef = null
 let bcPending = false
@@ -476,33 +462,6 @@ async function batchDelete() {
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '删除失败')
   }
-}
-
-// ===== 名称内联编辑 =====
-function startEditName(row) {
-  editingNameId.value = row.id
-  editNameValue.value = row.name
-  nextTick(() => {
-    nameInputRef?.focus?.()
-    nameInputRef?.select?.()
-  })
-}
-function cancelNameEdit() {
-  editingNameId.value = null
-  editNameValue.value = ''
-  nameInputRef = null
-}
-async function saveName(row) {
-  const v = editNameValue.value.trim()
-  if (!v || v === row.name) { cancelNameEdit(); return }
-  try {
-    await ttAccountsApi.update(row.id, { name: v })
-    row.name = v
-    ElMessage.success('名称已更新')
-  } catch (e) {
-    ElMessage.error('更新名称失败')
-  }
-  cancelNameEdit()
 }
 
 // ===== BC 内联编辑 =====
