@@ -126,7 +126,7 @@ class TestFbColumnSpec:
         row["account_id"] = "123"
         cells = hd.cells_for_row(row, "fb")
         assert "I" not in cells
-        assert set(cells) == set("ACDEFGHJKLMNOPQ")
+        assert set(cells) == set("ABCDEFGHJKLMNOPQ")   # A:Q 共 17 列，除去 I 剩 16
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
