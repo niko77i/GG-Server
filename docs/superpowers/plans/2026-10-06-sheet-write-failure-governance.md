@@ -23,7 +23,8 @@
 - 回滚守卫必须写在 `UPDATE ... WHERE` 里（原子），不得「先 SELECT 再 UPDATE」。
 - `err(msg, code)` 才是正确写法；**禁止** `return err(msg), code`（嵌套元组，Flask 抛 TypeError）。
 - 本仓库常有并行会话在改文件：**禁止 `git add -A`**，一律 `git add <显式路径>`。
-- 不启动/重启任何常驻进程（含 Flask、npm）—— 需要时提请用户执行。
+- 不启动/重启任何**常驻服务进程**（Flask 等）—— 需要时提请用户执行。
+  `npm run build` 是一次性构建、非常驻，允许执行；若用户当次要求跳过构建，改为人工核对模板语法并在交付说明里注明「未跑构建」。
 
 ---
 
@@ -1506,8 +1507,6 @@ def test_rollback_abandoned_when_status_changed_again(client, monkeypatch):
     aid = _mk_account(db, uid, "adv_rb2", alive)
     db.close()
 
-    # 第一次写表：不失败，但要拦住它 —— 用一个事件门控
-    gate = {"release": False}
     def _blocked(*a, **k):
         raise RuntimeError("Sheets 挂了")
     monkeypatch.setattr(gs, "append_recycle", _blocked)
@@ -1640,6 +1639,13 @@ export const sheetWriteApi = {
 
 ```js
 import { sheetWriteApi } from '../../api/sheetWrite'
+```
+
+并把 vue 的 import 补上 `onUnmounted`（当前是
+`import { ref, reactive, onMounted, watch, nextTick } from 'vue'`，**没有** `onUnmounted`）：
+
+```js
+import { ref, reactive, onMounted, onUnmounted, watch, nextTick } from 'vue'
 ```
 
 在文件顶部（`const authStore = ...` 附近）加入状态与常量：
