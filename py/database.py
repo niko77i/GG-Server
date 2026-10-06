@@ -125,6 +125,27 @@ def _ensure_columns(conn: sqlite3.Connection):
     # 两处都抛 IndexError → 该按钮恒失败。
     _add_column_if_missing(conn, "sheets_sync_log", "report_date", "report_date TEXT DEFAULT ''")
     _add_column_if_missing(conn, "sheets_sync_log", "line_name", "line_name TEXT DEFAULT ''")
+    # 写表失败治理（2026-10-06）：老库补建表。_ensure_schema 只在首建时跑，
+    # 存量库不会走到那段 CREATE TABLE，故此处再建一次（IF NOT EXISTS 幂等）。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sheet_write_log (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL,
+            platform      TEXT    NOT NULL,
+            target        TEXT    NOT NULL,
+            business_key  TEXT    NOT NULL DEFAULT '',
+            status        TEXT    NOT NULL,
+            error_msg     TEXT    DEFAULT '',
+            payload_json  TEXT    DEFAULT '',
+            snapshot_json TEXT    DEFAULT '',
+            created_at    TEXT    DEFAULT (datetime('now','localtime')),
+            updated_at    TEXT    DEFAULT (datetime('now','localtime')),
+            settled_at    TEXT    DEFAULT NULL,
+            UNIQUE(user_id, target, business_key)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_swl_user_platform "
+                 "ON sheet_write_log(user_id, platform)")
     # 高频查询字段索引（_add_column_if_missing 之后创建，确保列已存在）
     if _table_exists(conn, "accounts"):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
@@ -402,6 +423,24 @@ def _ensure_schema(conn: sqlite3.Connection):
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_ssl_user_product ON sheets_sync_log(user_id, product_name);
+
+        -- 写表失败统一治理（2026-10-06）：按 (user_id, target, business_key) upsert 的写表状态机。
+        CREATE TABLE IF NOT EXISTS sheet_write_log (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL,
+            platform      TEXT    NOT NULL,
+            target        TEXT    NOT NULL,
+            business_key  TEXT    NOT NULL DEFAULT '',
+            status        TEXT    NOT NULL,
+            error_msg     TEXT    DEFAULT '',
+            payload_json  TEXT    DEFAULT '',
+            snapshot_json TEXT    DEFAULT '',
+            created_at    TEXT    DEFAULT (datetime('now','localtime')),
+            updated_at    TEXT    DEFAULT (datetime('now','localtime')),
+            settled_at    TEXT    DEFAULT NULL,
+            UNIQUE(user_id, target, business_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_swl_user_platform ON sheet_write_log(user_id, platform);
 
         -- 文案管理
         CREATE TABLE IF NOT EXISTS copywritings (
