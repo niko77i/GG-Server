@@ -75,3 +75,55 @@ class TestFbColumnSpec:
         cells = hd.cells_for_row(row, "fb")
         assert "I" not in cells
         assert set(cells) == set("ABCDEFGHJKLMNOPQ")
+
+
+class TestFbNameResolution:
+    @pytest.fixture
+    def fb_seed(self, client):
+        """一个 FB 用户 + 一条渠道 + 一条资产类型。"""
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('fb_res', 'x', 'user', 'fb')")
+        uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_channels(name, owner_id, platform) VALUES('渠道甲', ?, 'fb')",
+                   (uid,))
+        ch = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_asset_types(name, owner_id, platform) VALUES('类型乙', ?, 'fb')",
+                   (uid,))
+        at = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+        return {"uid": uid, "channel_id": ch, "asset_type_id": at}
+
+    def test_resolves_channel_name(self, client, fb_seed):
+        db = database.get_db()
+        known, resolved = hd._resolve_field(db, "fb", "channel_name", "渠道甲")
+        db.close()
+        assert known is True
+        assert resolved == fb_seed["channel_id"]
+
+    def test_resolves_asset_type_name(self, client, fb_seed):
+        db = database.get_db()
+        known, resolved = hd._resolve_field(db, "fb", "asset_type_name", "类型乙")
+        db.close()
+        assert known is True
+        assert resolved == fb_seed["asset_type_id"]
+
+    def test_unknown_channel_gives_none_not_warning_lookup(self, client, fb_seed):
+        """查不到 → resolved is None（调用方记 warning），不是歧义档。"""
+        db = database.get_db()
+        known, resolved = hd._resolve_field(db, "fb", "channel_name", "不存在的渠道")
+        db.close()
+        assert known is True and resolved is None
+
+    def test_target_column_mapping(self):
+        assert hd._target_column("fb", "channel_name") == "channel_id"
+        assert hd._target_column("fb", "asset_type_name") == "asset_type_id"
+
+    def test_parseable_fields_fb(self):
+        assert hd._parseable_fields("fb") == ("channel_name", "asset_type_name", "status_name")
+
+    def test_parseable_fields_gg_tt_unchanged(self):
+        """回归点：GG / TT 的可解析字段集不得变化。"""
+        assert hd._parseable_fields("gg") == ("mcc_name", "agent_name", "bc_name", "status_name")
+        assert hd._parseable_fields("tt") == ("mcc_name", "agent_name", "bc_name", "status_name")

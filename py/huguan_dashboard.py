@@ -309,6 +309,11 @@ _SQL_BC = "SELECT id FROM tt_bcs WHERE name=? AND deleted_at IS NULL"
 # 平台 → 「所属渠道」的查名 SQL。FB 为 None：它不走 agents，由 Task 2 单独处理。
 _AGENT_SQL = {"gg": _SQL_AGENT_GG, "tt": _SQL_AGENT_TT, "fb": None}
 
+# FB 的两个公用词表（子项目 ① §4.2）。唯一约束都是 (name, platform)，
+# 因此**至多命中 1 行**，不存在「命中 ≥2 条」的歧义档 —— 与 status_name 同档。
+_SQL_CHANNEL = "SELECT id FROM fb_channels WHERE name=? AND platform='fb'"
+_SQL_ASSET_TYPE = "SELECT id FROM fb_asset_types WHERE name=? AND platform='fb'"
+
 
 def _resolve_field(db, platform: str, field: str, value: str):
     """把表里的一个名称解析成系统主键；不认识的字段返回 (True, None) 表示无需解析。
@@ -324,11 +329,18 @@ def _resolve_field(db, platform: str, field: str, value: str):
     if field == "mcc_name":
         return True, resolve_named_id(db, _SQL_MCC, (value,))
     if field == "agent_name":
-        # FB 的「所属渠道」不在 agents 表里（在 fb_channels），见 Task 2
         sql = _AGENT_SQL[platform]
+        if sql is None:
+            # FB 的「所属渠道」不在 agents 表里，走 fb_channels（见下方独立分支）
+            return False, None
         return True, resolve_named_id(db, sql, (value,))
     if field == "bc_name":
         return True, resolve_named_id(db, _SQL_BC, (value,))
+    # FB 专有：所属渠道 / 资产类型
+    if field == "channel_name":
+        return True, resolve_named_id(db, _SQL_CHANNEL, (value,))
+    if field == "asset_type_name":
+        return True, resolve_named_id(db, _SQL_ASSET_TYPE, (value,))
     return False, None
 
 
@@ -343,9 +355,17 @@ _PLAIN_TEXT_FIELDS = {
 }
 
 
+# 各平台可读且需要名称解析的字段。FB 没有 MCC / BC，改为两个公用词表。
+_PARSEABLE_FIELDS = {
+    "gg": ("mcc_name", "agent_name", "bc_name", "status_name"),
+    "tt": ("mcc_name", "agent_name", "bc_name", "status_name"),
+    "fb": ("channel_name", "asset_type_name", "status_name"),
+}
+
+
 def _parseable_fields(platform: str) -> tuple:
     """该平台可读且需要名称解析的字段（值非空时才解析）。"""
-    return ("mcc_name", "agent_name", "bc_name", "status_name")
+    return _PARSEABLE_FIELDS[platform]
 
 
 def build_diff(db, parsed_rows: list, platform: str) -> dict:
@@ -567,6 +587,8 @@ def _target_column(platform: str, field: str) -> str:
         "agent_name": "agent_id",
         "bc_name": "bc_id",
         "status_name": "status_id",
+        "channel_name": "channel_id",
+        "asset_type_name": "asset_type_id",
     }[field]
 
 
