@@ -7906,33 +7906,57 @@ _GOOGLE_SHEETS_CONFIG = {
 }
 
 
-def _sync_sheets_background(sync_fn, on_fail_fn):
+def _sync_sheets_background(sync_fn, on_result_fn):
     """后台线程写 Google Sheets，失败 30s 后重试一次。
 
-    sync_fn:      无参函数，执行 Sheets 写入
-    on_fail_fn:   回调 (status: str, error: str)，status 取值:
-                  'failed' | 'synced' | 'retry_failed'
+    命名沿革：参数原叫 `on_fail_fn`，但 **首次成功也会调用它**（2026-10-06 修复）。
+    这名字已名不副实，但改名要动 15 个调用点，收益不抵；按语义读作「结果回调」。
+
+    sync_fn:        无参函数，执行 Sheets 写入。**必须在自身闭包内新建 service
+                    与 DB 连接** —— 本函数在线程里跑，httplib2 与 sqlite 连接
+                    都不可跨线程复用。
+    on_result_fn:   回调 (status: str, error: str)，status 取值:
+                      'synced'        首次成功 或 失败后重试成功
+                      'failed'        首次失败（30s 重试在途的中间态）
+                      'retry_failed'  30s 重试也失败（最终失败）
+                    回调自身抛异常不影响主流程，但会落 log.error（原来静默 pass，
+                    等于唯一负责落记录的地方失败后彻底没痕迹）。
     """
     import time as _time
+
     def _run():
         try:
             sync_fn()
+            # 首次成功也必须回调：否则把「已同步」写进回调的调用点永远漏标
+            if on_result_fn:
+                try:
+                    on_result_fn("synced", "")
+                except Exception as e:
+                    log.error("Sheets 结果回调失败(status=synced): %s", e)
+            return
         except Exception as e:
             log.warning("Sheets 同步失败，30s 后重试: %s", e)
-            if on_fail_fn:
-                try: on_fail_fn("failed", str(e))
-                except Exception: pass
-            _time.sleep(30)
-            try:
-                sync_fn()
-                if on_fail_fn:
-                    try: on_fail_fn("synced", "")
-                    except Exception: pass
-            except Exception as e2:
-                log.error("Sheets 重试失败: %s", e2)
-                if on_fail_fn:
-                    try: on_fail_fn("retry_failed", str(e2))
-                    except Exception: pass
+            if on_result_fn:
+                try:
+                    on_result_fn("failed", str(e))
+                except Exception as e2:
+                    log.error("Sheets 结果回调失败(status=failed): %s", e2)
+        _time.sleep(30)
+        try:
+            sync_fn()
+            if on_result_fn:
+                try:
+                    on_result_fn("synced", "")
+                except Exception as e:
+                    log.error("Sheets 结果回调失败(status=synced): %s", e)
+        except Exception as e2:
+            log.error("Sheets 重试失败: %s", e2)
+            if on_result_fn:
+                try:
+                    on_result_fn("retry_failed", str(e2))
+                except Exception as e3:
+                    log.error("Sheets 结果回调失败(status=retry_failed): %s", e3)
+
     t = threading.Thread(target=_run, daemon=True)
     t.start()
 
