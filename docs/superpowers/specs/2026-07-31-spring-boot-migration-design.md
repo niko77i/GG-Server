@@ -1,12 +1,14 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.32  
-> **日期**: 2026-07-31（v1.32 更新于 2026-10-06）  
+> **文档版本**: v1.34  
+> **日期**: 2026-07-31（v1.34 更新于 2026-10-07）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.34 变更**: **TT 备注（`remark`）跨看板同步优先级**（对应 `py/huguan_dashboard.py`、`py/routes/huguan_dashboard_routes.py`、`py/routes/tt_accounts_routes.py`、`frontend/src/views/tt/TtAccountPanel.vue`，详见**附录 J**）——`tt_accounts.remark` 被**两张 Google 表同时读写**（投手「我的看板」`J` 列 / 户管看板 `M` 列），两边都 `writable=True`+`readable=True`，谁后同步谁赢；叠加「文本列空值照常落库」的口径 ⇒ **户管 `M` 列空着就会把投手填的备注清掉**。本次定下优先级：**首次入库**（户管触发）时投手 `J` 列**有值则投手赢**（覆盖系统 + 回写户管 `M`）、空则户管赢（推给投手 `J`）；**此后投手权威永久**，户管改 `M` 列**不再进系统**；投手在系统内联编辑备注则推**两张表**。实现上**零新增状态**——权威判定天然映射到 `build_diff` 的 `to_create`/`to_update` 两个分支，只需给 `to_update` 的字段过滤追加 `and not (platform == "tt" and k == "remark")`；⚠️ **不得**把 `remark` 从 `_PLAIN_TEXT_FIELDS["tt"]` 删掉（该清单被 `to_create` 与 `to_update` **共用**，删掉会让「首次入库读户管 `M` 列」失效）。**附带发现并补建了一条此前根本不存在的通路**：所有推送都走 `push_rows(user_id,...)`（取 `huguan_dashboard_{uid}` 配置），而投手没有该键 ⇒ `sync_from_sheet` 结尾的 `hd.writeback_rows(uid,...)` **对投手一直是静默空转**；本次新建 `push_remark_to_operator_dashboard(owner_id, account_id, value)` 面向投手看板，⚠️ **投手看板的账户ID在 `D` 列**（户管在 `C` 列），调 `update_rows_by_account_id` **必须显式传 `key_col="D"`**，漏传会默认 `"C"` 并**静默定位到错误的行**。**只改 `remark` 一个字段；仅 TT；不新增表、不新增数据库列**。前端在「消耗情况」列后加**可内联编辑**的「备注」列（复用既有 `.inline-*` 惯例，失败不回写 `row.remark` 即天然回滚）
+> **v1.33 变更**: **TT「换绑情况」列改造：归属变更通道 → 换绑记录字段**（对应 `py/database.py`、`py/huguan_dashboard.py`、`py/routes/huguan_dashboard_routes.py`、`py/routes/tt_accounts_routes.py`、`frontend/src/views/tt/TtAccountPanel.vue`，详见**附录 I**）——**这是改需求、不是 bug 修复**：v1.31 定下的「变更通道列（TT「换绑情况」）非空则压过运营列」（用户当时的原话，见 `2026-09-23-huguan-sheet-design.md:35`）**被用户 2026-10-06 裁定取消**。新语义：① TT 归属**恒取**「接户运营」`G` 列，`effective_owner_name(parsed, platform)` 按平台分叉，⚠️ **`platform` 必须是必填位置参数、不得给默认值**（默认值会让漏传的 TT 调用方静默拿到 GG 语义）；② `L` 列由合成字段 `_owner_channel` 改为**真实列** `owner_change_note`（普通文本、`writable=False`/`readable=True`），**DDL 新增一列**（已在 §5.2 同步，**无数据迁移动作**）；⚠️ `tt_accounts` 此前**没有任何** `_add_column_if_missing` 迁移记录，而生产库已存在 ⇒ `CREATE TABLE IF NOT EXISTS` **不生效**，**建表语句与迁移条目两处都要加**；③ 系统 UI 改归属时写 `旧归属人转新归属人+月.日`（如 `阿轩转黎明10.7`，**月日不补零**、旧归属解析不到写 `未分配`，⚠️ **不得**用 `strftime("%-m")`——Windows 不支持；⚠️ `display_name` 仅含空白时是 truthy 会顶掉 `or` 兜底 ⇒ 必须**先 strip 再 or**），且**同时落库** `owner_change_note`，两处同一份文本；④ **同步后的「清空变更通道列」（§7.9 规则 3②）改为 GG-only** —— 对 TT 执行会抹掉记录，且因读回按表覆盖会**连带清掉系统值**（双重抹除）；⑤ 前端加**只读**「换绑情况」列（仅户管可见）。**仅 TT**：GG 的「重新分配」（`H` 列）与 §7.9 的四条规则**逐字不变**（§7.9 已就地标注 TT 侧的作废范围）
 > **v1.32 变更**: **TT 广告账户列表不再展示「账户名称」列**（纯前端 `frontend/src/views/tt/TtAccountPanel.vue`，后端与数据库**零改动**，详见附录 H）——该列此前是 TT 账户名**唯一的内联编辑入口**（hover ✏️ → `<el-input>` → `ttAccountsApi.update(row.id, { name })`）。用户 2026-10-06 裁定 TT 列表无需展示账户名，本次删除该列，并同步清掉**专为该列存在**的状态与函数（`editingNameId` / `editNameValue` / `nameInputRef` 与 `startEditName` / `cancelNameEdit` / `saveName`，已核零残留引用；`nextTick`、`.inline-name-input`、`.inline-edit-btn` 仍被国家/消耗等其他内联编辑使用，**未删**）。**改名能力未丢失**：行尾 ✏️ 打开的 `TtAccountModal` 中「账户名称」仍是必填字段（新增与编辑共用该弹窗）。**仅 TT 改动**：GG（`AdsAccountPanel.vue`，见附录 E.1）与 FB（`FbAccountPanel.vue` 的「账户名」列）**保持原样**。**搜索框存在一处刻意的不一致，交接/迁移时勿「顺手修正」**：placeholder 由「🔍 搜索名称/广告账户 ID...」改为「🔍 搜索广告账户 ID...」，但后端 `GET /api/tt/accounts/list` 内**两处** search 条件 `(a.name LIKE ? OR a.advertiser_id LIKE ?)`（主列表 `tt_accounts_routes.py:224`、各状态计数 `:269`）**一律未改**——账户名只是不在列表里显示，按名搜索的通道仍然保留（用户明确选择「只改 placeholder 文案」）。`tt_accounts.name` 字段、DDL、接口契约均未动，**不存在数据迁移动作**。**Spring 侧无需任何改动**（本文档前提是前端不变、仅替换后端 API 层）
-> **v1.31 变更**: **户管角色（户管线）整体补录**——新增 `huguan` 角色、用户权限按角色收窄、以及「户管看板」Google Sheet 双向同步。权威设计见 `2026-09-22-huguan-role-design.md`（角色与权限）、`2026-09-23-huguan-sheet-design.md`（看板双向同步）、`2026-09-24-huguan-owner-source-and-picker-design.md`（归属变更「来源」标注）、`2026-09-24-huguan-frontend-visual-design.md`（前端视觉）；Java 侧重建要点见 §7.9，Controller 见 6.3，Sheets 方法见 8.1。**① 角色与三个角色集合常量**：`py/routes/helpers.py` 集中定义 `CROSS_USER_ROLES = ("developer","admin","huguan")`（可跨用户看数据）、`GLOBAL_OPTION_ROLES = ("developer","admin","huguan")`（可改全局选项/字典表，两者当前同值但**语义不同、不得合并**）、`PLATFORM_SWITCH_ROLES = ("developer","huguan")`（可切平台命名空间，**admin 刻意不在其中**——管理员自 v1.28 起按平台隔离，见 7.7）；`py/routes/decorators.py` 新增 `@huguan_required`，语义是**严格** `role == "huguan"`（admin/developer 一律 403 `权限不足，仅户管可操作`），因为户管看板是户管的**个人**配置，不是管理功能。**② 本版更正 §7.7.4 的衔接点预测**：v1.28 当时写「`_get_effective_platform` 的 `role == 'developer'` 计划改为 `CROSS_USER_ROLES`」，实际落地用的是 **`PLATFORM_SWITCH_ROLES`**（`main.py:6364`）——若真按 CROSS_USER_ROLES 改，admin 会被重新放回「跨平台取 `request.args['platform']`」分支，v1.28 刚修掉的「FB 管理员看到 GG 选项」缺陷当场复发。**这两个集合不可互换**，7.7.2 的 `isCrossPlatform()` 已据此拆成两个谓词。**③ 用户管理按户管收窄**（不改 administrator 既有行为）：`main.py:_check_modify_user` 在 developer 短路之后、角色层级与平台判断**之前**插入户管分支——目标角色必须是 `huguan`（否则 `户管只能操作户管账号`）**且** `target.created_by == actor.id`（否则 `只能操作自己创建的户管`）；户管**不受平台维度约束**（户管本身跨平台）。配套：`ALLOWED_CREATE_ROLES = {developer:(user,admin,viewer,huguan), admin:(user,admin,viewer), huguan:(huguan,)}`，创建用户时户管**忽略请求体 role 并强制写成 `huguan`**，改角色白名单收为 `("huguan","hidden")`；用户列表的角色过滤**不在 `auth.list_users` 内部**，而在路由层（`role_filter = "huguan" if user["role"] == "huguan" else None`），`list_users` 内部只负责「户管跳过平台过滤」。**迁移时两处都要照搬**，只改一处会漏掉一种越权。**④ 户管看板双向同步**：配置存 `config` 表键 `huguan_dashboard_{uid}`，**按平台各一份**（`PLATFORMS = ("gg","tt")`；**FB 不支持**）；GG 14 列 / TT 13 列，系统只写其中一部分（GG 实际自动写 `A:D`+`F:G`+`I:K`、TT 实际自动写 `A:J`+`M:M`），**其余列由户管自己用公式维护**，靠 `update_rows_by_account_id` 的**区间合并**（只有相邻列并成区间、空洞处断开）保证「没出现在 `cells` 里的列绝不被写到」——这是公式列保命的唯一机制，**不得**用「整行覆盖」实现。归属字段**不新增数据库列**，直接复用 `accounts.owner_id` / `tt_accounts.owner_id`（可空）。**⑤ 归属变更协议四条硬规则**：变更通道列（GG「重新分配」/ TT「换绑情况」）的值**优先于**运营列；**自动回写永不碰变更通道列**；变更通道列只有**两个**写入点（户管在系统 UI 改归属 ⇒ 写新名字；「从表同步到系统」成功 ⇒ 清空为 `""`）；应用归属变更后必须**回写运营列**为新归属人名，让两列重新一致。名字→`owner_id` 走「`display_name` 精确匹配、回落 `username`，命中 0 或 ≥2 均只告警、不写归属」（唯一命中才写）。**⑥ 表→系统同步的差异契约**：`POST /api/huguan/dashboard/sync` 返回五类差异（`to_create`/`to_update`/`owner_changes`/`to_skip`/`warnings`），表内**空值即清空**系统列（`to_update` 每条带 `clears`，`summary` 带 `clears` 计数），确认绑定**按 account_id 而非行号**，`not_applied` 防静默丢弃；`dry_run` 为**fail-safe**——**只有显式布尔 `false` 才落库**（缺省 / `true` / `null` / 字符串 `"false"` / `0` 全部只读），漏掉这个 `is not False` 会让「传个空值就把库改了」；表地址**只从该户管自己的配置取，请求体不接受表地址**（归属门禁不复用，因为复用等于给了「对着别人的表发起同步」这条路）。**⑦ 本轮终审修复**：`update_rows_by_account_id` 由「每行一次 `values().batchUpdate`」改为**整批一次调用**——Google 的单次 `batchUpdate` 请求是**原子**的，「配额撞车导致前几行已落表」的半写与「几百行 = 几百次请求」的请求数爆炸一并解掉，失败文案随之从「表已部分写入、无回滚」改为**「本次已写入 0 行」**，前端用户可见文案同步为**「刷新到看板失败。本次没有写入任何数据，直接重试是安全的。」**（`HuguanDashboardCard.vue:687` 与 `2026-09-24-huguan-frontend-visual-design.md` §195/§1005），后端异常消息里带本次涉及的 `account_id` 便于定位。**迁移红线**：区间合并语义、`dry_run` 的 fail-safe、归属回写顺序、`@huguan_required` 的严格性，四项均须原样重建；**不要**把户管并入 `admin`（两者权限模型不同），**不要**把 `CROSS_USER_ROLES` 与 `PLATFORM_SWITCH_ROLES` 合并成一个集合
+> **v1.31 变更**: **户管角色（户管线）整体补录**——新增 `huguan` 角色、用户权限按角色收窄、以及「户管看板」Google Sheet 双向同步。权威设计见 `2026-09-22-huguan-role-design.md`（角色与权限）、`2026-09-23-huguan-sheet-design.md`（看板双向同步）、`2026-09-24-huguan-owner-source-and-picker-design.md`（归属变更「来源」标注）、`2026-09-24-huguan-frontend-visual-design.md`（前端视觉）；Java 侧重建要点见 §7.9，Controller 见 6.3，Sheets 方法见 8.1。**① 角色与三个角色集合常量**：`py/routes/helpers.py` 集中定义 `CROSS_USER_ROLES = ("developer","admin","huguan")`（可跨用户看数据）、`GLOBAL_OPTION_ROLES = ("developer","admin","huguan")`（可改全局选项/字典表，两者当前同值但**语义不同、不得合并**）、`PLATFORM_SWITCH_ROLES = ("developer","huguan")`（可切平台命名空间，**admin 刻意不在其中**——管理员自 v1.28 起按平台隔离，见 7.7）；`py/routes/decorators.py` 新增 `@huguan_required`，语义是**严格** `role == "huguan"`（admin/developer 一律 403 `权限不足，仅户管可操作`），因为户管看板是户管的**个人**配置，不是管理功能。**② 本版更正 §7.7.4 的衔接点预测**：v1.28 当时写「`_get_effective_platform` 的 `role == 'developer'` 计划改为 `CROSS_USER_ROLES`」，实际落地用的是 **`PLATFORM_SWITCH_ROLES`**（`main.py:6364`）——若真按 CROSS_USER_ROLES 改，admin 会被重新放回「跨平台取 `request.args['platform']`」分支，v1.28 刚修掉的「FB 管理员看到 GG 选项」缺陷当场复发。**这两个集合不可互换**，7.7.2 的 `isCrossPlatform()` 已据此拆成两个谓词。**③ 用户管理按户管收窄**（不改 administrator 既有行为）：`main.py:_check_modify_user` 在 developer 短路之后、角色层级与平台判断**之前**插入户管分支——目标角色必须是 `huguan`（否则 `户管只能操作户管账号`）**且** `target.created_by == actor.id`（否则 `只能操作自己创建的户管`）；户管**不受平台维度约束**（户管本身跨平台）。配套：`ALLOWED_CREATE_ROLES = {developer:(user,admin,viewer,huguan), admin:(user,admin,viewer), huguan:(huguan,)}`，创建用户时户管**忽略请求体 role 并强制写成 `huguan`**，改角色白名单收为 `("huguan","hidden")`；用户列表的角色过滤**不在 `auth.list_users` 内部**，而在路由层（`role_filter = "huguan" if user["role"] == "huguan" else None`），`list_users` 内部只负责「户管跳过平台过滤」。**迁移时两处都要照搬**，只改一处会漏掉一种越权。**④ 户管看板双向同步**：配置存 `config` 表键 `huguan_dashboard_{uid}`，**按平台各一份**（`PLATFORMS = ("gg","tt")`；**FB 不支持**）；GG 14 列 / TT 13 列，系统只写其中一部分（GG 实际自动写 `A:D`+`F:G`+`I:K`、TT 实际自动写 `A:J`+`M:M`），**其余列由户管自己用公式维护**，靠 `update_rows_by_account_id` 的**区间合并**（只有相邻列并成区间、空洞处断开）保证「没出现在 `cells` 里的列绝不被写到」——这是公式列保命的唯一机制，**不得**用「整行覆盖」实现。归属字段**不新增数据库列**，直接复用 `accounts.owner_id` / `tt_accounts.owner_id`（可空）。**⑤ 归属变更协议四条硬规则**（⚠️ **v1.33 起规则 1 与规则 3 的 TT 部分已作废 —— 见附录 I；GG 部分逐字不变**）：变更通道列（GG「重新分配」/ TT「换绑情况」）的值**优先于**运营列（**仅 GG**）；**自动回写永不碰变更通道列**；变更通道列只有**两个**写入点（户管在系统 UI 改归属 ⇒ 写新名字；「从表同步到系统」成功 ⇒ 清空为 `""`）；应用归属变更后必须**回写运营列**为新归属人名，让两列重新一致。名字→`owner_id` 走「`display_name` 精确匹配、回落 `username`，命中 0 或 ≥2 均只告警、不写归属」（唯一命中才写）。**⑥ 表→系统同步的差异契约**：`POST /api/huguan/dashboard/sync` 返回五类差异（`to_create`/`to_update`/`owner_changes`/`to_skip`/`warnings`），表内**空值即清空**系统列（`to_update` 每条带 `clears`，`summary` 带 `clears` 计数），确认绑定**按 account_id 而非行号**，`not_applied` 防静默丢弃；`dry_run` 为**fail-safe**——**只有显式布尔 `false` 才落库**（缺省 / `true` / `null` / 字符串 `"false"` / `0` 全部只读），漏掉这个 `is not False` 会让「传个空值就把库改了」；表地址**只从该户管自己的配置取，请求体不接受表地址**（归属门禁不复用，因为复用等于给了「对着别人的表发起同步」这条路）。**⑦ 本轮终审修复**：`update_rows_by_account_id` 由「每行一次 `values().batchUpdate`」改为**整批一次调用**——Google 的单次 `batchUpdate` 请求是**原子**的，「配额撞车导致前几行已落表」的半写与「几百行 = 几百次请求」的请求数爆炸一并解掉，失败文案随之从「表已部分写入、无回滚」改为**「本次已写入 0 行」**，前端用户可见文案同步为**「刷新到看板失败。本次没有写入任何数据，直接重试是安全的。」**（`HuguanDashboardCard.vue:687` 与 `2026-09-24-huguan-frontend-visual-design.md` §195/§1005），后端异常消息里带本次涉及的 `account_id` 便于定位。**迁移红线**：区间合并语义、`dry_run` 的 fail-safe、归属回写顺序、`@huguan_required` 的严格性，四项均须原样重建；**不要**把户管并入 `admin`（两者权限模型不同），**不要**把 `CROSS_USER_ROLES` 与 `PLATFORM_SWITCH_ROLES` 合并成一个集合
 > **v1.30 变更**: **爬取产物归属校验：目录名认领判据加时间维度**（对应 `py/auth.py` 的 `directory_name_error` / `_dn_released_keys` / `_dir_ctime` / `_release_row_covers_dir` / `_sentinel_row_blocks_dir` 与 `py/database.py` 的 `_migrate_scrape_dn_history`）——这套判据来自 2026-09-23「全站鉴权加固」与 2026-09-24「下载签名按需签发 + scrape 产物归属校验」，**此前未录入本文档**，v1.30 随本轮换判据一并补录（权威说明见 `2026-09-24-ondemand-download-signing-design.md` §0.9–§0.13，Java 侧重建要点见 §7.8、缺表 DDL 见 §5.2）。背景：`temp/scraped_images/<目录名>` 下是各用户的爬取产物，目录名由用户名派生、磁盘上**没有 owner 记录**，归属只能靠「目录名判据」+ 一张墓碑表 `scrape_dn_history`（无外键、刻意不进删用户清理）反推。原判据只答「谁曾用过这个名字」（last-writer-wins），挡不住「行过期、但序号最大」的形态（迁移搬来的行、admin 用 `requested_dn` 代管建出的目录、记录缺失类故障）。本轮换成**带时间维度**的判据：① **释放行须晚于目录创建时刻**才参与比较（`created_at > 目录 ctime`），自己与他人**两侧一起**过滤——于是「上线前已改名者的旧目录认领路」恢复（他的旧行晚于旧目录，仍算数），而「每周清理后旧释放行认领新目录」被挡住；② **拿不到化身**（目录不存在 / 越界 / `stat` 失败）或**时刻解析不出**（脏行）时，释放行**不过滤**、哨兵**照拦**（两侧都取严侧，fail-closed）；③ **哨兵改按「化身」生效**：`user_id = 0` 的哨兵行只拦它写下时**已存在**的那个目录（`ts >= ctime`），目录在其后**重建**则旧哨兵失效（否则本人的认领路会被永久封死）；哨兵不参与 LWW 序号比较（独立 `blocked` 集合）。同时**退役**「无主目录扫盘补墓碑」整段（`database._tombstone_orphan_scrape_dirs` 删除）——它是上一轮的兜底，换判据后不再需要，无主目录仍由「判据 3：目录占用」接住。④ **亚秒不变式（本轮修的真实缺陷）**：`scrape_dn_history.created_at` 的表默认值 `datetime('now')` **只到秒**，同一个截断方向对**释放行**是 fail-closed（`ts > ctime` 更难成立）、对**哨兵**却是 **fail-open**（`ts >= ctime` 更难成立 ⇒ 拦不住它当年所判的化身），「同一秒内先建目录、后跑迁移」会把歧义名悄悄放开。故**任何**写该表的代码都必须显式带亚秒（`strftime('%Y-%m-%d %H:%M:%f','now')`）；迁移的哨兵写入口曾漏此条，已修并补效果级用例（code-review 第 7 轮 Important #1）。⑤ 时刻列是 **UTC**，解析须用 `calendar.timegm` 而非本地解析（用 `mktime` 会整体偏一个时区）；SQLite `now` 与文件系统时钟之间存在毫秒级抖动且**跨零**，故两侧判据都不能省掉亚秒精度。**迁移红线**：Spring 侧必须在**服务层**原样重建这套判据与墓碑表，**不得**改成按 `users` 外键推导归属；`scrape_dn_history` **不得**建 `UNIQUE(dn)`、**不得**加外键、**不得**在删用户时清理；时间列精度至少毫秒且按 UTC 存
 > **v1.29 变更**: **回收原因改为全平台公用词表**（对应 `py/routes/tt_accounts_routes.py` 的四个 `recycle-reasons` 接口、`py/database.py` 的 `_ensure_columns`、前端 `frontend/src/views/tt/TtSettingsPanel.vue`）——此前 `GET /api/tt/recycle-reasons/list` **无角色拦截**（仅 `@jwt_required() @tt_required`）却按 `owner_id` 做数据隔离：`role in CROSS_USER_ROLES`（developer/admin/huguan）看全量，其余**仅本人**。但该词表在前端是「TT设置 → ♻️回收原因选项」卡片集中维护的**共享词表**，设计意图与实现不一致 → admin 建的原因普通用户下拉框恒为空（实测：库中 3 条原因 `owner_id` 全为 admin uid=23，以普通用户 uid 查询返回 `[]`），且状态变更弹窗在用户手输时会自动 `create` 一条**归自己的同名记录**，产生跨 owner 重名脏数据。同一功能本已有两条**作用域互相矛盾**的写入路径：API 路径按 `(name, owner_id)` 去重，而 `_trigger_recycle_if_dead` 走 `WHERE name=?` **全局**去重 + `INSERT OR IGNORE`。本次统一为公用语义：① `list` 删掉角色分支，所有 TT 用户（含 viewer）读全表；② `create` 去重条件 `(name, owner_id)` → 全局 `name`，`owner_id` 仅记录创建者、**不再参与鉴权**，并加 `sqlite3.IntegrityError` 兜底返回 409（防并发撞唯一索引变 500）；③ `rename`/`delete` 删掉 owner 检查，`rename` 新增全局重名检查（改到已存在名称返回 409、原值不变，前端已消费 `error` 字段）；④ `py/database.py` 的 `_ensure_columns` 新增 `CREATE UNIQUE INDEX IF NOT EXISTS idx_tt_recycle_reasons_name ON tt_recycle_reasons(name)`，**带重名防御**：存量若有重名则跳过建索引，避免唯一索引创建失败导致每次连库都抛异常；⑤ 前端把「♻️ 回收原因选项」卡片移出管理员专属 `<template v-if>`，改用 `visibleOptionCards` 计算属性按角色过滤——回收原因对所有 TT 用户可见可改，「代理名选项」「账户状态选项」仍管理员专属（管理员渲染结果逐位不变）。**权限边界**：viewer 保持只读，`@tt_write_required` 未改（可读、不可增改删）。**迁移要点**：Spring 侧回收原因不得再按 owner 过滤，`name` 唯一约束必须是**全局唯一**而非 `UNIQUE(name, owner_id)`，详见 6.3
 > **v1.28 变更**: **用户管理的平台隔离**——此前 `admin` 是**全局角色**：任何管理员都能看到并操作全部平台的用户，创建用户时非 developer 一律被强制写成 `platform='gg'`（把 TT/FB 管理员建的用户错误塞进 GG）。本次把 `admin` 从全局改为**按平台隔离**，`developer` 短路豁免。涉及：① `auth.list_users` 非 developer 强制 `platform = 自己的平台` 且不返回 developer 行（**忽略传入的 `platform` 参数**；无 `current_user_id` 的内部调用保持原行为不变）；② `admin_create_user` 非 developer 的 `platform` 锁定为创建者自己的平台（非法存量值兜底 `gg`），前端平台下拉框仅 developer 可见；③ 新增 `_check_modify_user(actor, target)` 返回**拒绝原因字符串**（`不能操作同级管理员` / `不能操作其他平台的用户`），替换原布尔 `_can_modify_user`，被 `role`/`toggle`/`delete`/`update`/`password`/`telegram` **六个**用户操作接口复用；④ 新增 `_can_access_user_data(actor, target)` 约束数据导入/导出（不限制目标角色，仅平台）；⑤ **`_get_effective_platform()` 语义修正**：原判断 `role in ('developer','admin')` 时取 `request.args.get('platform','gg')`，实际只有 developer 会被前端注入 platform，导致**非 developer 管理员落到 GG 命名空间**（TT 页面因显式传参侥幸正确，FB 页面不传参 → FB 管理员看到 GG 的商务人员/账户状态选项），现改为仅 `role == 'developer'` 跨平台；⑥ 前端 `UserManageView.vue` 平台 Tab 按身份条件渲染 + 创建弹窗平台字段仅 developer 可见 + 身份时序修正（见 7.7）。**迁移要点**：`@AdminRequired` 不再等价于跨平台权限，Spring 侧必须补平台维度的校验，详见 7.7
@@ -1283,6 +1285,7 @@ CREATE TABLE tt_accounts (
     death_date          DATE         NULL     COMMENT '死亡日期（SQLite 旧值为空串）',
     status_changed_date DATE         NULL     COMMENT '状态变更日期（SQLite 旧值为空串）',
     remark              TEXT         DEFAULT '' COMMENT '备注',
+    owner_change_note   TEXT         DEFAULT '' COMMENT '换绑记录（旧归属人转新归属人+月.日，v1.33）',
     owner_id            BIGINT       NULL     COMMENT '归属用户ID',
     deleted_at          DATETIME     NULL     COMMENT '软删除时间',
     created_at          DATETIME     DEFAULT CURRENT_TIMESTAMP,
@@ -2584,12 +2587,12 @@ public static final Set<String> GLOBAL_OPTION_ROLES = Set.of("developer", "admin
 | | GG（14 列，`READ_RANGE=A:N`） | TT（13 列，`READ_RANGE=A:M`） |
 |---|---|---|
 | 定位键 | `C` 账户ID（**可写、不可读**） | `C` 账户ID（同上，取自 `advertiser_id`） |
-| 归属通道列 | `H` 重新分配 | `L` 换绑情况 |
+| 归属通道列 | `H` 重新分配 | **无**（`L` 换绑情况自 **v1.33** 起改为普通文本「换绑记录」列，不再参与归属判定 —— 见附录 I） |
 | 运营列 | `G` 运营 | `G` 接户运营 |
 | 系统**不映射**列（户管自维护，读写都不碰） | `E` 国家、`L` 位置、`M` 消耗、`N` 产品信息 | `K` 位置 |
 | 可写**不可读**（读回会与别的列打架） | `C`、`J` 大MCC（派生列） | `C` |
 
-三个合成字段**不对应数据库列**：`_dead_flag`（`death_date` 是否非空 → 写 `是`/空）、`_owner_channel`（归属变更通道）、以及派生列 `parent_mcc_name`。**归属不新增数据库列**，直接用 `accounts.owner_id` / `tt_accounts.owner_id`（可空）。系统**实际自动写**的列比「可写」更窄：GG 是 `A:D`+`F:G`+`I:K`，TT 是 `A:J`+`M:M` —— 中间的缺口（GG 的 `H`）就是归属通道列的预留位。
+三个合成字段**不对应数据库列**：`_dead_flag`（`death_date` 是否非空 → 写 `是`/空）、`_owner_channel`（归属变更通道，**v1.33 起仅 GG 使用**）、以及派生列 `parent_mcc_name`。**归属不新增数据库列**，直接用 `accounts.owner_id` / `tt_accounts.owner_id`（可空）。系统**实际自动写**的列比「可写」更窄：GG 是 `A:D`+`F:G`+`I:K`，TT 是 `A:J`+`M:M` —— 中间的缺口（GG 的 `H`、TT 的 `L`）就是不参与自动回写的列。GG 的 `H` 靠 `field == "_owner_channel"` 守卫排除，TT 的 `L` 自 **v1.33** 起靠 `writable=False` 排除 —— **机制不同、效果相同**，两者都不得改成可写。
 
 **写表方法 `update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows, key_col="C")`**（§8.1）：
 
@@ -2657,6 +2660,19 @@ public UserModifyDenyReason checkModifyUser(UserEntity actor, UserEntity target)
 3. **变更通道列只有两个写入点**：① 户管在系统 UI 改归属 ⇒ 写新归属人名；② 「从表同步到系统」成功应用归属后 ⇒ **清空为 `""`**。除此之外任何路径都不得写它。
 4. **应用归属变更后必须回写运营列**为新归属人名，让两列重新一致（否则下一轮同步会读到旧运营名，把归属再改回去）。
 
+> ⚠️ **v1.33 起，规则 1 与规则 3 的 TT 部分已作废**（GG 部分逐字不变）：
+>
+> | 规则 | GG（不变） | TT（v1.33 起） |
+> |------|-----------|----------------|
+> | 1 通道优先 | 保留 | **作废** —— 归属恒取「接户运营」，`L` 列值不参与判定 |
+> | 2 回写不碰通道列 | 保留 | **保留**（改由 `writable=False` 保证，不再靠 `_owner_channel` 守卫） |
+> | 3① 系统 UI 改归属写 L | 写新归属人名 | **保留但内容变更**：写 `旧归属人转新归属人+月.日`（如 `阿轩转黎明10.7`），且**同时落库** `tt_accounts.owner_change_note` |
+> | 3② 同步后清空 L | 保留 | **作废** —— 对 TT 执行会抹掉换绑记录（读回是按表覆盖，会连带清掉系统值） |
+> | 4 回写运营列 | 保留 | **保留**（TT 的 `G` 列现在是唯一归属列） |
+>
+> TT 侧实现的全部细节（含「为什么必须这样」）见**附录 I**。**迁移红线**：GG 的四条规则
+> **逐字重建**；TT 走附录 I 的新语义。把 TT 也按规则 1 实现，会让归属被 `L` 列的记录文本劫持。
+
 **名字 → `owner_id`**：先按 `users.display_name` **精确匹配**，无命中回落 `users.username`；命中 **0 个或 ≥2 个都不写归属**（只进 `warnings`），但**该行其他列照常处理**。
 
 **空归属**：已存在的账户 ⇒ **维持原值不变**；新建账户 ⇒ `owner_id = NULL`（普通用户看不见，户管/admin/developer 可见）。
@@ -2711,7 +2727,7 @@ String raw = (data instanceof Map) ? String.valueOf(((Map<?,?>) data).getOrDefau
 | `stores/auth.js` | `isHuguan: (s) => s.user?.role === 'huguan'`；`canSwitchPlatform: ['developer','huguan'].includes(...)`；`canManageAccounts: ['developer','admin','huguan'].includes(...)` |
 | 侧边栏 `AppSidebar.vue` | 户管有**三套**精简导航（`huguanNavItems` / `huguanFbNavItems` / `huguanTtNavItems`），按 `effectivePlatform` 取用：**FB 也可进入**，但只有「账户管理（广告账户/BM管理/像素管理）+ FB设置 + 管理」三项；GG/TT 侧为「账户管理（广告账户/MCC或BC/设置）+ 管理」。三套都**不含产品、素材、YouTube、媒体、做表**等域 |
 | 设置页「📊 户管看板配置」 | **同一个组件**（`HuguanDashboardCard.vue`）在 GG 设置页与 TT 设置页**各挂一次**，平台由 `platform` 属性驱动（`platform="gg"` / `platform="tt"`）——不是两份组件，也不是一份卡片。组件内部自带 `v-if="authStore.isHuguan"` 守卫，两个设置页都**无条件挂载**它；同页另一张 sheet 卡片与户管互斥（GG 侧是管理员专属 `template`，TT 侧是 `v-if="!isHuguan"`），所以不存在主次并列 |
-| 归属变更「来源」列 | 按平台映射**中文**：`owner_channel` → GG「重新分配」/ TT「换绑情况」；`owner_name` → GG「运营」/ TT「接户运营」。**未知 token 渲染 `—`**，**不得**只渲染 GG 的两种叫法 |
+| 归属变更「来源」列 | 按平台映射**中文**：`owner_channel` → GG「重新分配」/ ~~TT「换绑情况」~~；`owner_name` → GG「运营」/ TT「接户运营」。**未知 token 渲染 `—`**，**不得**只渲染 GG 的两种叫法。⚠️ **v1.33 起 TT 侧不再产出 `owner_channel`**（`L` 列不参与归属判定，故 `via` 恒为 `owner_name`）；映射表**保留** TT 那一项不删，纯属历史数据的容错 —— 但**不要**为 TT 再造出 `owner_channel` |
 | 路由守卫 `router/index.js` | 户管对 `meta.admin` 路由走**白名单**：`/accounts/ads`、`/accounts/mcc`、`/accounts/settings`、`/fb/accounts`、`/fb/bms`、`/fb/pixels`、`/fb/settings`、`/tt/accounts`、`/tt/bcs`、`/tt/settings`、`/admin/users`（`p === r \|\| p.startsWith(r + '/')`）。另有一串**逐条重定向**：产品页（GG/FB/TT 三处）、FB / TT 数据提取与数据管理、`/youtube`、`/media`、`/toolkit/audio` 一律弹回本平台账户页——对应的后端接口域（产品/包/素材、`/api/youtube/*`、`/api/video/*`、`/api/audio*`）已用 `@no_huguan` 覆盖（全仓 **79** 处：`main.py` 59、`fb_routes.py` 7、`tt_routes.py` 13）。**`/toolkit/zuobiao` 按裁定放行**，不要顺手也拒掉 |
 | `AccountModal.vue` 409 转户入口 | 非 `canManageAccounts` 角色（普通用户/viewer）**不渲染**「转移给我」按钮，改为明确告知「该账户属于他人，需由户管或管理员转移」——那个入口点了必然 403 |
 
@@ -2926,7 +2942,9 @@ public class GoogleSheetsService {
      * rows: [{"account_id": "123", "cells": {"A": "2026-09-23", "G": "张三"}}]
      *   cells 键为列字母——只有相邻列并成区间，空洞处断开，
      *   因此没出现在 cells 里的列绝不会被写到（户管的公式列靠这个保命）。
-     * keyCol: 账户ID 所在列字母（户管看板两侧都是 "C"）。
+     * keyCol: 账户ID 所在列字母。**户管看板两侧都是 "C"；投手「我的看板」是 "D"**
+     *   （自 v1.34 起本方法也服务投手看板，见附录 J）。调用方**必须显式传**：
+     *   默认值 "C" 只覆盖户管看板，用它去写投手看板会**静默定位到错误的行**。
      *
      * 返回 {"updated": n, "not_found": [accountId...]}：表里找不到该账户不算错误
      * （户管的表不必包含所有账户）。整批合并进**一次** values().batchUpdate——
@@ -4340,3 +4358,165 @@ TT 广告账户列表（`/tt/accounts`）第 2 列是「账户名称」。用户
 - **其余展示点未动**（用户选择「只去账户列表那一列」）：`TtAccountDetailModal.vue`（详情弹窗「账户名称：xxx」）、`TtAccountDeletedModal.vue`（已删除账户列表的「账户名称」列）**均保持原样**。
 - **GG / FB 未动**：GG 侧见附录 E.1（`AdsAccountPanel.vue` 的账户名内联编辑，本次不动）；FB 侧 `FbAccountPanel.vue` 的「账户名」列**保持原样**。
 - **后端影响：无**。`tt_accounts.name` 字段、DDL、接口契约一律未动，**不存在数据迁移动作**。迁移到 Spring Boot 时无需在 Controller / Service 层做任何处理。
+
+---
+
+## 附录 I: v1.33 TT「换绑情况」列改造
+
+> **日期**: 2026-10-06
+> **性质**: **改需求**（非 bug 修复）—— 推翻 v1.31 制定的归属协议中**仅 TT 的部分**
+> **权威设计**: `2026-10-06-tt-owner-change-note-design.md`
+> **取代范围**: `2026-09-23-huguan-sheet-design.md` 的 §7.1、§7.2 规则 1、规则 3② 中**仅 TT 的部分**
+> **影响文件**: `py/database.py`、`py/huguan_dashboard.py`、`py/routes/huguan_dashboard_routes.py`、`py/routes/tt_accounts_routes.py`、`frontend/src/views/tt/TtAccountPanel.vue`
+
+### I.1 需求背景与定性
+
+v1.31 定下「变更通道列的值优先于运营列」：TT 的 `L` 列「换绑情况」非空时压过 `G` 列「接户运营」
+（设计文档 `2026-09-23-huguan-sheet-design.md:35` 留有用户原话）。用户 2026-10-06 裁定**取消该规则**，
+把 `L` 列改作**换绑记录字段**。
+
+**这是改需求，不是 bug 修复** —— v1.31 的实现是按当时要求做的，本次是要求变了。
+因此 §7.9 与首部变更摘要是**有据地更正**，不是「实现偏离了设计」。
+
+**仅 TT**。GG 的「重新分配」（`H` 列）承载的是另一套已上线流程，**逐字节不变**。
+
+### I.2 变更内容
+
+| 项 | v1.31（旧） | v1.33（新） |
+|----|-----------|-----------|
+| TT 归属判定 | `_owner_channel`（`L` 列）非空则压过 `owner_name`（`G` 列） | **恒取** `G` 列「接户运营」；`effective_owner_name(parsed, platform)` 按平台分叉 |
+| `L` 列语义 | 合成字段 `_owner_channel`（归属变更通道） | 真实数据库列 `owner_change_note`，**普通文本**、`writable=False` / `readable=True` |
+| `L` 列写入 | 户管在系统 UI 改归属 ⇒ 写**新归属人名** | 同一时机 ⇒ 写 `旧归属人转新归属人+月.日`（如 `阿轩转黎明10.7`），**同时落库** `owner_change_note`，两处同一份文本 |
+| 同步后清空 `L` | 规则 3②：应用归属变更后清空为 `""` | **对 TT 不再执行**（改 GG-only）。对 TT 执行会抹掉记录，且因读回按表覆盖会**连带清掉系统值**（双重抹除） |
+| `L` 列读回 | 驱动归属 | 读回**原样存进** `owner_change_note`，**不影响归属**；空值按表覆盖（表里清空 → 系统也清空），并进 `clears` 让户管看见 |
+| 前端 | 无「换绑情况」列 | `TtAccountPanel.vue` 加**只读**「换绑情况」列（`v-if="authStore.isHuguan"`，紧挨「户归属」） |
+
+**DDL 变更（1 列，已在 §5.2 同步）**：
+
+```sql
+owner_change_note TEXT DEFAULT '' COMMENT '换绑记录（旧归属人转新归属人+月.日，v1.33）'
+```
+
+**无数据迁移动作**：老库里该列全为空串。`tt_accounts` 此前**没有任何** `_add_column_if_missing`
+迁移记录，故实现时**建表语句与迁移条目两处都要加** —— 生产库 `temp/app.db` 已存在，
+`CREATE TABLE IF NOT EXISTS` 对其**不生效**，只有 `_ensure_columns()` 里的
+`_add_column_if_missing` 能把列补上。Java 侧对应「建表 DDL + 启动时幂等的 schema 补丁」。
+
+**月日格式**：`f"{now.month}.{now.day}"`，**不补零**（10 月 7 日 → `10.7`；10 月 10 日 → `10.10`）。
+**不得**用 `strftime("%-m")` —— Windows 平台不支持该格式符。旧归属人解析不到时写 `未分配`。
+文本与落库值必须**同源**（在 reassign 端点内构造一次），不要两处各构造一遍。
+**注意**：`display_name` 仅含空白时它是 truthy、会顶掉 `or` 兜底，`.strip()` 后得到空串
+→ 记录退化成 `转10.7`。必须**先 strip 再 or**。
+
+### I.3 与 §7.9 的对应关系
+
+| §7.9 条款 | 处理 |
+|-----------|------|
+| 规则 1（变更通道优先） | TT **作废**；GG 保留 |
+| 规则 2（自动回写不碰通道列） | TT **效果保留**（改由 `writable=False` 实现）；GG 保留原实现 |
+| 规则 3①（系统 UI 改归属写 L） | TT **保留但内容变更**（见 I.2） |
+| 规则 3②（同步后清空通道列） | TT **作废**；GG 保留 |
+| 规则 4（落库后回写运营列） | TT / GG **均保留**（TT 的 `G` 列现在是唯一归属列，更需要它） |
+| 「归属不新增数据库列」 | **仅对 `owner_id` 成立**；归属判定本身仍不新增列，但换绑记录新增了 `owner_change_note` |
+
+### I.4 迁移红线
+
+1. **`effective_owner_name` 的 `platform` 参数必须是必填位置参数，不得给默认值** ——
+   默认值会让漏传的 TT 调用方**静默拿到 GG 语义**，正是本次要消除的缺陷。
+2. **GG 的四条规则逐字重建**；TT 走 I.2 的新语义。把 TT 也按规则 1 实现，会让归属被 `L` 列的
+   记录文本劫持（例如 `阿轩转黎明10.7` 会被当成一个叫这个名字的运营去找用户）。
+3. **`L` 列不得改成可写**。它靠 `writable=False` 排除出 `cells_for_row` —— 这是「自动回写永不碰
+   换绑记录」的**唯一**保障，机制与 GG 的 `H` 列（靠 `field == "_owner_channel"` 守卫）不同、效果相同。
+4. **`L` 列的读回按表覆盖**是刻意的（与其他文本列同口径）—— **不得**加 `if not value: continue`
+   之类的空值跳过，否则户管永远无法从表里清掉一条记录。
+5. **同步后的清空动作必须分平台**：TT 不清 `L`。漏掉这个分叉，每次同步都会抹掉换绑记录。
+
+---
+
+## 附录 J: v1.34 TT 备注（`remark`）跨看板同步优先级
+
+> **日期**: 2026-10-06
+> **性质**: 新增同步优先级规则 + **新建一条此前不存在的推送通路**
+> **权威设计**: `2026-10-06-tt-remark-sync-precedence-design.md`
+> **影响文件**: `py/huguan_dashboard.py`、`py/routes/huguan_dashboard_routes.py`、`py/routes/tt_accounts_routes.py`、`frontend/src/views/tt/TtAccountPanel.vue`
+
+### J.1 需求背景
+
+`tt_accounts.remark` 被**两张 Google 表同时读写**：投手「我的看板」`J` 列「备注」、
+户管看板 `M` 列「产品信息」。两边都是 `writable=True` + `readable=True`，谁后同步谁赢。
+更严重的是「文本列空值照常落库」的口径 ⇒ **户管看板 `M` 列空着，同步一次就会把投手填的备注清掉**。
+
+**附带发现**：**「系统 → 投手看板」的推送链路此前根本不存在**。所有推送都走
+`push_rows(user_id, ...)`，它取的是 `user_id` 自己的 `huguan_dashboard_{uid}` 配置 ——
+而投手没有这个键，所以 `sync_from_sheet` 结尾那句 `hd.writeback_rows(uid, ...)` 对投手是
+**一句静默空转**。
+
+### J.2 规则（用户逐条确认）
+
+| 场景 | 结果 |
+|------|------|
+| 首次入库（户管触发），投手看板 `J` 列**有值** | **投手赢**：覆盖系统 + 回写户管看板 `M` 列 |
+| 首次入库（户管触发），投手 `J` 列**空** | **户管赢**：系统用户管 `M` 列值 + 推给投手看板 `J` 列 |
+| 首次入库（投手触发） | 直接用投手 `J` 列的值，**不额外读户管看板**（分触发方处理） |
+| 账户已存在，户管改 `M` 列 | **不生效** —— 投手权威永久 |
+| 投手在系统内联编辑备注 | 推**两张表** |
+| 投手同步（`J` 列） | 不生效（维持现状，只处理消耗/状态冲突） |
+
+**只改 `remark` 一个字段**；**仅 TT**；**不新增表、不新增数据库列**。
+
+### J.3 实现要点（Java 侧必须重建的语义）
+
+1. **权威判定天然映射到 `build_diff` 的 `to_create` / `to_update` 两个分支**，故**零新增状态**。
+   实现方式是给 `to_update` 的字段过滤**追加一个剔除条件**：
+   `and not (platform == "tt" and k == "remark")`。
+   ⚠️ **不得**把 `remark` 从 `_PLAIN_TEXT_FIELDS["tt"]` 里删掉 —— 该清单被 `to_create` 与
+   `to_update` **共用**，删掉会让「首次入库读户管 `M` 列」那一支失效。
+   **附带收益**：`_blank_columns` 不再为已存在账户把 `remark` 报进 `clears`，
+   「户管空值清空投手备注」从此不可能发生。
+2. **读投手看板发生在 `apply_diff`（落库阶段）而非 `build_diff`（`dry_run`）** ——
+   后者承诺只读且会被空跑调用，在其中发起网络读取会让预览变慢并引入失败面。
+   代价：`dry_run` 预览**看不到**投手看板的影响（见 J.4）。
+   **缓存必须是单次 `apply_diff` 调用内的局部字典**（按 owner 惰性读取），
+   **不得**做成模块级缓存 —— 表内容随时可变，跨请求缓存会让户管看到过期值。
+3. **`apply_diff` 返回两个新键**（由路由层 `pop` 后消费）：
+   `remark_m_writeback: [{account_id, value}]`（投手赢 → 回写户管 `M`）、
+   `remark_operator_push: [{owner_id, account_id, value}]`（户管赢 → 推投手 `J`）。
+   在 `platform != "tt"` 时**恒为空列表**。
+   ⚠️ **`owner_id` 为 `None` 的行不产生 `remark_operator_push` 记录**（归属解析不到的 TT 行
+   确实会进 `to_create`，但它没有投手看板可推）。该键的元素类型声明是 `owner_id: int`，
+   **不得吐 `None`**。
+4. **新建推送函数 `push_remark_to_operator_dashboard(owner_id, account_id, value)`** ——
+   面向投手看板，配置取自 `tags.tt_sheet_id` + 每投手的 `my_dashboard`；
+   与 `push_rows`（面向户管看板、配置取自 `huguan_dashboard_{uid}`）**不是一回事**。
+   ⚠️ **投手看板的账户ID在 `D` 列**（户管看板在 `C` 列）—— 调 `update_rows_by_account_id`
+   **必须显式传 `key_col="D"`**，漏传会默认 `"C"` 并**静默定位到错误的行**。
+   只写 `{"J": value}` **单列**，绝不整行推送；走后台线程；**绝不抛异常**。
+5. **投手看板 sheet 名的解析顺序**（**必须与 `sync_from_sheet()` 逐字一致**，否则读与写会
+   对着不同的 tab 操作）：
+
+   ```
+   sheet_name = tags.tt_sheet_mappings.my_dashboard  或  "我的看板"      # 全局兜底
+   若 config.tt_sheet_mappings_{owner_id}.my_dashboard 非空 → 用它覆盖     # 投手私有（原值，不 strip）
+   ```
+
+   ⚠️ 私有值**原样透传、不得 strip** —— 既有写入路径用的是原值，一致才安全。
+   实测：`tags.tt_sheet_mappings` 只含 `{recycle, recharge, accounts}`，**不含 `my_dashboard`**；
+   私有配置在 `config.tt_sheet_mappings_{uid}`（现存 uid 23/25/28/30/31，29/32/33 未配）。
+6. **`PUT /api/tt/accounts/{id}` 带 `remark` 时推两张表**：户管看板 `M` 列 + 投手看板 `J` 列。
+   `owner_id` 取**该账户当前的 `owner_id`**（不是调用者 uid）—— 户管可能代改别人名下的户。
+   ⚠️ **户管看板那次回写不要自己在 commit 之前加**：`update_account()` 尾部**本来就有**一条
+   post-commit 的全量单行回写，而 `cells_for_row` 已含 `M` 列 —— 再加一条只会在
+   `db.commit()` 之前用**新连接读到未提交的旧值**，并与尾调用的后台线程**并发写同一行**。
+7. **前端**：`TtAccountPanel.vue` 在「消耗情况」列后加**可内联编辑**的「备注」列。
+   该文件已有六列内联可编辑，**必须复用既有的 `.inline-*` 类与「✏️ 按钮进入 + Esc 取消 +
+   成功/失败都提示」惯例**，不要发明新交互；失败时**不要**回写 `row.remark`（保持原值即天然回滚）。
+
+### J.4 已知后果（实现后仍成立，勿当缺陷修）
+
+1. `dry_run` 预览看不到投手看板的影响（读取在落库阶段）。
+2. 投手改备注时户管看板**不会即时刷新** —— `writeback_rows` 用的是调用者 uid 的
+   `huguan_dashboard_{uid}` 配置，投手没有它 → 该步**静默空转**（既有行为）。户管看板靠
+   `dashboard_push` 全量刷新对齐。
+3. 投手看板读不到时**静默降级为「户管赢」**并记日志 —— 读不到投手看板不得阻断户管同步。
+4. 投手看板里**没有该账户行**时，`update_rows_by_account_id` 返回 `not_found` 且**不建行**
+   （既有契约：系统只改单元格、不建行）。
