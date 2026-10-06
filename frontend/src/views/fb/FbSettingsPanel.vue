@@ -86,6 +86,60 @@
           <el-empty v-else description="暂无状态" :image-size="60" />
         </el-card>
       </el-col>
+
+      <!-- 第四栏：所属渠道 -->
+      <el-col :xs="24" :md="12" :lg="8">
+        <el-card class="setting-card" shadow="never">
+          <template #header>
+            <span class="card-title">🏷 所属渠道</span>
+          </template>
+
+          <div v-if="authStore.canManageAccounts" class="add-form">
+            <el-input v-model="newChannelName" placeholder="新建渠道名称" size="small"
+                      @keyup.enter="createChannel" />
+            <el-button type="primary" size="small" @click="createChannel">添加</el-button>
+          </div>
+
+          <div v-if="channels.length" class="tag-list">
+            <div v-for="item in channels" :key="item.id" class="tag-row">
+              <el-tag size="default">{{ item.name }}</el-tag>
+              <el-popconfirm v-if="authStore.canManageAccounts" title="确定删除？" @confirm="deleteChannel(item.id)">
+                <template #reference>
+                  <el-button class="tag-delete-btn" size="small" type="danger" link>删除</el-button>
+                </template>
+              </el-popconfirm>
+            </div>
+          </div>
+          <el-empty v-else description="暂无渠道" :image-size="60" />
+        </el-card>
+      </el-col>
+
+      <!-- 第五栏：资产类型 -->
+      <el-col :xs="24" :md="12" :lg="8">
+        <el-card class="setting-card" shadow="never">
+          <template #header>
+            <span class="card-title">📦 资产类型</span>
+          </template>
+
+          <div v-if="authStore.canManageAccounts" class="add-form">
+            <el-input v-model="newAssetTypeName" placeholder="新建资产类型名称" size="small"
+                      @keyup.enter="createAssetType" />
+            <el-button type="primary" size="small" @click="createAssetType">添加</el-button>
+          </div>
+
+          <div v-if="assetTypes.length" class="tag-list">
+            <div v-for="item in assetTypes" :key="item.id" class="tag-row">
+              <el-tag size="default">{{ item.name }}</el-tag>
+              <el-popconfirm v-if="authStore.canManageAccounts" title="确定删除？" @confirm="deleteAssetType(item.id)">
+                <template #reference>
+                  <el-button class="tag-delete-btn" size="small" type="danger" link>删除</el-button>
+                </template>
+              </el-popconfirm>
+            </div>
+          </div>
+          <el-empty v-else description="暂无资产类型" :image-size="60" />
+        </el-card>
+      </el-col>
     </el-row>
   </div>
 </template>
@@ -93,6 +147,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import client from '../../api/client'
+import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../../stores/auth'
 
@@ -101,11 +156,15 @@ const authStore = useAuthStore()
 const regionOptions = ref([]); const newRegionName = ref(''); const newRegionTz = ref('')
 const salesPersons = ref([]); const newSalesName = ref('')
 const statuses = ref([]); const newStatusName = ref('')
+const channels = ref([]); const newChannelName = ref('')
+const assetTypes = ref([]); const newAssetTypeName = ref('')
 
 async function loadData() {
   try { const r = await client.get('/sales-persons/list'); salesPersons.value = r.sales_persons || [] } catch(e) { console.warn(e) }
   try { const r = await client.get('/statuses/list'); statuses.value = r.statuses || r.data || [] } catch(e) { console.warn(e) }
   try { const r = await client.get('/regions/list'); regionOptions.value = (r.regions || []).map(r => typeof r === 'string' ? { name: r, timezone: '' } : r) } catch(e) { console.warn(e) }
+  try { const r = await fbApi.listChannels(); channels.value = r.items || [] } catch(e) { console.warn(e) }
+  try { const r = await fbApi.listAssetTypes(); assetTypes.value = r.items || [] } catch(e) { console.warn(e) }
 }
 
 // 地区
@@ -140,6 +199,32 @@ async function createStatus() {
   ElMessage.success('已添加'); newStatusName.value = ''; loadData()
 }
 async function deleteStatus(id) { await client.delete(`/statuses/${id}`); ElMessage.success('已删除'); loadData() }
+
+// 渠道
+async function createChannel() {
+  if (!newChannelName.value.trim()) return
+  try {
+    await fbApi.createChannel(newChannelName.value.trim())
+    ElMessage.success('已添加'); newChannelName.value = ''; loadData()
+  } catch(e) { ElMessage.error(e.response?.data?.error || '添加失败') }
+}
+async function deleteChannel(id) {
+  try { await fbApi.deleteChannel(id); ElMessage.success('已删除'); loadData() }
+  catch(e) { ElMessage.error(e.response?.data?.error || '删除失败') }
+}
+
+// 资产类型
+async function createAssetType() {
+  if (!newAssetTypeName.value.trim()) return
+  try {
+    await fbApi.createAssetType(newAssetTypeName.value.trim())
+    ElMessage.success('已添加'); newAssetTypeName.value = ''; loadData()
+  } catch(e) { ElMessage.error(e.response?.data?.error || '添加失败') }
+}
+async function deleteAssetType(id) {
+  try { await fbApi.deleteAssetType(id); ElMessage.success('已删除'); loadData() }
+  catch(e) { ElMessage.error(e.response?.data?.error || '删除失败') }
+}
 
 onMounted(loadData)
 </script>
