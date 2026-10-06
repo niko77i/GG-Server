@@ -226,7 +226,8 @@ class TestParseRow:
         谁把 parse_row 改成按平台输出 `advertiser_id`，这条就会红。
         """
         from huguan_dashboard import ACCOUNT_KEY_FIELD, parse_row
-        assert ACCOUNT_KEY_FIELD == {"gg": "account_id", "tt": "advertiser_id"}
+        assert ACCOUNT_KEY_FIELD == {"gg": "account_id", "tt": "advertiser_id",
+                                     "fb": "account_id"}
         p = parse_row(["", "", "'7001234567890"], "tt")
         assert p["account_id"] == "7001234567890"
         assert "advertiser_id" not in p
@@ -639,8 +640,9 @@ class TestDashboardConfig:
 
     def test_invalid_platform_rejected(self, client):
         hg, _ = _create_user(client, "_hg_cfg4", role="huguan")
+        # 用 "xx"（白名单外）而不是 "fb"：子项目 ② 起 fb 已是合法平台（hd.PLATFORMS）。
         resp = client.post("/api/huguan/dashboard", headers=hg,
-                           json={"platform": "fb", "spreadsheet_id": "S", "sheet_name": "N"})
+                           json={"platform": "xx", "spreadsheet_id": "S", "sheet_name": "N"})
         assert resp.status_code == 400
 
     def test_non_huguan_gets_403(self, client):
@@ -660,12 +662,13 @@ class TestDashboardConfig:
 
         循环里三条 payload 只有 `{"platform": 5}` 以前会 `AttributeError` 炸成 500；
         `{"spreadsheet_id": 123}`（缺 platform 键，旧代码 `(None or "")` 已得 `""`）与
-        `{"platform": "fb"}` 从来就是 400。断言都不变，只是别把注释读成「三条都曾 500」。
+        `{"platform": "xx"}` 从来就是 400。断言都不变，只是别把注释读成「三条都曾 500」。
+        （"xx" 取代原 "fb"：子项目 ② 起 fb 已是合法平台，不再走非法分支。）
         另注意 `sheet_name` 给数字**不算**畸形：按全局约束与 spreadsheet_id 一致地
         `str()` 兜底（见下一条），所以这里只钉 body 结构与 platform 非法两条路径。
         """
         hg, _ = _create_user(client, "_hg_badbody", role="huguan")
-        for payload in ({"platform": 5}, {"spreadsheet_id": 123}, {"platform": "fb"}):
+        for payload in ({"platform": 5}, {"spreadsheet_id": 123}, {"platform": "xx"}):
             resp = client.post("/api/huguan/dashboard", headers=hg, json=payload)
             assert resp.status_code == 400, payload
         assert client.post("/api/huguan/dashboard", headers=hg,
@@ -2910,13 +2913,17 @@ class TestOwnerOptionsPlatformIsolation:
         assert gg not in ids
 
     def test_unknown_platform_falls_back_to_gg(self, client):
-        """白名单外的值回落 gg，而不是「不过滤」（后者会把 FB/TT 的人漏回来）。"""
+        """白名单外的值回落 gg，而不是「不过滤」（后者会把 FB/TT 的人漏回来）。
+
+        取值不含 "fb"：子项目 ② 起 fb 是合法平台（hd.PLATFORMS），
+        它带回 FB 的人是**正确行为**，不再属于「白名单外」。
+        """
         hg, _ = _create_user(client, "_opi_hg3", role="huguan", platform="gg")
         db = database.get_db()
         gg = _seed(db, "_opi_gg3", "GG人3", role="user", platform="gg")
         tt = _seed(db, "_opi_tt3", "TT人3", role="user", platform="tt")
         db.close()
-        for bad in ("fb", "xx", ""):
+        for bad in ("xx", ""):
             ids = self._ids(client, hg, platform=bad)
             assert gg in ids, bad
             assert tt not in ids, bad

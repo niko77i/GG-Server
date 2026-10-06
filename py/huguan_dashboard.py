@@ -13,7 +13,7 @@ from google_sheets_service import col_index
 
 log = logging.getLogger("gg-server")
 
-PLATFORMS = ("gg", "tt")
+PLATFORMS = ("gg", "tt", "fb")
 
 DEAD_STATUS = "死亡"
 ALIVE_STATUS = "存活"
@@ -58,15 +58,36 @@ COLUMN_SPEC = {
         ("L", "换绑情况",  "owner_change_note", False, True),
         ("M", "产品信息",  "remark",          True,  True),
     ],
+    "fb": [
+        ("A", "日期",     "acquired_date",   True,  True),
+        ("B", "操作人",   "operator",        True,  False),  # 冻结字段，系统写、绝不读回
+        ("C", "账户名称", "name",            True,  True),
+        ("D", "资产UID",  "account_id",      True,  False),  # 定位键
+        ("E", "所属渠道", "channel_name",    True,  True),
+        ("F", "资产类型", "asset_type_name", True,  True),
+        ("G", "单价",     "unit_price",      True,  True),
+        ("H", "入库",     "inbound_qty",     True,  True),
+        # I 只读回、不参与批量回写：它是系统生成的换绑记录，由三个定向写点维护
+        # （建号 / reassign / apply_diff 收尾）。与 TT 的 L 列同形。
+        ("I", "接户运营", "acceptor",        False, True),
+        ("J", "在用运营", "owner_name",      True,  True),
+        ("K", "出库时间", "outbound_date",   True,  True),
+        ("L", "出库",     "outbound_qty",    True,  True),
+        ("M", "时区",     "timezone",        True,  True),
+        ("N", "消耗",     "consumption",     True,  True),
+        ("O", "状态",     "status_name",     True,  True),
+        ("P", "位置",     "primary_bm_name", True,  True),
+        ("Q", "产品信息", "remark",          True,  True),
+    ],
 }
 
-KEY_COL = {"gg": "C", "tt": "C"}
-OWNER_COL = {"gg": "G", "tt": "G"}
-OWNER_CHANNEL_COL = {"gg": "H", "tt": "L"}
-READ_RANGE = {"gg": "A:N", "tt": "A:M"}
+KEY_COL = {"gg": "C", "tt": "C", "fb": "D"}
+OWNER_COL = {"gg": "G", "tt": "G", "fb": "J"}
+OWNER_CHANNEL_COL = {"gg": "H", "tt": "L"}      # 刻意不含 fb，见 spec §6.5
+READ_RANGE = {"gg": "A:N", "tt": "A:M", "fb": "A:Q"}
 
 # 系统里「账户ID」列在两张表下的实际字段名
-ACCOUNT_KEY_FIELD = {"gg": "account_id", "tt": "advertiser_id"}
+ACCOUNT_KEY_FIELD = {"gg": "account_id", "tt": "advertiser_id", "fb": "account_id"}
 
 
 def _text(value) -> str:
@@ -285,6 +306,9 @@ _SQL_AGENT_TT = "SELECT id FROM agents WHERE name=? AND platform='tt'"
 # mcc / agents 无 deleted_at，不加；users 也无。
 _SQL_BC = "SELECT id FROM tt_bcs WHERE name=? AND deleted_at IS NULL"
 
+# 平台 → 「所属渠道」的查名 SQL。FB 为 None：它不走 agents，由 Task 2 单独处理。
+_AGENT_SQL = {"gg": _SQL_AGENT_GG, "tt": _SQL_AGENT_TT, "fb": None}
+
 
 def _resolve_field(db, platform: str, field: str, value: str):
     """把表里的一个名称解析成系统主键；不认识的字段返回 (True, None) 表示无需解析。
@@ -300,7 +324,8 @@ def _resolve_field(db, platform: str, field: str, value: str):
     if field == "mcc_name":
         return True, resolve_named_id(db, _SQL_MCC, (value,))
     if field == "agent_name":
-        sql = _SQL_AGENT_TT if platform == "tt" else _SQL_AGENT_GG
+        # FB 的「所属渠道」不在 agents 表里（在 fb_channels），见 Task 2
+        sql = _AGENT_SQL[platform]
         return True, resolve_named_id(db, sql, (value,))
     if field == "bc_name":
         return True, resolve_named_id(db, _SQL_BC, (value,))
@@ -312,6 +337,9 @@ _PLAIN_TEXT_FIELDS = {
     "gg": ("acquired_date", "timezone"),
     "tt": ("acquired_date", "country", "timezone", "consumption", "remark",
            "owner_change_note"),
+    # FB 的文本列。注意不含 acceptor —— 那是定向写列，不参与「空值=清空」批量口径。
+    "fb": ("acquired_date", "name", "unit_price", "inbound_qty", "outbound_date",
+           "outbound_qty", "timezone", "consumption", "remark"),
 }
 
 
@@ -355,7 +383,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
     existing_map = {}
     if ids:
         marks = ",".join("?" for _ in ids)
-        table = "tt_accounts" if platform == "tt" else "accounts"
+        table = _TABLE_FOR_PLATFORM[platform]
         rows = db.execute(
             f"""SELECT a.*, u.display_name AS owner_display, u.username AS owner_username
                 FROM {table} a LEFT JOIN users u ON a.owner_id = u.id
@@ -685,7 +713,7 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
     # 局部而非模块级 —— 表内容随时可变，跨请求缓存会让户管看到过期值。
     _operator_remark_cache = {}
 
-    table = "tt_accounts" if platform == "tt" else "accounts"
+    table = _TABLE_FOR_PLATFORM[platform]
     key_field = ACCOUNT_KEY_FIELD[platform]
 
     for item in diff.get("to_create", []):
@@ -805,7 +833,7 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
 
 def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:
     """按死亡标记同步 death_date（对照 main.py:4638 的既有语义）。"""
-    table = "tt_accounts" if platform == "tt" else "accounts"
+    table = _TABLE_FOR_PLATFORM[platform]
     if want_dead:
         db.execute(f"UPDATE {table} SET death_date=date('now','localtime'), "
                    "status_changed_date=datetime('now','localtime') WHERE id=?", (account_pk,))
@@ -851,6 +879,31 @@ LEFT JOIN users u ON a.owner_id = u.id
 LEFT JOIN account_statuses s ON a.status_id = s.id
 """
 
+_FB_ROW_SQL = """
+SELECT a.account_id, a.acquired_date, a.name, a.timezone, a.operator, a.acceptor,
+       a.unit_price, a.inbound_qty, a.outbound_date, a.outbound_qty, a.consumption, a.remark,
+       ch.name AS channel_name, at.name AS asset_type_name,
+       bm.name AS primary_bm_name,
+       COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
+       s.name AS status_name
+FROM fb_accounts a
+LEFT JOIN fb_channels ch ON a.channel_id = ch.id
+LEFT JOIN fb_asset_types at ON a.asset_type_id = at.id
+LEFT JOIN fb_account_bm ab ON ab.account_id = a.id AND ab.is_primary = 1
+LEFT JOIN fb_bms bm ON ab.bm_id = bm.id
+LEFT JOIN users u ON a.owner_id = u.id
+LEFT JOIN account_statuses s ON a.status_id = s.id
+"""
+# 主 BM 的 join **必须带 ab.is_primary = 1**：一个账户可挂多个 BM，
+# 不加这个条件会让同一个账户产出多行，而 collect_rows_for_push 按行产 cells。
+
+# 平台 → 业务表名。**刻意用字典查表而不是 `if platform == "tt" else ...`**：
+# 后者的 else 会把未知平台静默导向 GG 表（accounts），是本子项目最大的回归风险。
+_TABLE_FOR_PLATFORM = {"gg": "accounts", "tt": "tt_accounts", "fb": "fb_accounts"}
+
+# 平台 → 系统→表 的行查询语句
+_ROW_SQL = {"gg": _GG_ROW_SQL, "tt": _TT_ROW_SQL, "fb": _FB_ROW_SQL}
+
 
 def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
     """系统 → 表：查出待写账户并转成 update_rows_by_account_id 的入参。
@@ -861,7 +914,7 @@ def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
     to_skip 的口径对称，也符合规格 §6.2「软删不触发回写」的意图 —— 软删是用户
     主动从看板撤下的意图，刷新不该把它复活。
     """
-    sql = _TT_ROW_SQL if platform == "tt" else _GG_ROW_SQL
+    sql = _ROW_SQL[platform]
     params = ()
     # 两个基语句都没有 WHERE 子句，故条件先累积成 list 再统一拼 —— 避免
     # 「先拼 WHERE 再找地方插 AND」那种在无 WHERE 时静默拼错条件的写法。
