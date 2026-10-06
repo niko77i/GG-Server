@@ -957,7 +957,7 @@ git commit -m "feat(fb): 账户接口承载新增 10 字段，operator 冻结、
 
 **Interfaces:**
 - Consumes: `CROSS_USER_ROLES`（已导入）、`_get_role`、`get_uid`、`get_db`、`parse_body`、`ok`、`err`
-- Produces: `PUT /api/fb/accounts/<int:aid>/reassign`，body 可选 `{"owner_id": <int>}`。200 → `{"success": true, "data": {"message": str}}`；403 无权限；404 账户不存在；400 目标用户不存在 / owner_id 非法；409 已属于目标
+- Produces: `PUT /api/fb/accounts/<int:aid>/reassign`，body 可选 `{"owner_id": <int>}`。200 → `{"success": true, "message": str}`（**不是** `data.message` —— `ok(dict)` 是直接 `resp.update(data)`，`py/routes/helpers.py:20`，与 TT 同类端点一致）；403 无权限；404 账户不存在；400 目标用户不存在 / owner_id 非法；409 已属于目标
 
 - [ ] **Step 1: 写失败测试**
 
@@ -967,7 +967,7 @@ git commit -m "feat(fb): 账户接口承载新增 10 字段，operator 冻结、
 class TestFbReassign:
     @pytest.fixture
     def fb_user_headers_factory(self, client):
-        """注册两个 FB 用户并返回 (headers_dict, uid) 的工厂。"""
+        """注册一个 FB 用户并返回 (headers, uid) 的工厂 —— 每次调用建一个用户。"""
         def _make(username):
             client.post("/api/auth/register", json={"username": username, "password": "t123"})
             db = database.get_db()
