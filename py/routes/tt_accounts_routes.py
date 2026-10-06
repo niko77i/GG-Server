@@ -13,6 +13,7 @@ from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import tt_required, tt_write_required
 
 import huguan_dashboard as hd
+import sheet_write
 
 tt_accounts_bp = Blueprint('tt_accounts', __name__)
 
@@ -305,6 +306,16 @@ def update_account(aid):
     if role not in CROSS_USER_ROLES and row["owner_id"] != uid:
         return err("无权限", 403)
 
+    # 回滚快照必须在**这里**抓：下面的 `editable` 列表包含 death_date，
+    # 一旦进入那个循环，row 里的 death_date 就是本次请求改写后的值了 ——
+    # 那时抓到的快照会让回滚还原成错误的值。
+    recycle_snapshot_base = {
+        "account_pk": row["id"],
+        "prev_status_id": row["status_id"],
+        "prev_status_changed_date": row["status_changed_date"],
+        "prev_death_date": row["death_date"],
+    }
+
     editable = ["name", "country", "timezone", "consumption",
                 "acquired_date", "death_date", "remark"]
     for f in editable:
@@ -350,8 +361,10 @@ def update_account(aid):
                 db.execute("UPDATE tt_accounts SET death_date='' WHERE id=?", (aid,))
             db.execute("UPDATE tt_accounts SET status_id=? WHERE id=?", (status_id, aid))
             if new_status_name and new_status_name != (row["status_name"] or ""):
+                snap = dict(recycle_snapshot_base)
+                snap["new_status_id"] = status_id
                 _trigger_recycle_if_dead(db, uid, row["advertiser_id"], status_id,
-                                         (data.get("recycle_reason") or "").strip())
+                                         (data.get("recycle_reason") or "").strip(), snap)
 
     # BC 变更（记录历史）
     if "bc_id" in data:
@@ -462,11 +475,15 @@ def batch_update_accounts():
     for aid in ids:
         # owner 权限校验
         if role not in CROSS_USER_ROLES:
-            r = db.execute("SELECT owner_id, bc_id, advertiser_id, status_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+            r = db.execute("SELECT owner_id, bc_id, advertiser_id, status_id, "
+                           "status_changed_date, death_date FROM tt_accounts WHERE id=?",
+                           (aid,)).fetchone()
             if not r or r["owner_id"] != uid:
                 continue
         else:
-            r = db.execute("SELECT owner_id, bc_id, advertiser_id, status_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()
+            r = db.execute("SELECT owner_id, bc_id, advertiser_id, status_id, "
+                           "status_changed_date, death_date FROM tt_accounts WHERE id=?",
+                           (aid,)).fetchone()
             if not r:
                 continue
         if field == "bc_id":
@@ -480,8 +497,13 @@ def batch_update_accounts():
                 db.execute("UPDATE tt_accounts SET death_date=date('now','localtime') WHERE id=?", (aid,))
             db.execute("UPDATE tt_accounts SET status_changed_date=datetime('now','localtime') WHERE id=?", (aid,))
             if r["status_id"] is None or str(r["status_id"]) != str(value):
+                snap = {"account_pk": aid,
+                        "prev_status_id": r["status_id"],
+                        "prev_status_changed_date": r["status_changed_date"],
+                        "prev_death_date": r["death_date"],
+                        "new_status_id": value}
                 _trigger_recycle_if_dead(db, uid, r["advertiser_id"], value,
-                                         (data.get("recycle_reason") or "").strip())
+                                         (data.get("recycle_reason") or "").strip(), snap)
         db.execute(f"UPDATE tt_accounts SET {field}=?, updated_at=datetime('now','localtime') WHERE id=?",
                    (value, aid))
         affected_advertiser_ids.append(r["advertiser_id"])
@@ -1247,38 +1269,94 @@ def sync_from_sheet():
 
 # ==================== 状态改「非存活」写回收清单 ====================
 
-def _maybe_write_recycle(advertiser_id, reason, sheet_id, sheet_name):
-    """状态改为非存活时，后台异步写回收户清单（只写时间/账户ID/回收原因）。失败不阻塞状态变更。"""
-    from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
+def _tt_recycle_rebuild(user_id, business_key, payload):
+    """构造一次「写回收户清单」的函数。
 
-    rows = [{
-        "time": datetime.datetime.now().strftime("%Y-%m-%d"),
-        "account_id": advertiser_id,
-        "reason": reason,
-    }]
-
-    def _do_sync():
+    初始写表与重试**共用**这一条重建路径（DRY）。返回的是 zero-arg 闭包，
+    将由后台线程调用，故 service 与 DB 连接都必须在闭包**内部**新建 ——
+    请求线程的 sqlite 连接不能跨线程使用，httplib2 客户端亦非线程安全。
+    表地址在**每次执行时**现取：户管改过配置后，重试应写进新表。
+    """
+    def _sync():
+        import database
         import google_sheets_service as gs
+        from main import _GOOGLE_SHEETS_CONFIG
+
+        db = database.get_db()
+        try:
+            sheet_id = _get_tt_sheet_id(db)
+            mappings = _get_tt_sheet_mappings(db)
+            sheet_name = (mappings.get("recycle") or "").strip() or "回收户清单"
+        finally:
+            db.close()
+        if not sheet_id:
+            raise RuntimeError("未配置 TT 表格 ID，无法写回收户清单")
+
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        gs.append_recycle(service, sheet_id, sheet_name, rows)
+        gs.append_recycle(service, sheet_id, sheet_name, [{
+            "time": datetime.datetime.now().strftime("%Y-%m-%d"),
+            "account_id": business_key,
+            "reason": (payload or {}).get("reason", ""),
+        }])
 
-    _sync_sheets_background(_do_sync, lambda s, e: None)
+    return _sync
 
 
-def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason):
-    """status 为非「存活」时，异步写回收户清单（只写时间/账户ID/回收原因，保护公式列）。"""
+def _tt_recycle_rollback(db, snapshot):
+    """条件回滚：把账户状态改回改之前的值。
+
+    **守卫写在 UPDATE 的 WHERE 里**（原子），不是「先查后写」—— 后者在两步之间
+    存在竞态。受影响行数为 0 即守卫未过：说明这 30 秒内用户又改过状态，
+    此时**必须放弃回滚**（拿陈旧快照覆盖用户的后续操作就是伪造数据）。
+
+    返回 True=已回滚，False=放弃。
+    """
+    try:
+        acct_pk = snapshot.get("account_pk")
+        new_status_id = snapshot.get("new_status_id")
+    except AttributeError:
+        return False
+    if acct_pk is None or new_status_id is None:
+        return False
+    cur = db.execute(
+        "UPDATE tt_accounts SET status_id=?, status_changed_date=?, death_date=?, "
+        "updated_at=datetime('now','localtime') "
+        "WHERE id=? AND status_id=?",
+        (snapshot.get("prev_status_id"),
+         snapshot.get("prev_status_changed_date") or "",
+         snapshot.get("prev_death_date") or "",
+         acct_pk, new_status_id))
+    db.commit()
+    return cur.rowcount > 0
+
+
+sheet_write.register_target("tt_recycle", rebuild=_tt_recycle_rebuild,
+                            rollback=_tt_recycle_rollback)
+
+
+def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason, snapshot=None):
+    """status 为非「存活」时，走统一入口异步写回收户清单。
+
+    snapshot 由调用方在**业务变更落库前**抓取（见两条调用路径的注释），
+    供最终失败时条件回滚用。
+    """
     st = db.execute("SELECT name FROM account_statuses WHERE id=?", (status_id,)).fetchone()
     if not st or st["name"] == "存活":
         return
     if not reason:
         return
     sheet_id = _get_tt_sheet_id(db)
-    mappings = _get_tt_sheet_mappings(db)
-    sheet_name = (mappings.get("recycle") or "").strip() or "回收户清单"
     if not sheet_id:
         return
-    # 自动新增回收原因
+    # 自动新增回收原因（词表已改为全平台公用，name 全局唯一）
     existing = db.execute("SELECT id FROM tt_recycle_reasons WHERE name=?", (reason,)).fetchone()
     if not existing:
-        db.execute("INSERT OR IGNORE INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)", (reason, uid))
-    _maybe_write_recycle(advertiser_id, reason, sheet_id, sheet_name)
+        db.execute("INSERT OR IGNORE INTO tt_recycle_reasons(name, owner_id) VALUES(?,?)",
+                   (reason, uid))
+
+    payload = {"reason": reason}
+    sheet_write.run_write(
+        db, user_id=uid, platform="tt", target="tt_recycle",
+        business_key=advertiser_id,
+        sync_fn=sheet_write.build_sync("tt_recycle", uid, advertiser_id, payload),
+        payload=payload, snapshot=snapshot)

@@ -1029,7 +1029,8 @@ def test_trigger_recycle_on_non_alive_status(app):
     ids = {r["name"]: r["id"] for r in db.execute(
         "SELECT id, name FROM account_statuses WHERE platform='tt'").fetchall()}
 
-    with mock.patch("routes.tt_accounts_routes._maybe_write_recycle") as writer:
+    # 写表已接入统一入口（sheet_write.run_write），只保留「哪些状态该触发」这一派遣逻辑的守卫。
+    with mock.patch("routes.tt_accounts_routes.sheet_write.run_write") as writer:
         for name in ("验证", "封禁", "死亡"):
             _trigger_recycle_if_dead(db, 1, "1234567890123", ids[name], "跑量差")
         # 存活不写回收清单
