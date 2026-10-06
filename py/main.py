@@ -6535,6 +6535,124 @@ def statuses_delete(sid):
     return jsonify({"success": True})
 
 
+# ========== FB 公用词表 API（子项目 ①，2026-10-06）==========
+#
+# 「所属渠道」「资产类型」两组平台级公用词表。形状照 /api/statuses/*（本文件上方）：
+# platform 取自 _get_effective_platform()，名称唯一性是 (name, platform)，
+# owner_id 只记「谁先建的」、不参与查重。
+#
+# ⚠️ 下面 SQL 里插值的 table / ref_col 是**代码内常量**（调用点的字面量），
+# 绝不来自请求体；所有值一律走 ? 占位符。
+
+def _option_role_denied():
+    """非 GLOBAL_OPTION_ROLES 返回 403 响应；放行返回 None。"""
+    user = auth.get_user_by_id(int(get_jwt_identity()))
+    if not user or user.get("role") not in GLOBAL_OPTION_ROLES:
+        return jsonify({"success": False, "error": "权限不足，仅管理员可操作"}), 403
+    return None
+
+
+def _register_shared_option_api(table: str, url_base: str, ref_col: str, label: str):
+    """注册一组「全平台公用词表」的 list/create/rename/delete 四个端点。
+
+    table    —— 物理表名（fb_channels / fb_asset_types），代码内常量
+    url_base —— 路由前缀
+    ref_col  —— fb_accounts 上引用该表的列名，删除时用它统计 / 解除引用
+    label    —— 错误文案里的中文名
+    """
+
+    @app.route(f"{url_base}/list", methods=["GET"], endpoint=f"{table}_list")
+    @jwt_required()
+    def _list():
+        db = _yt_db()
+        try:
+            rows = db.execute(
+                f"SELECT id, name FROM {table} WHERE platform=? ORDER BY id",
+                (_get_effective_platform(),)).fetchall()
+            return jsonify({"success": True, "items": [dict(r) for r in rows]})
+        finally:
+            db.close()
+
+    @app.route(f"{url_base}/create", methods=["POST"], endpoint=f"{table}_create")
+    @jwt_required()
+    def _create():
+        denied = _option_role_denied()
+        if denied:
+            return denied
+        data = request.get_json(silent=True) or {}
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"success": False, "error": "名称不能为空"}), 400
+        platform = _get_effective_platform()
+        db = _yt_db()
+        try:
+            if db.execute(f"SELECT id FROM {table} WHERE name=? AND platform=?",
+                          (name, platform)).fetchone():
+                return jsonify({"success": False, "error": f"{label}「{name}」已存在"}), 409
+            user_id = int(get_jwt_identity())
+            db.execute(f"INSERT INTO {table}(name, owner_id, platform) VALUES(?,?,?)",
+                       (name, user_id, platform))
+            db.commit()
+            new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            return jsonify({"success": True, "id": new_id})
+        finally:
+            db.close()
+
+    @app.route(f"{url_base}/<int:oid>", methods=["PUT"], endpoint=f"{table}_rename")
+    @jwt_required()
+    def _rename(oid):
+        denied = _option_role_denied()
+        if denied:
+            return denied
+        data = request.get_json(silent=True) or {}
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"success": False, "error": "名称不能为空"}), 400
+        platform = _get_effective_platform()
+        db = _yt_db()
+        try:
+            if not db.execute(f"SELECT id FROM {table} WHERE id=?", (oid,)).fetchone():
+                return jsonify({"success": False, "error": f"{label}不存在"}), 404
+            if db.execute(f"SELECT id FROM {table} WHERE name=? AND platform=? AND id!=?",
+                          (name, platform, oid)).fetchone():
+                return jsonify({"success": False, "error": f"{label}「{name}」已存在"}), 409
+            db.execute(f"UPDATE {table} SET name=? WHERE id=?", (name, oid))
+            db.commit()
+            return jsonify({"success": True})
+        finally:
+            db.close()
+
+    @app.route(f"{url_base}/<int:oid>", methods=["DELETE"], endpoint=f"{table}_delete")
+    @jwt_required()
+    def _delete(oid):
+        denied = _option_role_denied()
+        if denied:
+            return denied
+        db = _yt_db()
+        try:
+            if not db.execute(f"SELECT id FROM {table} WHERE id=?", (oid,)).fetchone():
+                return jsonify({"success": False, "error": f"{label}不存在"}), 404
+            live = db.execute(
+                f"SELECT COUNT(*) FROM fb_accounts WHERE {ref_col}=? AND deleted_at IS NULL",
+                (oid,)).fetchone()[0]
+            if live > 0:
+                return jsonify({"success": False,
+                                "error": f"无法删除：被 {live} 个账户引用，请先解除关联"}), 409
+            # 软删账户不挡删除，但引用必须显式解除：fb_accounts.<ref_col> 是
+            # REFERENCES，连接开着 PRAGMA foreign_keys=ON，留着悬挂引用会让
+            # DELETE 抛 FOREIGN KEY constraint failed 变成 500。
+            db.execute(f"UPDATE fb_accounts SET {ref_col}=NULL WHERE {ref_col}=?", (oid,))
+            db.execute(f"DELETE FROM {table} WHERE id=?", (oid,))
+            db.commit()
+            return jsonify({"success": True})
+        finally:
+            db.close()
+
+
+_register_shared_option_api("fb_channels", "/api/fb-channels", "channel_id", "渠道")
+_register_shared_option_api("fb_asset_types", "/api/fb-asset-types", "asset_type_id", "资产类型")
+
+
 # ========== MCC Levels 选项 API ==========
 
 @app.route("/api/mcc-levels/list", methods=["GET"])

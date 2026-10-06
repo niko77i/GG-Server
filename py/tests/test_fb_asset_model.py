@@ -185,3 +185,94 @@ class TestPrimaryBm:
         n = db.execute("SELECT COUNT(*) FROM fb_account_bm WHERE account_id=?", (acc,)).fetchone()[0]
         db.close()
         assert n == 2
+
+
+class TestSharedOptionApi:
+    """两组词表端点的契约。门禁口径：list 任意已登录；create/rename/delete 需
+    GLOBAL_OPTION_ROLES（与 /api/regions/* 同族）。"""
+
+    @pytest.fixture
+    def fb_admin(self, client):
+        """一个 FB 平台的 admin —— GLOBAL_OPTION_ROLES 成员。"""
+        client.post("/api/auth/register", json={"username": "fb_admin", "password": "t123"})
+        db = database.get_db()
+        db.execute("UPDATE users SET role='admin', platform='fb' WHERE username='fb_admin'")
+        db.commit()
+        db.close()
+        token = client.post("/api/auth/login",
+                            json={"username": "fb_admin", "password": "t123"}
+                            ).get_json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    @pytest.fixture
+    def fb_plain(self, client):
+        """一个 FB 平台的普通 user —— 不在 GLOBAL_OPTION_ROLES。"""
+        client.post("/api/auth/register", json={"username": "fb_plain", "password": "t123"})
+        db = database.get_db()
+        db.execute("UPDATE users SET platform='fb' WHERE username='fb_plain'")
+        db.commit()
+        db.close()
+        token = client.post("/api/auth/login",
+                            json={"username": "fb_plain", "password": "t123"}
+                            ).get_json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    @pytest.mark.parametrize("base", ["/api/fb-channels", "/api/fb-asset-types"])
+    def test_create_list_rename_delete_roundtrip(self, client, fb_admin, base):
+        r = client.post(f"{base}/create", json={"name": "甲"}, headers=fb_admin)
+        assert r.status_code == 200 and r.get_json()["success"] is True
+        new_id = r.get_json()["id"]
+
+        r = client.get(f"{base}/list", headers=fb_admin)
+        names = [i["name"] for i in r.get_json()["items"]]
+        assert "甲" in names
+
+        r = client.put(f"{base}/{new_id}", json={"name": "乙"}, headers=fb_admin)
+        assert r.status_code == 200
+
+        r = client.delete(f"{base}/{new_id}", headers=fb_admin)
+        assert r.status_code == 200
+
+    @pytest.mark.parametrize("base", ["/api/fb-channels", "/api/fb-asset-types"])
+    def test_duplicate_name_rejected(self, client, fb_admin, base):
+        client.post(f"{base}/create", json={"name": "重复"}, headers=fb_admin)
+        r = client.post(f"{base}/create", json={"name": "重复"}, headers=fb_admin)
+        assert r.status_code == 409
+
+    @pytest.mark.parametrize("base", ["/api/fb-channels", "/api/fb-asset-types"])
+    def test_empty_name_rejected(self, client, fb_admin, base):
+        r = client.post(f"{base}/create", json={"name": "   "}, headers=fb_admin)
+        assert r.status_code == 400
+
+    @pytest.mark.parametrize("base", ["/api/fb-channels", "/api/fb-asset-types"])
+    def test_write_requires_option_role(self, client, fb_plain, base):
+        r = client.post(f"{base}/create", json={"name": "无权"}, headers=fb_plain)
+        assert r.status_code == 403
+
+    def test_delete_blocked_while_referenced_by_live_account(self, client, fb_admin, two_users):
+        r = client.post("/api/fb-channels/create", json={"name": "在用渠道"}, headers=fb_admin)
+        cid = r.get_json()["id"]
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, channel_id) "
+                   "VALUES('户','2001',?,?)", (two_users[0], cid))
+        db.commit()
+        db.close()
+        r = client.delete(f"/api/fb-channels/{cid}", headers=fb_admin)
+        assert r.status_code == 409
+
+    def test_delete_clears_reference_on_soft_deleted_account(self, client, fb_admin, two_users):
+        """软删账户不挡删除，但引用必须被解除 —— 否则 FK 约束会让 DELETE 变 500。"""
+        r = client.post("/api/fb-channels/create", json={"name": "仅软删引用"}, headers=fb_admin)
+        cid = r.get_json()["id"]
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, channel_id, deleted_at) "
+                   "VALUES('户','2002',?,?,datetime('now','localtime'))", (two_users[0], cid))
+        db.commit()
+        db.close()
+        r = client.delete(f"/api/fb-channels/{cid}", headers=fb_admin)
+        assert r.status_code == 200
+        db = database.get_db()
+        left = db.execute("SELECT channel_id FROM fb_accounts WHERE account_id='2002'").fetchone()[0]
+        gone = db.execute("SELECT COUNT(*) FROM fb_channels WHERE id=?", (cid,)).fetchone()[0]
+        db.close()
+        assert left is None and gone == 0
