@@ -85,13 +85,11 @@ def sheet_write_retry():
     payload = _load(row["payload_json"])
     snapshot = _load(row["snapshot_json"])
 
-    # 先构造 sync_fn、再动 status：build_sync 是纯工厂（查 TARGETS 表 + 调 target
-    # 的 rebuild 工厂），按契约 rebuild 只**构造**闭包 —— 不做 I/O、不写库，所以
-    # 放在 claim 之前零成本，也不会留下任何半成品状态。
-    # 顺序契约：rebuild 工厂必须无副作用（纯构造）。正因如此才敢在 claim 前调用；
-    # 否则未注册 / 配置错的目标要到 claim **之后**才炸，行已被置为 pending 且无人
-    # 推进 —— pending 不在 ATTENTION 里，列表标记不显示、前端轮询静默超时，且重试
-    # 闸门只放行 ATTENTION，该任务从此永久不可重试（正是本功能要消灭的静默卡住）。
+    # 先构造 sync_fn、再动 status：build_sync 是纯工厂，rebuild 工厂必须无副作用
+    # （纯构造，见 sheet_write.register_target），所以放在 claim 之前零成本。否则
+    # 未注册 / 配置错的目标要到 claim **之后**才炸，行已被置为 pending 且无人推进
+    # —— pending 不在 ATTENTION 里，标记不显示、轮询静默超时，闸门只放行
+    # ATTENTION，该任务永久不可重试（正是本功能要消灭的静默卡住）。
     try:
         sync_fn = sheet_write.build_sync(target, uid, business_key, payload)
     except KeyError as e:
@@ -110,8 +108,7 @@ def sheet_write_retry():
     db.commit()
     if cur.rowcount != 1:
         db.close()
-        return err(f"该写表任务当前状态为 {row['status']}，不需要重试", 400)
-
+        return err("该写表任务当前不需要重试（可能已在同步中或已成功）", 400)
 
     # 沿用上轮的 snapshot：回滚要撤销的仍是同一次业务变更，不能因为重试而丢掉守卫依据
     sheet_write.run_write(db, user_id=uid, platform=platform, target=target,

@@ -26,6 +26,12 @@ def register_target(name, rebuild, rollback=None):
     rebuild 必须是**工厂**而不是现成的 zero-arg 函数：重试发生在另一次请求里，
     执行器要在**后台线程内**用 database.get_db() 新建连接、新建 service
     （sqlite 连接与 httplib2 客户端都不可跨线程复用）。
+
+    rebuild 还必须是**纯构造**（无副作用）：不得做 I/O、不得读写数据库。
+    重试端点会在「原子 claim」**之前**调用它 —— 若它会失败或产生副作用，
+    未注册/配置错的目标会把记录留在 pending 且无人推进（pending 不在
+    ATTENTION 里，标记不显示、轮询静默超时，且闸门只放行 ATTENTION，
+    该任务从此永久不可重试）。
     """
     TARGETS[name] = {"rebuild": rebuild, "rollback": rollback}
 
