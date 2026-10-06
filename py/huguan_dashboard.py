@@ -349,9 +349,12 @@ _PLAIN_TEXT_FIELDS = {
     "gg": ("acquired_date", "timezone"),
     "tt": ("acquired_date", "country", "timezone", "consumption", "remark",
            "owner_change_note"),
-    # FB 的文本列。注意不含 acceptor —— 那是定向写列，不参与「空值=清空」批量口径。
+    # FB 的文本列。acceptor（I 列「接户运营」）**在这里** —— 它是**双向**列：户管
+    # 在表里手填的串原样读回落进 `acceptor`（设计 §3.1），空值照常走「文本列空着=清空」。
+    # 它之所以还特殊，只是**批量回写**（系统→表）不写这一列 —— 那是 `COLUMN_SPEC`
+    # 里 `writable=False` 管的（设计 §4.1），与本读回口径是两个正交的旋钮。
     "fb": ("acquired_date", "name", "unit_price", "inbound_qty", "outbound_date",
-           "outbound_qty", "timezone", "consumption", "remark"),
+           "outbound_qty", "timezone", "consumption", "remark", "acceptor"),
 }
 
 

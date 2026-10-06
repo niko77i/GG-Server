@@ -244,6 +244,13 @@ def _fb_row(account_id: str, bm_name: str = "") -> list:
     return values
 
 
+def _fb_row_with_acceptor(account_id: str, acceptor: str) -> list:
+    """构造一行 FB 表原始单元格值，只填 D 资产UID 与 I 接户运营。"""
+    values = _fb_row(account_id)
+    values[hd.col_index("I")] = acceptor
+    return values
+
+
 class TestFbBuildApplyIntegration:
     """端到端驱动 build_diff / apply_diff 的 FB 分支（子项目 ② Task 4）。
 
@@ -410,6 +417,93 @@ class TestFbAcceptor:
         parsed = hd.parse_row(values, "fb")
         assert parsed["acceptor"] == "张三转李四"
         assert "_owner_channel" not in parsed
+
+
+class TestFbAcceptorReadback:
+    """接户运营列（I）双向：户管在表里改它，build_diff + apply_diff 要落进 acceptor。
+
+    设计 §3.1：「接户运营列 可读可写。读回时**原样存进 `acceptor`（TEXT）**，
+    不做名称解析、不参与归属判定」。本类走真实路径
+    （parse_row → build_diff → apply_diff）钉住这条链路。
+
+    上面 `TestFbAcceptor.test_acceptor_is_read_back_verbatim` 只钉住 `parse_row`
+    产出了 acceptor —— 但产出**没人消费**就等于被静默丢弃。改动前
+    `_PLAIN_TEXT_FIELDS["fb"]` 不含 acceptor，`_collect_updates` 不会把它放进
+    fields，`to_update` 里根本没有这一列，下面两条断言都会红。
+    """
+
+    @pytest.fixture
+    def fb_acceptor_seed(self, client):
+        """一个 FB 用户 + 一条已存账户（acceptor 初始为空）。"""
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('fb_rb', 'x', 'user', 'fb')")
+        uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', 'RB-1', ?)",
+                   (uid,))
+        acc = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+        return {"uid": uid, "acc": acc}
+
+    def test_sheet_edit_lands_in_acceptor(self, client, fb_acceptor_seed):
+        """户管在表 I 列填串 → 落进 fb_accounts.acceptor（原样，不解析）。"""
+        s = fb_acceptor_seed
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row_with_acceptor("RB-1", "张三转李四"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        # 先钉住「这一列确实进了差异」：改动前 _collect_updates 不看 acceptor，
+        # to_update 里压根没有这一列，下面 len==1 会直接红。
+        upd = [i for i in diff["to_update"] if i["account_id"] == "RB-1"]
+        assert len(upd) == 1, diff
+        assert upd[0]["fields"].get("acceptor") == "张三转李四"
+
+        res = hd.apply_diff(db, diff, "fb", {"update": ["RB-1"]}, s["uid"])
+
+        stored = db.execute("SELECT acceptor FROM fb_accounts WHERE id=?",
+                            (s["acc"],)).fetchone()["acceptor"]
+        db.close()
+        assert res["errors"] == [], res["errors"]
+        assert res["updated"] == 1
+        assert stored == "张三转李四", stored
+
+    def test_blank_sheet_cell_clears_acceptor(self, client, fb_acceptor_seed):
+        """表 I 列清空 → 库里 acceptor 被清空（文本列「空着=清空」口径）。"""
+        s = fb_acceptor_seed
+        db = database.get_db()
+        db.execute("UPDATE fb_accounts SET acceptor='张三转李四' WHERE id=?", (s["acc"],))
+        db.commit()
+
+        parsed = hd.parse_row(_fb_row_with_acceptor("RB-1", ""), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        upd = [i for i in diff["to_update"] if i["account_id"] == "RB-1"]
+        assert len(upd) == 1, diff
+        assert upd[0]["fields"]["acceptor"] == ""
+        # 清空是不可逆动作，必须列进「将清空」提示（前端据此显式标注）。
+        assert "acceptor" in upd[0]["clears"], upd[0]["clears"]
+
+        res = hd.apply_diff(db, diff, "fb", {"update": ["RB-1"]}, s["uid"])
+
+        stored = db.execute("SELECT acceptor FROM fb_accounts WHERE id=?",
+                            (s["acc"],)).fetchone()["acceptor"]
+        db.close()
+        assert res["errors"] == [], res["errors"]
+        assert stored == "", stored
+
+    def test_cells_for_row_still_excludes_column_i(self):
+        """回归守卫：读回口径打开后，批量回写仍不得碰 I 列。
+
+        `_PLAIN_TEXT_FIELDS`（表→系统）与 `COLUMN_SPEC[...][3]`（系统→表）是
+        两个正交旋钮 —— 本次只动前者。若顺手把 FB 的 I 列改成 writable=True，
+        `cells_for_row` 会产出 "I" 覆盖户管手填的串，本断言必红。
+        """
+        row = {c[2]: "x" for c in hd.COLUMN_SPEC["fb"] if c[2]}
+        row["account_id"] = "123"
+        row["acceptor"] = "张三转李四"   # 即便行里有值也不得被推送
+        cells = hd.cells_for_row(row, "fb")
+        assert "I" not in cells
 
 
 def _fb_loginable_user(client, username, role="huguan", platform="fb"):
