@@ -1,0 +1,102 @@
+"""写表失败治理的 HTTP 入口。
+
+设计见 docs/superpowers/specs/2026-10-06-sheet-write-failure-governance-design.md。
+本文件只做取参/鉴权/调逻辑层，状态机与执行器都在 py/sheet_write.py。
+"""
+import json
+
+from flask import Blueprint, request
+from flask_jwt_extended import jwt_required
+
+import sheet_write
+from .helpers import ok, err, get_uid, get_db
+
+sheet_write_bp = Blueprint("sheet_write", __name__)
+
+_PLATFORMS = ("gg", "tt", "fb")
+
+
+@sheet_write_bp.route("/api/sheet-write/status", methods=["GET"])
+@jwt_required()
+def sheet_write_status():
+    """查当前用户的写表任务。
+
+    带 `business_key` → 回该项（含 pending/failed 中间态），供前端轮询；
+    不带           → 只回需要提示的终态，供列表标记。
+
+    隔离约束写在 SQL 的 `WHERE user_id=?` 里，不在 Python 侧过滤。
+    """
+    db = get_db()
+    uid = get_uid()
+    platform = (request.args.get("platform") or "").strip()
+    business_key = (request.args.get("business_key") or "").strip()
+    if platform not in _PLATFORMS:
+        db.close()
+        return err("platform 必须是 gg / tt / fb", 400)
+
+    sql = ("SELECT business_key, target, status, error_msg, created_at, updated_at, settled_at "
+           "FROM sheet_write_log WHERE user_id=? AND platform=?")
+    params = [uid, platform]
+    if business_key:
+        sql += " AND business_key=?"
+        params.append(business_key)
+    sql += " ORDER BY updated_at DESC"
+    items = [dict(r) for r in db.execute(sql, params).fetchall()]
+    db.close()
+
+    if business_key:
+        return ok({"item": items[0] if items else None})
+    return ok({"items": [i for i in items if i["status"] in sheet_write.ATTENTION]})
+
+
+@sheet_write_bp.route("/api/sheet-write/retry", methods=["POST"])
+@jwt_required()
+def sheet_write_retry():
+    """重试一次失败的写表。
+
+    只有**需要提示的终态**才可重试 —— pending 还在途、synced 已成功，都不该
+    被重复提交（重复提交会对同一个账户写第二行）。
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return err("请求体必须是 JSON 对象", 400)
+    platform = str(data.get("platform") or "").strip()
+    target = str(data.get("target") or "").strip()
+    business_key = str(data.get("business_key") or "").strip()
+    if platform not in _PLATFORMS or not target or not business_key:
+        return err("platform / target / business_key 均为必填", 400)
+
+    db = get_db()
+    uid = get_uid()
+    row = db.execute(
+        "SELECT * FROM sheet_write_log WHERE user_id=? AND platform=? AND target=? "
+        "AND business_key=?", (uid, platform, target, business_key)).fetchone()
+    if row is None:
+        db.close()
+        return err("没有找到该写表记录", 404)
+    if row["status"] not in sheet_write.ATTENTION:
+        db.close()
+        return err(f"该写表任务当前状态为 {row['status']}，不需要重试", 400)
+
+    def _load(raw):
+        try:
+            v = json.loads(raw or "{}")
+            return v if isinstance(v, dict) else {}
+        except Exception:
+            return {}
+
+    payload = _load(row["payload_json"])
+    snapshot = _load(row["snapshot_json"])
+
+    try:
+        sync_fn = sheet_write.build_sync(target, uid, business_key, payload)
+    except KeyError as e:
+        db.close()
+        return err(str(e), 400)
+
+    # 沿用上轮的 snapshot：回滚要撤销的仍是同一次业务变更，不能因为重试而丢掉守卫依据
+    sheet_write.run_write(db, user_id=uid, platform=platform, target=target,
+                          business_key=business_key, sync_fn=sync_fn,
+                          payload=payload, snapshot=snapshot)
+    db.close()
+    return ok({"message": "已重新提交，请稍后查看结果"})

@@ -366,6 +366,10 @@ app.register_blueprint(tt_accounts_bp)
 from routes.huguan_dashboard_routes import huguan_dashboard_bp
 app.register_blueprint(huguan_dashboard_bp)
 
+# 写表失败治理（跨平台）
+from routes.sheet_write_routes import sheet_write_bp
+app.register_blueprint(sheet_write_bp)
+
 try:
     auth.init_developer(APP_CONFIG)
 except Exception as e:

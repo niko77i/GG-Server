@@ -307,3 +307,117 @@ def test_build_sync_unknown_target_raises(client):
     import sheet_write
     with pytest.raises(KeyError):
         sheet_write.build_sync("nope", 1, "k", {})
+
+
+def _tt_user(client, username):
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET platform='tt' WHERE username=?", (username,))
+    db.commit()
+    uid = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()["id"]
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    return {"Authorization": f"Bearer {resp.get_json().get('access_token', '')}"}, uid
+
+
+def test_status_returns_only_attention_items(client):
+    """不带 business_key => 只回需要提示的终态（synced/pending 不出现在列表标记里）。"""
+    h, uid = _tt_user(client, "_sw_list")
+    db = database.get_db()
+    _mk_log(db, uid, "tt_recycle", "acc_bad", status="retry_failed")
+    _mk_log(db, uid, "tt_recycle", "acc_ok", status="synced")
+    _mk_log(db, uid, "tt_recycle", "acc_wait", status="pending")
+    db.close()
+
+    resp = client.get("/api/sheet-write/status?platform=tt", headers=h)
+    assert resp.status_code == 200
+    keys = [i["business_key"] for i in resp.get_json()["items"]]
+    assert keys == ["acc_bad"]
+
+
+def test_status_single_returns_latest_for_key(client):
+    """带 business_key => 回该项（含中间态），供轮询用。"""
+    h, uid = _tt_user(client, "_sw_one")
+    db = database.get_db()
+    _mk_log(db, uid, "tt_recycle", "acc_x", status="failed", payload={"reason": "封禁"})
+    db.close()
+
+    resp = client.get("/api/sheet-write/status?platform=tt&business_key=acc_x", headers=h)
+    body = resp.get_json()
+    assert body["item"]["status"] == "failed"
+
+
+def test_status_is_isolated_per_user(client):
+    """A 用户查不到 B 用户的记录（约束在 SQL 的 WHERE user_id 里）。"""
+    ha, uid_a = _tt_user(client, "_sw_a")
+    hb, uid_b = _tt_user(client, "_sw_b")
+    db = database.get_db()
+    _mk_log(db, uid_a, "tt_recycle", "acc_a", status="retry_failed")
+    db.close()
+
+    resp = client.get("/api/sheet-write/status?platform=tt&business_key=acc_a", headers=hb)
+    assert resp.get_json()["item"] is None
+
+
+def test_status_rejects_bad_platform(client):
+    h, _ = _tt_user(client, "_sw_badp")
+    resp = client.get("/api/sheet-write/status?platform=zz", headers=h)
+    assert resp.status_code == 400
+    assert "platform" in resp.get_json()["error"]
+
+
+def test_retry_requires_attention_status(client):
+    """pending / synced 的任务不接受重试。"""
+    h, uid = _tt_user(client, "_sw_retry_pending")
+    db = database.get_db()
+    _mk_log(db, uid, "tt_recycle", "acc_p", status="pending")
+    db.close()
+    resp = client.post("/api/sheet-write/retry", headers=h,
+                       json={"platform": "tt", "target": "tt_recycle", "business_key": "acc_p"})
+    assert resp.status_code == 400
+    assert "不需要重试" in resp.get_json()["error"]
+
+
+def test_retry_unknown_target_returns_400_not_500(client):
+    h, uid = _tt_user(client, "_sw_retry_badt")
+    db = database.get_db()
+    _mk_log(db, uid, "no_such_target", "acc_q", status="retry_failed")
+    db.close()
+    resp = client.post("/api/sheet-write/retry", headers=h,
+                       json={"platform": "tt", "target": "no_such_target", "business_key": "acc_q"})
+    assert resp.status_code == 400
+    assert "未注册" in resp.get_json()["error"]
+
+
+def test_retry_success_path(client):
+    """终态失败的任务可重试：重新走一次写表，成功则落 synced。"""
+    import sheet_write
+    ran = []
+    sheet_write.register_target("_t_retry",
+                                rebuild=lambda uid, key, payload: (lambda: ran.append(key)))
+    h, uid = _tt_user(client, "_sw_retry_ok")
+    db = database.get_db()
+    _mk_log(db, uid, "_t_retry", "acc_r", status="retry_failed", payload={"reason": "x"})
+    db.close()
+
+    resp = client.post("/api/sheet-write/retry", headers=h,
+                       json={"platform": "tt", "target": "_t_retry", "business_key": "acc_r"})
+    assert resp.status_code == 200, resp.get_json()
+
+    import time
+    db = database.get_db()
+    for _ in range(100):
+        if _row(db, uid, "_t_retry", "acc_r")["status"] == "synced":
+            break
+        time.sleep(0.02)
+    r = _row(db, uid, "_t_retry", "acc_r")
+    db.close()
+    assert ran == ["acc_r"]
+    assert r["status"] == "synced"
+
+
+def test_retry_missing_record_returns_404(client):
+    h, uid = _tt_user(client, "_sw_retry_404")
+    resp = client.post("/api/sheet-write/retry", headers=h,
+                       json={"platform": "tt", "target": "tt_recycle", "business_key": "nope"})
+    assert resp.status_code == 404
