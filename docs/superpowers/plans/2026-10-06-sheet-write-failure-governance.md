@@ -988,9 +988,6 @@ def sheet_write_retry():
     if row is None:
         db.close()
         return err("没有找到该写表记录", 404)
-    if row["status"] not in sheet_write.ATTENTION:
-        db.close()
-        return err(f"该写表任务当前状态为 {row['status']}，不需要重试", 400)
 
     def _load(raw):
         try:
@@ -1002,11 +999,31 @@ def sheet_write_retry():
     payload = _load(row["payload_json"])
     snapshot = _load(row["snapshot_json"])
 
+    # build_sync 必须在 claim **之前**：它是纯工厂（只查注册表、调用 rebuild 工厂
+    # 构造闭包，无 I/O），故放在 claim 前不会留下半截状态；反过来若 claim 先做，
+    # 「未注册 target」会抛 KeyError → 400，而行已被置为 pending 且无人推进 ——
+    # pending 不在 ATTENTION 里（列表标记不显示、前端轮询静默超时），且重试闸门
+    # 只放行 ATTENTION，该任务从此**永久不可重试**。
+    # ⇒ 契约：rebuild 工厂必须无副作用（只构造，不做 I/O / 写库）。
     try:
         sync_fn = sheet_write.build_sync(target, uid, business_key, payload)
     except KeyError as e:
         db.close()
         return err(str(e), 400)
+
+    # 原子闸门：把「检查状态」与「置为 pending」合成一条守卫式 UPDATE，按 rowcount
+    # 决定放行。原写法是 check-then-act，生产跑 waitress threads=40，两个并发 POST
+    # 会双双读到 ATTENTION、双双通过 → 同一账户在回收清单里写进两行。
+    cur = db.execute(
+        "UPDATE sheet_write_log SET status='pending', settled_at=NULL, "
+        "updated_at=datetime('now','localtime') "
+        "WHERE user_id=? AND platform=? AND target=? AND business_key=? "
+        "AND status IN (?,?,?)",
+        (uid, platform, target, business_key, *sheet_write.ATTENTION))
+    db.commit()
+    if cur.rowcount != 1:
+        db.close()
+        return err("该写表任务当前不需要重试", 400)
 
     # 沿用上轮的 snapshot：回滚要撤销的仍是同一次业务变更，不能因为重试而丢掉守卫依据
     sheet_write.run_write(db, user_id=uid, platform=platform, target=target,
@@ -1015,6 +1032,20 @@ def sheet_write_retry():
     db.close()
     return ok({"message": "已重新提交，请稍后查看结果"})
 ```
+
+> **勘误（2026-10-06，Task 4 审查裁决 + 两轮修复）**：上面这段重试端点已**不是**
+> 初稿写法。初稿的顺序是「`SELECT` 查状态 → `if not in ATTENTION: 400` → 加载 payload
+> → `build_sync` → `run_write`」，存在两个缺陷，均已修（`8917db8` / `aacd94e`）：
+>
+> 1. **闸门非原子**：检查与 `record_pending` 置位之间隔着 `build_sync` 等调用，
+>    waitress `threads=40` 下两个并发 POST 会双双通过，对同一账户写第二行表。
+>    → 改为守卫式 `UPDATE ... WHERE status IN (ATTENTION)` + `rowcount` 判定。
+> 2. **claim 早于 `build_sync` 会把行卡死**：修复轮 1 曾把 claim 提到最前，于是
+>    「未注册 target」先置 `pending` 再 400，行永久卡 `pending` 且**不可重试**。
+>    → 把纯工厂 `build_sync` 提到 claim 之前。
+>
+> **代价（已接受）**：错误优先级变为「未注册」先于「不需要重试」——`pending` 行 +
+> 未注册 target 现在报前者。
 
 - [ ] **Step 4: 注册 blueprint**
 
