@@ -2015,6 +2015,7 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > - 列映射（`append_recycle` → Java `GoogleSheetsService.appendRecycle`）：A 列时间 = 当天日期「年-月-日」（如 `2026-09-22`），前导 `'` 标记为文本（防日期解析）；B 列账户ID = 文本（前导 `'`，防 13 位纯数字变科学计数）；H 列回收原因 = 文本。用 `values().batchUpdate` 一次写 A/B/H 三个非连续 range（`A{start}:A{end}`、`B{start}:B{end}`、`H{start}:H{end}`），`valueInputOption=USER_ENTERED`。
 > - **判断最后一行（换行）只看「账户ID」列（B 列）有无数据**：从末行向上扫描，仅当 B 列非空才视为「已有数据行」，时间列（A）有残留但账户ID为空的行忽略。Java 侧读 `A:B` 后取 index 1 判断；注意 Google Sheets 会截断行尾空单元格，需 `len(row) > 1` 保护。
 > - **触发契约**：`updateAccount`（`PUT /api/tt/accounts/{id}`）与批量状态更新，当状态**真正变更**（新状态名 ≠ 旧状态名）且新状态为**非「存活」**（即 验证/封禁/死亡 等）且请求携带 `recycle_reason` 非空时，才触发写回收清单；状态同步（`sync-from-sheet`）路径**不得**触发（回收户清单是上游，同步只反映状态，见 v1.24）。写表在后台异步线程执行，失败不阻塞状态变更。
+> - ⚠️ **v1.34 起 `updateAccount` 还多一条推送契约**：请求体带 `remark` 时（`"remark" in data and data["remark"] is not None`，**显式传 `""` 也算**，语义是清空备注），除落库外向**两张表**各推一次 —— 户管看板 `M` 列 + 投手看板 `J` 列。`owner_id` 取**该账户当前的 `owner_id`**（不是调用者 uid：户管可能代改别人名下的户）。⚠️ **户管看板那次回写不要自己在 `commit()` 之前加**：函数尾部**本来就有**一条 post-commit 的全量单行回写，而 `cells_for_row` 已含 `M` 列 —— 再加一条只会在 commit 前用**新连接读到未提交的旧值**，并与尾调用的后台线程**并发写同一行**（乱序时旧值可能后落盘覆盖新值）。详见附录 J。
 > - **回收原因自动入库**：`recycle_reason` 若不在 `tt_recycle_reasons` 表则自动 INSERT（`owner_id` 记为当前用户，仅作创建者留痕）。
 > - **回收原因为全平台公用词表（v1.29 修订，取代 v1.26 的 owner 隔离描述）**：
 >   - `GET /api/tt/recycle-reasons/list` 返回**全表**，不做任何 owner / 角色过滤（viewer 亦可读）。
@@ -2026,7 +2027,7 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 > **户管看板迁移要点（v1.31 新增）**：`HuguanDashboardController`（`py/routes/huguan_dashboard_routes.py`）5 个接口，**全部** `@jwt_required() + @huguan_required`（严格 `role == "huguan"`，admin/developer 亦 403）：
 > - `GET /api/huguan/dashboard` → `{config: {gg:{spreadsheet_id,sheet_name}, tt:{...}}}`。两份都要**归一化**后再返回：`config` 表全仓共用，平台条目可能是「真值非 dict」（字符串/数字），直接透传会破坏响应契约。
 > - `POST /api/huguan/dashboard` → 保存某平台配置。`platform` 必须 ∈ `("gg","tt")`（否则 400 `platform 必须是 gg 或 tt`，**不含 fb**）；`spreadsheet_id` 过 `_parse_sheet_id` 接受裸 ID 或完整 URL；字段一律先 `str()` 兜底（给数字/null 不该炸 500）。
-> - `POST /api/huguan/dashboard/sync` → **表 → 系统**。未配置时 400 `请先在设置页配置户管看板的表格 ID 与工作表名`。跳表头第 1 行、**不跳任何数据行**（户管看板没有「是否解绑」列可用作跳过标记）；`read_range` 按平台取（GG `A:N` / TT `A:M`），读回**忽略**定位键列（C）与户管自维护列，但**不忽略**归属通道列。`dry_run is not False` 即只读返回 `{diff}`；落库后（`confirmed` 必须是对象、三个 key 各自的值为数组或 null，否则 400）清缓存 `accounts:agents:` 前缀、必要时清 `accounts:statuses:<uid>`，并回写运营列 + 清空归属通道列。响应 `{result, diff}`。
+> - `POST /api/huguan/dashboard/sync` → **表 → 系统**。未配置时 400 `请先在设置页配置户管看板的表格 ID 与工作表名`。跳表头第 1 行、**不跳任何数据行**（户管看板没有「是否解绑」列可用作跳过标记）；`read_range` 按平台取（GG `A:N` / TT `A:M`），读回**忽略**定位键列（C）与户管自维护列；⚠️ **v1.33 起 TT 的 `L` 列虽仍读回，但不再参与归属判定**（降为普通文本 `owner_change_note`，见附录 I）。`dry_run is not False` 即只读返回 `{diff}`；落库后（`confirmed` 必须是对象、三个 key 各自的值为数组或 null，否则 400）清缓存 `accounts:agents:` 前缀、必要时清 `accounts:statuses:<uid>`，并**回写运营列**、以及 ⚠️ **仅 GG 清空归属通道列**（TT 的 `L` 已是换绑记录，清它会抹掉记录 —— 见附录 I）。⚠️ **v1.34 起落库阶段还会读投手「我的看板」并对新建账户额外发起写回**（回写户管 `M` 列 / 推投手 `J` 列，见附录 J）；这两次写回在路由层被 `pop` 掉，**响应形状 `{result, diff}` 不变**。
 > - `POST /api/huguan/dashboard/push` → **系统 → 表**全量刷新，**同步执行**。响应形状是 **`{success, result:{rows, updated, not_found}}`**（注意 `result` 这层包裹，不是平铺的 `{rows,updated,not_found}`）。`rows` = 候选行数，`updated` = 真正写进该户管表里的行数（⊆ rows），**表里找不到该账户不算错误**（户管的表不必包含所有账户）而进 `not_found`。
 > - `GET /api/huguan/dashboard/owner-options` → 「户归属」下拉数据源：**全部非 `viewer`/`hidden` 用户**。与 `GET /api/platform/users`（只列该平台有未删除账户的人）**分工不同、都保留**：前者服务**编辑**（不要求名下已有账户），后者服务**筛选**（名下无户的选项筛不出东西）。
 >
@@ -2690,6 +2691,13 @@ String raw = (data instanceof Map) ? String.valueOf(((Map<?,?>) data).getOrDefau
 
 `target == 自己` 与 `target == 他人` 的 409 文案**刻意不同**（`该账户已属于当前用户，无需转移` / `该账户已属于目标用户，无需转移`），前端直接展示后端文案，**不要**在 Java 侧统一成一句。
 
+⚠️ **v1.33 起，TT 的 reassign 还多做一件事**：落库 `owner_id` 的同时，生成**换绑记录**并**写两处** ——
+① `UPDATE tt_accounts SET owner_change_note=?`（`旧归属人转新归属人+月.日`）；
+② 调 `writeback_owner_channel(..., text=同一个字符串)` 写进户管看板的 `L` 列。
+**两处必须同源**（在端点内构造一次），且写入点必须在 `db.commit()` **之前**、与 `owner_id` 同一次事务。
+⚠️ **返回文案里的 `old_owner` / `label` 保持原样不动** —— 那是给用户看的消息，与换绑记录是两套契约
+（文案没有月日格式要求）。全部细节与红线见**附录 I**。
+
 #### 7.9.5 表 → 系统同步的差异契约
 
 `POST /api/huguan/dashboard/sync`，请求体 `{platform, dry_run, confirmed}`。差异分**五类**：
@@ -2697,7 +2705,7 @@ String raw = (data instanceof Map) ? String.valueOf(((Map<?,?>) data).getOrDefau
 | 类别 | 含义 |
 |------|------|
 | `to_create` | 系统里没有、表里有的账户 |
-| `to_update` | 系统里有、表里字段值不同的账户。**表内空值 = 清空系统对应列**（每条带 `clears` 字段，`summary` 带 `clears` 计数） |
+| `to_update` | 系统里有、表里字段值不同的账户。**表内空值 = 清空系统对应列**（每条带 `clears` 字段，`summary` 带 `clears` 计数）。⚠️ **v1.34 起有一个 TT 专属例外**：`remark` **不再进 `to_update`**（投手权威永久，见附录 J）——表里改/清空户管 `M` 列对**已存在**账户一律不生效，`remark` 也因此**不再出现在 `clears` 里**。⚠️ **该例外只能加在 `to_update` 的字段过滤上，不得把 `remark` 从 `_PLAIN_TEXT_FIELDS["tt"]` 删掉**（该清单被 `to_create` 与 `to_update` 共用，删掉会让「首次入库读户管 `M` 列」失效） |
 | `owner_changes` | 归属变更，每条带 `{account_id, from, to, via}` |
 | `to_skip` | 软删除（`deleted_at` 非空）的账户 |
 | `warnings` | 名字解析歧义（0 或 ≥2 命中）等不阻断项 |
