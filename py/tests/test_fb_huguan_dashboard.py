@@ -461,3 +461,63 @@ class TestFbWritebackTriggers:
         db.close()
         client.delete(f"/api/fb/accounts/{aid}", headers=h)
         assert calls == []
+
+    def test_reassign_to_self_triggers_writeback(self, client, monkeypatch):
+        """跨用户角色把**别人名下**的户不带 owner_id 转给自己：归属真变了，两个回写都要调。
+
+        单用户分支（target_owner == uid）不是「归属没变」的死路：非跨用户角色走不到
+        这里（403 / 409），但跨用户角色对**别人的**户不传 owner_id 时，`existing["owner_id"]
+        != uid` 让「已属于目标」的 409 不触发，UPDATE 确实把归属改成调用者自己。
+        这条能区分「补了」与「没补」：去掉单用户分支的回写它必红。
+        """
+        rows_calls, acc_calls = [], []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: rows_calls.append((plat, ids)))
+        monkeypatch.setattr(hd, "writeback_fb_acceptor",
+                            lambda uid, plat, aid, note: acc_calls.append((plat, aid, note)))
+        h, dev = _fb_loginable_user(client, "fb_wb3", role="developer")
+        # 户先挂在**别人**名下
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform, display_name) "
+                   "VALUES('fb_wb3_old', 'x', 'user', 'fb', '旧主')")
+        old_uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','WB-3',?)",
+                   (old_uid,))
+        aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=h, json={})
+
+        assert r.status_code == 200, r.get_json()
+        db = database.get_db()
+        owner = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?",
+                           (aid,)).fetchone()["owner_id"]
+        db.close()
+        assert owner == dev, "归属应改成调用者自己"
+        assert rows_calls == [("fb", ["WB-3"])], rows_calls
+        assert len(acc_calls) == 1 and acc_calls[0][0] == "fb", acc_calls
+        assert acc_calls[0][2] == "旧主转fb_wb3", acc_calls
+
+    def test_plain_user_cannot_trigger_writeback(self, client, monkeypatch):
+        """非跨用户角色改**别人**的户 → 403，且不触发任何回写（归属不可能变）。"""
+        rows_calls, acc_calls = [], []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: rows_calls.append((plat, ids)))
+        monkeypatch.setattr(hd, "writeback_fb_acceptor",
+                            lambda uid, plat, aid, note: acc_calls.append((plat, aid, note)))
+        h, _ = _fb_loginable_user(client, "fb_wb4", role="user")
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('fb_wb4_own', 'x', 'user', 'fb')")
+        other = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','WB-4',?)",
+                   (other,))
+        aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=h, json={})
+
+        assert r.status_code == 403, r.get_json()
+        assert rows_calls == [] and acc_calls == []

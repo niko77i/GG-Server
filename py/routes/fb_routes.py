@@ -552,21 +552,24 @@ def reassign_account(aid):
                "WHERE id=?", (target_owner, aid))
     db.commit()
 
+    # 规格 §8：归属变了 → 刷该行可写列 + 定向写「接户运营」记录。**两条分支都要**，
+    # 与 GG/TT 两分支都回写对齐 —— 单用户分支不是「归属没变」的死路：
+    # 非跨用户角色走不到这里（403 / 409），但**跨用户角色对别人的户、不传 owner_id**
+    # 时 existing["owner_id"] != uid，「已属于目标」的 409 不触发，UPDATE 确实把归属
+    # 改成调用者自己。`t` 提到分支之前查（与 TT 同形）：两条分支共用同一个新归属名。
+    t = db.execute("SELECT display_name, username FROM users WHERE id=?",
+                   (target_owner,)).fetchone()
+    new_owner = (t["display_name"] or t["username"] or "") if t else ""
+    hd.writeback_rows(uid, "fb", [existing["account_id"]])
+    hd.writeback_fb_acceptor(uid, "fb", existing["account_id"],
+                             hd._fb_owner_transition(
+                                 existing["display_name"] or existing["username"] or "",
+                                 new_owner))
+
     if target_owner == uid:
         return ok({"message": f"账户「{existing['name'] or existing['account_id']}」"
                               f"已转移至当前用户"})
     old_owner = existing["display_name"] or existing["username"] or "未知"
-    t = db.execute("SELECT display_name, username FROM users WHERE id=?",
-                   (target_owner,)).fetchone()
-    new_owner = (t["display_name"] or t["username"] or "") if t else ""
-    # 规格 §8：归属变了 → 刷该行可写列 + 定向写「接户运营」记录。
-    # 放在此处（而非 db.commit() 紧后）是因为 `t` 只在这条跨用户分支里查到：
-    # 单用户分支（target_owner == uid）在上面 409 处已返回 —— 非跨用户角色
-    # 要么账户本就属于自己（409），要么在更早的 403 被拦，归属不会变。
-    _old_name = existing["display_name"] or existing["username"] or ""
-    hd.writeback_rows(uid, "fb", [existing["account_id"]])
-    hd.writeback_fb_acceptor(uid, "fb", existing["account_id"],
-                             hd._fb_owner_transition(_old_name, new_owner))
     # 文案与 TT 侧的分支结构对称：只有跨用户分支补「已从 A」。
     return ok({"message": f"账户「{existing['name'] or existing['account_id']}」"
                           f"已从 {old_owner} 转移至 {new_owner}"})
