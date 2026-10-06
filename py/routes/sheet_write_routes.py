@@ -74,7 +74,18 @@ def sheet_write_retry():
     if row is None:
         db.close()
         return err("没有找到该写表记录", 404)
-    if row["status"] not in sheet_write.ATTENTION:
+
+    # 原子闸门：把「检查状态」与「置为 pending」合成一条守卫式 UPDATE，
+    # 按 rowcount 决定是否放行。原来是 check-then-act，两个并发 POST 会双双
+    # 通过检查、双双起后台写 → 同一账户在回收清单里写进两行。
+    cur = db.execute(
+        "UPDATE sheet_write_log SET status='pending', settled_at=NULL, "
+        "updated_at=datetime('now','localtime') "
+        "WHERE user_id=? AND platform=? AND target=? AND business_key=? "
+        "AND status IN (?,?,?)",
+        (uid, platform, target, business_key, *sheet_write.ATTENTION))
+    db.commit()
+    if cur.rowcount != 1:
         db.close()
         return err(f"该写表任务当前状态为 {row['status']}，不需要重试", 400)
 

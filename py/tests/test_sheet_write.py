@@ -421,3 +421,40 @@ def test_retry_missing_record_returns_404(client):
     resp = client.post("/api/sheet-write/retry", headers=h,
                        json={"platform": "tt", "target": "tt_recycle", "business_key": "nope"})
     assert resp.status_code == 404
+
+
+def test_retry_gate_is_atomic_against_concurrent_submit(client, monkeypatch):
+    """闸门必须是原子 claim：两个并发 POST 不得双双通过。
+
+    构造方式（确定性，非时序竞态）：把 build_sync 换成桩，桩在**外层请求已经
+    通过闸门之后**、用同一个 client 再发一次完全相同的 POST，然后返回空
+    sync_fn。这就把生产里「两个请求交错」的那一段顺序固定下来了。
+
+    修复后外层已把 status 原子置为 pending，嵌套请求读到 pending ⇒ 400；
+    旧的 check-then-act 实现里外层只读过状态、尚未置位，嵌套请求会再读到
+    retry_failed 从而放行 ⇒ 200（并再起一次后台写，正是重复写行的成因）。
+    故断言 400 能区分修复前后。
+    """
+    import sheet_write
+    h, uid = _tt_user(client, "_sw_atomic")
+    db = database.get_db()
+    _mk_log(db, uid, "_t_atomic", "acc_c", status="retry_failed")
+    db.close()
+
+    nested = {}
+    fired = []
+
+    def _fake_build_sync(target, user_id, business_key, payload):
+        if not fired:
+            fired.append(True)   # 只嵌套一发：旧实现下嵌套请求会再进 build_sync，防无限递归
+            nested["resp"] = client.post(
+                "/api/sheet-write/retry", headers=h,
+                json={"platform": "tt", "target": "_t_atomic", "business_key": "acc_c"})
+        return lambda: None
+
+    monkeypatch.setattr(sheet_write, "build_sync", _fake_build_sync)
+    resp = client.post("/api/sheet-write/retry", headers=h,
+                       json={"platform": "tt", "target": "_t_atomic", "business_key": "acc_c"})
+    assert resp.status_code == 200, resp.get_json()
+    assert nested["resp"].status_code == 400, nested["resp"].get_json()
+    assert "不需要重试" in nested["resp"].get_json()["error"]
