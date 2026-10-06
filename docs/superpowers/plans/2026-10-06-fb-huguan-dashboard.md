@@ -804,6 +804,27 @@ _set_primary_bm（先清后设）+ _record_bm_change（写 fb_account_bm_history
 
 ---
 
+### Task 4 实施期间的订正（2026-10-06，由实现者发现，均已落地）
+
+本任务 brief 里的代码**不能照抄** —— 有 5 处会在 FB 路径上直接失败。以下是实测订正，
+**计划正文的代码块以上述「订正后」为准**：
+
+| # | brief 的错 | 后果 | 订正 |
+|---|---|---|---|
+| 1 | `to_create` 分支无条件写 `src["death_date"] = ""` | `fb_accounts` 无该列 → **FB 建号永远失败** | FB 跳过该键（设计 §6.1） |
+| 2 | `_record_channel_assign` / `_record_channel_change` 被无条件调用 | `_CHANNEL_HISTORY_SPEC` 无 `fb` 键 → `KeyError`，brief 的 4b/4c 锚点是死代码 | 调用点按平台分流 |
+| 3 | `if bm_name:` 把空串丢掉；且 `_same_as_existing` 看不到中间表上的主 BM | 「清空位置」这条路**永远走不到** —— 与 §6.3「空着 → 只清标记」直接矛盾 | 恒产出合成键 + `_same_as_existing` 增加实时查询 |
+| 4 | 历史行取 `b.bm_id`（文本业务号） | `fb_account_bm_history.old_bm_id REFERENCES fb_bms(id)` 要的是**行主键** → 外键失败 | 改取 `ab.bm_id` |
+| 5 | 引用 `warnings`，而 `apply_diff` 没有这个变量 | `NameError` | 在 `apply_diff` 内建局部 `warnings` 并加进返回 |
+
+另加：`_norm_ref_id` **已存在**，复用，未重复定义。
+
+**并且本任务的测试原本只覆盖两个辅助函数** —— 上面 6 处集成改动零覆盖（审查报为 Important）。
+已补 `TestFbBuildApplyIntegration` 四条（空位置清标记不删行 / 换 BM 写历史 /
+建号不写 death_date 的回归守卫 / 非法 BM 名警告）。补测试时**没有暴露新的生产 bug**。
+
+---
+
 ## Task 5: 归属协议 + 子项目 ① 的 `acceptor` 修订
 
 **Files:**
