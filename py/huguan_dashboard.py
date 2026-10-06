@@ -53,7 +53,9 @@ COLUMN_SPEC = {
         ("I", "状态",      "status_name",     True,  True),
         ("J", "消耗",      "consumption",     True,  True),
         ("K", "位置",      None,              False, False),
-        ("L", "换绑情况",  "_owner_channel",  True,  True),
+        # L 只读回、不回写：这一列是系统生成的换绑记录，只由 reassign 端点单点写入，
+        # 不参与任何全量/单行回写（否则自动回写会静默吞掉刚记下的换绑）。
+        ("L", "换绑情况",  "owner_change_note", False, True),
         ("M", "产品信息",  "remark",          True,  True),
     ],
 }

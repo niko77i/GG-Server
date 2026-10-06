@@ -132,8 +132,8 @@ class TestColumnSpec:
                 # A..D 连续；E 跳过；F..K 连续 —— 只断一次
                 assert merge_ranges(cols) == ["A:D", "F:K"]
             else:
-                # A..J 连续；K 跳过；L、M 连续
-                assert merge_ranges(cols) == ["A:J", "L:M"]
+                # A..J 连续；K 跳过；L 不可写（换绑记录，只由 reassign 单点写）；M 单独一段
+                assert merge_ranges(cols) == ["A:J", "M:M"]
 
     def test_real_writeback_ranges_never_span_owner_channel(self):
         """★这是规则 2 的守门测试：自动回写合并出的区间不得覆盖 H 列。
@@ -276,7 +276,7 @@ class TestParseRow:
         assert p["_dead_flag"] == "是"
         assert p["bc_name"] == "BC-1"
         assert p["country"] == "US"
-        assert p["_owner_channel"] == "王五"   # L 换绑情况
+        assert p["owner_change_note"] == "王五"   # L 换绑情况（2026-10-06 起为普通文本字段）
         assert p["consumption"] == "120.5"
         assert p["remark"] == "产品X"
 
@@ -285,7 +285,7 @@ class TestParseRow:
         from huguan_dashboard import parse_row
         p = parse_row(["", "", "'1"], "tt")
         assert set(p) == {"account_id", "acquired_date", "_dead_flag", "bc_name",
-                          "country", "agent_name", "owner_name", "_owner_channel",
+                          "country", "agent_name", "owner_name", "owner_change_note",
                           "timezone", "status_name", "consumption", "remark"}
 
     def test_whitespace_is_stripped(self):
