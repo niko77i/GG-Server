@@ -151,6 +151,19 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="备注" min-width="160">
+          <template #default="{ row }">
+            <div class="inline-edit-cell" v-if="editingRemarkId === row.id">
+              <el-input v-model="editRemarkValue" size="small" class="inline-name-input"
+                :ref="el => { if (el) remarkInputRef = el }"
+                @blur="saveRemark(row)" @keyup.enter="saveRemark(row)" @keyup.escape="cancelRemarkEdit" />
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <span class="inline-cell-text">{{ row.remark || '—' }}</span>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditRemark(row)">✏️</el-button>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="acquired_date" label="到手时间" min-width="100" show-overflow-tooltip />
         <el-table-column label="状态变更时间" min-width="110" show-overflow-tooltip>
           <template #default="{ row }">
@@ -321,6 +334,9 @@ const editCountryValue = ref('')
 const editConsumptionValue = ref('')
 let countryInputRef = null
 let consumptionInputRef = null
+const editingRemarkId = ref(null)
+const editRemarkValue = ref('')
+let remarkInputRef = null
 let bcPending = false
 let tzPending = false
 let agentPending = false
@@ -654,6 +670,29 @@ async function saveConsumption(row) {
     ElMessage.error('更新消耗情况失败')
   }
   cancelConsumptionEdit()
+}
+
+function startEditRemark(row) {
+  editingRemarkId.value = row.id
+  editRemarkValue.value = row.remark || ''
+  nextTick(() => { remarkInputRef?.focus?.() })
+}
+function cancelRemarkEdit() {
+  editingRemarkId.value = null
+  editRemarkValue.value = ''
+  remarkInputRef = null
+}
+async function saveRemark(row) {
+  const v = editRemarkValue.value.trim()
+  if (v === (row.remark || '')) { cancelRemarkEdit(); return }
+  try {
+    await ttAccountsApi.update(row.id, { remark: v })
+    row.remark = v
+    ElMessage.success('备注已更新')
+  } catch (e) {
+    ElMessage.error('更新备注失败')
+  }
+  cancelRemarkEdit()
 }
 
 // ===== 批量修改 =====
