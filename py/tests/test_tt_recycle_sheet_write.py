@@ -9,7 +9,9 @@ import sheet_write
 # 本文件多条用例要 monkeypatch 掉**全局** time.sleep 来跳过后台重试的 30s ——
 # 那会连测试自己的轮询 sleep 一起打成空转：主线程不再让出 GIL，daemon 线程跑不
 # 完回调，断言在后台线程落任何状态之前就先跑了（实测确定性失败/留下脏线程）。
-# 轮询一律用这个绑定，它在 import 时就抓住了原函数，不受 monkeypatch 影响。
+# 故**对 patch 了全局 time.sleep 的用例**，轮询须用这个绑定：它在 import 时就抓
+# 住了原函数，不受 monkeypatch 影响；未 patch time.sleep 的用例仍可直接用
+# time.sleep 轮询（如 test_snapshot_taken_before_editable_death_date_overwrite）。
 from time import sleep as _poll_sleep  # noqa: E402
 
 
@@ -196,7 +198,6 @@ def test_snapshot_taken_before_editable_death_date_overwrite(client, monkeypatch
 def test_rollback_restores_status_on_final_failure(client, monkeypatch):
     """写表最终失败且守卫通过 => 状态被改回，落 rolled_back。"""
     import google_sheets_service as gs
-    import json
     monkeypatch.setattr("time.sleep", lambda _s: None)      # 跳过 30s 重试等待
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
 
@@ -309,7 +310,6 @@ def test_rollback_abandoned_when_status_changed_again(client, monkeypatch):
 
 def test_mirror_target_never_rolls_back(client, monkeypatch):
     """镜像类目标最终失败后，业务数据一字不动（此处以 tt_accounts 为对象验证）。"""
-    import sheet_write
     monkeypatch.setattr("time.sleep", lambda _s: None)
     sheet_write.register_target("_t_mirror_biz",
                                 rebuild=lambda uid, key, payload: (lambda: None))
@@ -334,8 +334,15 @@ def test_mirror_target_never_rolls_back(client, monkeypatch):
         if r is not None and r["status"] == "retry_failed":
             break
         _poll_sleep(0.02)
+    r = db.execute("SELECT * FROM sheet_write_log WHERE user_id=? AND target='_t_mirror_biz'",
+                   (uid,)).fetchone()
     cur = db.execute("SELECT status_id FROM tt_accounts WHERE id=?", (aid,)).fetchone()["status_id"]
     db.close()
+    # 终态必须是 retry_failed（未注册 rollback 的目标口径），而非 rolled_back /
+    # rollback_abandoned —— 否则「镜像目标压根没定案（停在 pending）」或
+    # 「_apply_final 把它路由成可回滚」时本用例会假绿。
+    assert r is not None and r["status"] == "retry_failed", \
+        f"镜像类目标应落 retry_failed，实际 {r['status'] if r else None}"
     assert cur == dead, "镜像类不得回滚业务数据"
 
 
