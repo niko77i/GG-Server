@@ -918,6 +918,8 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [TT 支持苹果（App Store）包链接 + 掉包判定加固](docs/superpowers/specs/2026-09-24-tt-appstore-package-design.md)
 - [TT 掉包可见性收窄（彻底对齐 GG，去掉 developer/admin 特权）](docs/superpowers/specs/2026-09-26-tt-delist-visibility-scope-design.md)
 - [户归属下拉按平台隔离](docs/superpowers/specs/2026-09-28-huguan-owner-options-platform-isolation-design.md)
+- [TT「换绑情况」列改造：归属变更通道 → 换绑记录字段](docs/superpowers/specs/2026-10-06-tt-owner-change-note-design.md)（仅 TT；取代 `2026-09-23-huguan-sheet-design.md` §7 的 TT 部分）
+- [TT 备注（remark）跨看板同步优先级](docs/superpowers/specs/2026-10-06-tt-remark-sync-precedence-design.md)（方案 A：首次入库户管触发以投手为准、此后投手权威永久；新建「系统 → 投手看板」推送通路）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
@@ -1109,3 +1111,42 @@ npm run dev
 - 本项目是 ImageCrawling 的独立副本，修改不影响原项目
 - **后端重构进行中**：main.py 正逐步拆分为 Blueprint（`py/routes/`），新增路由优先写入独立 Blueprint 文件
 - **前端大组件拆分进行中**：YoutubeView/MediaView/AnalysisView/VideoView 逐步拆分为子组件
+
+## 数据操作记录（破坏性操作备份）
+
+> **规则**：任何破坏性数据操作（批量硬删、清空表）执行前**必须先备份**，并在下表登记备份位置。
+> 备份路径均相对于项目根目录。
+
+| 日期 | 操作 | 影响范围 | 备份位置 |
+|------|------|----------|----------|
+| 2026-10-06 | TT 账户状态选项瘦身 | `account_statuses` platform='tt' 删除 89 行（94 → 5） | 库快照 `temp/app.db.bak-before-tt-statuses-trim-20261006-200410`<br>CSV `temp/tt-statuses-trim-20261006-200410/account_statuses.csv` |
+| 2026-10-06 | TT 广告账户全部硬删 | `tt_accounts` 5097 行（正常 4582 + 回收站 515）、`tt_account_bc_history` 1493 行、`tt_recharge_records` 20 行 | 库快照 `temp/app.db.bak-before-tt-accounts-clear-20261006-195957`<br>CSV `temp/tt-accounts-clear-20261006-195957/` |
+| 2026-09-24 | GG 状态悬空 69 户硬删 | GG 账户 69 行 | 库快照 `temp/app.db.bak-before-69-delete-20260924-152405`<br>CSV `temp/deleted-69-accounts-20260924-152525.csv` |
+
+### 2026-10-06 TT 账户状态选项瘦身说明
+
+- 保留 5 项：`存活`(31) / `回收`(30) / `死亡`(32) / `不花费`(29) / `验证`(34)
+- 删除 TT 平台其余 89 项，**含其他用户（23/25/28/29/30/31）自建的杂项词条** ——
+  `GET /api/statuses/list` 不按 owner 过滤，状态列表全局共用一份，故此操作对所有人生效
+- **未触碰** gg（21 项）/ fb（6 项）的状态选项
+- 删除前已确认 `accounts` / `fb_accounts` / `tt_accounts` 中**无任何行**指向被删的 TT 状态（无外键风险）；
+  此时 `tt_accounts` 恰为空表，是最干净的时机
+- ⚠️ **`存活` / `死亡` 是代码硬依赖，不可删除**（删了会被自动重建）：
+  - `tt_accounts_routes.py:117,377` 建户默认状态写死 `存活`
+  - `tt_accounts_routes.py:790,846` 充值校验「仅『存活』状态可充值」
+  - `tt_accounts_routes.py:1095,1186` 表格同步由「是/空」推导 `死亡`/`存活`，且强制只接受这两个值
+  - `tt_accounts_routes.py:71` `_resolve_status_id()` 查不到即自动 `INSERT`（`owner_id=1`）
+  - `main.py:6442` 状态列表排序写死 `存活/死亡/验证/限额` 优先
+
+### 2026-10-06 TT 账户清空说明
+
+- 删除方式为**物理删除**（`DELETE FROM`），非软删，系统内不可恢复，**仅备份文件可回溯**
+- 删除顺序沿用 `py/routes/tt_accounts_routes.py` 的 `permanent_delete_account()`：
+  充值记录（按 `advertiser_id` 关联）→ BC 变更历史（按 `account_id` 关联）→ 账户本体
+- **未触碰** `tt_bcs` / `tt_products` / `tt_packages` / `tt_recycle_reasons` 等非账户数据，也**未触碰 Google 表格**
+- ⚠️ **复活路径**：`POST /api/tt/accounts/sync-from-sheet`（前端「从表格同步」按钮）会依据 Google 看板重新建户。
+  清空后若误点该按钮，账户会被依据表格重新导入
+- **备份方式**：服务运行中（WAL 模式）使用 sqlite3 backup API 在线快照，非直接拷贝 `app.db`
+  （直接拷贝会丢失尚未 checkpoint 的 `-wal` 内容）；快照已通过 `PRAGMA integrity_check`
+- **恢复方式**：停服后以快照覆盖 `temp/app.db`，并删除同目录 `app.db-wal` / `app.db-shm`；
+  或从 CSV 按需重建（CSV 为 `utf-8-sig` 编码，Excel 可直接打开）
