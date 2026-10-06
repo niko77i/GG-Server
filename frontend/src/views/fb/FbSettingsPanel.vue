@@ -140,6 +140,11 @@
           <el-empty v-else description="暂无资产类型" :image-size="60" />
         </el-card>
       </el-col>
+
+      <!-- 户管看板配置。只有户管可见（卡片内部自带 v-if）。 -->
+      <el-col :span="24">
+        <HuguanDashboardCard platform="fb" />
+      </el-col>
     </el-row>
   </div>
 </template>
@@ -150,6 +155,7 @@ import client from '../../api/client'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../../stores/auth'
+import HuguanDashboardCard from '@/components/HuguanDashboardCard.vue'
 
 const authStore = useAuthStore()
 

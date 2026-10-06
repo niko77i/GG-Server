@@ -47,7 +47,7 @@ def dashboard_config_save():
     # 字段一律先 str() 兜底：给个数字或 null 不该炸成 500，按取不到值处理
     platform = str(data.get("platform") or "").strip()
     if platform not in hd.PLATFORMS:
-        return err("platform 必须是 gg 或 tt", 400)
+        return err("platform 必须是 gg、tt 或 fb", 400)
 
     from main import _parse_sheet_id
     ss_id = _parse_sheet_id(str(data.get("spreadsheet_id") or "").strip())
@@ -75,7 +75,7 @@ def dashboard_sync():
         return err("请求体必须是 JSON 对象", 400)
     platform = str(data.get("platform") or "").strip()
     if platform not in hd.PLATFORMS:
-        return err("platform 必须是 gg 或 tt", 400)
+        return err("platform 必须是 gg、tt 或 fb", 400)
 
     uid = get_uid()
     db = database.get_db()
@@ -137,8 +137,18 @@ def dashboard_sync():
             _write_background(conf, rows)
             # 规则 3② 只对 GG 生效（2026-10-06 规格）：TT 的 L 列已是换绑记录，
             # 同步时清空会抹掉记录，且因读回按表覆盖会连带清掉系统里的值。
-            if platform != "tt":
+            # FB 同理、且更彻底：它根本没有通道列（OWNER_CHANNEL_COL 无 fb 键），
+            # 对 fb 硬调 owner_channel_cells 会 KeyError —— 换成下面的 I 列定向写。
+            if platform not in ("tt", "fb"):
                 _write_background(conf, hd.owner_channel_cells(applied, platform, ""))
+            if platform == "fb":
+                # FB 没有通道列可清；改为把换绑记录定向写进 I 列。
+                # 注意 _fb_acceptor_cells 的签名是 (rows, value)，value 是**同一个串**
+                # 写给所有行 —— 而这里每行的串不同，所以不能用它，直接构造 rows。
+                _write_background(conf, [
+                    {"account_id": r["account_id"],
+                     "cells": {"I": hd._fb_owner_transition(r.get("from", ""), r["to"])}}
+                    for r in applied])
 
         # TT 备注首次对齐的两个写回（2026-10-06 规格）。与 applied_owner_rows 同法：
         # 先从 result 摘掉，再发起后台写回 —— 只写单列，绝不整行推送。
@@ -164,7 +174,7 @@ def dashboard_push():
         return err("请求体必须是 JSON 对象", 400)
     platform = str(data.get("platform") or "").strip()
     if platform not in hd.PLATFORMS:
-        return err("platform 必须是 gg 或 tt", 400)
+        return err("platform 必须是 gg、tt 或 fb", 400)
 
     uid = get_uid()
     db = database.get_db()

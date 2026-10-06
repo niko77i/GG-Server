@@ -900,10 +900,18 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             db.execute(f"UPDATE {table} SET owner_id=?, "
                        "updated_at=datetime('now','localtime') WHERE id=?",
                        (item["to_owner_id"], item["existing_id"]))
+            if platform == "fb":
+                # 换绑记录：旧名 → 新名（spec §6.4 写点 3）
+                old_name = item.get("from") or ""
+                new_name = item.get("to") or ""
+                db.execute("UPDATE fb_accounts SET acceptor=? WHERE id=?",
+                           (_fb_owner_transition(old_name, new_name), item["existing_id"]))
             owner_changed += 1
-            # 带上 "to"（新归属名）：路由收尾直接用它回写运营列，不必再拿行号反查
+            # 带上 "to"（新归属名）：路由收尾直接用它回写运营列，不必再拿行号反查。
+            # "from" 一并带上：路由收尾的 FB 定向回写要用它拼「旧转新」。
             applied_owner_rows.append({"account_id": item["account_id"],
-                                       "to": item["to"]})
+                                       "to": item["to"],
+                                       "from": item.get("from", "")})
         except Exception as e:
             errors.append({"row": item["row"], "error": str(e)})
 
@@ -929,11 +937,17 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
 def _fb_owner_transition(old_name: str, new_name: str) -> str:
     """拼 FB 的换绑记录：`"{旧}转{新}"`。
 
-    没有旧归属（首任）时只返回新名 —— 否则会拼出「转李四」这种半截串，
-    户管在表里读不出是谁转给李四的。
+    两个方向都要挡半截串，否则户管在表里读到的是断句：
+    - **没有旧归属**（首任）时只返回新名 —— 否则会拼出「转李四」这种半截串，
+      户管在表里读不出是谁转给李四的。
+    - **没有新归属**时只返回旧名 —— 否则会拼出「张三转」。接线之后才可能遇到：
+      写点的目标用户查不到、或 `apply_diff` 的行少了 `to` 时新名会是空串。
+    两者皆空 → 空串（调用方据此不写这列）。
     """
     old_name = (old_name or "").strip()
     new_name = (new_name or "").strip()
+    if not new_name:
+        return old_name
     if not old_name:
         return new_name
     return f"{old_name}转{new_name}"
@@ -1307,3 +1321,38 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=No
             _do, lambda s, e: log.warning("归属变更通道列回写失败: %s", e) if e else None)
     except Exception as e:
         log.warning("归属变更通道列回写触发失败: %s", e)
+
+
+def writeback_fb_acceptor(user_id, platform, account_id, note):
+    """把 FB 的换绑记录（"{旧}转{新}"）定向写进表里的 I 列。
+
+    与 `writeback_owner_channel` 同形但**语义不同**：那个写的是「新归属名」，
+    这个写的是「旧转新」整串（spec §6.5）。因此刻意不复用 `OWNER_CHANNEL_COL`
+    （它不含 fb 键，硬塞会 KeyError）。
+
+    绝不抛异常（理由同 `writeback_rows`）。
+    """
+    try:
+        db = _open_db()
+        try:
+            conf = get_platform_config(db, user_id, platform)
+            if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+                return
+        finally:
+            db.close()
+        if not (note or "").strip():
+            return
+        rows = _fb_acceptor_cells([{"account_id": account_id}], note)
+
+        def _do():
+            import google_sheets_service as gs
+            from main import _GOOGLE_SHEETS_CONFIG
+            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+            gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
+                                         conf["sheet_name"], rows)
+
+        from main import _sync_sheets_background
+        _sync_sheets_background(
+            _do, lambda s, e: log.warning("FB 接户运营回写失败: %s", e) if e else None)
+    except Exception as e:
+        log.warning("FB 接户运营回写触发失败: %s", e)

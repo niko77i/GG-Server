@@ -386,6 +386,11 @@ class TestFbAcceptor:
         """首任（没有旧归属）不该拼出「转李四」。"""
         assert hd._fb_owner_transition("", "李四") == "李四"
 
+    def test_owner_transition_handles_empty_new(self):
+        """新归属为空（目标用户查不到 / 缺 to）不该拼出「张三转」。"""
+        assert hd._fb_owner_transition("张三", "") == "张三"
+        assert hd._fb_owner_transition("", "") == ""
+
     def test_acceptor_cells_only_contains_column_i(self):
         rows = [{"account_id": "A1"}, {"account_id": "A2"}]
         cells = hd._fb_acceptor_cells(rows, "张三转李四")
@@ -405,3 +410,54 @@ class TestFbAcceptor:
         parsed = hd.parse_row(values, "fb")
         assert parsed["acceptor"] == "张三转李四"
         assert "_owner_channel" not in parsed
+
+
+def _fb_loginable_user(client, username, role="huguan", platform="fb"):
+    """建一个可登录的 FB 用户并返回 (headers, uid)。
+
+    ⚠️ 偏离 brief：brief 的测试直接 `INSERT INTO users ... password='test123'`，
+    但 `login_user` 走 `check_password_hash`，明文密码必然 401（`KeyError:
+    'access_token'`）。这里改用仓内既定写法（register 落哈希 + UPDATE 改角色/平台，
+    见 test_huguan_dashboard.py::_create_user 与 conftest.tt_headers）。断言与意图不变。
+    """
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role=?, platform=? WHERE username=?", (role, platform, username))
+    db.commit()
+    row = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+    db.close()
+    token = client.post("/api/auth/login",
+                        json={"username": username, "password": "test123"}
+                        ).get_json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}, row["id"]
+
+
+class TestFbWritebackTriggers:
+    """FB 端点必须触发户管看板回写；软删 / 恢复 / 永久删不触发。"""
+
+    def test_create_triggers_writeback(self, client, monkeypatch):
+        calls = []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: calls.append((plat, ids)))
+        # 用真实端点建一个账户
+        # ⚠️ 偏离 brief：account_id 用纯数字 —— `create_account` 有
+        # `if not account_id.isdigit(): return 400`，brief 原文的 "WB-1" 会被 400 拒。
+        h, _ = _fb_loginable_user(client, "fb_wb")
+        r = client.post("/api/fb/accounts/create", headers=h,
+                        json={"name": "户wb", "account_id": "100001"})
+        assert r.status_code == 200
+        assert any(plat == "fb" for plat, _ in calls)
+
+    def test_soft_delete_does_not_trigger(self, client, monkeypatch):
+        calls = []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: calls.append((plat, ids)))
+        h, uid = _fb_loginable_user(client, "fb_wb2")
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','WB-2',?)",
+                   (uid,))
+        aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+        client.delete(f"/api/fb/accounts/{aid}", headers=h)
+        assert calls == []

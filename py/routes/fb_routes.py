@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import fb_required, no_huguan
+import huguan_dashboard as hd
 import re
 import threading
 
@@ -374,6 +375,7 @@ def create_account():
         if primary_bm_id:
             _set_primary_bm(db, acc_pk, primary_bm_id)
         db.commit()
+        hd.writeback_rows(uid, "fb", [account_id])
         return ok({'id': acc_pk})
     except Exception as e:
         return err(str(e))
@@ -384,6 +386,7 @@ def create_account():
 @fb_required
 def update_account(aid):
     db = get_db()
+    uid = get_uid()
     data = parse_body()
     name = data.get('name', '').strip()
     timezone = data.get('timezone', '')
@@ -426,6 +429,9 @@ def update_account(aid):
         _set_primary_bm(db, aid, primary_bm_id)
 
     db.commit()
+    _row = db.execute("SELECT account_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if _row:
+        hd.writeback_rows(uid, "fb", [_row["account_id"]])
     return ok()
 
 
@@ -496,9 +502,8 @@ def reassign_account(aid):
     - 默认路径（不带 owner_id，或调用者非 CROSS_USER_ROLES）→ 转给调用者自己
     - 跨用户路径：CROSS_USER_ROLES + 合法 owner_id → 转给该用户
 
-    注：本端点由子项目 ① 新增。TT / GG 版本在这里还会调 `hd.writeback_*`
-    回写户管看板 —— FB 的看板回写属于子项目 ②，**此处刻意不调**，
-    等 ② 落地时再补，不要提前接上。
+    注：本端点由子项目 ① 新增，子项目 ② 接上 `hd.writeback_*` 户管看板回写：
+    跨用户分支既刷该行可写列，又把「{旧}转{新}」定向写进 I 列（接户运营）。
     """
     db = get_db()
     uid = get_uid()
@@ -554,6 +559,14 @@ def reassign_account(aid):
     t = db.execute("SELECT display_name, username FROM users WHERE id=?",
                    (target_owner,)).fetchone()
     new_owner = (t["display_name"] or t["username"] or "") if t else ""
+    # 规格 §8：归属变了 → 刷该行可写列 + 定向写「接户运营」记录。
+    # 放在此处（而非 db.commit() 紧后）是因为 `t` 只在这条跨用户分支里查到：
+    # 单用户分支（target_owner == uid）在上面 409 处已返回 —— 非跨用户角色
+    # 要么账户本就属于自己（409），要么在更早的 403 被拦，归属不会变。
+    _old_name = existing["display_name"] or existing["username"] or ""
+    hd.writeback_rows(uid, "fb", [existing["account_id"]])
+    hd.writeback_fb_acceptor(uid, "fb", existing["account_id"],
+                             hd._fb_owner_transition(_old_name, new_owner))
     # 文案与 TT 侧的分支结构对称：只有跨用户分支补「已从 A」。
     return ok({"message": f"账户「{existing['name'] or existing['account_id']}」"
                           f"已从 {old_owner} 转移至 {new_owner}"})

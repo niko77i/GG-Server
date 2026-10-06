@@ -407,14 +407,15 @@ const authStore = useAuthStore()
 // 视觉设计：docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md
 //   卡片 §2 / 「刷新到看板」二次确认 §3 / 差异报告对话框 §4 / 标签映射 §4.9
 // 平台差异只有三处：platform、读 res.config[platform]、中文列名按该平台的
-// COLUMN_SPEC 走（GG：运营 / 重新分配；TT：接户运营 / 换绑情况 / BC / 消耗…）。
+// COLUMN_SPEC 走（GG：运营 / 重新分配；TT：接户运营 / 换绑情况 / BC / 消耗…；
+// FB：在用运营 / 接户运营 / 资产UID / 入库 / 出库…）。
 // ===========================================================================
 const props = defineProps({
-  platform: { type: String, required: true, validator: v => ['gg', 'tt'].includes(v) },
+  platform: { type: String, required: true, validator: v => ['gg', 'tt', 'fb'].includes(v) },
 })
 
-// 平台标识：本组件由 GG / TT 两个设置页共用。传入的 platform 是静态字面量
-// （两个页面各挂一次，不会中途变化），因此按普通常量使用即可。
+// 平台标识：本组件由 GG / TT / FB 三个设置页共用。传入的 platform 是静态字面量
+// （每个页面各挂一次，不会中途变化），因此按普通常量使用即可。
 const HD_PLATFORM = props.platform
 
 
@@ -475,6 +476,8 @@ function setHdHint(text, type = 'info') {
 const VIA_LABELS = {
   gg: { owner_channel: '重新分配', owner_name: '运营' },
   tt: { owner_channel: '换绑情况', owner_name: '接户运营' },
+  // FB 没有通道列，变更来源恒为「在用运营」列
+  fb: { owner_name: '在用运营' },
 }
 // 未知键一律原样显示，绝不隐藏（宁可露出英文，也不静默丢一条差异）
 const FIELD_LABELS = {
@@ -498,13 +501,29 @@ const FIELD_LABELS = {
     status_id: '状态',
     _is_dead: '是否回收',
   },
+  fb: {
+    acquired_date: '日期', name: '账户名称',
+    channel_id: '所属渠道', asset_type_id: '资产类型',
+    unit_price: '单价', inbound_qty: '入库',
+    outbound_date: '出库时间', outbound_qty: '出库',
+    timezone: '时区', consumption: '消耗', remark: '产品信息',
+    status_id: '状态', _primary_bm_name: '位置',
+    _is_dead: '死亡',
+  },
 }
-// 后端 warnings[].message 会夹带英文字段名，展示前替换（纯展示层）
-const WARN_TOKENS = { agent_name: '所属渠道', bc_name: 'BC', mcc_name: '所属 MCC', status_name: '状态' }
+// 后端 warnings[].message 会夹带英文字段名，展示前替换（纯展示层）。
+// 按平台分区：FB 用的是 channel_name / asset_type_name，不是 agent_name / bc_name，
+// 共用一份映射会漏替换 FB 的词。GG / TT 的四个词逐字不变。
+const WARN_TOKENS = {
+  gg: { agent_name: '所属渠道', bc_name: 'BC', mcc_name: '所属 MCC', status_name: '状态' },
+  tt: { agent_name: '所属渠道', bc_name: 'BC', mcc_name: '所属 MCC', status_name: '状态' },
+  fb: { channel_name: '所属渠道', asset_type_name: '资产类型', status_name: '状态' },
+}
 const CATEGORY_LABELS = { create: '新增', update: '字段更新', owner: '归属变更' }
 const OWNER_WRITEBACK_TEXT = {
   gg: '表里「运营」列已改写成新归属名，「重新分配」列已清空。下次同步不会重复应用这些变更。',
   tt: '表里「接户运营」列已改写成新归属名，「换绑情况」列已清空。下次同步不会重复应用这些变更。',
+  fb: '表里「在用运营」列已改写成新归属名，「接户运营」列已记下本次换绑。下次同步不会重复应用这些变更。',
 }
 
 function hdViaLabel(via) { return (VIA_LABELS[HD_PLATFORM] || {})[via] ?? '—' }
@@ -512,7 +531,8 @@ function hdFieldLabel(key) { return (FIELD_LABELS[HD_PLATFORM] || {})[key] ?? ke
 function hdCategoryLabel(cat) { return CATEGORY_LABELS[cat] ?? cat }
 function hdWarnText(message) {
   let out = String(message ?? '')
-  Object.keys(WARN_TOKENS).forEach(k => { out = out.split(k).join(WARN_TOKENS[k]) })
+  const tokens = WARN_TOKENS[HD_PLATFORM] || {}
+  Object.keys(tokens).forEach(k => { out = out.split(k).join(tokens[k]) })
   return out
 }
 const hdWriteBackText = OWNER_WRITEBACK_TEXT[HD_PLATFORM]
@@ -561,18 +581,36 @@ const PUSH_COVER = {
     { col: 'J 列', head: '消耗', to: '系统里的「消耗」' },
     { col: 'M 列', head: '产品信息', to: '系统里的「备注」' },
   ],
+  fb: [
+    { col: 'C 列',  head: '账户名称', to: '系统里的「账户名称」' },
+    { col: 'E 列',  head: '所属渠道', to: '系统里的「所属渠道」' },
+    { col: 'F 列',  head: '资产类型', to: '系统里的「资产类型」' },
+    { col: 'G 列',  head: '单价',     to: '系统里的「单价」' },
+    { col: 'H 列',  head: '入库',     to: '系统里的「入库」' },
+    { col: 'J 列',  head: '在用运营', to: '系统里的「归属人」' },
+    { col: 'K 列',  head: '出库时间', to: '系统里的「出库时间」' },
+    { col: 'L 列',  head: '出库',     to: '系统里的「出库」' },
+    { col: 'M 列',  head: '时区',     to: '系统里的「时区」' },
+    { col: 'N 列',  head: '消耗',     to: '系统里的「消耗」' },
+    { col: 'O 列',  head: '状态',     to: '系统里的「状态」' },
+    { col: 'P 列',  head: '位置',     to: '该账户的主 BM' },
+    { col: 'Q 列',  head: '产品信息', to: '系统里的「备注」' },
+  ],
 }
 const PUSH_SAFE = {
   gg: ['E 列 · 国家', 'H 列 · 重新分配', 'L 列 · 位置', 'M 列 · 消耗', 'N 列 · 产品信息'],
   tt: ['K 列 · 位置', 'L 列 · 换绑情况'],
+  fb: ['B 列 · 操作人', 'D 列 · 资产UID', 'I 列 · 接户运营'],
 }
 const PUSH_SAFE_NOTE = {
   gg: '其中「重新分配」列是你在表里填归属变更的通道，系统永远不碰它。',
   tt: '其中「换绑情况」列是你在表里填归属变更的通道，系统永远不碰它。',
+  fb: '其中「接户运营」列是系统记的换绑流水，系统只在归属变更时写它，其余时候不碰。',
 }
 const PUSH_EXTRA_NOTE = {
   gg: '另外系统还会按自己的数据重写：A 列 · 日期、B 列 · 是否封户、C 列 · 账户ID。表里有、系统里没有的账户不会被写入，只会在结果里报一个数。',
   tt: '另外系统还会按自己的数据重写：A 列 · 入库时间、B 列 · 是否回收、C 列 · 账户ID。表里有、系统里没有的账户不会被写入，只会在结果里报一个数。',
+  fb: '另外系统还会按自己的数据重写：A 列 · 日期。表里有、系统里没有的账户不会被写入，只会在结果里报一个数。',
 }
 const hdPushCover = computed(() => PUSH_COVER[HD_PLATFORM] || [])
 const hdPushSafe = computed(() => PUSH_SAFE[HD_PLATFORM] || [])
