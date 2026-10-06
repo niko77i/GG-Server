@@ -3942,3 +3942,83 @@ class TestApplyDiffRemarkPrecedence:
         assert "ADRP-N1" not in pushed, "owner_id 为 None 的行不得产生推送记录"
         assert all(isinstance(r["owner_id"], int) for r in res["remark_operator_push"])
         db.close()
+
+
+class TestRemarkPushPath:
+    """系统 → 投手看板 J 列的推送通路（本次新建）。"""
+
+    def test_push_writes_j_column_keyed_by_d(self, client, monkeypatch):
+        import google_sheets_service as gs
+        db = database.get_db()
+        u_op = _seed(db, "_rpp_op", "黎明", platform="tt")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','SS-TT')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{u_op}", json.dumps({"my_dashboard": "黎明账户看板"})))
+        db.commit()
+        db.close()
+        captured = []
+
+        def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
+            captured.append({"sheet_name": sheet_name, "key_col": key_col, "rows": rows})
+            return {"updated": len(rows), "not_found": []}
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
+        import main as m
+        monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+        import huguan_dashboard as hd
+        hd.push_remark_to_operator_dashboard(u_op, "RPP-1", "投手备注")
+        assert len(captured) == 1
+        assert captured[0]["sheet_name"] == "黎明账户看板"
+        assert captured[0]["key_col"] == "D", "投手看板账户ID在 D 列"
+        assert captured[0]["rows"] == [{"account_id": "RPP-1", "cells": {"J": "投手备注"}}]
+
+    def test_push_without_sheet_id_is_silent_noop(self, client, monkeypatch):
+        import google_sheets_service as gs
+        db = database.get_db()
+        u_op = _seed(db, "_rpp_no", "黎明2", platform="tt")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','')")
+        db.commit()
+        db.close()
+        called = []
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: called.append(1))
+        import huguan_dashboard as hd
+        hd.push_remark_to_operator_dashboard(u_op, "RPP-2", "x")
+        assert called == []
+
+    def test_sync_endpoint_emits_remark_writebacks(self, client, monkeypatch):
+        """走真实同步端点：投手赢 → 只回写户管 M；户管赢 → 只推投手 J。"""
+        import google_sheets_service as gs
+        hg, uid = _create_user(client, "_rpp_e2e", role="huguan", platform="tt")
+        db = database.get_db()
+        op = _seed(db, "_rpp_e2e_op", "黎明", platform="tt")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "HG-SS", "sheet_name": "S"}})))
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','OP-SS')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{op}", json.dumps({"my_dashboard": "黎明账户看板"})))
+        db.commit()
+        db.close()
+
+        def _read(service, spreadsheet_id, sheet_name, rng):
+            if sheet_name == "黎明账户看板":
+                return [["运营", "", "", "账户ID"],
+                        ["黎明", "", "", "E2E-1", "", "", "", "", "", "投手填的"]]
+            return [["入库时间", "是否回收", "账户ID", "BC", "国家", "所属渠道",
+                     "接户运营", "时区", "状态", "消耗", "位置", "换绑情况", "产品信息"],
+                    [""] * 2 + ["E2E-1"] + [""] * 3 + ["黎明"] + [""] * 5 + ["户管填的"]]
+
+        captured = []
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "read_sheet_values", _read)
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": False,
+                                 "confirmed": {"create": ["E2E-1"]}})
+        assert resp.status_code == 200
+        rows = [r for c in captured for r in c["rows"]]
+        assert {"account_id": "E2E-1", "cells": {"M": "投手填的"}} in rows, \
+            "投手赢 → 回写户管看板 M 列"
+        assert not any("J" in r["cells"] for r in rows), "投手赢时不应推投手看板"

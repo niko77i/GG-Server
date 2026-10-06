@@ -139,6 +139,15 @@ def dashboard_sync():
             # 同步时清空会抹掉记录，且因读回按表覆盖会连带清掉系统里的值。
             if platform != "tt":
                 _write_background(conf, hd.owner_channel_cells(applied, platform, ""))
+
+        # TT 备注首次对齐的两个写回（2026-10-06 规格）。与 applied_owner_rows 同法：
+        # 先从 result 摘掉，再发起后台写回 —— 只写单列，绝不整行推送。
+        m_writeback = result.pop("remark_m_writeback", [])
+        if m_writeback:
+            _write_background(conf, [{"account_id": r["account_id"],
+                                      "cells": {"M": r["value"]}} for r in m_writeback])
+        for r in result.pop("remark_operator_push", []):
+            hd.push_remark_to_operator_dashboard(r["owner_id"], r["account_id"], r["value"])
     finally:
         db.close()
 

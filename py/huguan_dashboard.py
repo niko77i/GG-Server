@@ -991,6 +991,42 @@ def push_rows(user_id: int, platform: str, account_ids=None) -> None:
     _sync_sheets_background(_do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)
 
 
+def push_remark_to_operator_dashboard(owner_id: int, account_id: str, value: str) -> None:
+    """把备注写进该投手「我的看板」的 J 列（按 D 列定位行）。
+
+    与 push_rows 的区别：push_rows 面向**户管看板**（配置来自 huguan_dashboard_{uid}），
+    本函数面向**投手看板**（配置来自 tags.tt_sheet_id + tt_sheet_mappings）。
+
+    投手未配看板 / 全局未配 tt_sheet_id → 静默返回。
+    绝不抛异常（与 writeback_rows 同契约：回写失败不得影响主流程）。
+    """
+    try:
+        db = _open_db()
+        try:
+            row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_id'").fetchone()
+            sheet_id = (row["value"] if row and row["value"] else "").strip()
+            if not sheet_id:
+                return
+            sheet_name = _operator_dashboard_name(db, owner_id)
+        finally:
+            db.close()
+
+        rows = [{"account_id": account_id, "cells": {"J": value}}]
+
+        def _do():
+            import google_sheets_service as gs
+            from main import _GOOGLE_SHEETS_CONFIG
+            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+            # 投手看板的账户ID在 D 列（户管看板在 C 列），故必须显式传 key_col。
+            gs.update_rows_by_account_id(service, sheet_id, sheet_name, rows, key_col="D")
+
+        from main import _sync_sheets_background
+        _sync_sheets_background(
+            _do, lambda s, e: log.warning("投手看板备注回写失败: %s", e) if e else None)
+    except Exception as e:
+        log.warning("投手看板备注回写触发失败: %s", e)
+
+
 def _open_db():
     """惰性取库连接（避免本模块在 import 期依赖 database）。"""
     import database
