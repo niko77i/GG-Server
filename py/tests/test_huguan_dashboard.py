@@ -3261,3 +3261,53 @@ class TestOwnerChangeNoteColumn:
             "SELECT owner_change_note FROM tt_accounts WHERE advertiser_id='OCN-1'").fetchone()
         assert row["owner_change_note"] == ""
         db.close()
+
+    def test_legacy_db_gets_owner_change_note_via_ensure_columns(self, app):
+        """锁定**存量库迁移路径**：预置缺列的旧表 → get_db() → 列被补且旧行读回 ''。
+
+        为什么专门守护这条：上面的用例用的是全新临时库，走的是 `CREATE TABLE`
+        分支；而生产库 temp/app.db 是**已存在的库**，`CREATE TABLE IF NOT EXISTS`
+        对它不生效 —— 真正给生产补上这一列的是 `_ensure_columns()` 里那条
+        `_add_column_if_missing`。删掉那一行，旧用例照样全绿，故这里独立覆盖。
+        """
+        # app fixture 已把 database._db_path 指向临时库；此处不经 get_db()，
+        # 用裸 sqlite3 手工建一张「升级前」的旧 tt_accounts（列与建表语句一致，
+        # 唯独没有 owner_change_note），再塞一行旧数据 —— 模拟存量库。
+        db_path = database._db_path()
+        raw = sqlite3.connect(db_path)
+        raw.execute("""
+            CREATE TABLE tt_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT DEFAULT '',
+                advertiser_id TEXT NOT NULL UNIQUE,
+                bc_id INTEGER,
+                country TEXT DEFAULT '',
+                agent_id INTEGER,
+                timezone TEXT DEFAULT '',
+                consumption TEXT DEFAULT '',
+                status_id INTEGER,
+                acquired_date TEXT DEFAULT '',
+                death_date TEXT DEFAULT '',
+                status_changed_date TEXT DEFAULT '',
+                remark TEXT DEFAULT '',
+                owner_id INTEGER,
+                deleted_at TEXT DEFAULT NULL,
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT ''
+            )
+        """)
+        raw.execute("INSERT INTO tt_accounts(advertiser_id, name) VALUES('LEGACY-1','旧账户')")
+        raw.commit()
+        raw.close()
+
+        # get_db() 每次连接都跑 _ensure_columns()（不像 _ensure_schema 有缓存），
+        # 里面那条 _add_column_if_missing 应当把缺的列补上。
+        db = database.get_db()
+        cols = {r[1]: r for r in db.execute("PRAGMA table_info(tt_accounts)").fetchall()}
+        assert "owner_change_note" in cols, "存量库路径未补上 owner_change_note 列"
+        assert cols["owner_change_note"][4] == "''", "补上的列默认值必须是 ''"
+        row = db.execute(
+            "SELECT owner_change_note FROM tt_accounts WHERE advertiser_id='LEGACY-1'").fetchone()
+        assert row is not None, "旧行应当保留"
+        assert row["owner_change_note"] == "", "旧行读回必须是空串，不能是 None"
+        db.close()
