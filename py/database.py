@@ -142,6 +142,31 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "copywritings", "owner_id", "owner_id INTEGER REFERENCES users(id)")
     _add_column_if_missing(conn, "copywritings", "effectiveness", "effectiveness TEXT DEFAULT ''")
     _add_column_if_missing(conn, "copywritings", "is_public", "is_public INTEGER DEFAULT 0")
+    # FB 资产数据模型（子项目 ①，2026-10-06）：10 个新列。
+    # 全部可空 —— 存量行取默认值，列表 / 编辑 / 删除行为与改动前一致。
+    # ⚠️ channel_id / asset_type_id 的 REFERENCES 指向上面 _ensure_schema 建的
+    # fb_channels / fb_asset_types。get_db 的调用顺序是 _ensure_schema → _ensure_columns，
+    # 同一次连接内表必定已存在。
+    _add_column_if_missing(conn, "fb_accounts", "operator", "operator TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "fb_accounts", "channel_id",
+                           "channel_id INTEGER REFERENCES fb_channels(id)")
+    _add_column_if_missing(conn, "fb_accounts", "asset_type_id",
+                           "asset_type_id INTEGER REFERENCES fb_asset_types(id)")
+    _add_column_if_missing(conn, "fb_accounts", "unit_price", "unit_price TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "fb_accounts", "inbound_qty", "inbound_qty TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "fb_accounts", "acceptor_id",
+                           "acceptor_id INTEGER REFERENCES users(id)")
+    _add_column_if_missing(conn, "fb_accounts", "outbound_date", "outbound_date TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "fb_accounts", "outbound_qty", "outbound_qty TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "fb_accounts", "consumption", "consumption TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "fb_accounts", "remark", "remark TEXT DEFAULT ''")
+    # 主 BM 标记（「位置」列的存储，规格 4.3）。部分唯一索引保证
+    # 「同一账户至多一个主 BM」——**不阻止换 BM**，换法是同一事务内先清后设。
+    _add_column_if_missing(conn, "fb_account_bm", "is_primary",
+                           "is_primary INTEGER NOT NULL DEFAULT 0")
+    if _table_exists(conn, "fb_account_bm"):
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fb_account_bm_primary "
+                     "ON fb_account_bm(account_id) WHERE is_primary = 1")
     # videos 复合主键后，关联表需 video_owner_id 列
     _add_column_if_missing(conn, "product_assets", "video_owner_id", "video_owner_id INTEGER NOT NULL DEFAULT 1")
     _add_column_if_missing(conn, "video_consumption", "video_owner_id", "video_owner_id INTEGER NOT NULL DEFAULT 1")
@@ -683,6 +708,29 @@ def _ensure_schema(conn: sqlite3.Connection):
             changed_by INTEGER REFERENCES users(id),
             change_type TEXT NOT NULL DEFAULT 'manual',
             created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+
+        -- FB 资产公用词表（子项目 ①，2026-10-06）：所属渠道 / 资产类型。
+        -- 形状照 account_statuses 的 UNIQUE(name, platform)——「公用」指名字全平台唯一，
+        -- owner_id 只记「谁先建的」，不参与查重。**刻意不复用 agents**：agents 的
+        -- UNIQUE 是 (name, owner_id, platform)，同名会落两行，而看板同步的
+        -- 「唯一命中才落库」口径会让那一列永远同步不上。
+        CREATE TABLE IF NOT EXISTS fb_channels (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            owner_id   INTEGER REFERENCES users(id),
+            platform   TEXT DEFAULT 'fb',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(name, platform)
+        );
+
+        CREATE TABLE IF NOT EXISTS fb_asset_types (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            owner_id   INTEGER REFERENCES users(id),
+            platform   TEXT DEFAULT 'fb',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(name, platform)
         );
 
         CREATE TABLE IF NOT EXISTS fb_products (
