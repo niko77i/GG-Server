@@ -318,9 +318,10 @@ def update_account(aid):
         _remark_value = str(data["remark"]).strip()
         _adv = row["advertiser_id"]
         _owner_for_push = row["owner_id"]
-        # 户管看板：writeback_rows 用的是调用者 uid 的 huguan_dashboard_{uid} 配置。
-        # 投手调用时查不到配置会静默空转 —— 这是既有行为，见规格 §5 已知后果 2。
-        hd.writeback_rows(uid, "tt", [_adv])
+        # 户管看板的 M 列（产品信息/remark）回写**不在此处**：函数尾部既有的
+        # hd.writeback_rows(uid, "tt", [row["advertiser_id"]]) 已覆盖（cells_for_row
+        # 会写 M）。此处刻意不再单独回写一次 —— 一是重复，二是它落在 db.commit()
+        # 之前，push_rows 走独立连接读不到本次未提交的新值，会拿旧 remark 并发写同一行。
         # 投手看板：推给**账户的归属人**，不是调用者 —— 户管可能代改别人名下的户。
         if _owner_for_push is not None:
             hd.push_remark_to_operator_dashboard(_owner_for_push, _adv, _remark_value)
@@ -367,6 +368,8 @@ def update_account(aid):
     db.execute("UPDATE tt_accounts SET updated_at=datetime('now','localtime') WHERE id=?", (aid,))
     db.commit()
     # 户管看板单行回写（规格 §6.2）。只写可写列，绝不碰「换绑情况」列。
+    # 它**同时承担 remark 改动时的 M 列回写**（cells_for_row 会写 M，即「产品信息」），
+    # 且此处 post-commit、数据新鲜 —— 故 remark 分支不必再单独回写一次。
     hd.writeback_rows(uid, "tt", [row["advertiser_id"]])
     return ok()
 

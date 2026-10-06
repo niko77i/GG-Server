@@ -4059,18 +4059,53 @@ class TestUpdateAccountPushesRemark:
         assert any(r["cells"].get("J") == "新备注" for r in cells), "应推投手看板 J 列"
 
     def test_updating_other_fields_does_not_push_remark(self, client, monkeypatch):
-        """回归护栏：不带 remark 的更新不得触发备注推送。"""
+        """回归护栏：**只有**带 remark 的更新才推投手看板 J 列。
+
+        判别力来源：本用例先做**正向对照** —— PUT {"remark": "对照值"} 断言 captured
+        里确实出现 key_col == "D" 的调用，证明「投手看板通路」在这套夹具下可达。
+        若缺了正向对照，负向断言（PUT {"country": …} 后无 "D"）会因通路本身被夹具
+        短路而**恒真、零判别力**——这正是本用例改写前的缺陷。对照通过后再清空 captured
+        发负向请求，此时的「无 D」才真正说明「非 remark 更新不触发备注推送」。
+
+        注意：端点尾部既有的户管看板单行回写（post-commit）会**无条件**产生一次
+        key_col == "C" 的回写，故负向断言只看「无 D」，不能笼统断言 captured 为空。
+        """
         import google_sheets_service as gs
         op, op_uid = _create_user(client, "_uapr_op2", role="user", platform="tt")
         db = database.get_db()
+        # 三份配置缺一不可：户管看板配置（writeback_rows 用）、全局 tt_sheet_id +
+        # 投手私有 my_dashboard（push_remark_to_operator_dashboard 用）。缺任一份，
+        # 对应通路都会在「读配置」那步提前 return，令断言失去意义。
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{op_uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "HG-SS", "sheet_name": "S"}})))
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','OP-SS')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{op_uid}", json.dumps({"my_dashboard": "投手看板"})))
         aid = _seed_tt(db, "UAPR-2", op_uid)
         db.commit()
         db.close()
-        called = []
+
+        captured = []
+
+        def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
+            captured.append({"sheet_name": sheet_name, "key_col": key_col, "rows": rows})
+            return {"updated": len(rows), "not_found": []}
+
         monkeypatch.setattr(gs, "build_service", lambda path: object())
-        monkeypatch.setattr(gs, "update_rows_by_account_id",
-                            lambda *a, **k: called.append(1) or {"updated": 0, "not_found": []})
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
         import main as m
         monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
-        client.put(f"/api/tt/accounts/{aid}", headers=op, json={"country": "US"})
-        assert called == []
+
+        # 正向对照：带 remark → 投手看板通路（key_col="D"）必须被触达。
+        resp = client.put(f"/api/tt/accounts/{aid}", headers=op, json={"remark": "对照值"})
+        assert resp.status_code == 200
+        assert any(c["key_col"] == "D" for c in captured), \
+            "正向对照失败：带 remark 时投手看板通路未触达，本夹具无法验证备注推送"
+
+        # 负向：清空后发不含 remark 的更新 → 不得再有任何投手看板（"D"）回写。
+        captured.clear()
+        resp = client.put(f"/api/tt/accounts/{aid}", headers=op, json={"country": "US"})
+        assert resp.status_code == 200
+        assert not any(c["key_col"] == "D" for c in captured), \
+            "不带 remark 的更新不得触发投手看板备注推送"
