@@ -368,10 +368,27 @@ sheets_synced=1 写在回调里 -> 标志位永远停在 0，前端 tooltip 误�
   - `record_pending(db, *, user_id, platform, target, business_key, payload=None, snapshot=None) -> None`
   - `settle(db, *, user_id, target, business_key, status, error_msg="") -> None`
   - `run_write(db, *, user_id, platform, target, business_key, sync_fn, payload=None, snapshot=None) -> None`
-  - `rebuild = _rebuild`（内部）
   - 注册表项：`TARGETS[name] = {"rebuild": ..., "rollback": ...}`
 
+> **勘误（2026-10-06，Task 3 审查）**：本 Interfaces 列表初稿还写过一行
+> `rebuild = _rebuild`（内部）—— 那是更早一版设计的残留，**模块里并不存在这个符号**，
+> 已删除。重试路径一律走 `build_sync()`（它内部查 `TARGETS[target]["rebuild"]` 并调用），
+> 下游任务不得 import 任何 `rebuild` / `_rebuild` 名字。
+
 - [ ] **Step 1: 写失败测试**
+
+> **勘误（2026-10-06，Task 3 审查）**：下面这些测试里凡是要 monkeypatch
+> `time.sleep` 的，**轮询必须用一份提前抓下来的真 sleep**，不能直接用
+> `time.sleep` / `_time.sleep` —— 那正是被 patch 掉的同一个符号，轮询会变成
+> 空转：主线程不再 yield GIL，daemon 线程拿不到执行机会，断言早于回调落地。
+> 实施时已在测试模块顶部加：
+>
+> ```python
+> from time import sleep as _poll_sleep   # 早于任何 monkeypatch 抓取
+> ```
+>
+> 并在各处用 `_poll_sleep(0.01)` / `_poll_sleep(0.02)` 轮询。
+> 下方代码块为初稿写法（直接用 `_time.sleep`），**照抄会重现该缺陷**。
 
 追加到 `py/tests/test_sheet_write.py`：
 
