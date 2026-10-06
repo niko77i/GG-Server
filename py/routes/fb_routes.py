@@ -376,6 +376,11 @@ def create_account():
             _set_primary_bm(db, acc_pk, primary_bm_id)
         db.commit()
         hd.writeback_rows(uid, "fb", [account_id])
+        # 规格 §6.4 写点 1：建号时填了接户人，I 列（接户运营）不补这个定向写点就永远是空的
+        # —— `cells_for_row` 跳过 I 列（COLUMN_SPEC 标 writable=False），批量回写不带它。
+        # acceptor 为空时不调（helper 内也有空串早退，但不依赖它，这里显式判断）。
+        if acceptor:
+            hd.writeback_fb_acceptor(uid, "fb", account_id, acceptor)
         return ok({'id': acc_pk})
     except Exception as e:
         return err(str(e))
@@ -432,6 +437,10 @@ def update_account(aid):
     _row = db.execute("SELECT account_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
     if _row:
         hd.writeback_rows(uid, "fb", [_row["account_id"]])
+        # 同 create_account：I 列不在批量回写范围里，编辑时填了接户人必须定向补写。
+        # acceptor 为空时**不调**（不要把 I 列清空 / 也不依赖 helper 的空串早退）。
+        if acceptor:
+            hd.writeback_fb_acceptor(uid, "fb", _row["account_id"], acceptor)
     return ok()
 
 
@@ -548,10 +557,6 @@ def reassign_account(aid):
         return err("该账户已属于当前用户，无需转移" if target_owner == uid
                    else "该账户已属于目标用户，无需转移", 409)
 
-    db.execute("UPDATE fb_accounts SET owner_id=?, updated_at=datetime('now','localtime') "
-               "WHERE id=?", (target_owner, aid))
-    db.commit()
-
     # 规格 §8：归属变了 → 刷该行可写列 + 定向写「接户运营」记录。**两条分支都要**，
     # 与 GG/TT 两分支都回写对齐 —— 单用户分支不是「归属没变」的死路：
     # 非跨用户角色走不到这里（403 / 409），但**跨用户角色对别人的户、不传 owner_id**
@@ -560,11 +565,22 @@ def reassign_account(aid):
     t = db.execute("SELECT display_name, username FROM users WHERE id=?",
                    (target_owner,)).fetchone()
     new_owner = (t["display_name"] or t["username"] or "") if t else ""
+    # 换绑串只算一次，库 / 表共用同一份 —— 面板读 a.acceptor、表里读 I 列，
+    # 任何一侧单独拼都会分叉（改前库里的 acceptor 恒为改前值，与表不一致）。
+    # TT 侧（routes/tt_accounts_routes.py 的 owner_change_note）也是库表双写。
+    note = hd._fb_owner_transition(
+        existing["display_name"] or existing["username"] or "", new_owner)
+
+    db.execute("UPDATE fb_accounts SET owner_id=?, updated_at=datetime('now','localtime') "
+               "WHERE id=?", (target_owner, aid))
+    # note 为空（新旧名皆空）时不写库：此时 helper 也不写表（空串早退），
+    # 单边写会把库里已有的换绑串清成空 —— 与「库表同串」相悖。
+    if note:
+        db.execute("UPDATE fb_accounts SET acceptor=? WHERE id=?", (note, aid))
+    db.commit()
+
     hd.writeback_rows(uid, "fb", [existing["account_id"]])
-    hd.writeback_fb_acceptor(uid, "fb", existing["account_id"],
-                             hd._fb_owner_transition(
-                                 existing["display_name"] or existing["username"] or "",
-                                 new_owner))
+    hd.writeback_fb_acceptor(uid, "fb", existing["account_id"], note)
 
     if target_owner == uid:
         return ok({"message": f"账户「{existing['name'] or existing['account_id']}」"

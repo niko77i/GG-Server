@@ -521,3 +521,157 @@ class TestFbWritebackTriggers:
 
         assert r.status_code == 403, r.get_json()
         assert rows_calls == [] and acc_calls == []
+
+    def test_create_with_acceptor_directed_writes_column_i(self, client, monkeypatch):
+        """建号时填了接户人 → 必须定向补写 I 列（列值原样透传）。
+
+        「接户运营」不在批量回写范围（`cells_for_row` 跳过 I 列），只靠 writeback_rows
+        的话表里那一格永远是空的 —— 去掉这条定向调用本用例必红。
+        """
+        rows_calls, acc_calls = [], []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: rows_calls.append((plat, ids)))
+        monkeypatch.setattr(hd, "writeback_fb_acceptor",
+                            lambda uid, plat, aid, note: acc_calls.append((plat, aid, note)))
+        h, _ = _fb_loginable_user(client, "fb_wb5")
+
+        r = client.post("/api/fb/accounts/create", headers=h,
+                        json={"name": "户wb5", "account_id": "100005", "acceptor": "张三"})
+
+        assert r.status_code == 200, r.get_json()
+        assert rows_calls == [("fb", ["100005"])], rows_calls
+        assert acc_calls == [("fb", "100005", "张三")], acc_calls
+        db = database.get_db()
+        stored = db.execute("SELECT acceptor FROM fb_accounts WHERE account_id='100005'"
+                            ).fetchone()["acceptor"]
+        db.close()
+        assert stored == "张三"
+
+    def test_create_without_acceptor_skips_directed_write(self, client, monkeypatch):
+        """接户人为空 → 不调定向写（不得凭空往 I 列写串）。"""
+        rows_calls, acc_calls = [], []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: rows_calls.append((plat, ids)))
+        monkeypatch.setattr(hd, "writeback_fb_acceptor",
+                            lambda uid, plat, aid, note: acc_calls.append((plat, aid, note)))
+        h, _ = _fb_loginable_user(client, "fb_wb6")
+
+        r = client.post("/api/fb/accounts/create", headers=h,
+                        json={"name": "户wb6", "account_id": "100006"})
+
+        assert r.status_code == 200, r.get_json()
+        assert rows_calls == [("fb", ["100006"])], rows_calls
+        assert acc_calls == [], acc_calls
+
+    def test_update_with_acceptor_directed_writes_column_i(self, client, monkeypatch):
+        """编辑时提交了接户人 → 同样定向补写 I 列。"""
+        rows_calls, acc_calls = [], []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: rows_calls.append((plat, ids)))
+        monkeypatch.setattr(hd, "writeback_fb_acceptor",
+                            lambda uid, plat, aid, note: acc_calls.append((plat, aid, note)))
+        h, uid = _fb_loginable_user(client, "fb_wb7")
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','WB-7',?)",
+                   (uid,))
+        aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+
+        r = client.put(f"/api/fb/accounts/{aid}", headers=h,
+                       json={"name": "户改", "account_id": "WB-7", "acceptor": "李四"})
+
+        assert r.status_code == 200, r.get_json()
+        assert rows_calls == [("fb", ["WB-7"])], rows_calls
+        assert acc_calls == [("fb", "WB-7", "李四")], acc_calls
+
+    def test_update_without_acceptor_skips_directed_write(self, client, monkeypatch):
+        """编辑时不传接户人 → 不调定向写（helper 对空串也早退，这里显式钉住不调）。"""
+        rows_calls, acc_calls = [], []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: rows_calls.append((plat, ids)))
+        monkeypatch.setattr(hd, "writeback_fb_acceptor",
+                            lambda uid, plat, aid, note: acc_calls.append((plat, aid, note)))
+        h, uid = _fb_loginable_user(client, "fb_wb8")
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','WB-8',?)",
+                   (uid,))
+        aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+
+        r = client.put(f"/api/fb/accounts/{aid}", headers=h,
+                       json={"name": "户改", "account_id": "WB-8", "acceptor": ""})
+
+        assert r.status_code == 200, r.get_json()
+        assert rows_calls == [("fb", ["WB-8"])], rows_calls
+        assert acc_calls == [], acc_calls
+
+    def test_reassign_syncs_db_acceptor_with_sheet(self, client, monkeypatch):
+        """reassign 必须**库表同串**：acceptor 列与 I 列写的是同一个换绑串。
+
+        单用户分支（developer 对别人名下的户、不带 owner_id 转给自己）。
+        改前库里的 acceptor 恒为改前值（NULL），本用例必红。
+        """
+        rows_calls, acc_calls = [], []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: rows_calls.append((plat, ids)))
+        monkeypatch.setattr(hd, "writeback_fb_acceptor",
+                            lambda uid, plat, aid, note: acc_calls.append((plat, aid, note)))
+        h, _dev = _fb_loginable_user(client, "fb_wb9", role="developer")
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform, display_name) "
+                   "VALUES('fb_wb9_old', 'x', 'user', 'fb', '旧主')")
+        old_uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','WB-9',?)",
+                   (old_uid,))
+        aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=h, json={})
+
+        assert r.status_code == 200, r.get_json()
+        db = database.get_db()
+        stored = db.execute("SELECT acceptor FROM fb_accounts WHERE id=?",
+                            (aid,)).fetchone()["acceptor"]
+        db.close()
+        assert stored == "旧主转fb_wb9", stored
+        assert acc_calls == [("fb", "WB-9", "旧主转fb_wb9")], acc_calls
+        # 库表同串：库里的值就是传给回写帮助函数的那一串
+        assert stored == acc_calls[0][2]
+
+    def test_reassign_cross_user_syncs_db_acceptor_with_sheet(self, client, monkeypatch):
+        """跨用户分支（带 owner_id）同样库表同串 —— 两条分支共用同一个 note。"""
+        rows_calls, acc_calls = [], []
+        monkeypatch.setattr(hd, "writeback_rows",
+                            lambda uid, plat, ids=None: rows_calls.append((plat, ids)))
+        monkeypatch.setattr(hd, "writeback_fb_acceptor",
+                            lambda uid, plat, aid, note: acc_calls.append((plat, aid, note)))
+        h, _dev = _fb_loginable_user(client, "fb_wb10", role="developer")
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform, display_name) "
+                   "VALUES('fb_wb10_old', 'x', 'user', 'fb', '旧主十')")
+        old_uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO users(username, password, role, platform, display_name) "
+                   "VALUES('fb_wb10_new', 'x', 'user', 'fb', '新主十')")
+        new_uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','WB-10',?)",
+                   (old_uid,))
+        aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+
+        r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=h,
+                       json={"owner_id": new_uid})
+
+        assert r.status_code == 200, r.get_json()
+        db = database.get_db()
+        stored = db.execute("SELECT acceptor FROM fb_accounts WHERE id=?",
+                            (aid,)).fetchone()["acceptor"]
+        owner = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?",
+                           (aid,)).fetchone()["owner_id"]
+        db.close()
+        assert owner == new_uid
+        assert stored == "旧主十转新主十", stored
+        assert acc_calls == [("fb", "WB-10", "旧主十转新主十")], acc_calls
