@@ -244,6 +244,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
 const store = useAccountStore()
+// 「默认只展示存活」必须在 **setup 顶层**落进筛选状态，不能放 onMounted：
+// 子组件 OwnerFilterSelect 的 setup 恒早于本组件 onMounted，它会同步 emit('change')
+// → searchAndLoad() → loadAccounts()，首次请求就以 status=''（全部状态）发出。
+// 等 onMounted 再补 status='存活' 时，dedupLoader 见首次请求仍在途 → 返回同一 Promise
+// 不重发，后端从未收到 status=存活 —— 表现为「按钮高亮存活、表格却是全部状态」。
+// （同款抢跑教训见 OwnerFilterSelect.vue 顶部注释。）
+if (!store.acFilters.status) store.acFilters.status = '存活'
 const selected = ref([])
 const acModalVisible = ref(false)
 const acEditId = ref(null)
@@ -284,7 +291,6 @@ onMounted(() => {
   store.loadSettings()
   store.loadAgents()
   store.loadStatuses()
-  if (!store.acFilters.status) store.acFilters.status = '存活'
   load()
 })
 

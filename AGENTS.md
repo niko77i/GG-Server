@@ -631,6 +631,50 @@ GG-Server 在 GG（Google Ads）基础上新增 FB（Facebook）广告管理能�
 - 每个字典表提供标准 CRUD API，GG/FB 平台共用
 - MCC 等级下拉懒加载修复
 
+⚠️ **`account_statuses` 是 `UNIQUE(name, platform)` 的共享字典，「存活」在 gg/fb/tt
+各有一行 —— 凡按名字取行都必须带 `platform`。** 2026-10-06 修的一处：
+GG 侧读写状态字典的 6 处 SQL 都写 `WHERE name=? AND owner_id=?`，
+(a) 缺 platform → 唯一索引按 (name, platform) 排序（`'fb' < 'gg' < 'tt'`），
+`fetchone()` 稳定落在 **fb** 行，生产 43 个 GG 账户的状态 id 被写成 fb 的
+（「存活」25 条、「死亡」8 条）；
+(b) `owner_id` 记的是**创建者**（生产全是 developer=1），与账户归属无关，
+普通用户按自己的 id 查永远查不到 —— 筛选恒空，写侧回退 `INSERT` 又撞 UNIQUE，
+异常被通用分支误报成「账户 ID 'xxx' 已存在」409。
+现口径：GG 侧统一走 `main._gg_status_id(db, name, owner_id)`（`WHERE name=? AND
+platform='gg'` + `INSERT OR IGNORE ... VALUES(?,?,'gg')` 再重查，**去掉 owner_id**）；
+存量由 `database._migrate_account_status_platform` 幂等归位。
+**别把 `owner_id` 加回来**，也别省掉 platform。`agents` 无此问题
+（它是 `UNIQUE(name, owner_id, platform)`，owner_id 在那里有意义）。
+回归测试见 `py/tests/test_account_status_platform.py`（6 条，改回旧写法会全红）。
+
+⚠️ **同一根因还有一处：`data_service._import_option_table` 的查重键。** 它此前对四张
+选项表一律按 `(name, owner_id)` 查重，而真实唯一键逐表不同 —— `agents`
+`(name, owner_id, platform)`、`account_statuses` / `sales_persons` `(name, platform)`、
+`mcc_levels` `(name, owner_id)`。生产字典行 owner_id 全是创建者 developer=1，
+于是**任何非 developer 的导入**都会撞 `UNIQUE(name, platform)` 把**整次导入**打崩
+（`/api/data/import` 直接 500，业务表一条都进不去）。现按 `_OPTION_UNIQUE_COLS`
+逐表取键；旧导出缺 platform 列时按建表默认 `'gg'` 补齐再查重（否则 NULL 配不上、
+查重形同虚设）。回归测试见 `py/tests/test_data_import_option_dedup.py`（3 红 1 对照）。
+
+⚠️ **`_migrate_account_status_platform` 的 try/except 不是装饰**：`_migrate_if_needed`
+每个请求都跑，逃出异常 = 全站每次 get_db() 都 500。可达触发是非 gg 字典行的
+`owner_id` 悬挂（跨库拷 app.db / 旧备份），此时补建 gg 行抛 FOREIGN KEY ——
+**`INSERT OR IGNORE` 不吞外键错**（ON CONFLICT 算法不适用于 FOREIGN KEY）。
+回归钉：`test_does_not_kill_get_db_when_owner_fk_dangles`（去掉 except 恰好 1 红）。
+⚠️ **空状态（`status_id IS NULL`）的口径 = 「未知」**（2026-10-06 用户裁定）。
+GG 侧三处必须同一口径：表格渲染（前端 `row.status || '未知'`）、`accounts_list`
+的 `status_counts`（NULL 桶命名为「未知」，**不再 `COALESCE(...,'存活')`**）、
+以及筛选（`status='未知'` → `status_id IS NULL OR 绑到名为「未知」的 gg 字典行`）。
+三者必须绑在一起改：`status_counts` 的 key 会被前端 `availableStatuses` 直接渲染成
+状态按钮、`toggleStatus` 又把它原样回传成 `status` 查询参数 —— 只改统计不改筛选，
+那个按钮就是个**死链**（数字 N、点开 0 条）。生产影响：10 条空状态账户从
+「存活 30」移到新的「未知 10」，总存活计数相应下降，属预期。
+回归测试见 `py/tests/test_account_status_platform.py::TestUnknownStatusBucket`
+（含不变式「出现过的 key，点开条数必须与计数相等」；两条改动各有独立红钉）。
+**TT 侧刻意不动**：`tt_accounts_routes.py` 的同一句 `COALESCE` 与它自己的表格渲染
+（`it['status'] = status_name or '存活'`）**自洽**，NULL 在 TT 显示也是「存活」，
+改它等于替用户改一个未定行为。（TT 筛选走 `status_id` 而非名字，机制不同。）
+
 ### 掉包通知按产品聚合
 
 掉包通知从按包聚合改为按产品聚合，同一产品多包掉包合并为一条通知。
