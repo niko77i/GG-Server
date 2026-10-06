@@ -366,8 +366,14 @@ def test_status_rejects_bad_platform(client):
     assert "platform" in resp.get_json()["error"]
 
 
-def test_retry_requires_attention_status(client):
+def test_retry_requires_attention_status(client, monkeypatch):
     """pending / synced 的任务不接受重试。"""
+    import sheet_write
+    # 闸门现在排在 build_sync **之后**：target 必须先在注册表里查得到，否则会先撞
+    # 「未注册」那条 400，就测不到「状态不满足」这条了。作用域限定在本用例内。
+    monkeypatch.setitem(sheet_write.TARGETS, "tt_recycle",
+                        {"rebuild": lambda uid, key, payload: (lambda: None),
+                         "rollback": None})
     h, uid = _tt_user(client, "_sw_retry_pending")
     db = database.get_db()
     _mk_log(db, uid, "tt_recycle", "acc_p", status="pending")
@@ -387,6 +393,32 @@ def test_retry_unknown_target_returns_400_not_500(client):
                        json={"platform": "tt", "target": "no_such_target", "business_key": "acc_q"})
     assert resp.status_code == 400
     assert "未注册" in resp.get_json()["error"]
+
+
+def test_retry_unknown_target_does_not_strand_row_at_pending(client):
+    """未注册 target 的重试必须在 claim **之前**就失败，不得把行留在 pending。
+
+    上一轮把原子 claim 排在 build_sync 之前：build_sync 抛 KeyError → 400，但行已被
+    claim 成 pending 且无人推进 —— pending 不在 ATTENTION 里，列表标记不显示、前端
+    轮询静默超时；且重试闸门只放行 ATTENTION，该任务从此**永久不可重试**。
+
+    故只断言 400 不够（旧代码同样回 400），必须把 status 读回来、验证原位不变。
+    """
+    h, uid = _tt_user(client, "_sw_no_strand")
+    db = database.get_db()
+    _mk_log(db, uid, "no_such_target", "acc_s", status="retry_failed")
+    db.close()
+
+    resp = client.post("/api/sheet-write/retry", headers=h,
+                       json={"platform": "tt", "target": "no_such_target",
+                             "business_key": "acc_s"})
+    assert resp.status_code == 400
+    assert "未注册" in resp.get_json()["error"]
+
+    db = database.get_db()
+    status = _row(db, uid, "no_such_target", "acc_s")["status"]
+    db.close()
+    assert status == "retry_failed", f"未注册 target 把行卡在了 {status}（应为 retry_failed）"
 
 
 def test_retry_success_path(client):
@@ -426,16 +458,18 @@ def test_retry_missing_record_returns_404(client):
 def test_retry_gate_is_atomic_against_concurrent_submit(client, monkeypatch):
     """闸门必须是原子 claim：两个并发 POST 不得双双通过。
 
-    构造方式（确定性，非时序竞态）：把 build_sync 换成桩，桩在**外层请求已经
-    通过闸门之后**、用同一个 client 再发一次完全相同的 POST，然后返回空
-    sync_fn。这就把生产里「两个请求交错」的那一段顺序固定下来了。
+    构造方式（确定性，非时序竞态）：把桩打在 run_write 上 —— 它正是「claim 已过、
+    status 已原子置为 pending」之后的那个点，桩里用同一个 client 再发一次完全相同的
+    POST，就把生产里两个请求交错的顺序固定下来了。
 
     修复后外层已把 status 原子置为 pending，嵌套请求读到 pending ⇒ 400；
-    旧的 check-then-act 实现里外层只读过状态、尚未置位，嵌套请求会再读到
-    retry_failed 从而放行 ⇒ 200（并再起一次后台写，正是重复写行的成因）。
-    故断言 400 能区分修复前后。
+    旧的 check-then-act 实现里置位发生在 run_write **内部**（record_pending），
+    桩点之前外层尚未置位，嵌套请求会再读到 retry_failed 从而放行 ⇒ 200（并再起
+    一次后台写，正是重复写行的成因）。故断言 400 能区分修复前后。
     """
     import sheet_write
+    sheet_write.register_target("_t_atomic",
+                                rebuild=lambda uid, key, payload: (lambda: None))
     h, uid = _tt_user(client, "_sw_atomic")
     db = database.get_db()
     _mk_log(db, uid, "_t_atomic", "acc_c", status="retry_failed")
@@ -444,15 +478,15 @@ def test_retry_gate_is_atomic_against_concurrent_submit(client, monkeypatch):
     nested = {}
     fired = []
 
-    def _fake_build_sync(target, user_id, business_key, payload):
+    def _fake_run_write(db, **kw):
         if not fired:
-            fired.append(True)   # 只嵌套一发：旧实现下嵌套请求会再进 build_sync，防无限递归
+            fired.append(True)   # 只嵌套一发，防无限递归
             nested["resp"] = client.post(
                 "/api/sheet-write/retry", headers=h,
                 json={"platform": "tt", "target": "_t_atomic", "business_key": "acc_c"})
-        return lambda: None
+        return None
 
-    monkeypatch.setattr(sheet_write, "build_sync", _fake_build_sync)
+    monkeypatch.setattr(sheet_write, "run_write", _fake_run_write)
     resp = client.post("/api/sheet-write/retry", headers=h,
                        json={"platform": "tt", "target": "_t_atomic", "business_key": "acc_c"})
     assert resp.status_code == 200, resp.get_json()
