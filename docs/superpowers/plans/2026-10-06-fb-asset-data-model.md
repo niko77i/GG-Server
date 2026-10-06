@@ -707,7 +707,7 @@ class TestFbAccountApi:
             "name": "户五", "account_id": "9005", "bm_ids": [bm], "primary_bm_id": bm,
         })
         assert r.status_code == 200
-        r = client.get("/api/fb/accounts/list", headers=fb_user, params={"search": "9005"})
+        r = client.get("/api/fb/accounts/list", headers=fb_user, query_string={"search": "9005"})
         item = r.get_json()["items"][0]
         assert item["primary_bm_name"] == "BM主"
 
