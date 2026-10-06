@@ -529,8 +529,9 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     与下方名称类字段的 `if not value: continue` 不对称是**刻意的**：空串在名称
     命名空间里根本没有可解析的候选，属规格 §8.4 的「命中 0 条」。
 
-    产出里可能带两个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
-    `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名。
+    产出里可能带三个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
+    `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名、
+    `_primary_bm_name`（FB 专有，表里填的主 BM 名）。
 
     create_missing 由 build_diff 传 False（dry_run 只读），落库阶段才用默认 True。
     """
@@ -538,6 +539,15 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     for f in _PLAIN_TEXT_FIELDS[platform]:
         # `_conf_text` 兜底是因为 p 未必全是 str（同 `_conf_text` 的既有理由）
         out[f] = _conf_text(p.get(f))
+    # FB 的「位置」列：BM 名 → 主 BM。它不是普通外键列（主 BM 存在中间表
+    # fb_account_bm 上，见 _set_primary_bm），所以不能走 _resolve_field /
+    # _target_column 那条通用路径，改为在这里产出 `_primary_bm_name` 合成键，
+    # 由 apply_diff 的 to_create / to_update 分支消费。
+    # 注意**不判空**：表里「位置」空着时也要产出空串，交给 apply_diff 的 to_update
+    # 走「只清 is_primary 标记、不删关联行」那条分支（设计 §6.3）。若在这里用
+    # `if bm_name:` 把空值丢掉，户管就永远无法从表里撤销主 BM。
+    if platform == "fb":
+        out["_primary_bm_name"] = (p.get("primary_bm_name") or "").strip()
     for f in _parseable_fields(platform):
         value = (p.get(f) or "").strip()
         if not value:
@@ -597,6 +607,14 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
     if key == "_is_dead":
         cur_dead = bool((existing.get("death_date") or "").strip())
         return cur_dead == bool(value)
+    if key == "_primary_bm_name":
+        # 合成键：当前主 BM 名不在业务表行上（挂在中间表 fb_account_bm），
+        # existing 里取不到，必须现查 —— 否则「表里清空位置」会被误判成「没变」
+        # 而被 build_diff 滤掉，主 BM 永远清不掉（设计 §6.3）。
+        row = db.execute(
+            "SELECT b.name AS n FROM fb_account_bm ab JOIN fb_bms b ON ab.bm_id=b.id "
+            "WHERE ab.account_id=? AND ab.is_primary=1", (existing["id"],)).fetchone()
+        return (row["n"] if row else "") == (value if value is not None else "")
     cur = existing.get(key)
     if cur is None and value in (None, ""):
         return True
@@ -725,6 +743,10 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
     conf = confirmed or {}
     created = updated = owner_changed = 0
     errors = []
+    # 行级「非致命、但户管要知道」的提示（与 build_diff 的 warnings 同形：row + message）。
+    # 落库阶段唯一的此类情形是 FB「位置」列的 BM 名无法唯一匹配 —— 该列被跳过，
+    # 但不该让整行失败。errors 装的是异常，语义不同，故单列一个列表。
+    warnings = []
     applied_owner_rows = []
     hit = {"create": set(), "update": set(), "owner": set()}
 
@@ -764,6 +786,10 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
                                                  "value": (src.get("remark") or "").strip()})
             # _is_dead 是合成标记，不是数据库列，必须先摘掉再拼 INSERT
             want_dead = bool(src.pop("_is_dead", False))
+            # FB 的「位置」列同样是合成键：主 BM 挂在中间表 fb_account_bm 上，不是
+            # fb_accounts 的列。**必须在下面 `cols = ", ".join(src)` 之前摘掉**，
+            # 否则会拼出 `INSERT INTO fb_accounts(..., _primary_bm_name)` 直接报错。
+            fb_bm_name = src.pop("_primary_bm_name", None) if platform == "fb" else None
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读）
             pending = item.get("pending_status")
             if pending:
@@ -772,14 +798,30 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             src[key_field] = item["account_id"]
             src["name"] = item["account_id"]
             src["owner_id"] = item.get("owner_id")
-            src["death_date"] = ""
+            # FB 无 death_date 列（子项目 ① 已确认，设计 §6.1）：生死只由状态列承载，
+            # 「apply_diff 不据此写 death_date」。无条件写会让 FB 的 INSERT 直接
+            # `no column named death_date` —— 整条 to_create 失败，主 BM（位置列）也就挂不上。
+            if platform != "fb":
+                src["death_date"] = ""
             cols = ", ".join(src)
             marks = ", ".join("?" for _ in src)
             db.execute(f"INSERT INTO {table}({cols}) VALUES({marks})", tuple(src.values()))
             new_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
             # 首次分配也要留痕（与 main.py:4333 的 create / :4479 的 import 同契约）。
             # new_id 是刚 INSERT 出来的**行主键**，历史表的外键列要的正是它。
-            _record_channel_assign(db, platform, new_id, src, user_id)
+            # MCC / BC 首次分配留痕。FB 无 MCC / BC —— `_CHANNEL_HISTORY_SPEC` 没有
+            # "fb" 键，直接调用会 KeyError。调用点按平台分流（设计 §5：FB 绝不走到
+            # 那两个函数）；FB 自己的留痕是下面的主 BM（_record_bm_change）。
+            if platform != "fb":
+                _record_channel_assign(db, platform, new_id, src, user_id)
+            # FB 的「位置」列：把主 BM 挂到刚建出的账户上（bm_name 在上方已从 src 摘出）。
+            if platform == "fb" and fb_bm_name:
+                bid = resolve_named_id(
+                    db, "SELECT id FROM fb_bms WHERE name=? AND deleted_at IS NULL",
+                    (fb_bm_name,))
+                if bid:
+                    _set_primary_bm(db, new_id, bid)
+                    _record_bm_change(db, new_id, None, bid, user_id)
             _apply_death(db, platform, new_id, want_dead)
             created += 1
         except Exception as e:
@@ -792,6 +834,12 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
         try:
             fields = dict(item.get("fields") or {})
             is_dead_val = fields.pop("_is_dead", None)
+            # 「位置」列是合成键（主 BM 挂在中间表上，不是 fb_accounts 的列）：
+            # **必须在下面 `sets = [f"{k}=?" for k in fields]` 之前摘掉**，否则会拼出
+            # `UPDATE fb_accounts SET _primary_bm_name=?` 直接报错。
+            # 注意空值语义：表里「位置」空着 → 这里是空串（不是 None），
+            # 要落到下面的 else 分支「只清主 BM 标记、不删关联行」（设计 §6.3）。
+            new_bm_name = fields.pop("_primary_bm_name", None) if platform == "fb" else None
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读，规格 §8.3
             # 步骤 7/8）。owner 取该行作用域归属，只记「谁先建的」——不参与查重。
             pending = item.get("pending_status")
@@ -808,7 +856,32 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
                 sets.append("status_changed_date=datetime('now','localtime')")
             # MCC / BC 变更必须留痕（历史面板按行主键查）。放在 UPDATE **之前**：
             # 旧值要从库里读，写完这一行就读不到了。
-            _record_channel_change(db, platform, item["existing_id"], fields, user_id)
+            # FB 无 MCC / BC —— `_CHANNEL_HISTORY_SPEC` 没有 "fb" 键，调用点按平台
+            # 分流（设计 §5）。FB 的留痕是下面的主 BM（_record_bm_change）。
+            if platform != "fb":
+                _record_channel_change(db, platform, item["existing_id"], fields, user_id)
+            # FB 的「位置」列：BM 名 → 换主 BM。必须放在 UPDATE **之前** —— 旧主 BM
+            # 要从库里读，写完这行业务表就读不到了。
+            if platform == "fb" and new_bm_name is not None:
+                # `ab.bm_id` 就是 fb_bms 的**行主键**（中间表的外键），正是
+                # fb_account_bm_history.old_bm_id 需要的值。**不能取 `b.bm_id`**
+                # —— 那是 fb_bms 的业务文本 ID（如 'b1'），拿它写历史会撞 FK。
+                old = db.execute(
+                    "SELECT ab.bm_id AS bm_id FROM fb_account_bm ab "
+                    "WHERE ab.account_id=? AND ab.is_primary=1",
+                    (item["existing_id"],)).fetchone()
+                bid = resolve_named_id(
+                    db, "SELECT id FROM fb_bms WHERE name=? AND deleted_at IS NULL",
+                    (new_bm_name,)) if new_bm_name else None
+                if new_bm_name and bid is None:
+                    warnings.append({"row": item["row"],
+                                     "message": f"位置「{new_bm_name}」无法唯一匹配，已跳过"})
+                else:
+                    _set_primary_bm(db, item["existing_id"], bid) if bid else \
+                        db.execute("UPDATE fb_account_bm SET is_primary=0 WHERE account_id=?",
+                                   (item["existing_id"],))
+                    _record_bm_change(db, item["existing_id"],
+                                      old["bm_id"] if old else None, bid, user_id)
             if sets:
                 db.execute(f"UPDATE {table} SET {', '.join(sets)}, "
                            "updated_at=datetime('now','localtime') WHERE id=?",
@@ -850,7 +923,53 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             "applied_owner_rows": applied_owner_rows, "not_applied": not_applied,
             "remark_m_writeback": remark_m_writeback,
             "remark_operator_push": remark_operator_push,
-            "errors": errors}
+            "errors": errors, "warnings": warnings}
+
+
+def _set_primary_bm(db, acc_pk: int, bm_id: int) -> None:
+    """把某账户的主 BM 换成 bm_id。**不 commit**，事务边界由调用方负责。
+
+    ⚠️ **必须先清后设，顺序不能反。** `idx_fb_account_bm_primary` 是
+    `WHERE is_primary = 1` 的部分唯一索引（子项目 ① §4.3）。SQLite 的唯一索引是
+    **逐语句**检查的，先设新的（此刻旧的主 BM 还是 1）会立刻 UNIQUE constraint failed。
+
+    与 `py/routes/fb_routes.py::_set_primary_bm` 同一契约（逻辑层刻意不 import
+    flask / routes，故不能复用那个）。BM 存在中间表 `fb_account_bm` 上，不是
+    `fb_accounts` 的外键列 —— 所以它走不了 `_resolve_field` / `_target_column`
+    那条通用路径。
+    """
+    db.execute("UPDATE fb_account_bm SET is_primary=0 WHERE account_id=?", (acc_pk,))
+    cur = db.execute("UPDATE fb_account_bm SET is_primary=1 WHERE account_id=? AND bm_id=?",
+                     (acc_pk, bm_id))
+    if cur.rowcount == 0:
+        db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,1)",
+                   (acc_pk, bm_id))
+
+
+def _record_bm_change(db, acc_pk: int, old_bm_id, new_bm_id, changed_by: int) -> None:
+    """主 BM 真变了才写一行 `fb_account_bm_history`。**不 commit**。
+
+    与 GG 的 `account_mcc_history` / TT 的 `tt_account_bc_history` 同契约：
+    任何 MCC / BC 变更都要留痕，FB 的对应物是 BM。`change_type` 取既有的 `batch`
+    （表驱动的一批账户改列，与 main.py 的批量修改同档）。
+
+    changed_by 为假值时不写：该列 `REFERENCES users(id)`，写 None/0 会撞 FK 或
+    记出一行无主历史，宁可漏记也不能写坏（同 `_insert_channel_history` 的口径）。
+
+    本函数刻意不复用 `_CHANNEL_HISTORY_SPEC` / `_insert_channel_history`：FB 的历史
+    表 `fb_account_bm_history` 挂在**中间表**上、不是业务表的外键列，那个形状装不下
+    （设计 §5）。
+    """
+    old_val = _norm_ref_id(old_bm_id)
+    new_val = _norm_ref_id(new_bm_id)
+    if old_val == new_val:
+        return
+    if not changed_by:
+        log.warning("FB 主 BM 变更但缺少 changed_by，跳过历史记录 acc=%s", acc_pk)
+        return
+    db.execute("INSERT INTO fb_account_bm_history"
+               "(account_id, old_bm_id, new_bm_id, changed_by, change_type) "
+               "VALUES(?,?,?,?,?)", (acc_pk, old_val, new_val, changed_by, "batch"))
 
 
 def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:

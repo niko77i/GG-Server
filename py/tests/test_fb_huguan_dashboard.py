@@ -133,7 +133,7 @@ class TestFbApplyDeathIsNoop:
     def test_death_does_not_touch_fb_accounts(self, client):
         """fb_accounts 没有 death_date 列 —— 走到这里会 OperationalError。
 
-        这条是防回归的关键断言：FB 分支忘记 return 会让整批同步挂掉，
+        这条是防回归的关键断言：FB 分支忘记 return 会让整批同步逐行报错，
         而不是静默出错，所以必须有一个用例钉住「调用不抛异常且不改任何列」。
         """
         db = database.get_db()
@@ -171,3 +171,66 @@ class TestFbApplyDeathIsNoop:
         db.close()
         assert row["death_date"] != ""
         assert row["status_changed_date"] != ""
+
+
+class TestFbPrimaryBmSync:
+    @pytest.fixture
+    def fb_bm_seed(self, client):
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('fb_bm', 'x', 'user', 'fb')")
+        uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        ids = []
+        for nm, bid in (("BM一", "b1"), ("BM二", "b2")):
+            db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES(?,?,?)", (nm, bid, uid))
+            ids.append(db.execute("SELECT last_insert_rowid()").fetchone()[0])
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', 'BM-1', ?)",
+                   (uid,))
+        acc = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+        return {"uid": uid, "bm1": ids[0], "bm2": ids[1], "acc": acc}
+
+    def test_set_primary_bm_switches(self, client, fb_bm_seed):
+        s = fb_bm_seed
+        db = database.get_db()
+        hd._set_primary_bm(db, s["acc"], s["bm1"])
+        db.commit()
+        hd._set_primary_bm(db, s["acc"], s["bm2"])   # 换 BM
+        db.commit()
+        row = db.execute("SELECT bm_id FROM fb_account_bm WHERE account_id=? AND is_primary=1",
+                         (s["acc"],)).fetchone()
+        db.close()
+        assert row["bm_id"] == s["bm2"]
+
+    def test_record_bm_change_writes_history(self, client, fb_bm_seed):
+        s = fb_bm_seed
+        db = database.get_db()
+        hd._record_bm_change(db, s["acc"], None, s["bm1"], s["uid"])
+        db.commit()
+        row = db.execute("SELECT old_bm_id, new_bm_id, changed_by FROM fb_account_bm_history "
+                         "WHERE account_id=?", (s["acc"],)).fetchone()
+        db.close()
+        assert row["old_bm_id"] is None and row["new_bm_id"] == s["bm1"]
+
+    def test_record_bm_change_skips_when_unchanged(self, client, fb_bm_seed):
+        """值没变不写历史 —— 否则历史面板会被 A→A 刷屏。"""
+        s = fb_bm_seed
+        db = database.get_db()
+        hd._record_bm_change(db, s["acc"], s["bm1"], s["bm1"], s["uid"])
+        db.commit()
+        n = db.execute("SELECT COUNT(*) FROM fb_account_bm_history WHERE account_id=?",
+                       (s["acc"],)).fetchone()[0]
+        db.close()
+        assert n == 0
+
+    def test_record_bm_change_skips_without_changed_by(self, client, fb_bm_seed):
+        """changed_by REFERENCES users(id)，写 None 会撞 FK —— 宁可漏记。"""
+        s = fb_bm_seed
+        db = database.get_db()
+        hd._record_bm_change(db, s["acc"], None, s["bm1"], 0)
+        db.commit()
+        n = db.execute("SELECT COUNT(*) FROM fb_account_bm_history WHERE account_id=?",
+                       (s["acc"],)).fetchone()[0]
+        db.close()
+        assert n == 0
