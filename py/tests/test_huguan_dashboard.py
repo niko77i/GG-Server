@@ -10,6 +10,7 @@ import sqlite3
 import pytest
 
 import database
+from huguan_dashboard import apply_diff
 
 
 def _is_datetime_shape(value) -> bool:
@@ -3810,3 +3811,93 @@ class TestReadOperatorRemarkMap:
         hd.read_operator_remark_map(db, u)
         db.close()
         assert seen["sheet_name"] == "私有看板", "私有配置必须压过全局兜底"
+
+
+class TestApplyDiffRemarkPrecedence:
+    """首次入库时投手看板 J 列优先（2026-10-06 规格）。"""
+
+    def _prepare(self, client):
+        db = database.get_db()
+        u_op = _seed(db, "_adrp_op", "黎明", platform="tt")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','SS-TT')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{u_op}", json.dumps({"my_dashboard": "黎明账户看板"})))
+        db.commit()
+        return db, u_op
+
+    def _arm_read(self, monkeypatch, mapping):
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [["运营", "", "", "账户ID"],
+                                             *[["黎明", "", "", aid, "", "", "", "", "", v]
+                                               for aid, v in mapping.items()]])
+
+    def _diff_one(self, db, aid, owner_name, remark):
+        from huguan_dashboard import build_diff, parse_row
+        row = [""] * 13
+        row[2], row[6], row[12] = aid, owner_name, remark
+        return build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+
+    def test_operator_value_wins_on_first_ingest(self, client, monkeypatch):
+        db, u_op = self._prepare(client)
+        self._arm_read(monkeypatch, {"ADRP-1": "投手填的"})
+        diff = self._diff_one(db, "ADRP-1", "黎明", "户管填的")
+        res = apply_diff(db, diff, "tt", {"create": ["ADRP-1"]}, user_id=1)
+        stored = db.execute(
+            "SELECT remark FROM tt_accounts WHERE advertiser_id='ADRP-1'").fetchone()["remark"]
+        assert stored == "投手填的", "投手看板有值时投手赢"
+        assert res["remark_m_writeback"] == [{"account_id": "ADRP-1", "value": "投手填的"}]
+        assert res["remark_operator_push"] == []
+        db.close()
+
+    def test_supervisor_value_wins_when_operator_blank(self, client, monkeypatch):
+        db, u_op = self._prepare(client)
+        self._arm_read(monkeypatch, {"ADRP-2": ""})
+        diff = self._diff_one(db, "ADRP-2", "黎明", "户管填的")
+        res = apply_diff(db, diff, "tt", {"create": ["ADRP-2"]}, user_id=1)
+        stored = db.execute(
+            "SELECT remark FROM tt_accounts WHERE advertiser_id='ADRP-2'").fetchone()["remark"]
+        assert stored == "户管填的"
+        assert res["remark_m_writeback"] == []
+        assert res["remark_operator_push"] == [
+            {"owner_id": u_op, "account_id": "ADRP-2", "value": "户管填的"}]
+        db.close()
+
+    def test_operator_sheet_read_once_per_owner(self, client, monkeypatch):
+        """同一投手的多个新建账户只读一次表。"""
+        import google_sheets_service as gs
+        db, u_op = self._prepare(client)
+        calls = []
+
+        def _count(service, spreadsheet_id, sheet_name, rng):
+            calls.append(sheet_name)
+            return [["运营", "", "", "账户ID"],
+                    ["黎明", "", "", "ADRP-3", "", "", "", "", "", "投手3"],
+                    ["黎明", "", "", "ADRP-4", "", "", "", "", "", "投手4"]]
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "read_sheet_values", _count)
+        d3 = self._diff_one(db, "ADRP-3", "黎明", "户管3")
+        d4 = self._diff_one(db, "ADRP-4", "黎明", "户管4")
+        # 两个账户必须在**同一次** apply_diff 调用里创建，才能共享缓存
+        diff = {"to_create": d3["to_create"] + d4["to_create"], "to_update": [],
+                "owner_changes": [], "to_skip": [], "warnings": [], "summary": {}}
+        apply_diff(db, diff, "tt", {"create": ["ADRP-3", "ADRP-4"]}, user_id=1)
+        assert len(calls) == 1, f"应在一次 apply_diff 内只读一次投手表，实读 {len(calls)} 次"
+        db.close()
+
+    def test_gg_produces_no_remark_keys(self, client, monkeypatch):
+        """回归护栏：GG 不得产生这两个键的内容。"""
+        db = database.get_db()
+        u1 = _seed(db, "_adrp_gg", "张三")
+        row = ["", "", "ADRP-GG", "MCC-A", "", "", "张三", ""]
+        from huguan_dashboard import build_diff, parse_row
+        diff = build_diff(db, [dict(parse_row(row, "gg"), row=2)], "gg")
+        res = apply_diff(db, diff, "gg", {"create": ["ADRP-GG"]}, user_id=1)
+        # 正向对照：先确认该行**确实**走过了 to_create 分支（否则下面两条
+        # `== []` 在「行根本没进 diff」时会静默通过 —— 本项目踩过两次的空断言坑）。
+        assert res["created"] == 1
+        assert res["remark_m_writeback"] == []
+        assert res["remark_operator_push"] == []
+        db.close()

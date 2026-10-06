@@ -678,6 +678,13 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
     applied_owner_rows = []
     hit = {"create": set(), "update": set(), "owner": set()}
 
+    # TT 备注首次对齐的产物（2026-10-06 规格）：由路由层 pop 后消费。
+    remark_m_writeback = []
+    remark_operator_push = []
+    # 本次调用内的投手看板备注缓存 {owner_id: {aid: remark}}。
+    # 局部而非模块级 —— 表内容随时可变，跨请求缓存会让户管看到过期值。
+    _operator_remark_cache = {}
+
     table = "tt_accounts" if platform == "tt" else "accounts"
     key_field = ACCOUNT_KEY_FIELD[platform]
 
@@ -689,6 +696,20 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             # db_values 装的是「数据库列名 → 值」（见 build_diff 的 to_create），
             # 与表列字母的 cells 不是一回事，切勿混用。
             src = dict(item.get("db_values") or {})
+            if platform == "tt" and "remark" in src:
+                _op_id = item.get("owner_id")
+                if _op_id is not None and _op_id not in _operator_remark_cache:
+                    _operator_remark_cache[_op_id] = read_operator_remark_map(db, _op_id)
+                _op_value = (_operator_remark_cache.get(_op_id) or {}).get(
+                    item["account_id"], "").strip() if _op_id is not None else ""
+                if _op_value:
+                    src["remark"] = _op_value            # 投手赢
+                    remark_m_writeback.append({"account_id": item["account_id"],
+                                               "value": _op_value})
+                else:
+                    remark_operator_push.append({"owner_id": _op_id,
+                                                 "account_id": item["account_id"],
+                                                 "value": (src.get("remark") or "").strip()})
             # _is_dead 是合成标记，不是数据库列，必须先摘掉再拼 INSERT
             want_dead = bool(src.pop("_is_dead", False))
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读）
@@ -775,6 +796,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
     db.commit()
     return {"created": created, "updated": updated, "owner_changed": owner_changed,
             "applied_owner_rows": applied_owner_rows, "not_applied": not_applied,
+            "remark_m_writeback": remark_m_writeback,
+            "remark_operator_push": remark_operator_push,
             "errors": errors}
 
 
