@@ -234,3 +234,138 @@ class TestFbPrimaryBmSync:
                        (s["acc"],)).fetchone()[0]
         db.close()
         assert n == 0
+
+
+def _fb_row(account_id: str, bm_name: str = "") -> list:
+    """构造一行 FB 表原始单元格值（A:Q 共 17 列，只填 D 资产UID 与 P 位置）。"""
+    values = [""] * 17
+    values[hd.col_index("D")] = account_id
+    values[hd.col_index("P")] = bm_name
+    return values
+
+
+class TestFbBuildApplyIntegration:
+    """端到端驱动 build_diff / apply_diff 的 FB 分支（子项目 ② Task 4）。
+
+    上面 TestFbPrimaryBmSync 只直接调 `_set_primary_bm` / `_record_bm_change` 两个
+    助手；本类走真实路径：parse_row → build_diff → apply_diff，钉住 6 处 FB 安全
+    修补里「清位置 / 换位置 / 建号不写 death_date / 坏 BM 名」这几条集成行为 ——
+    它们正是后续重构最容易静默改坏、而单测助手函数看不见的部分。
+    """
+
+    @pytest.fixture
+    def fb_seed(self, client):
+        """一个 FB 用户 + 两个 BM + 一个已存账户（BM一 为主 BM，BM二 为非主）。"""
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('fb_int', 'x', 'user', 'fb')")
+        uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        ids = []
+        for nm, bid in (("BM一", "b1"), ("BM二", "b2")):
+            db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES(?,?,?)", (nm, bid, uid))
+            ids.append(db.execute("SELECT last_insert_rowid()").fetchone()[0])
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', 'BM-1', ?)",
+                   (uid,))
+        acc = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,1)",
+                   (acc, ids[0]))
+        db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,0)",
+                   (acc, ids[1]))
+        db.commit()
+        db.close()
+        return {"uid": uid, "bm1": ids[0], "bm2": ids[1], "acc": acc}
+
+    def test_blank_position_clears_primary_without_deleting_links(self, client, fb_seed):
+        """位置空着 → 清主 BM 标记，但关联行一行都不能删。"""
+        s = fb_seed
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row("BM-1", ""), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        # 先钉住「空位置确实进了差异」：build_diff 若看不见当前主 BM 会把它滤掉。
+        upd = [i for i in diff["to_update"] if i["account_id"] == "BM-1"]
+        assert len(upd) == 1
+        assert "_primary_bm_name" in upd[0]["fields"]
+        before = db.execute("SELECT COUNT(*) FROM fb_account_bm WHERE account_id=?",
+                            (s["acc"],)).fetchone()[0]
+
+        res = hd.apply_diff(db, diff, "fb", {"update": ["BM-1"]}, s["uid"])
+
+        prim = db.execute("SELECT COUNT(*) FROM fb_account_bm WHERE account_id=? AND is_primary=1",
+                          (s["acc"],)).fetchone()[0]
+        after = db.execute("SELECT COUNT(*) FROM fb_account_bm WHERE account_id=?",
+                           (s["acc"],)).fetchone()[0]
+        db.close()
+        assert res["errors"] == []
+        assert res["updated"] == 1
+        assert prim == 0, "主 BM 标记应被清掉"
+        assert before == 2
+        assert after == 2, "清标记不得删掉任何 fb_account_bm 关联行"
+
+    def test_position_filled_switches_primary_and_writes_history(self, client, fb_seed):
+        """位置填 BM 名 → 换主 BM（旧的不再是主），并写一行历史。"""
+        s = fb_seed
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row("BM-1", "BM二"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+
+        res = hd.apply_diff(db, diff, "fb", {"update": ["BM-1"]}, s["uid"])
+
+        prim = db.execute("SELECT bm_id FROM fb_account_bm WHERE account_id=? AND is_primary=1",
+                          (s["acc"],)).fetchone()
+        old_primary = db.execute(
+            "SELECT is_primary FROM fb_account_bm WHERE account_id=? AND bm_id=?",
+            (s["acc"], s["bm1"])).fetchone()
+        hist = db.execute("SELECT old_bm_id, new_bm_id, changed_by FROM fb_account_bm_history "
+                          "WHERE account_id=?", (s["acc"],)).fetchall()
+        db.close()
+        assert res["errors"] == []
+        assert res["updated"] == 1
+        assert prim is not None and prim["bm_id"] == s["bm2"], "新 BM 应成为主 BM"
+        assert old_primary["is_primary"] == 0, "旧 BM 不应再是主 BM"
+        assert len(hist) == 1
+        assert hist[0]["old_bm_id"] == s["bm1"]
+        assert hist[0]["new_bm_id"] == s["bm2"]
+        assert hist[0]["changed_by"] == s["uid"]
+
+    def test_fb_create_does_not_write_death_date(self, client, fb_seed):
+        """FB 建号不得写 death_date —— 否则 fb_accounts 无此列，整条建号失败。
+
+        回归守卫：曾有无条件 `src["death_date"] = ""`，让每个 FB 新建账户
+        都 `no column named death_date` 落进 errors，created 恒为 0。
+        """
+        s = fb_seed
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row("BM-NEW", ""), "fb")
+        parsed["row"] = 3
+        diff = hd.build_diff(db, [parsed], "fb")
+        assert any(i["account_id"] == "BM-NEW" for i in diff["to_create"])
+
+        res = hd.apply_diff(db, diff, "fb", {"create": ["BM-NEW"]}, s["uid"])
+
+        row = db.execute("SELECT id FROM fb_accounts WHERE account_id='BM-NEW'").fetchone()
+        db.close()
+        assert res["errors"] == [], res["errors"]
+        assert res["created"] == 1
+        assert row is not None, "FB 新建账户应真的落库"
+
+    def test_position_unknown_bm_warns_and_writes_nothing(self, client, fb_seed):
+        """位置填不存在的 BM 名 → 出警告，且不换主 BM、不写历史。"""
+        s = fb_seed
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row("BM-1", "不存在的BM"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+
+        res = hd.apply_diff(db, diff, "fb", {"update": ["BM-1"]}, s["uid"])
+
+        prim = db.execute("SELECT bm_id FROM fb_account_bm WHERE account_id=? AND is_primary=1",
+                          (s["acc"],)).fetchone()
+        n_hist = db.execute("SELECT COUNT(*) FROM fb_account_bm_history WHERE account_id=?",
+                            (s["acc"],)).fetchone()[0]
+        db.close()
+        assert res["errors"] == []
+        assert any("无法唯一匹配" in w["message"] for w in res["warnings"]), res["warnings"]
+        assert prim is not None and prim["bm_id"] == s["bm1"], "坏 BM 名不得改动主 BM"
+        assert n_hist == 0, "坏 BM 名不得写历史"
