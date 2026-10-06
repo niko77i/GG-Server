@@ -4022,3 +4022,55 @@ class TestRemarkPushPath:
         assert {"account_id": "E2E-1", "cells": {"M": "投手填的"}} in rows, \
             "投手赢 → 回写户管看板 M 列"
         assert not any("J" in r["cells"] for r in rows), "投手赢时不应推投手看板"
+
+
+class TestUpdateAccountPushesRemark:
+    """投手在系统内联改备注 → 推两张表（2026-10-06 规格）。"""
+
+    def test_updating_remark_pushes_to_both_boards(self, client, monkeypatch):
+        import google_sheets_service as gs
+        op, op_uid = _create_user(client, "_uapr_op", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{op_uid}",   # 让 writeback_rows 有配置可写
+                    json.dumps({"tt": {"spreadsheet_id": "HG-SS", "sheet_name": "S"}})))
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','OP-SS')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{op_uid}", json.dumps({"my_dashboard": "投手看板"})))
+        aid = _seed_tt(db, "UAPR-1", op_uid)
+        db.commit()
+        db.close()
+
+        captured = []
+
+        def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
+            captured.append({"sheet_name": sheet_name, "key_col": key_col, "rows": rows})
+            return {"updated": len(rows), "not_found": []}
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
+        import main as m
+        monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+
+        resp = client.put(f"/api/tt/accounts/{aid}", headers=op, json={"remark": "新备注"})
+        assert resp.status_code == 200
+        cells = [c for cap in captured for c in cap["rows"]]
+        assert any(r["cells"].get("M") == "新备注" for r in cells), "应推户管看板 M 列"
+        assert any(r["cells"].get("J") == "新备注" for r in cells), "应推投手看板 J 列"
+
+    def test_updating_other_fields_does_not_push_remark(self, client, monkeypatch):
+        """回归护栏：不带 remark 的更新不得触发备注推送。"""
+        import google_sheets_service as gs
+        op, op_uid = _create_user(client, "_uapr_op2", role="user", platform="tt")
+        db = database.get_db()
+        aid = _seed_tt(db, "UAPR-2", op_uid)
+        db.commit()
+        db.close()
+        called = []
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: called.append(1) or {"updated": 0, "not_found": []})
+        import main as m
+        monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+        client.put(f"/api/tt/accounts/{aid}", headers=op, json={"country": "US"})
+        assert called == []

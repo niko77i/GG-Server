@@ -312,6 +312,19 @@ def update_account(aid):
             db.execute(f"UPDATE tt_accounts SET {f}=? WHERE id=?",
                        (str(data[f]).strip() if isinstance(data[f], str) else data[f], aid))
 
+    # 备注改动要推到两张表（2026-10-06 规格）。在 editable 循环之后取一次值：
+    # 循环里可能已 strip 过，或本次并未带 remark，故以「data 里是否给了 remark」为准。
+    if "remark" in data and data["remark"] is not None:
+        _remark_value = str(data["remark"]).strip()
+        _adv = row["advertiser_id"]
+        _owner_for_push = row["owner_id"]
+        # 户管看板：writeback_rows 用的是调用者 uid 的 huguan_dashboard_{uid} 配置。
+        # 投手调用时查不到配置会静默空转 —— 这是既有行为，见规格 §5 已知后果 2。
+        hd.writeback_rows(uid, "tt", [_adv])
+        # 投手看板：推给**账户的归属人**，不是调用者 —— 户管可能代改别人名下的户。
+        if _owner_for_push is not None:
+            hd.push_remark_to_operator_dashboard(_owner_for_push, _adv, _remark_value)
+
     # agent/status 文本回退
     if "agent" in data or "agent_id" in data:
         agent_id = _resolve_agent_id(db, (data.get("agent") or "").strip(), data.get("agent_id"))
