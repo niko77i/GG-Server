@@ -1050,7 +1050,14 @@ git commit -m "feat(sheet-write): 新增 status / retry 两个接口
 ### Task 5: TT 回收清单接入统一入口
 
 **Files:**
-- Modify: `py/routes/tt_accounts_routes.py`（`_maybe_write_recycle` `:1214-1229`、`_trigger_recycle_if_dead` `:1232-1248`、单条更新 `:299-306` 与 `:338-340`、批量更新 `:446-449` 与 `:466-468`）
+- Modify: `py/routes/tt_accounts_routes.py`（`_maybe_write_recycle` `:1250` 起、`_trigger_recycle_if_dead` `:1268` 起、单条更新 `:299-306` 与 `:353-354`、批量更新 `:465`/`:469` 与 `:477-484`）
+
+> **行号漂移提示（2026-10-06 重新审核）**：本任务初稿写的行号基于当时的
+> `tt_accounts_routes.py`。期间另一个会话在该文件提交了 4 次改动（换绑记录 / 备注回写），
+> 上述行号已按**当前**文件更新。**状态变更那两段代码本身逐字未变**，只是整体下移。
+> 定位请以**函数与代码锚点**为准（`update_account` 的 `if "status" in data or "status_id" in data:`、
+> `batch_update_accounts` 的 `if field == "status_id" and value:`），行号仅作参考 ——
+> 该文件仍可能有并行改动。
 - Test: `py/tests/test_tt_recycle_sheet_write.py`
 
 **Interfaces:**
@@ -1261,7 +1268,8 @@ Expected: FAIL —— `sheet_write_log` 里没有任何记录（当前 `_maybe_w
 import sheet_write
 ```
 
-把 `_maybe_write_recycle`（`:1214-1229`）与 `_trigger_recycle_if_dead`（`:1232-1248`）整段替换为：
+把 `_maybe_write_recycle`（`:1250` 起）与 `_trigger_recycle_if_dead`（`:1268` 起）整段替换为
+（两函数之间到下一个 `# ====================` 分节之前）：
 
 ```python
 # ==================== 状态改「非存活」写回收清单 ====================
@@ -1384,7 +1392,7 @@ def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason, snapshot
     }
 ```
 
-并把 `:338-340` 改为：
+并把 `:353-354`（原 `:338-340`，已下移）改为：
 
 ```python
             if new_status_name and new_status_name != (row["status_name"] or ""):
@@ -1394,7 +1402,7 @@ def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason, snapshot
                                          (data.get("recycle_reason") or "").strip(), snap)
 ```
 
-**批量路径**（`batch_update_accounts`）：把 `:449` 的 SELECT 与 `:453` 的 SELECT 都补上缺的两列——
+**批量路径**（`batch_update_accounts`）：把 `:465` 与 `:469` 的两条 SELECT（原 `:449`/`:453`，已下移）都补上缺的两列——
 
 ```python
             r = db.execute("SELECT owner_id, bc_id, advertiser_id, status_id, "
@@ -1402,7 +1410,7 @@ def _trigger_recycle_if_dead(db, uid, advertiser_id, status_id, reason, snapshot
                            (aid,)).fetchone()
 ```
 
-并把 `:461-468` 改为：
+并把 `:477-484`（原 `:461-468`，已下移）改为：
 
 ```python
         if field == "status_id" and value:
