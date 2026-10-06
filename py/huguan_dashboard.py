@@ -430,8 +430,13 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         fields = _collect_updates(db, platform, p, scope_owner, row_no, warnings,
                                   create_missing=False)
         pending = fields.pop("_pending_status", None)
+        # TT 的 remark 不走「按表覆盖」（2026-10-06 规格）：投手权威永久，
+        # 户管看板 M 列的改动不再进系统。空值也因此不会进 clears，
+        # 根治了原先「户管 M 列空着就清掉投手备注」的隐患。
+        # 注意：只剔 to_update —— to_create（首次入库）仍要用户管 M 列的值。
         changed = {k: v for k, v in fields.items()
-                   if not _same_as_existing(db, platform, existing, k, v)}
+                   if not _same_as_existing(db, platform, existing, k, v)
+                   and not (platform == "tt" and k == "remark")}
         # pending 也算真实变更：系统里没这个状态名，建出来必然与现状不同。
         # 只比 `changed` 会让「这一行只改了状态」被整行漏掉。
         if changed or pending:

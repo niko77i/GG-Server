@@ -1304,7 +1304,13 @@ class TestBuildDiff:
         插入序 = 字典序，所以把 `sorted()` 改成 `list()` 在 GG 上永远是绿的。TT 的插入序
         是 `(acquired_date, country, timezone, consumption, remark)`，与字典序不同 ——
         必须用 TT 造一条**多列同时被清空**的用例才钉得住。列下标以 COLUMN_SPEC 为准：
-        A=0 acquired_date、E=4 country、H=7 timezone、J=9 consumption、M=12 remark。
+        A=0 acquired_date、E=4 country、H=7 timezone、J=9 consumption。
+
+        ⚠️ 2026-10-06 规格：TT 的 remark（M 列）对**已存在**账户不再进 to_update，
+        故也不出现在 clears —— 本用例因此不再包含 remark，且 seed 里的 remark 非空、
+        表里 M 留空，正好一并钉住「表里清空 remark 也不进 clears」。剩余四列的
+        插入序（acquired_date, country, timezone, consumption）仍 ≠ 字典序（
+        acquired_date, consumption, country, timezone），`sorted()` 的判别力不减。
         """
         from huguan_dashboard import build_diff, parse_row
         db, u1, _ = self._prepare(client)
@@ -1315,8 +1321,8 @@ class TestBuildDiff:
         diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
         assert len(diff["to_update"]) == 1
         assert diff["to_update"][0]["clears"] == [
-            "acquired_date", "consumption", "country", "remark", "timezone"]
-        assert diff["summary"]["clears"] == 5
+            "acquired_date", "consumption", "country", "timezone"]
+        assert diff["summary"]["clears"] == 4
         db.close()
 
     def test_existing_status_lands_in_fields_with_no_pending(self, client):
@@ -3613,3 +3619,57 @@ class TestWritebackOwnerChannelText:
         hd.writeback_owner_channel(uid, "tt", "WB-EMPTY", target, text="")
         cells = [r["cells"] for c in captured for r in c["rows"] if "L" in r["cells"]]
         assert cells == [{"L": ""}]
+
+
+class TestRemarkNotPulledForExistingAccounts:
+    """户管看板 M 列的改动不再进系统（2026-10-06 规格：投手权威永久）。"""
+
+    def _prepare(self, client):
+        db = database.get_db()
+        u1 = _seed(db, "_rmk_a", "张三")
+        return db, u1
+
+    def _tt_row_with_remark(self, aid, remark):
+        row = [""] * 13
+        row[2], row[6], row[12] = aid, "张三", remark   # C 账户ID / G 接户运营 / M 产品信息
+        return row
+
+    def test_existing_account_remark_change_is_ignored(self, client):
+        from huguan_dashboard import build_diff, parse_row
+        db, u1 = self._prepare(client)
+        _seed_tt_account(db, "RMK-EX", u1)
+        db.execute("UPDATE tt_accounts SET remark='投手写的' WHERE advertiser_id='RMK-EX'")
+        db.commit()
+        row = self._tt_row_with_remark("RMK-EX", "户管改的")
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        # 该行可能因别的字段进 to_update，但 remark 必须不在其中
+        for item in diff["to_update"]:
+            assert "remark" not in item["fields"], "已存在账户不得从表里更新 remark"
+        db.close()
+
+    def test_existing_account_blank_remark_does_not_clear_nor_report(self, client):
+        """表里把 M 列清空，既不清系统里的值，也不进 clears（旧隐患已根治）。"""
+        from huguan_dashboard import build_diff, parse_row
+        db, u1 = self._prepare(client)
+        _seed_tt_account(db, "RMK-CLR", u1)
+        db.execute("UPDATE tt_accounts SET remark='投手的备注' WHERE advertiser_id='RMK-CLR'")
+        db.commit()
+        row = self._tt_row_with_remark("RMK-CLR", "")      # M 列留空
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        for item in diff["to_update"]:
+            assert "remark" not in item["fields"]
+            assert "remark" not in item["clears"]
+        stored = db.execute(
+            "SELECT remark FROM tt_accounts WHERE advertiser_id='RMK-CLR'").fetchone()["remark"]
+        assert stored == "投手的备注", "表里空值不得清掉系统里的备注"
+        db.close()
+
+    def test_new_account_still_carries_remark(self, client):
+        """回归护栏：to_create 分支必须仍能收到户管 M 列的值（Task 3 要用）。"""
+        from huguan_dashboard import build_diff, parse_row
+        db, u1 = self._prepare(client)
+        row = self._tt_row_with_remark("RMK-NEW", "户管填的")
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        item = diff["to_create"][0]
+        assert item["db_values"]["remark"] == "户管填的"
+        db.close()
