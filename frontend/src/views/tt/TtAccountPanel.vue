@@ -53,6 +53,22 @@
         <!-- TT 账户列表不展示「账户名称」（用户 2026-10-06 裁定，仅 TT）。
              改名入口保留在行尾 ✏️ 的 TtAccountModal 里。 -->
         <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="150" show-overflow-tooltip />
+        <!-- 写表状态。沿用充值记录表「表格」列的既有语汇：⚠️ 点它即重试、✅ 已同步，
+             操作员不必重新学。位置紧贴「广告账户 ID」—— 本表 14 列横向必滚，
+             埋到表尾在左滚状态下会被漏看，那就等于没做。 -->
+        <el-table-column label="写表" width="54" align="center">
+          <template #default="{ row }">
+            <template v-if="sheetWriteFailures[row.advertiser_id]">
+              <el-tooltip placement="top"
+                :content="sheetWriteHint(sheetWriteFailures[row.advertiser_id])">
+                <el-button link size="small"
+                  :type="sheetWriteTone(sheetWriteFailures[row.advertiser_id].status)"
+                  @click.stop="retrySheetWrite(row)">{{ sheetWriteMark(sheetWriteFailures[row.advertiser_id].status) }}</el-button>
+              </el-tooltip>
+            </template>
+            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
+          </template>
+        </el-table-column>
         <el-table-column label="所属 BC" min-width="160">
           <template #default="{ row }">
             <div class="inline-edit-cell" v-if="editingBcId === row.id">
@@ -265,9 +281,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ttApi, ttAccountsApi } from '@/api/tt'
 import client from '@/api/client'
+import { sheetWriteApi } from '../../api/sheetWrite'
 import TtAccountModal from '@/components/tt/TtAccountModal.vue'
 import TtAccountDetailModal from '@/components/tt/TtAccountDetailModal.vue'
 import TtAccountDeletedModal from '@/components/tt/TtAccountDeletedModal.vue'
@@ -319,6 +336,13 @@ const recycleTarget = ref(null)
 const batchStatus = ref('')
 const batchBc = ref('')
 
+// ---------- 写表失败治理（回收户清单异步写表的结果） ----------
+const RECYCLE_TARGET = 'tt_recycle'
+const SHEET_WRITE_POLL_MS = 3000
+const SHEET_WRITE_POLL_MAX = 14          // ~42s，覆盖 30s 重试窗口
+let sheetWriteTimer = null
+const sheetWriteFailures = ref({})       // advertiser_id -> {target, status, error_msg}
+
 // 内联编辑状态
 const editingBcId = ref(null)
 const editingTimezoneId = ref(null)
@@ -356,7 +380,12 @@ function buildTimezoneOptions() {
 onMounted(async () => {
   await loadOptions()
   await load()
+  // 初始拉一次写表标记。load() 成功分支里也会拉，但 load() 请求失败时会跳过那次，
+  // 所以这里再保证一次：标记是「失败必须可见」的兜底，不能随列表请求的成败而丢。
+  loadSheetWriteFailures()
 })
+
+onUnmounted(() => { if (sheetWriteTimer) clearTimeout(sheetWriteTimer) })
 
 async function loadOptions() {
   try {
@@ -386,6 +415,7 @@ async function load() {
     items.value = res.items || []
     total.value = res.total || 0
     statusCounts.value = res.status_counts || {}
+    loadSheetWriteFailures()
   } catch (e) {
     ElMessage.error('加载失败: ' + (e.response?.data?.error || e.message))
   }
@@ -448,7 +478,14 @@ function onSearch() {
 function showModal(account) { acEditAccount.value = account || null; acModalVisible.value = true }
 function showDetail(row) { detailAccount.value = row; detailVisible.value = true }
 function openRecharge(row) { rechargeDefaultAccountId.value = row.advertiser_id || ''; rechargeVisible.value = true }
-function onRecycleSaved() { load() }
+async function onRecycleSaved() {
+  // 记下本次涉及哪些账户，用于轮询写表结果（快照：load() 会重建 items）
+  const ids = recycleTarget.value?.mode === 'batch'
+    ? (recycleTarget.value.accounts || []).map(a => a.advertiser_id)
+    : [recycleTarget.value?.account?.advertiser_id].filter(Boolean)
+  load()
+  for (const id of ids) pollSheetWrite(id)
+}
 
 function notImplemented(feature) {
   ElMessage.info((feature || '该功能') + '将在后续任务接入')
@@ -714,10 +751,13 @@ async function doBatchStatus(val) {
     return
   }
   try {
+    // 快照本次涉及的账户，load() 会重建 items（selected 随之清空）
+    const ids = selected.value.map(s => s.advertiser_id)
     await ttAccountsApi.batchUpdate({ ids: selected.value.map(s => s.id), field: 'status_id', value: val })
     ElMessage.success(`已将 ${selected.value.length} 个账户状态改为「${stName}」`)
     batchStatus.value = ''
     load()
+    for (const id of ids) pollSheetWrite(id)
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '批量修改失败')
     batchStatus.value = ''
@@ -734,6 +774,84 @@ async function doBatchBc(val) {
     ElMessage.error(e.response?.data?.error || '批量修改失败')
     batchBc.value = ''
   }
+}
+
+// ===== 写表失败治理：轮询 / 行标记 / 重试 =====
+/** 列表标记用：拉取当前用户所有「需要提示」的写表终态。静默失败（不打扰用户）。 */
+async function loadSheetWriteFailures() {
+  try {
+    const res = await sheetWriteApi.status({ platform: 'tt' })
+    const map = {}
+    for (const it of res.items || []) map[it.business_key] = it
+    sheetWriteFailures.value = map
+  } catch { /* 标记拉不到不该打扰用户，保持上一次的结果 */ }
+}
+
+/** 轮询单条直到终态。中间态（pending/failed）继续等，不提示。 */
+function pollSheetWrite(advertiserId) {
+  let attempts = 0
+  const tick = async () => {
+    if (attempts >= SHEET_WRITE_POLL_MAX) return
+    attempts++
+    try {
+      const res = await sheetWriteApi.status({ platform: 'tt', businessKey: advertiserId })
+      const it = res.item
+      if (!it) return                                    // 无记录 = 这条路径没触发写表
+      if (it.status === 'synced') { loadSheetWriteFailures(); return }
+      if (it.status === 'pending' || it.status === 'failed') {
+        sheetWriteTimer = setTimeout(tick, SHEET_WRITE_POLL_MS)
+        return
+      }
+      // 三种需提示的终态 —— 文案与行内 tooltip 同源（sheetWriteHint），避免两处各写一份
+      const hint = sheetWriteHint(it)
+      SHEET_WRITE_TOAST[sheetWriteTone(it.status)](hint)
+      loadSheetWriteFailures()
+    } catch { /* 轮询失败静默，靠列表标记兜底 */ }
+  }
+  if (sheetWriteTimer) clearTimeout(sheetWriteTimer)
+  sheetWriteTimer = setTimeout(tick, SHEET_WRITE_POLL_MS)
+}
+
+/** 重试按钮 */
+async function retrySheetWrite(row) {
+  const f = sheetWriteFailures.value[row.advertiser_id]
+  if (!f) return
+  try {
+    await sheetWriteApi.retry({ platform: 'tt', target: f.target, businessKey: row.advertiser_id })
+    ElMessage.success('已重新提交，请稍后查看结果')
+    pollSheetWrite(row.advertiser_id)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '重试失败')
+  }
+}
+
+// 写表状态三态。强度按「操作员要做什么」排，不按严重感：
+//   retry_failed       表没写进去，但系统变更仍生效 → 要去补
+//   rolled_back        表没写，系统已自动撤销       → 已了结，只有知情权（刻意压低）
+//   rollback_abandoned 表没写，且不敢撤销（期间被再改）→ 数据可能不一致，须人工核对（最高）
+// ✅ 沿用充值记录表「表格」列的既有符号
+const SHEET_WRITE_UI = {
+  retry_failed:       { mark: '⚠️', tone: 'warning' },
+  rolled_back:        { mark: '↩️', tone: 'info' },
+  rollback_abandoned: { mark: '⛔', tone: 'danger' },
+}
+const SHEET_WRITE_TOAST = {
+  warning: ElMessage.warning, info: ElMessage.info, danger: ElMessage.error,
+}
+function sheetWriteUi(status) { return SHEET_WRITE_UI[status] || SHEET_WRITE_UI.retry_failed }
+function sheetWriteMark(status) { return sheetWriteUi(status).mark }
+function sheetWriteTone(status) { return sheetWriteUi(status).tone }
+
+/** 行内 tooltip 与终态弹窗共用同一句文案：结构统一为「发生了什么 + 你要做什么」+ 原始原因 */
+function sheetWriteHint(f) {
+  const reason = f.error_msg || '未知原因'
+  if (f.status === 'rolled_back') {
+    return `写表失败，已撤销本次状态变更。原因：${reason}`
+  }
+  if (f.status === 'rollback_abandoned') {
+    return `写表失败，且该账户期间被再次修改，未自动撤销，请手工核对。原因：${reason}`
+  }
+  return `写表失败，表中未写入。原因：${reason}`
 }
 
 // ===== 「户归属」列（仅户管可见可编辑）=====
