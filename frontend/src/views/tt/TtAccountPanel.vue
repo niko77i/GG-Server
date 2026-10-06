@@ -337,10 +337,11 @@ const batchStatus = ref('')
 const batchBc = ref('')
 
 // ---------- 写表失败治理（回收户清单异步写表的结果） ----------
-const RECYCLE_TARGET = 'tt_recycle'
 const SHEET_WRITE_POLL_MS = 3000
 const SHEET_WRITE_POLL_MAX = 14          // ~42s，覆盖 30s 重试窗口
-let sheetWriteTimer = null
+// 每个账户一个轮询定时器。批量改状态是在同步 for 里逐账户调度的，共用一个变量会
+// 让每次调用把上一个账户的定时器 clear 掉 —— 批量 N 个只有最后 1 个会弹提示。
+const sheetWriteTimers = new Map()       // advertiser_id -> timerId
 const sheetWriteFailures = ref({})       // advertiser_id -> {target, status, error_msg}
 
 // 内联编辑状态
@@ -385,7 +386,10 @@ onMounted(async () => {
   loadSheetWriteFailures()
 })
 
-onUnmounted(() => { if (sheetWriteTimer) clearTimeout(sheetWriteTimer) })
+onUnmounted(() => {
+  for (const t of sheetWriteTimers.values()) clearTimeout(t)
+  sheetWriteTimers.clear()
+})
 
 async function loadOptions() {
   try {
@@ -790,26 +794,32 @@ async function loadSheetWriteFailures() {
 /** 轮询单条直到终态。中间态（pending/failed）继续等，不提示。 */
 function pollSheetWrite(advertiserId) {
   let attempts = 0
+  // 本账户轮询停止（终态 / 无记录 / synced / 超限 / 异常）时统一摘掉自己的表项，
+  // 避免 Map 无界增长。每个 return 路径都要走到这里。
+  const stop = () => { sheetWriteTimers.delete(advertiserId) }
   const tick = async () => {
-    if (attempts >= SHEET_WRITE_POLL_MAX) return
+    if (attempts >= SHEET_WRITE_POLL_MAX) { stop(); return }
     attempts++
     try {
       const res = await sheetWriteApi.status({ platform: 'tt', businessKey: advertiserId })
       const it = res.item
-      if (!it) return                                    // 无记录 = 这条路径没触发写表
-      if (it.status === 'synced') { loadSheetWriteFailures(); return }
+      if (!it) { stop(); return }                        // 无记录 = 这条路径没触发写表
+      if (it.status === 'synced') { loadSheetWriteFailures(); stop(); return }
       if (it.status === 'pending' || it.status === 'failed') {
-        sheetWriteTimer = setTimeout(tick, SHEET_WRITE_POLL_MS)
+        sheetWriteTimers.set(advertiserId, setTimeout(tick, SHEET_WRITE_POLL_MS))
         return
       }
       // 三种需提示的终态 —— 文案与行内 tooltip 同源（sheetWriteHint），避免两处各写一份
       const hint = sheetWriteHint(it)
       SHEET_WRITE_TOAST[sheetWriteTone(it.status)](hint)
       loadSheetWriteFailures()
-    } catch { /* 轮询失败静默，靠列表标记兜底 */ }
+      stop()
+    } catch { stop() /* 轮询失败静默，靠列表标记兜底 */ }
   }
-  if (sheetWriteTimer) clearTimeout(sheetWriteTimer)
-  sheetWriteTimer = setTimeout(tick, SHEET_WRITE_POLL_MS)
+  // 同账户重入（例如重试按钮）时先清掉旧链，保证一个账户只有一条在跑
+  const prev = sheetWriteTimers.get(advertiserId)
+  if (prev) clearTimeout(prev)
+  sheetWriteTimers.set(advertiserId, setTimeout(tick, SHEET_WRITE_POLL_MS))
 }
 
 /** 重试按钮 */
