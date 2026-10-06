@@ -626,3 +626,97 @@ def test_status_endpoint_sweeps_stale_rows(client, monkeypatch):
                        json={"platform": "tt", "target": "tt_recycle",
                              "business_key": "acc_stuck"})
     assert resp.status_code == 200, resp.get_json()
+
+
+def test_sweep_stale_skips_inflight_rows(client):
+    """在途（线程还活着）的行不得被 sweep 收敛。
+
+    build_service 未设 timeout（google_sheets_service.py 全文零 timeout），黑洞式
+    网络故障下在途的 Sheets 调用可以挂过 STALE_AFTER_SECONDS —— 此时线程并没死。
+    若把这种行误收敛成 retry_failed，重试闸门会放行 → 起第二个写手 → 同一账户
+    写进第二行，正是原子 claim（8917db8）专门要消灭的形态。
+    """
+    import sheet_write
+    db = database.get_db()
+    _mk_log(db, 1, "tt_recycle", "live_acc", status="pending")
+    _mk_log(db, 1, "tt_recycle", "dead_acc", status="pending")
+    stale = sheet_write.STALE_AFTER_SECONDS + 100
+    _age(db, "live_acc", stale)
+    _age(db, "dead_acc", stale)
+
+    key = (1, "tt_recycle", "live_acc")
+    with sheet_write._inflight_lock:
+        sheet_write._inflight.add(key)
+    try:
+        n = sheet_write.sweep_stale(db)
+        live = _row(db, 1, "tt_recycle", "live_acc")
+        dead = _row(db, 1, "tt_recycle", "dead_acc")
+    finally:
+        db.close()
+        with sheet_write._inflight_lock:
+            sheet_write._inflight.discard(key)
+
+    assert n == 1, f"应只收敛非在途的那条，实际 {n}"
+    assert live["status"] == "pending", "在途行被误收敛成终态 —— 重试闸门将放行第二个写手"
+    assert dead["status"] == "retry_failed", "非在途的行应当照常收敛"
+
+
+def test_sweep_stale_sweeps_after_inflight_key_cleared(client):
+    """在途登记只是**暂时**的保护：key 摘除后同一行应恢复被收敛，不是永久豁免。"""
+    import sheet_write
+    db = database.get_db()
+    _mk_log(db, 1, "tt_recycle", "was_live", status="pending")
+    _age(db, "was_live", sheet_write.STALE_AFTER_SECONDS + 100)
+    key = (1, "tt_recycle", "was_live")
+
+    with sheet_write._inflight_lock:
+        sheet_write._inflight.add(key)
+    n1 = sheet_write.sweep_stale(db)
+    mid = _row(db, 1, "tt_recycle", "was_live")
+
+    with sheet_write._inflight_lock:
+        sheet_write._inflight.discard(key)
+    n2 = sheet_write.sweep_stale(db)
+    after = _row(db, 1, "tt_recycle", "was_live")
+    db.close()
+
+    assert n1 == 0, "在途时不得收敛"
+    assert mid["status"] == "pending"
+    assert n2 == 1, "摘除 key 后应恢复收敛"
+    assert after["status"] == "retry_failed"
+
+
+def test_final_failure_with_incomplete_snapshot_does_not_claim_re_edit(client, monkeypatch):
+    """快照缺 new_status_id => 回滚器抛具名异常，落「回滚过程出错」，
+    不得断言「该账户在写表期间被再次修改」—— 它并不知道这个成因。
+
+    原来 _tt_recycle_rollback 在快照不完整时 return False，与「守卫未过（用户又改过
+    状态）」同路，会被归到「被再次修改」。当前不可达（两处调用点都建完整 5 键快照），
+    但这是最后一处会让本功能断言未知成因的路径。
+    """
+    import sheet_write
+    from routes.tt_accounts_routes import _tt_recycle_rollback
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    sheet_write.register_target("_t_badsnap",
+                                rebuild=lambda uid, key, payload: (lambda: None),
+                                rollback=_tt_recycle_rollback)
+
+    def _boom():
+        raise RuntimeError("Sheets 挂了")
+
+    db = database.get_db()
+    # 缺 new_status_id 的不完整快照
+    sheet_write.run_write(db, user_id=1, platform="tt", target="_t_badsnap",
+                          business_key="k_bs", sync_fn=_boom, snapshot={"account_pk": 1})
+    import time
+    for _ in range(150):
+        if _row(db, 1, "_t_badsnap", "k_bs")["status"] == "rollback_abandoned":
+            break
+        _poll_sleep(0.02)
+    r = _row(db, 1, "_t_badsnap", "k_bs")
+    db.close()
+
+    assert r["status"] == "rollback_abandoned"
+    assert "被再次修改" not in r["error_msg"], \
+        f"快照不完整却断言账户被再次修改: {r['error_msg']}"
+    assert "回滚过程出错" in r["error_msg"], f"未点明回滚出错: {r['error_msg']}"

@@ -1302,6 +1302,15 @@ def _tt_recycle_rebuild(user_id, business_key, payload):
     return _sync
 
 
+class IncompleteRecycleSnapshotError(Exception):
+    """回收清单回滚快照缺少必需键 —— 无法判定守卫条件。
+
+    原来这条路径 return False，与「守卫未过（用户又改过状态）」同路，最终会被
+    _apply_final 归到「该账户在写表期间被再次修改」—— 而它并不知道这个成因。
+    改为抛异常：_apply_final 会把回滚器异常如实报成「自动撤销失败（回滚过程出错：…）」。
+    """
+
+
 def _tt_recycle_rollback(db, snapshot):
     """条件回滚：把账户状态改回改之前的值。
 
@@ -1309,15 +1318,17 @@ def _tt_recycle_rollback(db, snapshot):
     存在竞态。受影响行数为 0 即守卫未过：说明这 30 秒内用户又改过状态，
     此时**必须放弃回滚**（拿陈旧快照覆盖用户的后续操作就是伪造数据）。
 
-    返回 True=已回滚，False=放弃。
+    返回 True=已回滚，False=放弃（仅指守卫未过）。快照不完整是**另一种**失败，
+    它无从判定守卫条件，故抛异常而非返回 False，别让调用方误报成「被再次修改」。
     """
-    try:
-        acct_pk = snapshot.get("account_pk")
-        new_status_id = snapshot.get("new_status_id")
-    except AttributeError:
-        return False
+    if not isinstance(snapshot, dict):
+        raise IncompleteRecycleSnapshotError(
+            f"回滚快照类型异常（{type(snapshot).__name__}），无法撤销")
+    acct_pk = snapshot.get("account_pk")
+    new_status_id = snapshot.get("new_status_id")
     if acct_pk is None or new_status_id is None:
-        return False
+        raise IncompleteRecycleSnapshotError(
+            "回滚快照不完整（缺 account_pk / new_status_id），无法撤销")
     cur = db.execute(
         "UPDATE tt_accounts SET status_id=?, status_changed_date=?, death_date=?, "
         "updated_at=datetime('now','localtime') "

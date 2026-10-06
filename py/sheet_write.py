@@ -7,6 +7,7 @@
 """
 import json
 import logging
+import threading
 
 log = logging.getLogger("gg-server")
 
@@ -18,6 +19,16 @@ ATTENTION = ("retry_failed", "rolled_back", "rollback_abandoned")
 # 写表窗口 = 首次尝试 + 30s 重试；留 3 倍余量。超过这个时长仍停在中间态，
 # 说明推进它的线程已经不在了（进程重启 / 后台线程启动失败），需要惰性收敛。
 STALE_AFTER_SECONDS = 90
+
+# 在途写表任务的进程内登记，key = (user_id, target, business_key)。
+# 让 sweep_stale 跳过「线程还活着、只是 Sheets 调用挂住了」的行：
+# build_service 未设 timeout（google_sheets_service.py 全文零 timeout），黑洞式
+# 网络故障下写表可以挂过 STALE_AFTER_SECONDS；若把这种行误收敛成终态，重试闸门
+# 会放行 → 起第二个写手 → 同一账户写进第二行（原子 claim 8917db8 专门要消灭的形态）。
+# 服务是单进程多线程（waitress threads=40，py/main.py），故进程内集合恰好覆盖
+# 「谁还可能活着」；进程重启后集合为空，那些行本就是真死了、该被收敛。
+_inflight = set()
+_inflight_lock = threading.Lock()
 
 # target -> {"rebuild": (user_id, business_key, payload) -> sync_fn,
 #            "rollback": (db, snapshot) -> bool  |  None}
@@ -76,19 +87,34 @@ def sweep_stale(db, user_id=None):
     等于失败记录静默丢失，正是本功能要消灭的形态。
 
     在 status 接口里按当前用户惰性调用，任何进程都能自愈，无需启动钩子。
+
+    **跳过在途任务**（见 _inflight 注释）：线程还活着、只是 Sheets 调用挂住的行
+    不是真死，不能收敛 —— 否则重试闸门放行会导致同一账户写第二行。
     """
-    sql = ("UPDATE sheet_write_log SET status='retry_failed', "
-           "error_msg=(CASE WHEN error_msg IS NULL OR error_msg='' THEN '' "
-           "ELSE error_msg || '；' END) || '任务中断：写表未在预期时间内完成', "
-           "settled_at=datetime('now','localtime'), "
-           "updated_at=datetime('now','localtime') "
-           "WHERE status IN ('pending','failed') "
-           "AND updated_at < datetime('now','localtime', ?)")
+    with _inflight_lock:
+        live = set(_inflight)
+    where = ("status IN ('pending','failed') "
+             "AND updated_at < datetime('now','localtime', ?)")
     params = [f"-{STALE_AFTER_SECONDS} seconds"]
     if user_id is not None:
-        sql += " AND user_id=?"
+        where += " AND user_id=?"
         params.append(user_id)
-    cur = db.execute(sql, params)
+    rows = db.execute(
+        f"SELECT id, user_id, target, business_key FROM sheet_write_log WHERE {where}",
+        params).fetchall()
+    ids = [r["id"] for r in rows
+           if (r["user_id"], r["target"], r["business_key"]) not in live]
+    if not ids:
+        return 0
+    marks = ",".join("?" for _ in ids)
+    cur = db.execute(
+        f"UPDATE sheet_write_log SET status='retry_failed', "
+        f"error_msg=(CASE WHEN error_msg IS NULL OR error_msg='' THEN '' "
+        f"ELSE error_msg || '；' END) || '任务中断：写表未在预期时间内完成', "
+        f"settled_at=datetime('now','localtime'), "
+        f"updated_at=datetime('now','localtime') "
+        f"WHERE id IN ({marks})",
+        ids)
     db.commit()
     return cur.rowcount
 
@@ -163,6 +189,9 @@ def run_write(db, *, user_id, platform, target, business_key, sync_fn,
         # 登记失败不该阻断写表本身，但必须有痕迹 —— 否则前端永远查不到这次任务
         log.error("写表任务登记失败 target=%s key=%s: %s", target, business_key, e)
 
+    # 在途登记：起线程**之前**记上，让 sweep_stale 跳过这条（见 _inflight 注释）。
+    key = (user_id, target, business_key)
+
     def _on_result(status, err_msg):
         import database
         _db = None
@@ -190,9 +219,20 @@ def run_write(db, *, user_id, platform, target, business_key, sync_fn,
                     _db.close()
                 except Exception:
                     pass
+            # 只在**终态**回调摘除在途登记。中间态 "failed" 只是 30s 重试在途 ——
+            # 同一后台线程马上还会再试一次，此时摘除会让重试窗口（90s-30s=60s）
+            # 失去在途保护，sweep 又能把活着的重试误收敛（正是本 key 要拦的形态）。
+            if status in TERMINAL:
+                with _inflight_lock:
+                    _inflight.discard(key)
 
+    with _inflight_lock:
+        _inflight.add(key)
     try:
         from main import _sync_sheets_background
         _sync_sheets_background(sync_fn, _on_result)
     except Exception as e:
+        # 线程没起来 ⇒ 永远不会有回调来摘除，必须在这里摘，否则该行会被永久豁免收敛
+        with _inflight_lock:
+            _inflight.discard(key)
         log.error("写表后台任务启动失败 target=%s key=%s: %s", target, business_key, e)
