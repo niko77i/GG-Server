@@ -3242,3 +3242,22 @@ class TestA1SheetNameEscaping:
         assert res == {"updated": 1}
         upd = [r for r in svc.recorder if r.get("op") == "update"][0]
         assert upd["range"] == f"{ESCAPED}F1"
+
+
+class TestOwnerChangeNoteColumn:
+    def test_tt_accounts_has_owner_change_note_column(self, client):
+        """新列必须存在，且默认空串（不能是 NULL —— 读回按表覆盖时 NULL 与 '' 要同义）。"""
+        db = database.get_db()
+        cols = {r[1]: r for r in db.execute("PRAGMA table_info(tt_accounts)").fetchall()}
+        assert "owner_change_note" in cols, "tt_accounts 缺 owner_change_note 列"
+        assert cols["owner_change_note"][4] == "''"   # dflt_value
+        db.close()
+
+    def test_owner_change_note_defaults_to_empty(self, client):
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name) VALUES('OCN-1','OCN-1')")
+        db.commit()
+        row = db.execute(
+            "SELECT owner_change_note FROM tt_accounts WHERE advertiser_id='OCN-1'").fetchone()
+        assert row["owner_change_note"] == ""
+        db.close()

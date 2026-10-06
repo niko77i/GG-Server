@@ -186,6 +186,10 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "fb_accounts", "outbound_qty", "outbound_qty TEXT DEFAULT ''")
     _add_column_if_missing(conn, "fb_accounts", "consumption", "consumption TEXT DEFAULT ''")
     _add_column_if_missing(conn, "fb_accounts", "remark", "remark TEXT DEFAULT ''")
+    # TT 换绑记录（2026-10-06 规格）：由 reassign 生成「旧转新月.日」，读回时按表覆盖。
+    # 建表语句服务全新库，这一条服务存量库 —— 两处都要有。
+    _add_column_if_missing(conn, "tt_accounts", "owner_change_note",
+                           "owner_change_note TEXT DEFAULT ''")
     # 主 BM 标记（「位置」列的存储，规格 4.3）。部分唯一索引保证
     # 「同一账户至多一个主 BM」——**不阻止换 BM**，换法是同一事务内先清后设。
     _add_column_if_missing(conn, "fb_account_bm", "is_primary",
@@ -974,6 +978,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             death_date TEXT DEFAULT '',
             status_changed_date TEXT DEFAULT '',
             remark TEXT DEFAULT '',
+            owner_change_note TEXT DEFAULT '',
             owner_id INTEGER REFERENCES users(id),
             deleted_at TEXT DEFAULT NULL,
             created_at TEXT DEFAULT (datetime('now','localtime')),
