@@ -90,6 +90,24 @@ def preview_import(file_path: str, file_type: str) -> dict:
     return {"file_type": file_type, "summary": summary}
 
 
+# 各选项表的**真实唯一键**（按 `sqlite_master` 建表语句实测）。查重必须逐表按它来：
+# 用错列会让「别人已建的同名行」查不中而重复 INSERT，撞 UNIQUE 后异常穿出
+# `_import_option_table`，**把整次导入打崩**（业务表一条都进不去）。
+#   agents           UNIQUE(name, owner_id, platform)
+#   account_statuses UNIQUE(name, platform)   ← owner_id 只是「谁先建的」
+#   mcc_levels       UNIQUE(name, owner_id)
+#   sales_persons    UNIQUE(name, platform)
+# 2026-10-06 修:此前四张表一律按 (name, owner_id) 查重 —— 只要目标用户不是字典行的
+# 创建者（生产里字典行 owner_id 全是 developer=1），account_statuses / sales_persons
+# 就会撞 UNIQUE(name, platform)，非 developer 的导入 100% 失败。
+_OPTION_UNIQUE_COLS = {
+    "agents": ("name", "owner_id", "platform"),
+    "account_statuses": ("name", "platform"),
+    "mcc_levels": ("name", "owner_id"),
+    "sales_persons": ("name", "platform"),
+}
+
+
 def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
     """解析文件、智能分流、写入目标库，返回导入报告。"""
     if file_type == "db":
@@ -117,8 +135,14 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
 
     # === 选项表：先导入，供业务表外键映射 ===
     def _import_option_table(table_name: str, report_key: str) -> dict:
-        """导入单张选项表，返回 old_id -> new_id 映射字典。"""
+        """导入单张选项表，返回 old_id -> new_id 映射字典。
+
+        查重键取自 `_OPTION_UNIQUE_COLS`（= 该表真实的 UNIQUE 约束），**不是**一律
+        (name, owner_id) —— 详见该常量上方的注释。
+        """
         id_map = {}
+        key_cols = _OPTION_UNIQUE_COLS.get(table_name, ("name", "owner_id"))
+        tbl_cols = [c[1] for c in db.execute(f"PRAGMA table_info({table_name})").fetchall()]
         for r in data.get(table_name, []):
             d = dict(r)
             old_id = d.pop("id", None)
@@ -126,16 +150,20 @@ def execute_import(file_path: str, file_type: str, target_user_id: int) -> dict:
             if not name:
                 continue
             d["owner_id"] = target_user_id
+            if "platform" in tbl_cols:
+                # 旧导出没有 platform 列，而插入时该列会走 DEFAULT 'gg' ——
+                # 查重也得按同一个值，否则 NULL 永远配不上、查重形同虚设。
+                d["platform"] = (d.get("platform") or "gg")
+            where = " AND ".join(f"{c}=?" for c in key_cols)
             existing = db.execute(
-                f"SELECT id FROM {table_name} WHERE name=? AND owner_id=?",
-                (name, target_user_id)
+                f"SELECT id FROM {table_name} WHERE {where}",
+                tuple(d.get(c) for c in key_cols)
             ).fetchone()
             if existing:
                 if old_id is not None:
                     id_map[old_id] = existing["id"]
                 report[report_key]["skipped"] += 1
             else:
-                tbl_cols = [c[1] for c in db.execute(f"PRAGMA table_info({table_name})").fetchall()]
                 insert_cols = [k for k in d if k in tbl_cols]
                 placeholders = ", ".join(["?"] * len(insert_cols))
                 vals = [d[c] for c in insert_cols]

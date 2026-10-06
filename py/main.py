@@ -4045,13 +4045,23 @@ def accounts_list():
         params += [f"%{search}%", f"%{search}%"]
     if mcc_id:
         where.append("a.mcc_id = ?"); params.append(mcc_id)
-    if status:
-        if sub_owner is None:
-            where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=?)")
-            params += [status]
-        else:
-            where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND owner_id=?)")
-            params += [status, sub_owner]
+    if status == "未知":
+        # 空状态（status_id IS NULL）在列表里渲染成「未知」（前端 `row.status || '未知'`），
+        # 统计里也归到「未知」这一个 key（见下面 status_counts）。统计的 key 又会被前端
+        # 直接当状态按钮、点了原样回传成本参数（availableStatuses / toggleStatus），
+        # 所以筛选必须一并认这个字面量，否则那个按钮点下去恒为空。
+        # 与统计保持同一并集口径：真有一行叫「未知」的字典行时，两边都算上。
+        where.append(
+            "(a.status_id IS NULL OR a.status_id IN "
+            "(SELECT id FROM account_statuses WHERE name='未知' AND platform='gg'))"
+        )
+    elif status:
+        # 状态字典按 (name, platform) 唯一，owner_id 记的是**创建者**、与账户归属无关，
+        # 且缺 platform 条件时 `name=?` 会同时命中 fb / gg / tt 三行（唯一索引按
+        # (name, platform) 排序 → 'fb' < 'gg' < 'tt'，fetchone() 稳定拿 fb 行）。
+        # 故这里只按 name + platform='gg' 取行，不收窄 owner（本表即 GG 账户表）。
+        where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND platform='gg')")
+        params += [status]
     if agent:
         if sub_owner is None:
             where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ?)")
@@ -4115,15 +4125,21 @@ def accounts_list():
             sc_params += [f"%{agent}%", sub_owner]
     if timezone:
         sc_where.append("a.timezone = ?"); sc_params.append(timezone)
+    # 空状态桶（st.name 为 NULL）命名为「未知」——与表格渲染的兜底文案一致
+    # （前端 `row.status || '未知'`），且这个 key 会被前端直接当状态按钮、并原样
+    # 回传成 `status` 查询参数。曾写 COALESCE(st.name,'存活')，把 NULL 计进「存活」
+    # 计数，而按「存活」筛选走的是 name 子查询、筛不出这批行 —— 按钮数字与列表对不上。
+    # GROUP BY st.name 已把 NULL 归成一组，故无需 COALESCE；下面按 key 累加，
+    # 顺带把「真有一行字典叫未知」与 NULL 桶合并到同一个 key（筛选侧同样并集）。
     status_counts = {}
     for r in db.execute(
-        "SELECT COALESCE(st.name, '存活') as status, COUNT(*) as cnt "
+        "SELECT st.name as status, COUNT(*) as cnt "
         "FROM accounts a "
         "LEFT JOIN account_statuses st ON a.status_id = st.id "
         "WHERE " + " AND ".join(sc_where) + " GROUP BY st.name",
         sc_params
     ).fetchall():
-        s = r["status"] or "存活"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
+        s = r["status"] or "未知"; status_counts[s] = status_counts.get(s, 0) + r["cnt"]
     # 筛选下拉数据（缓存低频查询结果）
     # 缓存键带 owner 维度：_app_cache 是进程级全局缓存，不区分维度会串数据
     scope = owner_filter or "all" if cross_user else str(user_id)
@@ -4295,6 +4311,40 @@ def accounts_batch_lookup():
     return jsonify({"success": True, "found": found, "not_found": not_found})
 
 
+def _gg_status_id(db, name: str, owner_id):
+    """状态名 → account_statuses.id（**GG 分区**）。账户创建/同步四条路径共用。
+
+    查重键是 `(name, platform='gg')`，**不含 owner_id**：
+
+    - 唯一约束就是这两列（`UNIQUE(name, platform)`），owner_id 只记「谁先建的」。
+      带上它会让「别人已建的同名行」查不中 → 回退 INSERT 撞 UNIQUE。旧实现正是
+      这样 —— 异常穿到 accounts_create 的通用分支后被**误报成「账户 ID 'xxx' 已存在」**，
+      批量导入路径则整批 500。
+    - 必须带 platform：`'存活'` 在 gg/fb/tt 各有一行，唯一索引按 (name, platform)
+      排序（`'fb' < 'gg' < 'tt'`），只按 name 查会稳定落在 **fb** 行 —— 生产曾因此
+      把 43 个 GG 账户的状态写成 fb 的字典 id。
+    - `INSERT OR IGNORE` + 重查是为了并发收敛（两个请求同建一个新状态名时，
+      后到的那个不该炸）；注意 OR IGNORE **不吞外键错**，owner_id 非法仍会抛
+      IntegrityError —— 与旧行为一致，由调用方的异常分支接住。
+
+    存量错挂（已落库的行）由 `database._migrate_account_status_platform` 归位。
+    """
+    row = db.execute(
+        "SELECT id FROM account_statuses WHERE name=? AND platform='gg'", (name,)
+    ).fetchone()
+    if row:
+        return row["id"]
+    db.execute(
+        "INSERT OR IGNORE INTO account_statuses(name, owner_id, platform) VALUES(?,?,'gg')",
+        (name, owner_id))
+    row = db.execute(
+        "SELECT id FROM account_statuses WHERE name=? AND platform='gg'", (name,)
+    ).fetchone()
+    if row is None:
+        raise _sqlite3.IntegrityError(f"状态「{name}」写入失败")
+    return row["id"]
+
+
 @app.route("/api/accounts/create", methods=["POST"])
 @jwt_required()
 def accounts_create():
@@ -4334,14 +4384,7 @@ def accounts_create():
         if status_id is None and data.get("status"):
             status_name = data.get("status", "").strip()
             if status_name:
-                existing_st = db.execute(
-                    "SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (status_name, target_owner)
-                ).fetchone()
-                if existing_st:
-                    status_id = existing_st["id"]
-                else:
-                    db.execute("INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (status_name, target_owner))
-                    status_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                status_id = _gg_status_id(db, status_name, target_owner)
 
         db.execute(
             "INSERT INTO accounts(name,account_id,mcc_id,timezone,agent_id,status_id,acquired_date,death_date,created_at,updated_at,owner_id) "
@@ -4478,14 +4521,7 @@ def accounts_batch_create():
 
         # status_id 文本回退
         if status_id is None and status:
-            existing_st = db.execute(
-                "SELECT id FROM account_statuses WHERE name=? AND owner_id=?", (status, user_id)
-            ).fetchone()
-            if existing_st:
-                status_id = existing_st["id"]
-            else:
-                db.execute("INSERT INTO account_statuses(name, owner_id) VALUES(?,?)", (status, user_id))
-                status_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            status_id = _gg_status_id(db, status, user_id)
 
         try:
             db.execute(
@@ -5294,18 +5330,7 @@ def accounts_sync_from_sheet():
                 new_status = item.get("new_status", "")
                 if account_id and new_status:
                     # 查找状态 ID
-                    st = db.execute(
-                        "SELECT id FROM account_statuses WHERE name=? AND owner_id=?",
-                        (new_status, user_id)
-                    ).fetchone()
-                    if not st:
-                        db.execute(
-                            "INSERT INTO account_statuses(name, owner_id) VALUES(?,?)",
-                            (new_status, user_id)
-                        )
-                        st_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    else:
-                        st_id = st["id"]
+                    st_id = _gg_status_id(db, new_status, user_id)
 
                     # 更新账户状态（不触发清账逻辑）
                     # 同步死亡时间
@@ -5417,19 +5442,8 @@ def _execute_sync_create(db, item: dict, user_id: int):
             )
             agent_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    # 默认状态为"存活"
-    st = db.execute(
-        "SELECT id FROM account_statuses WHERE name='存活' AND owner_id=?",
-        (user_id,)
-    ).fetchone()
-    if st:
-        status_id = st["id"]
-    else:
-        db.execute(
-            "INSERT INTO account_statuses(name, owner_id) VALUES('存活',?)",
-            (user_id,)
-        )
-        status_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # 默认状态为"存活"（取 gg 分区的字典行，见 _gg_status_id）
+    status_id = _gg_status_id(db, "存活", user_id)
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     db.execute(

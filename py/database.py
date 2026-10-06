@@ -1290,6 +1290,60 @@ def _migrate_options_tables(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _migrate_account_status_platform(conn: sqlite3.Connection):
+    """把挂在**非 gg 平台**字典行上的 GG 账户状态归位到 gg 的同名行。
+
+    起因（2026-10-06）：GG 侧写 status_id 的四处 SQL 都按 `owner_id=?` 取行、且缺
+    platform 条件。account_statuses 是 `UNIQUE(name, platform)` 的共享字典，唯一索引
+    按 (name, platform) 排序（'fb' < 'gg' < 'tt'），`name=?` 的 fetchone() 便稳定落在
+    **fb** 那一行 —— 生产实测 43 个 GG 账户被写成 fb 的字典 id（「存活」25 条、
+    「死亡」8 条）。写侧现已改为按 `platform='gg'` 取行，本函数负责把存量挪回去。
+
+    口径：
+    - 一律搬到 gg 的**同名行**；gg 没有该名字时补建一行（对齐写侧的口径，
+      即「GG 账户的状态名必须能在这张表的 gg 分区里解析」）。**不置 NULL** —— 置 NULL
+      会让该账户的状态显示退回 COALESCE 兜底的「存活」。
+    - `status_id IS NULL` 的行不动（那是「未设置状态」，不是错挂）。
+    - 天然幂等：跑完一遍后 `platform != 'gg'` 的引用清零，后续连接只做一次 SELECT，
+      不产生写操作（`_migrate_if_needed` 每次连接都会跑，不能留下常驻写）。
+
+    ⚠️ **异常绝不能逃出去**（与 `_migrate_scrape_dn_history` 同契约）：本函数由
+    `_migrate_if_needed` 调用，而后者**每个请求**都跑 —— 逃出一个异常就是整个服务
+    每个接口 500，且此后每次 get_db() 都会重抛。可达触发：某条非 gg 字典行的
+    `owner_id` 指向已不存在的用户（跨库拷 app.db / 旧备份导入造出的悬挂外键），
+    此时补建 gg 行的 INSERT 会抛 FOREIGN KEY —— 注意 **`INSERT OR IGNORE` 不吞外键错**
+    （SQLite 的 ON CONFLICT 算法不适用于 FOREIGN KEY 约束）。故整体包 try 并回滚，
+    宁可这一轮不归位（下轮还会再来），也不能打死服务。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT s.name AS name, s.owner_id AS owner_id "
+            "FROM accounts a JOIN account_statuses s ON a.status_id = s.id "
+            "WHERE s.platform != 'gg'"
+        ).fetchall()
+        if not rows:
+            return
+        for r in rows:
+            name = r["name"]
+            conn.execute(
+                "INSERT OR IGNORE INTO account_statuses(name, owner_id, platform) VALUES(?,?,'gg')",
+                (name, r["owner_id"]))
+            target = conn.execute(
+                "SELECT id FROM account_statuses WHERE name=? AND platform='gg'", (name,)
+            ).fetchone()
+            if target is None:
+                # 补建行被其它约束挡下 —— 不动这些行，避免把状态置 NULL
+                continue
+            conn.execute(
+                "UPDATE accounts SET status_id=? WHERE status_id IN "
+                "(SELECT id FROM account_statuses WHERE name=? AND platform!='gg')",
+                (target["id"], name))
+        conn.commit()
+    except Exception as e:  # noqa: BLE001 — 迁移契约：异常不得逃出去打死 get_db()
+        print(f"[Migrate] account_statuses platform 归位失败（下轮重试）: {e}")
+        conn.rollback()
+
+
 def _cleanup_old_option_columns(conn: sqlite3.Connection):
     """在所有代码切换到外键列之后，删除旧 TEXT 列和 tags 中的旧配置（仅执行一次）。"""
     migrated = conn.execute(
@@ -1673,6 +1727,8 @@ def _migrate_if_needed(conn: sqlite3.Connection):
             conn.rollback()
 
     _migrate_options_tables(conn)
+    # 4b. 挂在 fb/tt 字典行上的 GG 账户状态 → 归位到 gg 的同名行（见函数 docstring）
+    _migrate_account_status_platform(conn)
     # 5. users.prev_scrape_dns（JSON）→ scrape_dn_history 表，并删掉旧列
     _migrate_scrape_dn_history(conn)
     # 6. （已退役）磁盘上的无主爬取目录 → 补哨兵墓碑。

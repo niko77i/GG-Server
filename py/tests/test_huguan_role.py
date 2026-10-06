@@ -550,10 +550,18 @@ class TestGgAccountListCrossUser:
         assert ids == {"GG-AC-1"}
 
     def test_status_counts_follow_owner_filter(self, client):
-        """状态计数必须与 owner_id 筛选同步，否则出现「列表1条、计数3条」。"""
+        """状态计数必须与 owner_id 筛选同步，否则出现「列表1条、计数3条」。
+
+        断言的是「各状态计数之和 == 本次筛选出的行数」这个不变式，**不钉死桶名** ——
+        本夹具的账户没有 status_id，落在哪个桶属于另一条口径（见
+        test_account_status_platform.py::TestUnknownStatusBucket）。
+        曾写死 `.get("存活", 0) == 1`：那正是旧统计把空状态 COALESCE 成「存活」
+        才成立的，空状态改判「未知」后它就失真了。
+        """
         hg, _, u1, _ = self._setup(client)
-        resp = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hg)
-        assert resp.get_json()["status_counts"].get("存活", 0) == 1
+        payload = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hg).get_json()
+        assert payload["total"] == 1
+        assert sum(payload["status_counts"].values()) == 1, "计数之和必须等于本次筛选出的行数"
 
     def test_regular_user_ignores_owner_id(self, client):
         """回归：普通用户传 owner_id 不能越权看到别人的账户。"""
