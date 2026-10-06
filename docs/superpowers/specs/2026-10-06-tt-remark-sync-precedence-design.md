@@ -107,8 +107,18 @@ def read_operator_remark_map(db, owner_id: int) -> dict:
     """
 ```
 
-- 表 ID 取 `tags.tt_sheet_id`；sheet 名取 `tags.tt_sheet_mappings` 里 `{owner_id}.my_dashboard`
-  （默认 `"我的看板"`）—— 与 `tt_accounts_routes._get_tt_sheet_id` / `_get_tt_sheet_mappings` 同源。
+- 表 ID 取 `tags.tt_sheet_id`。
+  > **勘误（2026-10-06 实现时实测，Task 2 回写）**：本文档初稿此处曾写「sheet 名取
+  > `tags.tt_sheet_mappings` 里 `{owner_id}.my_dashboard`」—— **这是错的**。实测：
+  > - `tags.tt_sheet_mappings` 只含 `{"recycle":…, "recharge":…, "accounts":…}`，**不含 `my_dashboard`**；
+  > - 每投手私有的 `my_dashboard` 存在 `config.tt_sheet_mappings_{uid}`。
+  >
+  > 正确解析顺序（**必须镜像 `py/routes/tt_accounts_routes.py` 的 `sync_from_sheet()`**）：
+  > ```
+  > sheet_name = tags.tt_sheet_mappings.my_dashboard  或  "我的看板"   # 全局兜底
+  > 若 config.tt_sheet_mappings_{owner_id}.my_dashboard 非空 → 覆盖     # 投手私有
+  > ```
+  > 实现见 `py/huguan_dashboard.py` 的 `_operator_dashboard_name()`。
 - 读 `A:J`，跳过表头，按 D 列（`r[3]`）建索引，取 J 列（`r[9]`）。
 - 一次读全表，供本次同步的所有新建账户共用（不要按账户逐个读）。
 

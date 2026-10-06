@@ -857,6 +857,71 @@ def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
     return [o for o in out if o["account_id"]]
 
 
+def _operator_dashboard_name(db, owner_id: int) -> str:
+    """解析某投手「我的看板」的 sheet 名。
+
+    与 tt_accounts_routes.sync_from_sheet() 同源：先取全局 tags 兜底，
+    再被 config 表里的投手私有配置覆盖。两处必须保持一致，否则读与写会对着
+    不同的 tab 操作。
+    """
+    name = ""
+    row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_mappings'").fetchone()
+    if row and row["value"]:
+        try:
+            loaded = json.loads(row["value"])
+            if isinstance(loaded, dict):
+                name = (loaded.get("my_dashboard") or "").strip()
+        except Exception:
+            pass
+    if not name:
+        name = "我的看板"
+    priv = db.execute("SELECT value FROM config WHERE key=?",
+                      (f"tt_sheet_mappings_{owner_id}",)).fetchone()
+    if priv and priv["value"]:
+        try:
+            loaded_priv = json.loads(priv["value"])
+            if isinstance(loaded_priv, dict) and (loaded_priv.get("my_dashboard") or "").strip():
+                name = loaded_priv["my_dashboard"].strip()
+        except Exception:
+            pass
+    return name
+
+
+def read_operator_remark_map(db, owner_id: int) -> dict:
+    """读该投手「我的看板」的 广告账户ID → J 列备注 映射。
+
+    投手未配看板、全局未配 tt_sheet_id、或读表失败 —— 一律返回空 dict，
+    由调用方按「户管赢」降级。读不到投手看板不应阻断户管同步，故本函数**绝不抛异常**。
+    """
+    import logging
+    log = logging.getLogger("gg-server")
+    try:
+        row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_id'").fetchone()
+        sheet_id = (row["value"] if row and row["value"] else "").strip()
+        if not sheet_id:
+            return {}
+        sheet_name = _operator_dashboard_name(db, owner_id)
+
+        import google_sheets_service as gs
+        from main import _GOOGLE_SHEETS_CONFIG
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        rows = gs.read_sheet_values(service, sheet_id, sheet_name, "A:J")
+        if not rows:
+            return {}
+        rows = rows[1:]   # 跳过表头
+        out = {}
+        for r in rows:
+            # D 列（下标 3）是账户ID，J 列（下标 9）是备注
+            aid = (r[3] if len(r) > 3 else "").strip().lstrip("'").strip()
+            if not aid or aid in out:
+                continue
+            out[aid] = (r[9] if len(r) > 9 else "").strip()
+        return out
+    except Exception as e:
+        log.warning("读投手看板备注失败（按户管赢降级）: %s", e)
+        return {}
+
+
 def push_rows(user_id: int, platform: str, account_ids=None) -> None:
     """把账户当前值写进该户管自己的看板表。
 

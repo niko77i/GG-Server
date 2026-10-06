@@ -3704,3 +3704,80 @@ class TestRemarkNotPulledForExistingAccounts:
         item = diff["to_create"][0]
         assert item["db_values"]["remark"] == "户管填的"
         db.close()
+
+
+class TestReadOperatorRemarkMap:
+    """读投手「我的看板」的 账户ID → J 列备注 映射。"""
+
+    def _setup(self, client, uid_suffix, dashboard_name, sheet_id="SS-TT"):
+        db = database.get_db()
+        u = _seed(db, f"_orm_{uid_suffix}", f"投手{uid_suffix}", platform="tt")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id',?)", (sheet_id,))
+        if dashboard_name:
+            db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                       (f"tt_sheet_mappings_{u}", json.dumps({"my_dashboard": dashboard_name})))
+        db.commit()
+        db.close()
+        return u
+
+    def test_builds_map_from_d_column_keyed_rows(self, client, monkeypatch):
+        import google_sheets_service as gs
+        u = self._setup(client, "a", "黎明账户看板")
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "接户运营",
+             "时区", "状态", "备注"],                       # 表头，应被跳过
+            ["黎明", "", "", "AID-1", "", "", "", "", "", "投手备注1"],
+            ["黎明", "", "", "AID-2", "", "", "", "", "", ""],
+        ])
+        import huguan_dashboard as hd
+        db = database.get_db()
+        got = hd.read_operator_remark_map(db, u)
+        db.close()
+        assert got == {"AID-1": "投手备注1", "AID-2": ""}
+
+    def test_missing_sheet_id_returns_empty(self, client, monkeypatch):
+        u = self._setup(client, "b", "看板B", sheet_id="")
+        import huguan_dashboard as hd
+        db = database.get_db()
+        assert hd.read_operator_remark_map(db, u) == {}
+        db.close()
+
+    def test_read_failure_returns_empty_not_raise(self, client, monkeypatch):
+        """读不到投手看板不得阻断户管同步 —— 绝不抛异常。"""
+        import google_sheets_service as gs
+        u = self._setup(client, "c", "看板C")
+
+        def _boom(*a, **k):
+            raise RuntimeError("网络炸了")
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "read_sheet_values", _boom)
+        import huguan_dashboard as hd
+        db = database.get_db()
+        assert hd.read_operator_remark_map(db, u) == {}
+        db.close()
+
+    def test_operator_without_private_config_falls_back_to_global(self, client, monkeypatch):
+        """投手没配私有 my_dashboard 时用全局 tags 兜底，而不是直接放弃。"""
+        import google_sheets_service as gs
+        db = database.get_db()
+        u = _seed(db, "_orm_d", "投手d", platform="tt")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','SS-TT')")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings',?)",
+                   (json.dumps({"my_dashboard": "全局看板"}),))
+        db.commit()
+        db.close()
+        seen = {}
+
+        def _capture(service, spreadsheet_id, sheet_name, rng):
+            seen["sheet_name"] = sheet_name
+            return []
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "read_sheet_values", _capture)
+        import huguan_dashboard as hd
+        db = database.get_db()
+        hd.read_operator_remark_map(db, u)
+        db.close()
+        assert seen["sheet_name"] == "全局看板"
