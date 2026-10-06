@@ -369,3 +369,39 @@ class TestFbBuildApplyIntegration:
         assert any("无法唯一匹配" in w["message"] for w in res["warnings"]), res["warnings"]
         assert prim is not None and prim["bm_id"] == s["bm1"], "坏 BM 名不得改动主 BM"
         assert n_hist == 0, "坏 BM 名不得写历史"
+
+
+class TestFbAcceptor:
+    def test_column_exists_and_defaults_empty(self, client):
+        db = database.get_db()
+        cols = {r[1]: r[2] for r in db.execute("PRAGMA table_info(fb_accounts)").fetchall()}
+        db.close()
+        assert "acceptor" in cols
+        assert cols["acceptor"] == "TEXT"
+
+    def test_owner_transition_format(self):
+        assert hd._fb_owner_transition("张三", "李四") == "张三转李四"
+
+    def test_owner_transition_handles_empty_old(self):
+        """首任（没有旧归属）不该拼出「转李四」。"""
+        assert hd._fb_owner_transition("", "李四") == "李四"
+
+    def test_acceptor_cells_only_contains_column_i(self):
+        rows = [{"account_id": "A1"}, {"account_id": "A2"}]
+        cells = hd._fb_acceptor_cells(rows, "张三转李四")
+        assert cells == [{"account_id": "A1", "cells": {"I": "张三转李四"}},
+                         {"account_id": "A2", "cells": {"I": "张三转李四"}}]
+
+    def test_acceptor_is_read_back_verbatim(self, client):
+        """接户运营双向：表里的串原样落进 acceptor，不做名称解析、不出警告。"""
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('fb_acc', 'x', 'user', 'fb')")
+        db.commit()
+        db.close()
+        values = [""] * 17
+        values[hd.col_index("D")] = "AC-1"
+        values[hd.col_index("I")] = "张三转李四"
+        parsed = hd.parse_row(values, "fb")
+        assert parsed["acceptor"] == "张三转李四"
+        assert "_owner_channel" not in parsed

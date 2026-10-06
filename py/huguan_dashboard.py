@@ -926,6 +926,28 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             "errors": errors, "warnings": warnings}
 
 
+def _fb_owner_transition(old_name: str, new_name: str) -> str:
+    """拼 FB 的换绑记录：`"{旧}转{新}"`。
+
+    没有旧归属（首任）时只返回新名 —— 否则会拼出「转李四」这种半截串，
+    户管在表里读不出是谁转给李四的。
+    """
+    old_name = (old_name or "").strip()
+    new_name = (new_name or "").strip()
+    if not old_name:
+        return new_name
+    return f"{old_name}转{new_name}"
+
+
+def _fb_acceptor_cells(rows: list, value: str) -> list:
+    """构造只写 I 列（接户运营）的 rows。
+
+    刻意只含这一列 —— 与 `owner_channel_cells` 同一理由：收尾写入若顺手带上别的列，
+    就会把户管在表里的其他手工改动一起冲掉。
+    """
+    return [{"account_id": r["account_id"], "cells": {"I": value}} for r in rows]
+
+
 def _set_primary_bm(db, acc_pk: int, bm_id: int) -> None:
     """把某账户的主 BM 换成 bm_id。**不 commit**，事务边界由调用方负责。
 

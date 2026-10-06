@@ -165,6 +165,12 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "fb_accounts", "outbound_qty", "outbound_qty TEXT DEFAULT ''")
     _add_column_if_missing(conn, "fb_accounts", "consumption", "consumption TEXT DEFAULT ''")
     _add_column_if_missing(conn, "fb_accounts", "remark", "remark TEXT DEFAULT ''")
+    # FB 的「接户运营」＝归属变更记录（"{旧}转{新}"），用户 2026-10-06 定为一格放整串、
+    # 且双向。外键装不下复合串，所以是 TEXT。
+    # ⚠️ 子项目 ① 曾加过 `acceptor_id INTEGER REFERENCES users(id)`，该列**已废弃**、
+    # 本处刻意**不删**（SQLite 的 DROP COLUMN 与 _add_column_if_missing 的幂等语义
+    # 相冲，删了下次连库又会被补回来）。读写一律走 acceptor，acceptor_id 不再有任何引用。
+    _add_column_if_missing(conn, "fb_accounts", "acceptor", "acceptor TEXT DEFAULT ''")
     # TT 换绑记录（2026-10-06 规格）：由 reassign 生成「旧转新月.日」，读回时按表覆盖。
     # 建表语句服务全新库，这一条服务存量库 —— 两处都要有。
     _add_column_if_missing(conn, "tt_accounts", "owner_change_note",

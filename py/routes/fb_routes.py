@@ -342,7 +342,7 @@ def create_account():
     asset_type_id = data.get('asset_type_id') or None
     unit_price = data.get('unit_price', '')
     inbound_qty = data.get('inbound_qty', '')
-    acceptor_id = data.get('acceptor_id') or None
+    acceptor = (data.get('acceptor') or '').strip()
     outbound_date = data.get('outbound_date', '')
     outbound_qty = data.get('outbound_qty', '')
     consumption = data.get('consumption', '')
@@ -362,11 +362,11 @@ def create_account():
         db.execute(
             "INSERT INTO fb_accounts (name, account_id, timezone, status_id, acquired_date, "
             "owner_id, operator, channel_id, asset_type_id, unit_price, inbound_qty, "
-            "acceptor_id, outbound_date, outbound_qty, consumption, remark) "
+            "acceptor, outbound_date, outbound_qty, consumption, remark) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, account_id, timezone, status_id, acquired_date, uid, operator,
              channel_id, asset_type_id, unit_price, inbound_qty,
-             acceptor_id, outbound_date, outbound_qty, consumption, remark))
+             acceptor, outbound_date, outbound_qty, consumption, remark))
         acc_pk = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         for bm_id in bm_ids:
             db.execute("INSERT OR IGNORE INTO fb_account_bm (account_id, bm_id) VALUES (?, ?)",
@@ -398,7 +398,7 @@ def update_account(aid):
     asset_type_id = data.get('asset_type_id') or None
     unit_price = data.get('unit_price', '')
     inbound_qty = data.get('inbound_qty', '')
-    acceptor_id = data.get('acceptor_id') or None
+    acceptor = (data.get('acceptor') or '').strip()
     outbound_date = data.get('outbound_date', '')
     outbound_qty = data.get('outbound_qty', '')
     consumption = data.get('consumption', '')
@@ -408,11 +408,11 @@ def update_account(aid):
     if name:
         db.execute(
             "UPDATE fb_accounts SET name=?, timezone=?, status_id=?, acquired_date=?, "
-            "channel_id=?, asset_type_id=?, unit_price=?, inbound_qty=?, acceptor_id=?, "
+            "channel_id=?, asset_type_id=?, unit_price=?, inbound_qty=?, acceptor=?, "
             "outbound_date=?, outbound_qty=?, consumption=?, remark=?, "
             "updated_at=datetime('now','localtime') WHERE id=?",
             (name, timezone, status_id, acquired_date,
-             channel_id, asset_type_id, unit_price, inbound_qty, acceptor_id,
+             channel_id, asset_type_id, unit_price, inbound_qty, acceptor,
              outbound_date, outbound_qty, consumption, remark, aid))
 
     if bm_ids is not None:

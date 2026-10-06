@@ -128,10 +128,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="接户运营">
-          <el-select v-model="form.acceptor_id" clearable filterable placeholder="选择接户运营" style="width:100%">
-            <el-option v-for="u in fbUsers" :key="u.id"
-                       :label="u.display_name || u.username" :value="u.id" />
-          </el-select>
+          <el-input v-model="form.acceptor" placeholder="如：张三转李四" />
         </el-form-item>
         <el-form-item label="单价">
           <el-input v-model="form.unit_price" placeholder="数字" />
@@ -190,7 +187,7 @@ function optName(list, id) {
 const form = reactive({
   name:'', account_id:'', bm_ids:[], primary_bm_id:null, timezone:'', acquired_date:'',
   status_id:null, channel_id:null, asset_type_id:null, unit_price:'', inbound_qty:'',
-  acceptor_id:null, outbound_date:'', outbound_qty:'', consumption:'', remark:'',
+  acceptor:'', outbound_date:'', outbound_qty:'', consumption:'', remark:'',
 })
 
 let searchTimer = null
@@ -228,7 +225,7 @@ function openCreate() {
   Object.assign(form, {
     name:'', account_id:'', bm_ids:[], primary_bm_id:null, timezone:'', acquired_date:'',
     status_id:null, channel_id:null, asset_type_id:null, unit_price:'', inbound_qty:'',
-    acceptor_id:null, outbound_date:'', outbound_qty:'', consumption:'', remark:'',
+    acceptor:'', outbound_date:'', outbound_qty:'', consumption:'', remark:'',
   })
   dialogVisible.value = true
 }
@@ -241,7 +238,7 @@ function openEdit(row) {
     timezone: row.timezone, acquired_date: row.acquired_date, status_id: row.status_id,
     channel_id: row.channel_id, asset_type_id: row.asset_type_id,
     unit_price: row.unit_price, inbound_qty: row.inbound_qty,
-    acceptor_id: row.acceptor_id, outbound_date: row.outbound_date,
+    acceptor: row.acceptor, outbound_date: row.outbound_date,
     outbound_qty: row.outbound_qty, consumption: row.consumption, remark: row.remark,
   })
   dialogVisible.value = true
