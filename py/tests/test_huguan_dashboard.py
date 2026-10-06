@@ -3839,6 +3839,13 @@ class TestApplyDiffRemarkPrecedence:
         row[2], row[6], row[12] = aid, owner_name, remark
         return build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
 
+    @staticmethod
+    def _tt_row_full(aid, owner_name, remark):
+        """13 列 TT 行：C(2) 账户ID / G(6) 接户运营 / M(12) 产品信息，其余留空。"""
+        row = [""] * 13
+        row[2], row[6], row[12] = aid, owner_name, remark
+        return row
+
     def test_operator_value_wins_on_first_ingest(self, client, monkeypatch):
         db, u_op = self._prepare(client)
         self._arm_read(monkeypatch, {"ADRP-1": "投手填的"})
@@ -3900,4 +3907,38 @@ class TestApplyDiffRemarkPrecedence:
         assert res["created"] == 1
         assert res["remark_m_writeback"] == []
         assert res["remark_operator_push"] == []
+        db.close()
+
+    def test_unresolvable_owner_emits_no_operator_push(self, client, monkeypatch):
+        """归属解析不到的 TT 新建行：不产生 remark_operator_push 记录（owner_id 恒为 int）。
+
+        必须带正向对照 —— 同批次里另有一个能解析归属的行，它必须照常产生记录，
+        否则「本键为空」这个断言无法区分「守卫生效」与「管道根本没跑」。
+        """
+        db = database.get_db()
+        u_op = _seed(db, "_adrp_none_op", "黎明", platform="tt")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','SS-TT')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{u_op}", json.dumps({"my_dashboard": "黎明账户看板"})))
+        db.commit()
+        db.close()
+        # 投手看板里两行都留空 ⇒ 两边都走「户管赢」，区别只在 owner 能否解析
+        self._arm_read(monkeypatch, {"ADRP-N1": "", "ADRP-N2": ""})
+
+        db = database.get_db()
+        from huguan_dashboard import build_diff, parse_row
+        rows = [
+            # 归属名解析不到 ⇒ owner_id 为 None
+            dict(parse_row(self._tt_row_full("ADRP-N1", "不存在的运营", "户管1"), "tt"), row=2),
+            # 归属名可解析 ⇒ 走常规路径
+            dict(parse_row(self._tt_row_full("ADRP-N2", "黎明", "户管2"), "tt"), row=3),
+        ]
+        diff = build_diff(db, rows, "tt")
+        res = apply_diff(db, diff, "tt", {"create": ["ADRP-N1", "ADRP-N2"]}, user_id=1)
+        pushed = {r["account_id"] for r in res["remark_operator_push"]}
+        # 正向对照：能解析归属的那条必须留下记录
+        assert "ADRP-N2" in pushed, "对照行未产生记录，本用例不具判别力"
+        # 被测行为：归属解析不到的那条不得留下记录
+        assert "ADRP-N1" not in pushed, "owner_id 为 None 的行不得产生推送记录"
+        assert all(isinstance(r["owner_id"], int) for r in res["remark_operator_push"])
         db.close()

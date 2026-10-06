@@ -706,7 +706,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
                     src["remark"] = _op_value            # 投手赢
                     remark_m_writeback.append({"account_id": item["account_id"],
                                                "value": _op_value})
-                else:
+                elif _op_id is not None:
+                    # 归属解析不到的账户没有投手看板可推（build_diff 对这类行只 warning
+                    # 不拦，仍会进 to_create）——不发出记录，保持本键 owner_id 恒为 int。
                     remark_operator_push.append({"owner_id": _op_id,
                                                  "account_id": item["account_id"],
                                                  "value": (src.get("remark") or "").strip()})

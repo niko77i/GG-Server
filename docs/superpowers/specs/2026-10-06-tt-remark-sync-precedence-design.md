@@ -156,6 +156,10 @@ if platform == "tt" and "remark" in src:
 | `remark_m_writeback` | `[{"account_id": str, "value": str}]` | **投手赢**的行：需把 `value` 回写「户管看板」M 列（覆盖户管填的） |
 | `remark_operator_push` | `[{"owner_id": int, "account_id": str, "value": str}]` | **户管赢**的行：需把 `value` 推到该投手看板的 J 列 |
 
+> `remark_operator_push` 的 `owner_id` 恒为 `int`：归属解析不到（`owner_id is None`）的行
+> 不产生本键记录 —— 无投手看板可推。`build_diff` 对这类行只 warning 不拦，仍会进
+> `to_create`，故该守卫落在 `apply_diff` 里。消费方无需判空。
+
 两个键在 `platform != "tt"` 时恒为空列表（GG 路径不产生）。
 
 在 `py/routes/huguan_dashboard_routes.py` 的 `dashboard_sync()` 中，`apply_diff` 返回后消费：
