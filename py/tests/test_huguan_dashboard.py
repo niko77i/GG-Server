@@ -2684,9 +2684,12 @@ class TestOwnerChangeVia:
     """归属变更项的 `via` 键：标明这次变更是由表里**哪一列**触发的。
 
     用户裁定用稳定 token（不是中文列头）：列头改名 / 新增平台 / 前端要做分支统计
-    这三种未来场景都不破坏接口契约（设计文档 §6-1）。GG 与 TT 共用同一对 token，
-    故 TT 那两条断言必须与 GG 逐字相同 —— 谁把 token 改成平台相关（写成列头文字
-    如「重新分配」/「换绑情况」）都会红。
+    这三种未来场景都不破坏接口契约（设计文档 §6-1）。同一套 token 不为平台改名 ——
+    谁把 token 改成平台相关（写成列头文字如「重新分配」/「换绑情况」）都会红。
+
+    平台差异只在**触发来源的集合**上：GG 有「运营」(G) + 「重新分配」(H) 两列，
+    两个 token 都可能产出；TT 自 2026-10-06 起 L 列（换绑情况）是换绑记录文本、
+    不参与归属判定，故 TT 只可能产出 `owner_name`。
     """
 
     def _prepare(self, client):
@@ -2719,11 +2722,12 @@ class TestOwnerChangeVia:
         assert item["via"] == "owner_channel"
         db.close()
 
-    def test_tt_uses_the_same_tokens_as_gg(self, client):
-        """TT 的换绑(接户运营 L 列) 给出**与 GG 同 token**：token 不随平台变。
+    def test_tt_only_owner_name_token_since_2026_10_06(self, client):
+        """TT 归属只认「接户运营」列 ⇒ 只可能产出 `owner_name` token。
 
-        前端按平台各自映射中文（GG 重新分配 / TT 换绑情况），token 两侧一致才能只
-        维护一张映射表。TT 的列下标：G=6 接户运营、L=11 换绑情况。
+        L 列（换绑情况）自 2026-10-06 起是换绑记录文本，不参与归属判定，
+        因此 TT 侧**不再存在** `owner_channel` 这个触发来源。
+        GG 的 `owner_channel` token 仍由 test_gg_channel_column_gives_owner_channel_token 覆盖。
         """
         from huguan_dashboard import build_diff, parse_row
         db, u1, u2 = self._prepare(client)
@@ -2738,9 +2742,11 @@ class TestOwnerChangeVia:
             dict(parse_row(row_chan, "tt"), row=3),
         ], "tt")
         by_aid = {i["account_id"]: i for i in diff["owner_changes"]}
+        # VIA-TT-1：G=李四 ≠ 库内张三 → 变更，via=owner_name
         assert by_aid["VIA-TT-1"]["to_owner_id"] == u2
         assert by_aid["VIA-TT-1"]["via"] == "owner_name"
-        assert by_aid["VIA-TT-2"]["via"] == "owner_channel"
+        # VIA-TT-2：G=张三 与库内一致，L 列不再参与 ⇒ 无归属变更
+        assert "VIA-TT-2" not in by_aid
         db.close()
 
     def test_existing_six_keys_are_unchanged(self, client):

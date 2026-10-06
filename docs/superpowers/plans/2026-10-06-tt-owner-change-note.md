@@ -789,6 +789,11 @@ git commit -m "feat(tt): reassign 自动写换绑记录（旧转新月.日）"
 
 ## Task 8: `TestOwnerChangeVia` 的 TT 断言随语义更新
 
+> **已提前执行（2026-10-06，用户裁定）**：本任务的用例改写已前移到 Task 2 之后立即执行。
+> 原因：Task 2 把 L 列改为 `owner_change_note` 后该用例即变红，而它并非依赖 Task 3 的分叉
+> （TT 侧 `_owner_channel` 在 Task 2 之后已自然消失）。留到 Task 8 会让 Task 3–7 期间持续
+> 红灯，掩盖真回归。本任务剩余内容仅为记录，不再重复执行。
+
 **Files:**
 - Test: `py/tests/test_huguan_dashboard.py`（`TestOwnerChangeVia::test_tt_uses_the_same_tokens_as_gg`）
 
