@@ -717,8 +717,17 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 
 **核心逻辑**：
 - **定时检测**：后台 daemon 线程每小时检测正常状态 TT 产品的正常状态跑包
-- **手动检测**：`POST /api/tt/products/:pid/check-delist`，同样走代理池
+- **手动检测**：`POST /api/tt/products/:pid/check-delist`，同样走代理池、并发同样**按代理池容量自适应**（口径见 GG 侧「并发口径」）；⚠️ 返回结果与入参同序，本路由用 `zip(pkg_list, results)` 配对，改并发实现时不得打乱顺序
 - **前端通知**：`GET /api/tt/delist/pending` 按产品聚合返回，首次弹窗 + 关闭后 3 分钟未处理再提醒
+- **可见性**：`delist/pending` 与 `delist-status` 均只按**产品归属人（`tt_products.owner_id`）或在跑人员（`tt_product_runners`）**过滤，
+  **无 developer/admin 特权**（2026-09-26 按用户裁定移除该特权分支；起因：developer 账号既非归属人也非在跑人员，
+  却照样收到掉包弹窗。GG 侧本就无角色分支，故本条即「对齐 GG」）。
+  平台闸门 `require_platform('tt')` / `@tt_required` 不受影响，仍保留。
+  ⚠️ **别把 owner 轴也一并删掉**：owner 轴是设计过的需求（`2026-09-24-tt-delist-notification-design.md`），
+  有具名测试 `test_owner_sees_own_delisted_notification` 钉住；GG 无 owner 轴是因为
+  GG 的 `products` 表压根没有 owner 列（产品共享），不等于「刻意排斥归属人看自己的产品」。
+  回归测试见 `py/tests/test_tt_delist_notification.py::TestTtDelistStatusScope`
+  与 `::TestTtDelistPending::test_developer_no_longer_sees_all` / `test_developer_sees_when_runner`。
 - **Telegram 通知**：首次检测到掉包时，通过 `tt_telegram` 机器人向群组发送消息并 @在跑人员（与 GG 的 `telegram` 节点**互不影响**，可分别配置不同的群）
 - **配置**：`config.json` 保留空的 `tt_telegram.{bot_token,chat_id}` 结构，真实值放 `config/config.local.json`（已 gitignore）
 - **数据清理**：TT 产品合并、投放对象批量删除时同步清理其掉包检测与通知行
@@ -907,6 +916,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [全站鉴权加固与既有缺陷收口](docs/superpowers/specs/2026-09-23-security-hardening-design.md)
 - [下载签名按需签发 + scrape 产物归属校验](docs/superpowers/specs/2026-09-24-ondemand-download-signing-design.md)（含 §0.9：code-review 第 3 轮逐条处置；§0.10：曾用目录名认领 + 存量非法名豁免，及第 5 轮审查处置；§0.11：三条裁定落地 —— 换表 + last-writer-wins、墓碑表、并发改名 500→400；§0.12：第 6 轮两条裁定落地 —— 哨兵硬闸 + 无主目录补墓碑、越界退化同步进 `_dir_name_of`；§0.13：换判据加时间维度 —— 释放行须晚于目录创建时刻，扫盘退役、哨兵改按**化身**生效）
 - [TT 支持苹果（App Store）包链接 + 掉包判定加固](docs/superpowers/specs/2026-09-24-tt-appstore-package-design.md)
+- [TT 掉包可见性收窄（彻底对齐 GG，去掉 developer/admin 特权）](docs/superpowers/specs/2026-09-26-tt-delist-visibility-scope-design.md)
 - [户归属下拉按平台隔离](docs/superpowers/specs/2026-09-28-huguan-owner-options-platform-isolation-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
