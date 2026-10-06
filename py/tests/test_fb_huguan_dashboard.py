@@ -127,3 +127,47 @@ class TestFbNameResolution:
         """回归点：GG / TT 的可解析字段集不得变化。"""
         assert hd._parseable_fields("gg") == ("mcc_name", "agent_name", "bc_name", "status_name")
         assert hd._parseable_fields("tt") == ("mcc_name", "agent_name", "bc_name", "status_name")
+
+
+class TestFbApplyDeathIsNoop:
+    def test_death_does_not_touch_fb_accounts(self, client):
+        """fb_accounts 没有 death_date 列 —— 走到这里会 OperationalError。
+
+        这条是防回归的关键断言：FB 分支忘记 return 会让整批同步挂掉，
+        而不是静默出错，所以必须有一个用例钉住「调用不抛异常且不改任何列」。
+        """
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('fb_d', 'x', 'user', 'fb')")
+        uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', 'DE-1', ?)",
+                   (uid,))
+        pk = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        before = dict(db.execute("SELECT * FROM fb_accounts WHERE id=?", (pk,)).fetchone())
+        # 两个方向都不能抛异常（走到 UPDATE death_date 就会 OperationalError）
+        hd._apply_death(db, "fb", pk, True)
+        hd._apply_death(db, "fb", pk, False)
+        db.commit()
+        after = dict(db.execute("SELECT * FROM fb_accounts WHERE id=?", (pk,)).fetchone())
+        db.close()
+        # 真的什么都没改 —— 不只是「没崩」
+        assert after == before
+
+    def test_gg_apply_death_still_works(self, client):
+        """回归点：GG / TT 的死亡标记行为不变。"""
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('gg_d', 'x', 'user', 'gg')")
+        uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO accounts(name, account_id, owner_id) VALUES('户', 'GD-1', ?)",
+                   (uid,))
+        pk = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        hd._apply_death(db, "gg", pk, True)
+        db.commit()
+        row = db.execute("SELECT death_date, status_changed_date FROM accounts WHERE id=?",
+                         (pk,)).fetchone()
+        db.close()
+        assert row["death_date"] != ""
+        assert row["status_changed_date"] != ""

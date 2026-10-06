@@ -855,6 +855,11 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
 
 def _apply_death(db, platform: str, account_pk: int, want_dead: bool) -> None:
     """按死亡标记同步 death_date（对照 main.py:4638 的既有语义）。"""
+    # FB 没有 death_date 列（子项目 ① 已确认），生死完全由状态列承载 ——
+    # is_dead() 对 FB 只看 status_name == "死亡"，落库时已经通过 status_id 表达。
+    # 这里必须直接返回：继续走下去会 UPDATE 一个不存在的列，整批同步报错。
+    if platform == "fb":
+        return
     table = _TABLE_FOR_PLATFORM[platform]
     if want_dead:
         db.execute(f"UPDATE {table} SET death_date=date('now','localtime'), "
