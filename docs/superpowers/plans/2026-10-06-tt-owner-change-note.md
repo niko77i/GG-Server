@@ -455,7 +455,7 @@ class TestSyncChannelClearPlatformSplit:
         monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
             ["入库时间", "是否回收", "账户ID", "BC", "国家", "所属渠道",
              "接户运营", "时区", "状态", "消耗", "位置", "换绑情况", "产品信息"],
-            [""] * 6 + ["李四"] + [""] * 5,
+            [""] * 2 + ["CLR-TT"] + [""] * 3 + ["李四"] + [""] * 6,
         ])
         captured = []
         _stub_sheets(monkeypatch, captured)
