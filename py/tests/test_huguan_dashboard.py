@@ -3781,3 +3781,32 @@ class TestReadOperatorRemarkMap:
         hd.read_operator_remark_map(db, u)
         db.close()
         assert seen["sheet_name"] == "全局看板"
+
+    def test_private_dashboard_name_overrides_global(self, client, monkeypatch):
+        """私有 config 的 my_dashboard 必须压过全局 tags 兜底 —— 这是配置了的投手走的那条路。
+
+        必须捕获**实际使用的 sheet 名**并断言，否则删掉私有分支用例照样绿。
+        """
+        import google_sheets_service as gs
+        db = database.get_db()
+        u = _seed(db, "_orm_e", "投手e", platform="tt")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','SS-TT')")
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings',?)",
+                   (json.dumps({"my_dashboard": "全局看板"}),))
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{u}", json.dumps({"my_dashboard": "私有看板"})))
+        db.commit()
+        db.close()
+        seen = {}
+
+        def _capture(service, spreadsheet_id, sheet_name, rng):
+            seen["sheet_name"] = sheet_name
+            return []
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "read_sheet_values", _capture)
+        import huguan_dashboard as hd
+        db = database.get_db()
+        hd.read_operator_remark_map(db, u)
+        db.close()
+        assert seen["sheet_name"] == "私有看板", "私有配置必须压过全局兜底"

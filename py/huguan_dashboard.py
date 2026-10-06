@@ -880,8 +880,12 @@ def _operator_dashboard_name(db, owner_id: int) -> str:
     if priv and priv["value"]:
         try:
             loaded_priv = json.loads(priv["value"])
-            if isinstance(loaded_priv, dict) and (loaded_priv.get("my_dashboard") or "").strip():
-                name = loaded_priv["my_dashboard"].strip()
+            # 必须与 tt_accounts_routes.sync_from_sheet() 的私有覆盖分支**逐字一致**
+            # （真值判断、赋原值，两侧都不 strip）——否则「读」与「写」会对着
+            # 不同的 sheet tab 操作：配置值带首尾空白时写入用 " 看板A " 而这里读
+            # "看板A"；纯空白值写入侧接受、这里却当成「未配置」回退到全局名。
+            if isinstance(loaded_priv, dict) and loaded_priv.get("my_dashboard"):
+                name = loaded_priv["my_dashboard"]
         except Exception:
             pass
     return name
@@ -909,13 +913,21 @@ def read_operator_remark_map(db, owner_id: int) -> dict:
         if not rows:
             return {}
         rows = rows[1:]   # 跳过表头
+
+        # 单元格取值的 None 守卫（同 parse_row）：Sheets API 对空值可能返回 null，
+        # 直接 .strip() 会 AttributeError —— 被外层 catch 吞成 {} 后**一个坏格
+        # 就把整张映射全丢了**。
+        def _cell(r, i):
+            raw = r[i] if len(r) > i else ""
+            return ("" if raw is None else str(raw)).strip()
+
         out = {}
         for r in rows:
             # D 列（下标 3）是账户ID，J 列（下标 9）是备注
-            aid = (r[3] if len(r) > 3 else "").strip().lstrip("'").strip()
+            aid = _cell(r, 3).lstrip("'")   # D 列剥 Sheets 文本前缀 '，J 列不需要
             if not aid or aid in out:
                 continue
-            out[aid] = (r[9] if len(r) > 9 else "").strip()
+            out[aid] = _cell(r, 9)
         return out
     except Exception as e:
         log.warning("读投手看板备注失败（按户管赢降级）: %s", e)
