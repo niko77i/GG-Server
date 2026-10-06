@@ -3450,3 +3450,39 @@ class TestSyncChannelClearPlatformSplit:
         all_cells = [c for cap in captured for c in cap["rows"]]
         assert any(c["cells"].get("H") == "" for c in all_cells), \
             "GG 同步仍应清空 H 列"
+
+
+class TestWritebackOwnerChannelText:
+    def test_text_param_overrides_resolved_name(self, client, monkeypatch):
+        """传了 text 就写 text，不再写解析出的新归属名。"""
+        hg, uid = _create_user(client, "_wb_text", role="huguan", platform="tt")
+        db = database.get_db()
+        target = _seed(db, "_wb_text_t", "黎明", platform="tt")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        import huguan_dashboard as hd
+        hd.writeback_owner_channel(uid, "tt", "WB-TEXT", target, text="阿轩转黎明10.7")
+        cells = [r["cells"] for c in captured for r in c["rows"] if "L" in r["cells"]]
+        assert cells == [{"L": "阿轩转黎明10.7"}]
+
+    def test_omitting_text_keeps_legacy_behavior(self, client, monkeypatch):
+        """回归护栏：不传 text 时写解析出的新归属名（GG 走这条路）。"""
+        hg, uid = _create_user(client, "_wb_legacy", role="huguan", platform="gg")
+        db = database.get_db()
+        target = _seed(db, "_wb_legacy_t", "李四")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        import huguan_dashboard as hd
+        hd.writeback_owner_channel(uid, "gg", "WB-LEGACY", target)
+        cells = [r["cells"] for c in captured for r in c["rows"] if "H" in r["cells"]]
+        assert cells == [{"H": "李四"}]

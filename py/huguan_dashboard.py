@@ -901,7 +901,7 @@ def writeback_rows(user_id, platform, account_ids=None):
         log.warning("户管看板回写触发失败: %s", e)
 
 
-def writeback_owner_channel(user_id, platform, account_id, new_owner_id):
+def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=None):
     """户管在系统里改了归属 → 把新归属写进表里的变更通道列（规格 §7.2 规则 3①）。
 
     GG 写 H「重新分配」，TT 写 L「换绑情况」。绝不抛异常（理由同 writeback_rows）。
@@ -919,7 +919,11 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id):
             db.close()
         if not name:
             return
-        rows = owner_channel_cells([{"account_id": account_id}], platform, name)
+        # text 为 None 时写解析出的新归属名 —— GG 走这条路，行为与改动前逐字节一致。
+        # TT 由调用方传入完整的换绑记录文本（「旧转新月.日」）：文本里含「变更前归属人」，
+        # 那是 reassign 端点才知道的信息，在本函数里重新推断会引入第二次查询与不一致风险。
+        value = text if text is not None else name
+        rows = owner_channel_cells([{"account_id": account_id}], platform, value)
 
         def _do():
             import google_sheets_service as gs
