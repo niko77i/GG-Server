@@ -129,33 +129,20 @@ Expected: FAIL —— `no such table: sheet_write_log`
         CREATE INDEX IF NOT EXISTS idx_swl_user_platform ON sheet_write_log(user_id, platform);
 ```
 
-在 `_ensure_columns` 里追加（放在既有 `sheets_sync_log` 补列之后，保持同类聚在一起）：
+**不要在 `_ensure_columns` 里再写一份。**
 
-```python
-    # 写表失败治理（2026-10-06）：老库补建表。_ensure_schema 只在首建时跑，
-    # 存量库不会走到那段 CREATE TABLE，故此处再建一次（IF NOT EXISTS 幂等）。
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS sheet_write_log (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id       INTEGER NOT NULL,
-            platform      TEXT    NOT NULL,
-            target        TEXT    NOT NULL,
-            business_key  TEXT    NOT NULL DEFAULT '',
-            status        TEXT    NOT NULL,
-            error_msg     TEXT    DEFAULT '',
-            payload_json  TEXT    DEFAULT '',
-            snapshot_json TEXT    DEFAULT '',
-            created_at    TEXT    DEFAULT (datetime('now','localtime')),
-            updated_at    TEXT    DEFAULT (datetime('now','localtime')),
-            settled_at    TEXT    DEFAULT NULL,
-            UNIQUE(user_id, target, business_key)
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_swl_user_platform "
-                 "ON sheet_write_log(user_id, platform)")
-```
-
-> **为什么两处都要写**：`_ensure_schema` 只在 `_schema_verified` 为假时跑（首建），存量库永远不会再进；`_ensure_columns` 每次连库都跑。两侧都写才能保证新老库一致。
+> **勘误（2026-10-06，Task 1 审查裁决）**：本计划初稿要求在 `_ensure_schema` 与
+> `_ensure_columns` **两处**都写这段 DDL，理由是「`_ensure_schema` 只在首建时跑，存量库
+> 永远不会再进」。**该理由是错的**：`database.py:45-50` 的 `_schema_verified` 是**进程内
+> 内存标志**（初始 `False`），不是「这个库文件是不是新建的」—— 任何进程的首次 `get_db()`
+> 都会执行 `_ensure_schema`，存量库一样会走到，而它内部全是 `IF NOT EXISTS`。
+> 因此 `_ensure_columns` 那份是**冗余**的。
+>
+> 更关键的是它**破坏本文件惯例**：另 54 张表全部只在 `_ensure_schema` 里建，
+> `_ensure_columns` 专用于 `_add_column_if_missing` 列迁移，从不建表。
+>
+> 实施时已按裁决删除重复的那份（提交 `92cd96a`），仅保留 `_ensure_schema` 内的定义。
+> 后续若再新增表，一律只写 `_ensure_schema`。
 
 - [ ] **Step 4: 跑测试确认通过**
 
