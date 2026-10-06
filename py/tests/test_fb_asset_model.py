@@ -133,6 +133,10 @@ class TestPrimaryBm:
         bm1, bm2, acc = _seed_bm_pair_and_account(db, two_users[0])
         db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,1)",
                    (acc, bm1))
+        # bm2 必须**已与该账户关联**（is_primary=0），否则下面的 SET is_primary=1
+        # 影响 0 行、什么也没换。换 BM 的前提是这条关联已经存在。
+        db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,0)",
+                   (acc, bm2))
         db.commit()
         db.execute("UPDATE fb_account_bm SET is_primary=0 WHERE account_id=?", (acc,))
         db.execute("UPDATE fb_account_bm SET is_primary=1 WHERE account_id=? AND bm_id=?",
@@ -165,6 +169,10 @@ class TestPrimaryBm:
         bm1, bm2, acc = _seed_bm_pair_and_account(db, two_users[0])
         db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,1)",
                    (acc, bm1))
+        # 同上：bm2 得先关联，否则这条 UPDATE 影响 0 行、根本不会撞唯一索引 ——
+        # 那样这个用例就成了「什么都没发生却断言抛异常」的假绿。
+        db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,0)",
+                   (acc, bm2))
         db.commit()
         with pytest.raises(sqlite3.IntegrityError):
             # 先设新的（此刻 bm1 仍是 1）
@@ -194,26 +202,26 @@ class TestSharedOptionApi:
     @pytest.fixture
     def fb_admin(self, client):
         """一个 FB 平台的 admin —— GLOBAL_OPTION_ROLES 成员。"""
-        client.post("/api/auth/register", json={"username": "fb_admin", "password": "t123"})
+        client.post("/api/auth/register", json={"username": "fb_admin", "password": "test123"})
         db = database.get_db()
         db.execute("UPDATE users SET role='admin', platform='fb' WHERE username='fb_admin'")
         db.commit()
         db.close()
         token = client.post("/api/auth/login",
-                            json={"username": "fb_admin", "password": "t123"}
+                            json={"username": "fb_admin", "password": "test123"}
                             ).get_json()["access_token"]
         return {"Authorization": f"Bearer {token}"}
 
     @pytest.fixture
     def fb_plain(self, client):
         """一个 FB 平台的普通 user —— 不在 GLOBAL_OPTION_ROLES。"""
-        client.post("/api/auth/register", json={"username": "fb_plain", "password": "t123"})
+        client.post("/api/auth/register", json={"username": "fb_plain", "password": "test123"})
         db = database.get_db()
         db.execute("UPDATE users SET platform='fb' WHERE username='fb_plain'")
         db.commit()
         db.close()
         token = client.post("/api/auth/login",
-                            json={"username": "fb_plain", "password": "t123"}
+                            json={"username": "fb_plain", "password": "test123"}
                             ).get_json()["access_token"]
         return {"Authorization": f"Bearer {token}"}
 
@@ -281,14 +289,14 @@ class TestSharedOptionApi:
 class TestFbAccountApi:
     @pytest.fixture
     def fb_user(self, client):
-        client.post("/api/auth/register", json={"username": "fb_owner", "password": "t123"})
+        client.post("/api/auth/register", json={"username": "fb_owner", "password": "test123"})
         db = database.get_db()
         db.execute("UPDATE users SET platform='fb', display_name='张三' "
                    "WHERE username='fb_owner'")
         db.commit()
         db.close()
         token = client.post("/api/auth/login",
-                            json={"username": "fb_owner", "password": "t123"}
+                            json={"username": "fb_owner", "password": "test123"}
                             ).get_json()["access_token"]
         return {"Authorization": f"Bearer {token}"}
 
@@ -394,14 +402,14 @@ class TestFbReassign:
     def fb_user_headers_factory(self, client):
         """注册两个 FB 用户并返回 (headers_dict, uid) 的工厂。"""
         def _make(username):
-            client.post("/api/auth/register", json={"username": username, "password": "t123"})
+            client.post("/api/auth/register", json={"username": username, "password": "test123"})
             db = database.get_db()
             db.execute("UPDATE users SET platform='fb' WHERE username=?", (username,))
             db.commit()
             uid = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()[0]
             db.close()
             token = client.post("/api/auth/login",
-                                json={"username": username, "password": "t123"}
+                                json={"username": username, "password": "test123"}
                                 ).get_json()["access_token"]
             return {"Authorization": f"Bearer {token}"}, uid
         return _make
@@ -419,7 +427,7 @@ class TestFbReassign:
         db.close()
         # 重新登录拿带新角色的 token
         token = client.post("/api/auth/login",
-                            json={"username": "fb_dev", "password": "t123"}
+                            json={"username": "fb_dev", "password": "test123"}
                             ).get_json()["access_token"]
         dev_h = {"Authorization": f"Bearer {token}"}
         _, target_uid = fb_user_headers_factory("fb_target")
@@ -456,7 +464,7 @@ class TestFbReassign:
         db.commit()
         db.close()
         token = client.post("/api/auth/login",
-                            json={"username": "fb_dev2", "password": "t123"}
+                            json={"username": "fb_dev2", "password": "test123"}
                             ).get_json()["access_token"]
         dev_h = {"Authorization": f"Bearer {token}"}
         aid = self._make_account(client, dev_h, "7004")
@@ -478,7 +486,7 @@ class TestFbReassign:
         db.commit()
         db.close()
         token = client.post("/api/auth/login",
-                            json={"username": "fb_dev3", "password": "t123"}
+                            json={"username": "fb_dev3", "password": "test123"}
                             ).get_json()["access_token"]
         h = {"Authorization": f"Bearer {token}"}
         aid = self._make_account(client, h, "7005")
