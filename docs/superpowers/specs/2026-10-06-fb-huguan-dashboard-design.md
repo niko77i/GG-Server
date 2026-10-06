@@ -22,8 +22,9 @@ GG / TT 的户管看板已上线（`2026-09-23-huguan-sheet-design.md`）。FB �
 
 ### 一句话目标
 
-每个 FB 户管在 FB 设置页配置一张自己的看板表，系统与表之间双向同步，语义与 GG / TT 一致，
-但**归属协议不同**（见第三节）。
+每个 FB 户管在 FB 设置页配置一张自己的看板表，系统与表之间双向同步。
+配置、写表、读回、差异确认这套**机制**与 GG/TT 一致；**归属协议是第三套** ——
+GG 用通道列、TT 用只读回记录列（2026-10-06 起）、FB 见 §3。
 
 ---
 
@@ -118,8 +119,16 @@ FB 按用户 2026-10-06 的选择不走通道列，接受该代价。缓解手�
 | P | 位置 | 主 BM 名 | ✓ | ✓ | `fb_account_bm.is_primary=1` 那条的 `fb_bms.name` |
 | Q | 产品信息 | `remark` | ✓ | ✓ | |
 
-- 可写区间：**`A:Q`**（B 与 D 标 ✓ 但语义特殊：`operator` 由系统填、`account_id` 是幂等自写）
-- 不可读：**B**（冻结）、**D**（定位键）
+**`COLUMN_SPEC["fb"]` 的标志位（照抄，勿自行推断）：**
+
+| 列 | 字段 | `(writable, readable)` |
+|---|---|---|
+| A / C / E / F / G / H / J / K / L / M / N / O / P / Q | 见上表 | `(True, True)` |
+| B 操作人 | `operator` | **`(True, False)`** —— 系统写，绝不读回（冻结字段） |
+| D 资产UID | `account_id` | **`(True, False)`** —— 定位键 |
+| I 接户运营 | `acceptor` | **`(False, True)`** —— 只读回 + 定向写，不进批量回写（§4.1） |
+
+- `cells_for_row` 实际产出 = 上表里 `writable=True` 的列，即 **A:Q 除去 I**
 - 无「是否封户 / 是否回收」列
 
 ### 4.1 I 列（接户运营）：系统维护它，但只走定向写入
@@ -162,13 +171,45 @@ FB 按用户 2026-10-06 的选择不走通道列，接受该代价。缓解手�
 **改法**：把 5 处二元表达式改成以 `platform` 为键的字典查表（`_TABLE_FOR_PLATFORM`、
 `_AGENT_SQL`、`_ROW_SQL`），缺键即 `KeyError` —— 比 `else` 兜底安全，后者会把未知平台静默导向 GG。
 
-需要补 "fb" 键的既有字典：`COLUMN_SPEC` / `KEY_COL` / `OWNER_COL` / `READ_RANGE` /
-`ACCOUNT_KEY_FIELD` / `_PLAIN_TEXT_FIELDS`。`OWNER_CHANNEL_COL` 对 FB **无对应列** ——
-需要把它改成「FB 没有」的显式表达，而不是硬塞一个字母。
+需要补 `"fb"` 键的既有字典：`COLUMN_SPEC` / `KEY_COL` / `OWNER_COL` / `READ_RANGE` /
+`ACCOUNT_KEY_FIELD` / `_PLAIN_TEXT_FIELDS`。
+
+`OWNER_CHANNEL_COL` **刻意不登记 `"fb"` 键**（理由见 §6.5）—— 但它是被
+`owner_channel_cells` 直接下标取用的，缺键会 `KeyError`。**FB 绝不允许走到那个函数**，
+所以调用点必须按平台分流，不能靠「表里有键」来判断。
 
 `_CHANNEL_HISTORY_SPEC`（MCC/BC 变更历史）对 FB **没有对应物**：FB 的历史表是
 `fb_account_bm_history`，而它挂在**中间表**上、不是 `fb_accounts` 的一个外键列，
-现有 `_record_channel_change` 的形状装不下。见第六节第 4 点。
+现有 `_record_channel_change` 的形状装不下。FB 的主 BM 变更留痕另写，见 §6.3。
+
+### 5.1 需要新增的 FB 行查询
+
+```python
+_FB_ROW_SQL = """
+SELECT a.account_id, a.acquired_date, a.name, a.timezone, a.operator, a.acceptor,
+       a.unit_price, a.inbound_qty, a.outbound_date, a.outbound_qty, a.consumption, a.remark,
+       ch.name AS channel_name, at.name AS asset_type_name,
+       bm.name AS primary_bm_name,
+       COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
+       s.name AS status_name
+FROM fb_accounts a
+LEFT JOIN fb_channels ch ON a.channel_id = ch.id
+LEFT JOIN fb_asset_types at ON a.asset_type_id = at.id
+LEFT JOIN fb_account_bm ab ON ab.account_id = a.id AND ab.is_primary = 1
+LEFT JOIN fb_bms bm ON ab.bm_id = bm.id
+LEFT JOIN users u ON a.owner_id = u.id
+LEFT JOIN account_statuses s ON a.status_id = s.id
+"""
+```
+
+> `fb_account_bm` 的 join **必须带 `ab.is_primary = 1`**：一个账户可挂多个 BM，
+> 不加这个条件会让行数翻倍（一个账户出多行），而 `collect_rows_for_push` 按行产 cells。
+
+### 5.2 `/api/huguan/dashboard/owner-options` 自动生效
+
+该端的白名单 `_owner_option_platform`（`routes/huguan_dashboard_routes.py:176-193`）
+是 `p if p in hd.PLATFORMS else "gg"` —— **`PLATFORMS` 一加 `"fb"` 它自动生效**，无需改动。
+那段注释里「将来若给 FB 面板接上归属下拉，必须先扩展 `hd.PLATFORMS`」的预警正是本子项目兑现。
 
 ---
 
@@ -214,11 +255,16 @@ FB 的生死完全由状态列（O 列）承载：`is_dead()` 对 FB 只看 `sta
 
 ### 6.4 「接户运营」的写点
 
-两处，都要写 `"{旧}转{新}"`：
+**三个定向写点**（都不走批量回写）：
 
-1. **系统 → 表**：归属在系统侧变更时（`reassign` 端点），写该行 I 列
-2. **表 → 系统**：同步落库应用归属变更时（`apply_diff` 的 `owner_changes` 分支），
-   写 `acceptor = f"{旧名}转{新名}"`，并在收尾时回写表
+| # | 触发 | 写什么 |
+|---|---|---|
+| 1 | **建号**（`create_account`）时 `acceptor` 非空 | 原样写该值 |
+| 2 | **系统 → 表**：归属在系统侧变更（`reassign` 端点） | `"{旧}转{新}"` |
+| 3 | **表 → 系统**：同步落库应用归属变更（`apply_diff` 的 `owner_changes` 分支） | 写 `acceptor = f"{旧名}转{新名}"`，并在收尾时回写表 |
+
+> 第 1 点必须存在：I 列 `writable=False`，批量回写拿不到它。若建号时户管在面板上填了接户人，
+> 不补这个写点的话，表里那一格永远是空的 —— 户管会以为填了没用。
 
 **旧名怎么取**：从库里读该账户变更**之前**的 owner 显示名（`display_name or username`），
 与 GG/TT 的 `old_owner` 取法一致（`main.py:4609`）。
@@ -296,7 +342,8 @@ FB 要写的内容**不是新归属名，而是 `"{旧}转{新}"` 整串**，语
 1. **三平台的表名映射**：`build_diff` / `apply_diff` / `_apply_death` / `collect_rows_for_push`
    对 `platform="fb"` 全部解析到 `fb_accounts`（**回归点**：二元判断漏改会静默写 GG 表，
    断言必须验到真实落库表，不能只看返回码）
-2. **17 列映射**：给定 FB fixture，验证写值列与跳过列（B、D 不读）
+2. **17 列映射**：给定 FB fixture，验证 `cells_for_row` 产出的列 = **A:Q 除去 I**；
+   且 `parse_row` 的结果里不出现 `operator`（B 不可读）
 3. **归属协议**：在用运营非空 → 改 `owner_id`；`acceptor` 被写成 `"{旧}转{新}"`
 4. **接户运营双向**：表里填的串原样落进 `acceptor`，**不做名称解析、不因解析失败出警告**
 5. **位置列**：写主 BM 名；读回换主 BM（先清后设）；填了不存在的 BM 名 → 警告不落库
@@ -306,7 +353,9 @@ FB 要写的内容**不是新归属名，而是 `"{旧}转{新}"` 整串**，语
 8. **未配置看板时静默跳过**（不是每个 FB 用户都是户管）
 9. **GG/TT 行为逐字节不变**：既有 `test_huguan_dashboard.py` 全绿
 
-门禁：`cd py && python -m pytest tests/ -q`（基线 1011 passed）；`cd frontend && npm run build`。
+门禁：`cd py && python -m pytest tests/ -q`；`cd frontend && npm run build`。
+基线是 2026-10-06 实测的 **1011 passed** —— 本仓库有并行会话在持续加测试，
+开工时以当时实测的全绿为准，**只增不减**。
 
 ---
 
