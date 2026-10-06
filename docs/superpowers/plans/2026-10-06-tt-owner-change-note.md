@@ -639,6 +639,11 @@ git add py/huguan_dashboard.py py/tests/test_huguan_dashboard.py
 git commit -m "feat(tt): writeback_owner_channel 支持传入完整换绑文本"
 ```
 
+**审查裁定（2026-10-06）**：早退由 `if not name: return` 改为
+`if not name and text is None: return`，使 `text` 的写入与「归属人名能否解析」解耦；
+另补 `text=""` 用例钉死 `is not None` 与 truthiness 的区别。GG 路径不受影响
+（不传 `text` 时两式等价）。
+
 ---
 
 ## Task 7: reassign 生成并落库换绑记录

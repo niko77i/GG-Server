@@ -3486,3 +3486,43 @@ class TestWritebackOwnerChannelText:
         hd.writeback_owner_channel(uid, "gg", "WB-LEGACY", target)
         cells = [r["cells"] for c in captured for r in c["rows"] if "H" in r["cells"]]
         assert cells == [{"H": "李四"}]
+
+    def test_text_is_written_even_when_owner_name_unresolvable(self, client, monkeypatch):
+        """text 非 None 时，写不写与归属人名能否解析无关（2026-10-06 审查裁定）。
+
+        传一个不存在的 user id：name 必然解析为空串，但 text 有值 ⇒ 仍须写出。
+        """
+        hg, uid = _create_user(client, "_wb_noname", role="huguan", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        import huguan_dashboard as hd
+        hd.writeback_owner_channel(uid, "tt", "WB-NONAME", 10**9,
+                                   text="阿轩转黎明10.7")
+        cells = [r["cells"] for c in captured for r in c["rows"] if "L" in r["cells"]]
+        assert cells == [{"L": "阿轩转黎明10.7"}]
+
+    def test_empty_text_writes_empty_not_fallback_to_name(self, client, monkeypatch):
+        """text="" 必须写出空串，不得退化成归属人名 —— 钉死 `is not None` 与 truthiness 的区别。
+
+        若有人把实现写成 `text or name`，本用例会红（写出的是名字而非 ""）。
+        """
+        hg, uid = _create_user(client, "_wb_empty", role="huguan", platform="tt")
+        db = database.get_db()
+        target = _seed(db, "_wb_empty_t", "黎明", platform="tt")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        import huguan_dashboard as hd
+        hd.writeback_owner_channel(uid, "tt", "WB-EMPTY", target, text="")
+        cells = [r["cells"] for c in captured for r in c["rows"] if "L" in r["cells"]]
+        assert cells == [{"L": ""}]

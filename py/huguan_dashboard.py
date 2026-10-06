@@ -917,7 +917,9 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=No
             name = (r["n"] if r else "").strip()
         finally:
             db.close()
-        if not name:
+        # text 非 None 时值就是 text，写不写与「归属人名能否解析」无关 ——
+        # 否则换绑记录会在归属人名为空时被静默丢弃（2026-10-06 审查裁定）。
+        if not name and text is None:
             return
         # text 为 None 时写解析出的新归属名 —— GG 走这条路，行为与改动前逐字节一致。
         # TT 由调用方传入完整的换绑记录文本（「旧转新月.日」）：文本里含「变更前归属人」，
