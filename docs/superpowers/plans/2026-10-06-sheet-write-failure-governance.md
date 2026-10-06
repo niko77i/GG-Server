@@ -1819,15 +1819,9 @@ function pollSheetWrite(advertiserId) {
         sheetWriteTimer = setTimeout(tick, SHEET_WRITE_POLL_MS)
         return
       }
-      // 三种需提示的终态，文案各自不同 —— 用户后续动作不一样
-      const reason = it.error_msg || '未知原因'
-      if (it.status === 'rolled_back') {
-        ElMessage.warning(`写表失败，已撤销本次状态变更。原因：${reason}`)
-      } else if (it.status === 'rollback_abandoned') {
-        ElMessage.warning(`写表失败，且该账户期间被再次修改，未自动撤销，请手工核对。原因：${reason}`)
-      } else {
-        ElMessage.error(`写表失败，表中未写入。原因：${reason}`)
-      }
+      // 三种需提示的终态 —— 文案与行内 tooltip 同源（sheetWriteHint），避免两处各写一份
+      const hint = sheetWriteHint(it)
+      SHEET_WRITE_TOAST[sheetWriteTone(it.status)](hint)
       loadSheetWriteFailures()
     } catch { /* 轮询失败静默，靠列表标记兜底 */ }
   }
@@ -1893,23 +1887,66 @@ onUnmounted(() => { if (sheetWriteTimer) clearTimeout(sheetWriteTimer) })
 
 - [ ] **Step 5: 在表格里加标记与重试按钮**
 
-在「广告账户 ID」列之后插入一列（位置与样式按 Step 1 的视觉方案定；下方为功能骨架）：
+在「广告账户 ID」列之后插入一列。**按已确认的视觉方案**（沿用充值记录表「表格」列的
+既有语汇 ⚠️/✅ + tooltip 显示原因 + 点击即重试，只多分出「已自动撤销」与「未撤销须人工
+核对」两态）：
 
 ```vue
-        <el-table-column label="写表" width="110" align="center">
+        <!-- 写表状态。沿用充值记录表「表格」列的既有语汇：⚠️ 点它即重试、✅ 已同步，
+             操作员不必重新学。位置紧贴「广告账户 ID」—— 本表 14 列横向必滚，
+             埋到表尾在左滚状态下会被漏看，那就等于没做。 -->
+        <el-table-column label="写表" width="54" align="center">
           <template #default="{ row }">
             <template v-if="sheetWriteFailures[row.advertiser_id]">
               <el-tooltip placement="top"
-                :content="sheetWriteFailures[row.advertiser_id].error_msg || '写表失败'">
-                <el-tag size="small" type="danger" effect="plain">写表失败</el-tag>
+                :content="sheetWriteHint(sheetWriteFailures[row.advertiser_id])">
+                <el-button link size="small"
+                  :type="sheetWriteTone(sheetWriteFailures[row.advertiser_id].status)"
+                  @click.stop="retrySheetWrite(row)">{{ sheetWriteMark(sheetWriteFailures[row.advertiser_id].status) }}</el-button>
               </el-tooltip>
-              <el-button link type="primary" size="small"
-                @click.stop="retrySheetWrite(row)">重试</el-button>
             </template>
-            <span v-else style="color:#c0c4cc;">—</span>
+            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
           </template>
         </el-table-column>
 ```
+
+配套在 `<script setup>` 里加三态语汇表与三个取值函数（与 Step 3 的轮询共用，
+保证行内 tooltip 与弹窗文案**同源**）：
+
+```js
+// 写表状态三态。强度按「操作员要做什么」排，不按严重感：
+//   retry_failed       表没写进去，但系统变更仍生效 → 要去补
+//   rolled_back        表没写，系统已自动撤销       → 已了结，只有知情权（刻意压低）
+//   rollback_abandoned 表没写，且不敢撤销（期间被再改）→ 数据可能不一致，须人工核对（最高）
+// ✅ 沿用充值记录表「表格」列的既有符号
+const SHEET_WRITE_UI = {
+  retry_failed:       { mark: '⚠️', tone: 'warning' },
+  rolled_back:        { mark: '↩️', tone: 'info' },
+  rollback_abandoned: { mark: '⛔', tone: 'danger' },
+}
+const SHEET_WRITE_TOAST = {
+  warning: ElMessage.warning, info: ElMessage.info, danger: ElMessage.error,
+}
+function sheetWriteUi(status) { return SHEET_WRITE_UI[status] || SHEET_WRITE_UI.retry_failed }
+function sheetWriteMark(status) { return sheetWriteUi(status).mark }
+function sheetWriteTone(status) { return sheetWriteUi(status).tone }
+
+/** 行内 tooltip 与终态弹窗共用同一句文案：结构统一为「发生了什么 + 你要做什么」+ 原始原因 */
+function sheetWriteHint(f) {
+  const reason = f.error_msg || '未知原因'
+  if (f.status === 'rolled_back') {
+    return `写表失败，已撤销本次状态变更。原因：${reason}`
+  }
+  if (f.status === 'rollback_abandoned') {
+    return `写表失败，且该账户期间被再次修改，未自动撤销，请手工核对。原因：${reason}`
+  }
+  return `写表失败，表中未写入。原因：${reason}`
+}
+```
+
+> **不做的事**（设计阶段已明确砍掉，勿「顺手加上」）：不给失败行加左侧竖条或整行变色
+> （本表用行底色按 BC 分组交替，那是既有信息）；不加进场动画或行闪烁（密集表格常驻闪烁
+> 无法工作）；不新造图标或色相（另发明一套只会让操作员重新学）；不做独立失败列表页。
 
 - [ ] **Step 6: 构建验证**
 
