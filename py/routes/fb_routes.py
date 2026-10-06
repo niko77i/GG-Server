@@ -133,9 +133,9 @@ def create_bm():
     note = data.get('note', '').strip()
 
     if not name or not bm_id:
-        return err('BM名称和BMID不能为空'), 400
+        return err('BM名称和BMID不能为空', 400)
     if not bm_id.isdigit():
-        return err('BMID必须是纯数字'), 400
+        return err('BMID必须是纯数字', 400)
 
     uid = get_uid()
     try:
@@ -199,9 +199,9 @@ def ban_and_migrate(bid):
     # 检查当前 BM 状态
     bm = db.execute("SELECT * FROM fb_bms WHERE id=?", (bid,)).fetchone()
     if not bm:
-        return err('BM不存在'), 404
+        return err('BM不存在', 404)
     if bm['status'] == 'banned':
-        return err('该BM已被封禁'), 400
+        return err('该BM已被封禁', 400)
 
     try:
         # 查找或创建目标 BM
@@ -209,12 +209,12 @@ def ban_and_migrate(bid):
         if target:
             target_bid = target['id']
             if target_bid == bid:
-                return err('不能迁移到自身'), 400
+                return err('不能迁移到自身', 400)
         else:
             if not target_bm_name:
-                return err('新建BM需要提供名称'), 400
+                return err('新建BM需要提供名称', 400)
             if not target_bm_id_str.isdigit():
-                return err('BMID必须是纯数字'), 400
+                return err('BMID必须是纯数字', 400)
             db.execute(
                 "INSERT INTO fb_bms (name, bm_id, owner_id) VALUES (?, ?, ?)",
                 (target_bm_name, target_bm_id_str, uid))
@@ -255,7 +255,7 @@ def ban_and_migrate(bid):
         })
     except Exception as e:
         db.rollback()
-        return err(f'封禁迁移失败: {str(e)}'), 500
+        return err(f'封禁迁移失败: {str(e)}', 500)
 
 
 # ==================== 账户管理 ====================
@@ -350,9 +350,9 @@ def create_account():
     primary_bm_id = data.get('primary_bm_id') or None
 
     if not name or not account_id:
-        return err('账户名称和账户ID不能为空'), 400
+        return err('账户名称和账户ID不能为空', 400)
     if not account_id.isdigit():
-        return err('账户ID必须是纯数字'), 400
+        return err('账户ID必须是纯数字', 400)
 
     uid = get_uid()
     # operator 是**冻结字段**（规格 6.1）：服务端填创建者的名字快照，
@@ -711,7 +711,7 @@ def create_product():
     lines = data.get('lines', [])  # [{line_name, link, pixel_id}]
 
     if not product_name:
-        return err('产品名不能为空'), 400
+        return err('产品名不能为空', 400)
 
     uid = get_uid()
     try:
@@ -809,7 +809,7 @@ def product_detail(pid):
     db = get_db()
     prod = db.execute("SELECT * FROM fb_products WHERE id=?", (pid,)).fetchone()
     if not prod:
-        return err('产品不存在'), 404
+        return err('产品不存在', 404)
     item = dict(prod)
     item['bms'] = [dict(b) for b in db.execute(
         "SELECT b.id, b.name, b.bm_id FROM fb_bms b JOIN fb_product_bms pb ON pb.bm_id=b.id WHERE pb.product_id=?", (pid,)
@@ -837,7 +837,7 @@ def add_line(pid):
     pixel_id = data.get('pixel_id', None)
 
     if not line_name:
-        return err('线名不能为空'), 400
+        return err('线名不能为空', 400)
     try:
         db.execute(
             "INSERT INTO fb_lines (product_id, line_name, link, pixel_id) VALUES (?, ?, ?, ?)",
@@ -926,9 +926,9 @@ def create_pixel_bm():
     note = data.get('note', '').strip()
 
     if not name or not bm_id:
-        return err('BM名称和BMID不能为空'), 400
+        return err('BM名称和BMID不能为空', 400)
     if not bm_id.isdigit():
-        return err('BMID必须是纯数字'), 400
+        return err('BMID必须是纯数字', 400)
 
     uid = get_uid()
     try:
@@ -1001,9 +1001,9 @@ def create_pixel(bid):
     pixel_id = data.get('pixel_id', '').strip()
 
     if not pixel_name or not pixel_id:
-        return err('像素名和像素ID不能为空'), 400
+        return err('像素名和像素ID不能为空', 400)
     if not pixel_id.isdigit():
-        return err('像素ID必须是纯数字'), 400
+        return err('像素ID必须是纯数字', 400)
 
     try:
         db.execute(
@@ -1230,11 +1230,11 @@ def extract_parse():
     sorted_mode = data.get('sorted', False)
 
     if not text.strip():
-        return err('请粘贴数据'), 400
+        return err('请粘贴数据', 400)
 
     result = _parse_fb_extract(text, sorted_mode)
     if 'error' in result:
-        return err(result['error']), 400
+        return err(result['error'], 400)
     return ok(result)
 
 
@@ -1250,7 +1250,7 @@ def extract_save():
     records = data.get('records', [])
 
     if not product_name or not records:
-        return err('产品名和数据不能为空'), 400
+        return err('产品名和数据不能为空', 400)
 
     uid = get_uid()
     try:
@@ -1275,9 +1275,11 @@ def extract_save():
         # 先插入一条 pending 同步日志并拿到 id，供前端精确轮询本次写表结果
         import json as _json
         db.execute(
-            "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, rows_json) "
-            "VALUES (?,?,?,'','pending',?)",
-            (uid, product_name, '', _json.dumps(records, ensure_ascii=False)[:10000]))
+            "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, rows_json, "
+            "report_date, line_name) "
+            "VALUES (?,?,?,'','pending',?,?,?)",
+            (uid, product_name, '', _json.dumps(records, ensure_ascii=False)[:10000],
+             report_date, line_name))
         log_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.commit()
 
@@ -1287,7 +1289,7 @@ def extract_save():
         return ok({'saved': len(records), 'sync_log_id': log_id})
     except Exception as e:
         db.rollback()
-        return err(f'保存数据失败: {str(e)}'), 500
+        return err(f'保存数据失败: {str(e)}', 500)
 
 
 def _check_fb_sheet_exists(user_id, report_date):
@@ -1426,7 +1428,7 @@ def fb_sync_status_by_id(log_id):
         (log_id, uid)
     ).fetchone()
     if not row:
-        return err('同步记录不存在'), 404
+        return err('同步记录不存在', 404)
     return ok({'id': row['id'], 'status': row['status'], 'error_msg': row['error_msg'] or ''})
 
 
@@ -1446,6 +1448,33 @@ def fb_sheets_sync_status():
     return ok({'items': [dict(r) for r in rows]})
 
 
+def _rebuild_fb_records(db, user_id, log_row):
+    """按日志行的 (产品名, 线名, 日期) 回查 fb_ad_reports，重建待写 records。
+
+    返回 `(records, None)` 或 `(None, 失败原因)`。
+
+    **刻意不读 `sheets_sync_log.rows_json`**：那个快照在写入时被 `[:10000]` 截断
+    （见 extract_save 的 pending 插入）。每条 record 约 200 字符，超过约 50 条就从
+    中间断开，`json.loads` 必然抛错 —— 所以只把列名从 `row_data` 改对，
+    重试照样是坏的。`fb_ad_reports` 存的是完整原始行，且按
+    (user_id, product_name, line_name, account_id, report_date) 唯一，重建更可靠。
+    """
+    report_date = (log_row['report_date'] or '').strip()
+    if not report_date:
+        # 这两列是随本次修复才落库的，修复前写入的 pending/failed 行没有它，无从定位
+        return None, '这条同步记录缺少日期，无法重建待写数据，请重新保存一次数据'
+    records = db.execute(
+        "SELECT account_name, account_id, cost, impressions, clicks, "
+        "registrations, purchases, cost_per_purchase FROM fb_ad_reports "
+        "WHERE user_id=? AND product_name=? AND line_name=? AND report_date=?",
+        (user_id, log_row['product_name'],
+         (log_row['line_name'] or '').strip(), report_date)
+    ).fetchall()
+    if not records:
+        return None, '找不到对应的原始数据，无法重建待写数据，请重新保存一次数据'
+    return [dict(r) for r in records], None
+
+
 @fb_bp.route('/api/fb/reports/retry-sync', methods=['POST'])
 @jwt_required()
 @fb_required
@@ -1461,13 +1490,17 @@ def fb_retry_sheets_sync():
             "SELECT * FROM sheets_sync_log WHERE id=? AND user_id=?", (log_id, user_id)
         ).fetchone()
         if not log_row:
-            return err('记录不存在'), 404
+            return err('记录不存在', 404)
+        records, why = _rebuild_fb_records(db, user_id, log_row)
+        if records is None:
+            return err(why, 400)
         try:
             import google_sheets_service as gs
-            import json
-            row_data = json.loads(log_row['row_data'] or '[]')
+            # 线名必须带上：upsert_fb_reports 把它当渠道号写进 J 列，原来写死 '' 会让
+            # 重试行丢渠道号
             gs.upsert_fb_reports(db, user_id, log_row['product_name'],
-                                '', log_row['report_date'], row_data)
+                                 (log_row['line_name'] or '').strip(),
+                                 (log_row['report_date'] or '').strip(), records)
             db.execute("DELETE FROM sheets_sync_log WHERE id=?", (log_id,))
             db.commit()
             return ok({'retried': 1})
@@ -1477,7 +1510,7 @@ def fb_retry_sheets_sync():
                 "updated_at=datetime('now','localtime') WHERE id=?",
                 (str(e)[:500], log_id))
             db.commit()
-            return err(f'重试失败: {str(e)}'), 500
+            return err(f'重试失败: {str(e)}', 500)
 
     # 批量重试
     rows = db.execute(
@@ -1485,21 +1518,29 @@ def fb_retry_sheets_sync():
         (user_id,)
     ).fetchall()
     retried = 0
+    failed = []
     for r in rows:
+        records, why = _rebuild_fb_records(db, user_id, r)
+        if records is None:
+            # 无法重建的原因必须回传前端：原来是裸 except 吞掉，用户只看到
+            # `retried: 0`，永远不知道哪条没成功、为什么 —— 正是「静默失败」
+            failed.append({'id': r['id'], 'product_name': r['product_name'], 'error': why})
+            continue
         try:
             import google_sheets_service as gs
-            import json
-            row_data = json.loads(r['row_data'] or '[]')
             gs.upsert_fb_reports(db, user_id, r['product_name'],
-                                '', r['report_date'], row_data)
+                                 (r['line_name'] or '').strip(),
+                                 (r['report_date'] or '').strip(), records)
             db.execute("DELETE FROM sheets_sync_log WHERE id=?", (r['id'],))
             retried += 1
-        except Exception:
+        except Exception as e:
+            err_msg = str(e)[:500]
             db.execute(
-                "UPDATE sheets_sync_log SET retry_count=retry_count+1, "
-                "updated_at=datetime('now','localtime') WHERE id=?", (r['id'],))
+                "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
+                "updated_at=datetime('now','localtime') WHERE id=?", (err_msg, r['id']))
+            failed.append({'id': r['id'], 'product_name': r['product_name'], 'error': err_msg})
     db.commit()
-    return ok({'retried': retried})
+    return ok({'retried': retried, 'failed': failed})
 
 
 # ==================== 数据管理 ====================

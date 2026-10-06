@@ -120,6 +120,11 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "recharge_records", "status", "status TEXT DEFAULT ''")
     _add_column_if_missing(conn, "recharge_records", "sheets_synced", "sheets_synced INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "recharge_records", "sheets_error", "sheets_error TEXT DEFAULT ''")
+    # sheets_sync_log 补列：FB 重试要按 (产品, 线名, 日期) 回查 fb_ad_reports 重建待写数据。
+    # 原来重试读的是 `row_data`（列名实为 `rows_json`）和 `report_date`（列根本不存在），
+    # 两处都抛 IndexError → 该按钮恒失败。
+    _add_column_if_missing(conn, "sheets_sync_log", "report_date", "report_date TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "sheets_sync_log", "line_name", "line_name TEXT DEFAULT ''")
     # 高频查询字段索引（_add_column_if_missing 之后创建，确保列已存在）
     if _table_exists(conn, "accounts"):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id)")
@@ -390,6 +395,9 @@ def _ensure_schema(conn: sqlite3.Connection):
             error_msg TEXT DEFAULT '',
             rows_json TEXT DEFAULT '',
             retry_count INTEGER DEFAULT 0,
+            -- 重试要按 (产品, 线名, 日期) 回查 fb_ad_reports 重建待写数据，故留存这两列
+            report_date TEXT DEFAULT '',
+            line_name TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now','localtime')),
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         );
