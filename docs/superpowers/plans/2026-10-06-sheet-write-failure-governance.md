@@ -1784,12 +1784,19 @@ import { ref, reactive, onMounted, onUnmounted, watch, nextTick } from 'vue'
 
 ```js
 // ---------- 写表失败治理（回收户清单异步写表的结果） ----------
-const RECYCLE_TARGET = 'tt_recycle'
 const SHEET_WRITE_POLL_MS = 3000
 const SHEET_WRITE_POLL_MAX = 14          // ~42s，覆盖 30s 重试窗口
-let sheetWriteTimer = null
+// 每个账户一个轮询定时器。**不能共用一个变量**：批量改状态/批量回收是在同步 for 里
+// 逐账户调度的，共用会让每次调用把上一个账户的定时器 clear 掉 —— 批量 N 个只有最后
+// 1 个会弹终态提示。这是本功能的主要场景，故必须按账户分表。
+const sheetWriteTimers = new Map()       // advertiser_id -> timerId
 const sheetWriteFailures = ref({})       // advertiser_id -> {target, status, error_msg}
 ```
+
+> **勘误（2026-10-06，Task 7 实施/审查发现）**：初稿在这里写的是
+> `const RECYCLE_TARGET = 'tt_recycle'` 与 `let sheetWriteTimer = null`。
+> 前者是**未被任何代码引用的死常量**（重试用的 target 由接口返回的 `f.target` 提供），
+> 已删除；后者是**单计时器缺陷**，已改为按账户分表的 `Map`（见下）。
 
 加入三个函数：
 
@@ -1823,11 +1830,26 @@ function pollSheetWrite(advertiserId) {
       const hint = sheetWriteHint(it)
       SHEET_WRITE_TOAST[sheetWriteTone(it.status)](hint)
       loadSheetWriteFailures()
-    } catch { /* 轮询失败静默，靠列表标记兜底 */ }
+    } catch { stop() /* 轮询失败静默，靠列表标记兜底 */ }
   }
-  if (sheetWriteTimer) clearTimeout(sheetWriteTimer)
-  sheetWriteTimer = setTimeout(tick, SHEET_WRITE_POLL_MS)
+  // 同一账户重入（例如再点一次重试）时先清掉旧链，避免一个账户跑两条
+  const prev = sheetWriteTimers.get(advertiserId)
+  if (prev) clearTimeout(prev)
+  sheetWriteTimers.set(advertiserId, setTimeout(tick, SHEET_WRITE_POLL_MS))
 }
+```
+
+> **`tick` 内的写法**（与初稿的差别，见上条勘误）：提前定义
+> `const stop = () => sheetWriteTimers.delete(advertiserId)`，并让**每一条退出路径**
+> 都先调它再 return —— 超限、无记录、`synced`、三种终态、`catch` 共五处；
+> 只有 `pending` / `failed` 分支重排下一次（保留表项）。
+> 任何一条路径漏了 `stop()`，长时间运行下 `Map` 会无界增长。
+
+```js
+onUnmounted(() => {
+  for (const t of sheetWriteTimers.values()) clearTimeout(t)
+  sheetWriteTimers.clear()
+})
 
 /** 重试按钮 */
 async function retrySheetWrite(row) {
@@ -1880,10 +1902,15 @@ onMounted(async () => {
   // …既有内容不动…
   loadSheetWriteFailures()
 })
-onUnmounted(() => { if (sheetWriteTimer) clearTimeout(sheetWriteTimer) })
+onUnmounted(() => {
+  for (const t of sheetWriteTimers.values()) clearTimeout(t)
+  sheetWriteTimers.clear()
+})
 ```
 
 > 若该组件已在其他位置调用 `onUnmounted`，把清理语句并进去即可，不要新增第二个 `onUnmounted`。
+> 注意清理的是**整个 Map**，不是单个变量 —— 初稿的 `clearTimeout(sheetWriteTimer)` 写法随单计时器
+> 缺陷一并作废（见上条勘误）。
 
 - [ ] **Step 5: 在表格里加标记与重试按钮**
 
