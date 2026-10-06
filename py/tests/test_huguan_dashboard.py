@@ -296,24 +296,46 @@ class TestParseRow:
 
 
 class TestEffectiveOwnerName:
-    def test_channel_wins_when_present(self):
-        """规格 §7.1：运营与重新分配不一致时以重新分配为准。"""
+    # ---- GG：维持 §7.1，变更通道非空时压过运营列 ----
+
+    def test_gg_channel_wins_when_present(self):
         from huguan_dashboard import effective_owner_name
         p = {"owner_name": "张三", "_owner_channel": "李四"}
-        assert effective_owner_name(p) == "李四"
+        assert effective_owner_name(p, "gg") == "李四"
 
-    def test_falls_back_to_owner_when_channel_empty(self):
+    def test_gg_falls_back_to_owner_when_channel_empty(self):
         from huguan_dashboard import effective_owner_name
-        assert effective_owner_name({"owner_name": "张三", "_owner_channel": ""}) == "张三"
+        assert effective_owner_name(
+            {"owner_name": "张三", "_owner_channel": ""}, "gg") == "张三"
 
-    def test_whitespace_channel_falls_back_to_owner(self):
+    def test_gg_whitespace_channel_falls_back_to_owner(self):
         """通道只有空白时不算「已填」，应回退到运营列。"""
         from huguan_dashboard import effective_owner_name
-        assert effective_owner_name({"owner_name": "张三", "_owner_channel": "   "}) == "张三"
+        assert effective_owner_name(
+            {"owner_name": "张三", "_owner_channel": "   "}, "gg") == "张三"
 
-    def test_blank_when_both_empty(self):
+    def test_gg_blank_when_both_empty(self):
         from huguan_dashboard import effective_owner_name
-        assert effective_owner_name({"owner_name": "", "_owner_channel": "  "}) == ""
+        assert effective_owner_name({"owner_name": "", "_owner_channel": "  "}, "gg") == ""
+
+    # ---- TT：2026-10-06 起只认「接户运营」列 ----
+
+    def test_tt_ignores_legacy_channel_key(self):
+        """TT 归属恒取接户运营列 —— 即使 parsed 里仍带着 _owner_channel 也不看它。"""
+        from huguan_dashboard import effective_owner_name
+        p = {"owner_name": "张三", "_owner_channel": "李四"}
+        assert effective_owner_name(p, "tt") == "张三"
+
+    def test_tt_uses_owner_change_note_as_plain_text_not_owner(self):
+        """换绑情况现在是普通文本字段，绝不参与归属判定。"""
+        from huguan_dashboard import effective_owner_name
+        p = {"owner_name": "张三", "owner_change_note": "阿豪转李四10.6"}
+        assert effective_owner_name(p, "tt") == "张三"
+
+    def test_tt_blank_owner(self):
+        from huguan_dashboard import effective_owner_name
+        assert effective_owner_name(
+            {"owner_name": "", "owner_change_note": "阿豪转李四10.6"}, "tt") == ""
 
 
 class TestIsDead:

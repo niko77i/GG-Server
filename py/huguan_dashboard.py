@@ -122,11 +122,20 @@ def parse_row(values: list, platform: str) -> dict:
     return out
 
 
-def effective_owner_name(parsed: dict) -> str:
-    """规格 §7.1：归属变更通道非空时压过当前归属列。
+def effective_owner_name(parsed: dict, platform: str) -> str:
+    """有效归属判定，按平台分叉。
 
+    TT（2026-10-06 规格）：归属**恒取**「接户运营」列。原「换绑情况」列的变更通道语义已取消，
+    该列改作换绑记录文本（`owner_change_note`），不参与归属判定。
+
+    GG：维持 2026-09-23 规格 §7.1 —— 「重新分配」列非空时压过「运营」列。
     「表里运营列和重新分配列不一致，就以表里的重新分配为准」（用户原话）。
+
+    platform 是**必填位置参数**，刻意不给默认值：漏传的 TT 调用方会静默拿到 GG 语义，
+    那正是本次要消除的 bug。
     """
+    if platform == "tt":
+        return (parsed.get("owner_name") or "").strip()
     channel = (parsed.get("_owner_channel") or "").strip()
     if channel:
         return channel
@@ -362,7 +371,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             warnings.append({"row": row_no, "message": "账户ID为空，跳过"})
             continue
 
-        want_owner_name = effective_owner_name(p)
+        want_owner_name = effective_owner_name(p, platform)
         want_owner_id = None
         if want_owner_name:
             want_owner_id = resolve_owner_id(db, want_owner_name)
