@@ -279,6 +279,44 @@ def test_run_write_abandons_rollback_when_guard_fails(client, monkeypatch):
     assert "被再次修改" in r["error_msg"]
 
 
+def test_run_write_reports_rollback_crash_as_such(client, monkeypatch):
+    """回滚器自身抛异常 => rollback_abandoned，且原因必须指向「回滚出错」。
+
+    原来 _apply_final 把「回滚器抛异常」与「守卫未过」归为同一个 else，都写
+    「该账户在写表期间被再次修改」；前端又无条件再断言一次。回滚器崩溃时界面在
+    断言一件没发生的事 —— 而本功能的需求原话就是「提示需要给出失败的原因」。
+    故断言 error_msg 点明回滚过程出错，且**不得**出现「被再次修改」。
+    """
+    import sheet_write
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    def _rb_boom(db, snap):
+        raise RuntimeError("回滚器炸了")
+
+    sheet_write.register_target("_t_rb_crash",
+                                rebuild=lambda uid, key, payload: (lambda: None),
+                                rollback=_rb_boom)
+
+    def _boom():
+        raise RuntimeError("Sheets 挂了")
+
+    db = database.get_db()
+    sheet_write.run_write(db, user_id=1, platform="tt", target="_t_rb_crash",
+                          business_key="k5", sync_fn=_boom, snapshot={"x": 1})
+    import time
+    for _ in range(150):
+        if _row(db, 1, "_t_rb_crash", "k5")["status"] == "rollback_abandoned":
+            break
+        _poll_sleep(0.02)
+    r = _row(db, 1, "_t_rb_crash", "k5")
+    db.close()
+    assert r["status"] == "rollback_abandoned"
+    assert "回滚过程出错" in r["error_msg"]
+    assert "回滚器炸了" in r["error_msg"]
+    assert "被再次修改" not in r["error_msg"], \
+        f"回滚器崩溃却断言账户被再次修改: {r['error_msg']}"
+
+
 def test_run_write_no_rollback_for_mirror_target(client, monkeypatch):
     """镜像类（未注册 rollback）最终失败 => retry_failed，且业务数据不动。"""
     import sheet_write
@@ -492,3 +530,99 @@ def test_retry_gate_is_atomic_against_concurrent_submit(client, monkeypatch):
     assert resp.status_code == 200, resp.get_json()
     assert nested["resp"].status_code == 400, nested["resp"].get_json()
     assert "不需要重试" in nested["resp"].get_json()["error"]
+
+
+def _age(db, key, seconds):
+    """把某行的 updated_at 拨回 seconds 秒前。"""
+    db.execute("UPDATE sheet_write_log "
+               "SET updated_at=datetime('now','localtime', ?) "
+               "WHERE business_key=?", (f"-{seconds} seconds", key))
+    db.commit()
+
+
+def test_sweep_stale_converges_middle_states(client):
+    """超时停在 pending/failed 的行收敛为 retry_failed，新鲜中间态不动。
+
+    这两态没有任何别的收敛路径：进程重启、后台线程启动失败都会让永久停在中间态。
+    中间态不在 ATTENTION 里（列表不显示），又过不了只放行 ATTENTION 的重试闸门
+    （不可重试）—— 失败记录静默丢失，正是本功能要消灭的形态。
+    """
+    import sheet_write
+    db = database.get_db()
+    _mk_log(db, 1, "tt_recycle", "old_p", status="pending")
+    _mk_log(db, 1, "tt_recycle", "old_f", status="failed")
+    _mk_log(db, 1, "tt_recycle", "fresh_p", status="pending")
+    db.execute("UPDATE sheet_write_log SET error_msg='Sheets 挂了' "
+               "WHERE business_key='old_f'")
+    db.commit()
+    stale = sheet_write.STALE_AFTER_SECONDS + 100
+    _age(db, "old_p", stale)
+    _age(db, "old_f", stale)
+
+    n = sheet_write.sweep_stale(db)
+    old_p = _row(db, 1, "tt_recycle", "old_p")
+    old_f = _row(db, 1, "tt_recycle", "old_f")
+    fresh_p = _row(db, 1, "tt_recycle", "fresh_p")
+    db.close()
+
+    assert n == 2, f"应只收敛两条超时中间态，实际 {n}"
+    assert old_p["status"] == "retry_failed"
+    assert "任务中断" in old_p["error_msg"]
+    assert old_p["settled_at"] is not None, "收敛后必须落终态时刻"
+    assert old_f["status"] == "retry_failed"
+    assert "Sheets 挂了" in old_f["error_msg"] and "任务中断" in old_f["error_msg"], \
+        f"原有原因被覆盖而非追加: {old_f['error_msg']}"
+    assert fresh_p["status"] == "pending", "未超时的中间态不得被动"
+
+
+def test_sweep_stale_is_scoped_by_user(client):
+    """收敛只作用于给定 user_id —— 不得动别的操作员的行。"""
+    import sheet_write
+    db = database.get_db()
+    _mk_log(db, 1, "tt_recycle", "u1_old", status="pending")
+    _mk_log(db, 2, "tt_recycle", "u2_old", status="pending")
+    stale = sheet_write.STALE_AFTER_SECONDS + 100
+    _age(db, "u1_old", stale)
+    _age(db, "u2_old", stale)
+
+    n = sheet_write.sweep_stale(db, user_id=1)
+    r1 = _row(db, 1, "tt_recycle", "u1_old")
+    r2 = _row(db, 2, "tt_recycle", "u2_old")
+    db.close()
+
+    assert n == 1
+    assert r1["status"] == "retry_failed"
+    assert r2["status"] == "pending"
+
+
+def test_status_endpoint_sweeps_stale_rows(client, monkeypatch):
+    """轮询 status 时惰性收敛超时中间态，使其立刻可见且可重试。
+
+    进程重启 / 后台线程启动失败留下的 pending 行，若不在此刻收敛，就既不在
+    ATTENTION 列表里（操作员看不到）又过不了重试闸门（点不动）—— 永久卡住。
+    """
+    import sheet_write
+    monkeypatch.setitem(sheet_write.TARGETS, "tt_recycle",
+                        {"rebuild": lambda uid, key, payload: (lambda: None),
+                         "rollback": None})
+    h, uid = _tt_user(client, "_sw_sweep")
+    db = database.get_db()
+    _mk_log(db, uid, "tt_recycle", "acc_stuck", status="pending")
+    _age(db, "acc_stuck", sheet_write.STALE_AFTER_SECONDS + 100)
+    db.close()
+
+    resp = client.get("/api/sheet-write/status?platform=tt", headers=h)
+    assert resp.status_code == 200
+    keys = [i["business_key"] for i in resp.get_json()["items"]]
+    assert "acc_stuck" in keys, f"卡住的行未出现在 ATTENTION 列表: {keys}"
+
+    db = database.get_db()
+    r = _row(db, uid, "tt_recycle", "acc_stuck")
+    db.close()
+    assert r["status"] == "retry_failed"
+
+    # 且该行现在真的可重试（闸门只放行 ATTENTION）
+    resp = client.post("/api/sheet-write/retry", headers=h,
+                       json={"platform": "tt", "target": "tt_recycle",
+                             "business_key": "acc_stuck"})
+    assert resp.status_code == 200, resp.get_json()

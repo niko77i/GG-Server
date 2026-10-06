@@ -838,7 +838,7 @@ async function retrySheetWrite(row) {
 // 写表状态三态。强度按「操作员要做什么」排，不按严重感：
 //   retry_failed       表没写进去，但系统变更仍生效 → 要去补
 //   rolled_back        表没写，系统已自动撤销       → 已了结，只有知情权（刻意压低）
-//   rollback_abandoned 表没写，且不敢撤销（期间被再改）→ 数据可能不一致，须人工核对（最高）
+//   rollback_abandoned 表没写，且未能自动撤销 → 数据可能不一致，须人工核对（最高）
 // ✅ 沿用充值记录表「表格」列的既有符号
 const SHEET_WRITE_UI = {
   retry_failed:       { mark: '⚠️', tone: 'warning' },
@@ -859,7 +859,8 @@ function sheetWriteHint(f) {
     return `写表失败，已撤销本次状态变更。原因：${reason}`
   }
   if (f.status === 'rollback_abandoned') {
-    return `写表失败，且该账户期间被再次修改，未自动撤销，请手工核对。原因：${reason}`
+    // 成因由后端裁定（回滚器崩溃 / 守卫未过是两回事），前端不再自行断言
+    return reason
   }
   return `写表失败，表中未写入。原因：${reason}`
 }

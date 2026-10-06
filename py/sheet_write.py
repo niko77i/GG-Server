@@ -15,6 +15,10 @@ TERMINAL = ("synced", "retry_failed", "rolled_back", "rollback_abandoned")
 # 需要向用户提示的终态（synced 是「没出事」，不打扰）
 ATTENTION = ("retry_failed", "rolled_back", "rollback_abandoned")
 
+# 写表窗口 = 首次尝试 + 30s 重试；留 3 倍余量。超过这个时长仍停在中间态，
+# 说明推进它的线程已经不在了（进程重启 / 后台线程启动失败），需要惰性收敛。
+STALE_AFTER_SECONDS = 90
+
 # target -> {"rebuild": (user_id, business_key, payload) -> sync_fn,
 #            "rollback": (db, snapshot) -> bool  |  None}
 TARGETS = {}
@@ -64,6 +68,31 @@ def record_pending(db, *, user_id, platform, target, business_key,
     db.commit()
 
 
+def sweep_stale(db, user_id=None):
+    """把长时间停在中间态（pending / failed）的任务收敛为终态。
+
+    这些行没有别的收敛路径：进程重启、后台线程启动失败都会让它们永久停在中间态，
+    而中间态既不在 ATTENTION 里（列表不显示）又过不了重试闸门（不可重试）——
+    等于失败记录静默丢失，正是本功能要消灭的形态。
+
+    在 status 接口里按当前用户惰性调用，任何进程都能自愈，无需启动钩子。
+    """
+    sql = ("UPDATE sheet_write_log SET status='retry_failed', "
+           "error_msg=(CASE WHEN error_msg IS NULL OR error_msg='' THEN '' "
+           "ELSE error_msg || '；' END) || '任务中断：写表未在预期时间内完成', "
+           "settled_at=datetime('now','localtime'), "
+           "updated_at=datetime('now','localtime') "
+           "WHERE status IN ('pending','failed') "
+           "AND updated_at < datetime('now','localtime', ?)")
+    params = [f"-{STALE_AFTER_SECONDS} seconds"]
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
+    cur = db.execute(sql, params)
+    db.commit()
+    return cur.rowcount
+
+
 def settle(db, *, user_id, target, business_key, status, error_msg=""):
     """落状态。settled_at 只在终态置上。"""
     db.execute(
@@ -82,7 +111,7 @@ def _apply_final(db, row, err_msg):
     三种结局必须区分，因为用户的后续动作完全不同：
       retry_failed        镜像类，无回滚 —— 业务变更仍生效，用户需自己处理
       rolled_back         已撤销 —— 用户无需再做任何事
-      rollback_abandoned  该账户期间被再次修改，不敢覆盖 —— 用户需手工核对
+      rollback_abandoned  未能自动撤销 —— 用户需手工核对
     """
     entry = TARGETS.get(row["target"]) or {}
     rollback_fn = entry.get("rollback")
@@ -96,21 +125,28 @@ def _apply_final(db, row, err_msg):
         snapshot = json.loads(row["snapshot_json"] or "{}")
     except Exception:
         snapshot = {}
+    rolled = False
+    rb_error = None
     try:
         rolled = bool(rollback_fn(db, snapshot))
     except Exception as e:
         log.error("写表回滚异常 target=%s key=%s: %s",
                   row["target"], row["business_key"], e)
-        rolled = False
+        rb_error = str(e)[:200]
 
     if rolled:
         settle(db, user_id=row["user_id"], target=row["target"],
                business_key=row["business_key"], status="rolled_back",
                error_msg=err_msg)
     else:
+        if rb_error is not None:
+            # 回滚器自己炸了 —— 不能断言「账户被再次修改」，那是另一回事
+            note = f"自动撤销失败（回滚过程出错：{rb_error}），业务变更仍生效，请手工核对"
+        else:
+            note = "该账户在写表期间被再次修改，未自动撤销，请手工核对"
         settle(db, user_id=row["user_id"], target=row["target"],
                business_key=row["business_key"], status="rollback_abandoned",
-               error_msg=f"{err_msg}（该账户在写表期间被再次修改，未自动撤销，请手工核对）")
+               error_msg=f"{err_msg}（{note}）")
 
 
 def run_write(db, *, user_id, platform, target, business_key, sync_fn,

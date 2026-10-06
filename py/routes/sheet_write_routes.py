@@ -34,6 +34,10 @@ def sheet_write_status():
         db.close()
         return err("platform 必须是 gg / tt / fb", 400)
 
+    # 惰性收敛：把超时停在中间态的任务按当前用户收敛为终态，使它们立刻可见且可重试。
+    # 放在 SELECT 之前 —— 同一次轮询里，卡住的行就能出现在下面的 ATTENTION 列表里。
+    sheet_write.sweep_stale(db, user_id=uid)
+
     sql = ("SELECT business_key, target, status, error_msg, created_at, updated_at, settled_at "
            "FROM sheet_write_log WHERE user_id=? AND platform=?")
     params = [uid, platform]
