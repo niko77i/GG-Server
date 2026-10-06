@@ -1129,6 +1129,15 @@ def writeback_fb_acceptor(user_id, platform, account_id, note):
 
 > `applied` 的元素来自 `apply_diff` 的 `applied_owner_rows`，当前只有 `account_id` 与 `to`。**`from` 需要在 `apply_diff` 里一并带上** —— 在 `applied_owner_rows.append({...})` 处补 `"from": item.get("from", "")`。这是本步骤的前置改动，别漏。
 
+**顺带修一处过期的用户文案**（Task 1 的连带，由 Task 2 的审查者发现并报为范围外）：
+`py/routes/huguan_dashboard_routes.py` 里有 **3 处**（`save_config` / `sync` / `push` 各一处）
+返回 `err("platform 必须是 gg 或 tt", 400)`。fb 现在是合法平台，这句对用户是错的。
+三处统一改成：
+
+```python
+        return err("platform 必须是 gg、tt 或 fb", 400)
+```
+
 - [ ] **Step 6: 前端卡片**
 
 `frontend/src/components/HuguanDashboardCard.vue`：
