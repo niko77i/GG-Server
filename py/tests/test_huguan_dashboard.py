@@ -1302,9 +1302,10 @@ class TestBuildDiff:
 
         GG 的 `_PLAIN_TEXT_FIELDS["gg"]` 恰好是 `("acquired_date", "timezone")`，
         插入序 = 字典序，所以把 `sorted()` 改成 `list()` 在 GG 上永远是绿的。TT 的插入序
-        是 `(acquired_date, country, timezone, consumption, remark)`，与字典序不同 ——
-        必须用 TT 造一条**多列同时被清空**的用例才钉得住。列下标以 COLUMN_SPEC 为准：
-        A=0 acquired_date、E=4 country、H=7 timezone、J=9 consumption。
+        是 `(acquired_date, country, timezone, consumption, remark, owner_change_note)`，
+        与字典序不同 —— 必须用 TT 造一条**多列同时被清空**的用例才钉得住。列下标以
+        COLUMN_SPEC 为准：A=0 acquired_date、E=4 country、H=7 timezone、J=9 consumption、
+        M=12 remark、M 之后 owner_change_note（`_PLAIN_TEXT_FIELDS["tt"]` 现有六项）。
 
         ⚠️ 2026-10-06 规格：TT 的 remark（M 列）对**已存在**账户不再进 to_update，
         故也不出现在 clears —— 本用例因此不再包含 remark，且 seed 里的 remark 非空、
@@ -3635,33 +3636,63 @@ class TestRemarkNotPulledForExistingAccounts:
         return row
 
     def test_existing_account_remark_change_is_ignored(self, client):
+        """TT 已存在账户：表里改 M 列不产生 remark 的更新项。
+
+        必须带**同批次的对照行**（改国家的 RMK-CTRL）—— 否则 to_update 为空时
+        断言形同虚设。本项目已不止一次踩过这个空断言坑。
+        """
         from huguan_dashboard import build_diff, parse_row
         db, u1 = self._prepare(client)
         _seed_tt_account(db, "RMK-EX", u1)
+        _seed_tt_account(db, "RMK-CTRL", u1)
         db.execute("UPDATE tt_accounts SET remark='投手写的' WHERE advertiser_id='RMK-EX'")
         db.commit()
-        row = self._tt_row_with_remark("RMK-EX", "户管改的")
-        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
-        # 该行可能因别的字段进 to_update，但 remark 必须不在其中
-        for item in diff["to_update"]:
-            assert "remark" not in item["fields"], "已存在账户不得从表里更新 remark"
+
+        ctrl = [""] * 13
+        ctrl[2], ctrl[4], ctrl[6] = "RMK-CTRL", "BR", "张三"   # E 国家填了新值
+        rows = [
+            dict(parse_row(self._tt_row_with_remark("RMK-EX", "户管改的"), "tt"), row=2),
+            dict(parse_row(ctrl, "tt"), row=3),
+        ]
+        diff = build_diff(db, rows, "tt")
+        by_aid = {i["account_id"]: i for i in diff["to_update"]}
+        # 正向对照：对照行必须进 to_update，否则下面的负向断言无判别力
+        assert "RMK-CTRL" in by_aid, "对照行未进 to_update，本用例不具判别力"
+        assert by_aid["RMK-CTRL"]["fields"]["country"] == "BR"
+        # 被测目标：只改了 remark，不得进 to_update
+        assert "RMK-EX" not in by_aid, "已存在账户不得因 remark 变化进 to_update"
         db.close()
 
     def test_existing_account_blank_remark_does_not_clear_nor_report(self, client):
-        """表里把 M 列清空，既不清系统里的值，也不进 clears（旧隐患已根治）。"""
+        """表里把 M 列清空，不产生清空项、也不进 clears（旧隐患已根治）。
+
+        对照行（RMK-CTRL2）的 E 列留空 ⇒ 清空 country ⇒ 必须出现在 clears 里，
+        以此证明 clears 机制本身是通的；目标行（RMK-CLR）只动了 remark，
+        故必须完全不进 to_update —— 空值不得把备注清掉。
+        """
         from huguan_dashboard import build_diff, parse_row
         db, u1 = self._prepare(client)
+        # 目标行 RMK-CLR 的 goal 是「只和系统差一个 remark」，故 country 保持默认空串
+        # （`_tt_row_with_remark` 的 E 列也是空串）—— 否则该行会因 country 变化而合法进
+        # to_update，负向断言就不再测 remark 了。
         _seed_tt_account(db, "RMK-CLR", u1)
+        _seed_tt_account(db, "RMK-CTRL2", u1, country="US")
         db.execute("UPDATE tt_accounts SET remark='投手的备注' WHERE advertiser_id='RMK-CLR'")
         db.commit()
-        row = self._tt_row_with_remark("RMK-CLR", "")      # M 列留空
-        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
-        for item in diff["to_update"]:
-            assert "remark" not in item["fields"]
-            assert "remark" not in item["clears"]
-        stored = db.execute(
-            "SELECT remark FROM tt_accounts WHERE advertiser_id='RMK-CLR'").fetchone()["remark"]
-        assert stored == "投手的备注", "表里空值不得清掉系统里的备注"
+
+        ctrl = [""] * 13
+        ctrl[2], ctrl[6] = "RMK-CTRL2", "张三"   # E 留空 ⇒ 清空 country
+        rows = [
+            dict(parse_row(self._tt_row_with_remark("RMK-CLR", ""), "tt"), row=2),
+            dict(parse_row(ctrl, "tt"), row=3),
+        ]
+        diff = build_diff(db, rows, "tt")
+        by_aid = {i["account_id"]: i for i in diff["to_update"]}
+        # 正向对照：清空机制本身是通的
+        assert "RMK-CTRL2" in by_aid, "对照行未进 to_update，本用例不具判别力"
+        assert by_aid["RMK-CTRL2"]["clears"] == ["country"]
+        # 被测目标：M 列留空不得让该行进 to_update，更不得进 clears
+        assert "RMK-CLR" not in by_aid, "表里清空 M 列不得影响已存在账户"
         db.close()
 
     def test_new_account_still_carries_remark(self, client):
