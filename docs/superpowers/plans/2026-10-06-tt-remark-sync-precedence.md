@@ -879,58 +879,87 @@ git commit -m "feat(tt): 系统内联改备注后同时推送户管看板与投�
 `/frontend-design` 技能完成视觉设计**，再按设计实现。控制器会在派发本任务前先跑该技能，
 并把结论一并交给实现者。
 
-- [ ] **Step 1: 先过 `/frontend-design`（控制器执行）**
+- [x] **Step 1: 先过 `/frontend-design`（控制器执行）**
 
-由控制器调用 `/frontend-design`，产出该列内联编辑的视觉与交互约定
-（编辑态/只读态样式、提交时机、失败回滚表现、与相邻列的一致性）。
+**结论：不发明新视觉，逐字对齐本文件既有的内联编辑模式。**
+
+理由与依据：
+
+1. **brief 把方向钉死了** —— 「与既有 Element Plus 表格列风格一致」。设计自由度为零的轴
+   不投入；自由度仅存在于**行为**（何时进编辑态、怎么取消、怎么反馈）而非外观。
+2. **本文件已有六列内联可编辑**：BC / 时区 / 代理 / 状态 / 国家 / **消耗情况**
+   （`TtAccountPanel.vue:58,82,98,114,130,143`），共用一套已成型的结构：
+   `v-if="editingXxxId === row.id"` 切 `<el-input>` / 只读态 `{{ row.xxx || '—' }}` +
+   `✏️` 按钮；类名 `.inline-edit-cell` / `.inline-cell-text` / `.inline-name-input` /
+   `.inline-edit-btn` 已在 `<style scoped>` 里定义好（`:740` 起）。
+3. **`消耗情况` 是最贴切的类比** —— 同为纯文本列，交互与 remark 完全同构。
+4. **在 20 列的运营数据表里给单列发明独特视觉身份，是对抗既有设计系统、损害可用性。**
+   这里的「克制」不是保守，是正确的设计判断。
+
+**计划初稿的三处偏离（本次修正）**：
+
+| 初稿写法 | 既有惯例 | 为什么改 |
+|---|---|---|
+| 点文字进编辑态（隐式热区） | `✏️` 按钮显式进入 | 隐式热区在密集表格里不可发现，且与六个邻居不一致 |
+| 无取消键 | `@keyup.escape` → `cancelXxxEdit` | 缺了它，用户误触后只能靠失焦提交，无法放弃 |
+| 只弹失败提示 | 成功/失败都弹（六个邻居一致） | 只报错不报成，用户无法确认改动已生效 |
+
+自造类名 `.remark-cell` 也一并去掉 —— 复用 `.inline-*`。
 
 - [ ] **Step 2: 按设计实现**
 
-在 `frontend/src/views/tt/TtAccountPanel.vue` 的「消耗情况」列（约第 141 行）之后插入：
+在 `frontend/src/views/tt/TtAccountPanel.vue` 的「消耗情况」列（`:141`）**之后**插入：
 
 ```vue
-        <el-table-column label="备注" min-width="160" show-overflow-tooltip>
+        <el-table-column label="备注" min-width="160">
           <template #default="{ row }">
-            <el-input v-if="editingRemarkId === row.id"
-                      v-model="editingRemarkValue"
-                      size="small"
-                      @blur="submitRemark(row)"
-                      @keyup.enter="submitRemark(row)" />
-            <span v-else class="remark-cell" @click="startEditRemark(row)">
-              {{ row.remark || '—' }}
-            </span>
+            <div class="inline-edit-cell" v-if="editingRemarkId === row.id">
+              <el-input v-model="editRemarkValue" size="small" class="inline-name-input"
+                :ref="el => { if (el) remarkInputRef = el }"
+                @blur="saveRemark(row)" @keyup.enter="saveRemark(row)" @keyup.escape="cancelRemarkEdit" />
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <span class="inline-cell-text">{{ row.remark || '—' }}</span>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditRemark(row)">✏️</el-button>
+            </div>
           </template>
         </el-table-column>
 ```
 
-`<script setup>` 内补：
+`<script setup>` 内，紧挨 `编辑消耗情况` 那一组（`:315,321,323,636-657`）之后补：
 
 ```js
 const editingRemarkId = ref(null)
-const editingRemarkValue = ref('')
+const editRemarkValue = ref('')
+let remarkInputRef = null
 
 function startEditRemark(row) {
   editingRemarkId.value = row.id
-  editingRemarkValue.value = row.remark || ''
+  editRemarkValue.value = row.remark || ''
+  nextTick(() => { remarkInputRef?.focus?.() })
 }
-
-async function submitRemark(row) {
-  if (editingRemarkId.value !== row.id) return
-  const next = editingRemarkValue.value
-  const prev = row.remark || ''
+function cancelRemarkEdit() {
   editingRemarkId.value = null
-  if (next === prev) return
+  editRemarkValue.value = ''
+  remarkInputRef = null
+}
+async function saveRemark(row) {
+  const v = editRemarkValue.value.trim()
+  if (v === (row.remark || '')) { cancelRemarkEdit(); return }
   try {
-    await ttAccountsApi.update(row.id, { remark: next })
-    row.remark = next
+    await ttAccountsApi.update(row.id, { remark: v })
+    row.remark = v
+    ElMessage.success('备注已更新')
   } catch (e) {
-    ElMessage.error('备注保存失败')
+    ElMessage.error('更新备注失败')
   }
+  cancelRemarkEdit()
 }
 ```
 
-（`ttAccountsApi` 与 `ElMessage`、`ref` 该文件**均已导入** —— 见 `TtAccountPanel.vue:256,270,255`，
-无需新增 import。`ttAccountsApi.update` 定义在 `frontend/src/api/tt.js:75`。）
+**注意**：失败时**不要**回写 `row.remark` —— 保持原值即天然回滚，与六个邻居同款。
+`ttAccountsApi` / `ElMessage` / `ref` / `nextTick` 该文件**均已导入**
+（`TtAccountPanel.vue:256,270,255`），无需新增 import。
 
 - [ ] **Step 3: 构建验证**
 
