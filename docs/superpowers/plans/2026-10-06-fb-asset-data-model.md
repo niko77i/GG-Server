@@ -1040,7 +1040,22 @@ class TestFbReassign:
         assert r.status_code == 400
 
     def test_non_numeric_owner_id_returns_400(self, client, fb_user_headers_factory):
-        h, _ = fb_user_headers_factory("fb_solo2")
+        """非法 owner_id 只对**跨用户角色**才有意义。
+
+        端点只在 `if role in CROSS_USER_ROLES:` 分支里解析 owner_id —— 普通 user
+        传的 owner_id 被**完全忽略**（默认路径恒为「转给自己」，与 TT 同口径）。
+        用普通 user 发这个请求会走到「已属于当前用户」的 409，拿不到 400。
+        所以本用例必须用跨用户角色发起。
+        """
+        fb_user_headers_factory("fb_dev3")
+        db = database.get_db()
+        db.execute("UPDATE users SET role='developer' WHERE username='fb_dev3'")
+        db.commit()
+        db.close()
+        token = client.post("/api/auth/login",
+                            json={"username": "fb_dev3", "password": "t123"}
+                            ).get_json()["access_token"]
+        h = {"Authorization": f"Bearer {token}"}
         aid = self._make_account(client, h, "7005")
         r = client.put(f"/api/fb/accounts/{aid}/reassign", headers=h,
                        json={"owner_id": "abc"})
