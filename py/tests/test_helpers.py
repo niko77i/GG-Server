@@ -104,3 +104,57 @@ class TestMccChangeLabels:
         assert MCC_CHANGE_TYPE_LABELS["reassign"] == "认领转移"
         assert MCC_CHANGE_TYPE_LABELS["import"] == "批量导入"
         assert MCC_CHANGE_TYPE_LABELS["create"] == "新建账户"
+
+
+class TestParsePagination:
+    """parse_pagination(default, maximum, name) 函数。
+
+    需要 Flask 请求上下文（读 request.args），故用 app 夹具的 test_request_context。
+    """
+
+    def _call(self, app, query, **kwargs):
+        from routes.helpers import parse_pagination
+        with app.test_request_context("/?" + query):
+            return parse_pagination(**kwargs)
+
+    def test_defaults_when_no_params(self, app):
+        assert self._call(app, "") == (1, 20)
+
+    def test_explicit_values(self, app):
+        assert self._call(app, "page=3&size=50") == (3, 50)
+
+    def test_size_above_maximum_is_clamped_not_rejected(self, app):
+        """上万级数据下这是「冲烂浏览器」的总闸门，必须钳制。"""
+        assert self._call(app, "size=999999") == (1, 500)
+
+    def test_size_exactly_maximum_passes(self, app):
+        assert self._call(app, "size=500") == (1, 500)
+
+    def test_size_just_above_maximum_clamps(self, app):
+        assert self._call(app, "size=501") == (1, 500)
+
+    def test_non_numeric_size_falls_back_to_default(self, app):
+        """现状的裸 int() 会 ValueError ⇒ 500；本函数必须回落而不是抛。"""
+        assert self._call(app, "size=abc") == (1, 20)
+
+    def test_zero_and_negative_size_fall_back_to_one(self, app):
+        assert self._call(app, "size=0") == (1, 1)
+        assert self._call(app, "size=-5") == (1, 1)
+
+    def test_negative_page_falls_back_to_one(self, app):
+        """负数页在现状里会变成 OFFSET -N（SQLite 等价 0），是静默错值。"""
+        assert self._call(app, "page=-3") == (1, 20)
+
+    def test_non_numeric_page_falls_back_to_one(self, app):
+        assert self._call(app, "page=abc") == (1, 20)
+
+    def test_custom_default_preserves_caller_behavior(self, app):
+        """TT/FB 的默认页尺寸是 50，迁移时不得把它变成 20。"""
+        assert self._call(app, "", default=50) == (1, 50)
+
+    def test_custom_maximum(self, app):
+        assert self._call(app, "size=999", maximum=100) == (1, 100)
+
+    def test_custom_param_name(self, app):
+        """main.py:8423 用的是 page_size，不是 size。"""
+        assert self._call(app, "page_size=30", name="page_size") == (1, 30)

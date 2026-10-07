@@ -71,10 +71,37 @@ def get_user_display(user: dict | None, uid: int = None) -> str:
     return f"user_{uid or 0}"
 
 
-def parse_pagination() -> tuple[int, int]:
-    """解析分页参数，返回 (page, size)。"""
-    page = max(1, int(request.args.get("page", 1) or 1))
-    size = max(1, min(100, int(request.args.get("size", 20) or 20)))
+def _safe_int(raw, default: int) -> int:
+    """安全整数解析：非数字一律回落默认值，不抛异常。
+
+    现状的裸 `int(request.args.get("size", 20) or 20)` 遇到 `size=abc`
+    会 ValueError ⇒ 500。分页参数是用户可以随便拼的，不该把接口打成 500。
+    """
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_pagination(default: int = 20, maximum: int = 500,
+                     name: str = "size") -> tuple[int, int]:
+    """解析分页参数，返回 (page, size)。**越界一律钳制，不报错**。
+
+    这是「不要全量返回、冲烂浏览器」的服务端总闸门：调用方前端的默认页尺寸
+    都很小，但服务端此前没有任何上限，任何客户端传 `size=999999` 就能把整张
+    表拉回去。
+
+    Args:
+        default: 缺省页尺寸。**各调用点保持自己的原值**（GG 是 20，TT/FB 是 50），
+                 迁移时不得统一成 20 —— 那会改变既有端点的行为。
+        maximum: 页尺寸上限，默认 500（前端最大页尺寸是 200，留 2.5 倍余量）。
+        name: 页尺寸的查询参数名，默认 "size"。`main.py:8423` 用的是 `page_size`。
+
+    Returns:
+        (page, size)，满足 `page >= 1` 且 `1 <= size <= maximum`。
+    """
+    page = max(1, _safe_int(request.args.get("page"), 1))
+    size = max(1, min(maximum, _safe_int(request.args.get(name), default)))
     return page, size
 
 
