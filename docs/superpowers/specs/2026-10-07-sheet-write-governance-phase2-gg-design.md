@@ -245,6 +245,8 @@ def run_write_many(db, *, user_id, platform, target, business_keys,
    改前 `⚠️` 是 `recharge_records` 上的**列**，任何能看到该账户的人（owner / admin / 户管）打开账户都能看到；
    改后日志行按 `sheet_write_log.user_id = 操作者` 归属，`/api/sheet-write/status` 只回自己的行 ⇒
    **管理员/户管替他人账户充值而写表失败时，账户 owner 看不到、也无法重试**。
+   **看板点（`gg_my_dashboard`）同理**：管理员替他人删户/恢复/改状态时，日志行同样归**操作者**，
+   ⇒ 账户 owner 在自己的账户表里看不到那条 ⚠️（最终审查点名：本节原先只记了充值侧）。
    保持现状的理由：① 这条通知的语义是「**我这次操作**没写进去」，操作者才能重试；
    ② 扩大到按账户可见需要改 `/status` 的隔离规则（不再是 `WHERE user_id=?`），属碰数据隔离模型的独立改动。
    **将来若要求按账户可见，改的是 status 接口的隔离规则，不是这一处。**
