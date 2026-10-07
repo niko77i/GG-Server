@@ -425,6 +425,45 @@ def batch_lookup_accounts():
     return ok({'found': found, 'not_found': [a for a in clean_ids if a not in found_ids]})
 
 
+@fb_bp.route('/api/fb/accounts/batch-delete', methods=['POST'])
+@jwt_required()
+@fb_required
+def batch_delete_accounts():
+    """批量软删账户。非跨用户角色只能删自己的；删不到的 id 进 not_found。
+
+    **归属隔离**：「不存在」与「无权」都归入 not_found，故用逐条 UPDATE + rowcount
+    （一条 `IN` 区分不了这两种情况）。`AND deleted_at IS NULL` 保证已软删的 id
+    再次提交时进 not_found，不会把 deleted 计数刷虚。
+    """
+    db = get_db()
+    data = parse_body()
+    ids = data.get('ids') or []
+    if not ids or not isinstance(ids, list):
+        return err('未选择账户', 400)
+    # ids 元素闸门：元素随后原样绑进 sqlite（逐条 UPDATE），
+    # 非 ASCII 数字串 / 超 int64 会抛 OverflowError ⇒ 提前 400 挡下。
+    for _i in ids:
+        if _valid_pk_int64(_i) is None:
+            return err('ids 不合法', 400)
+
+    uid = get_uid()
+    cross_user = _get_role(db, uid) in CROSS_USER_ROLES
+    owner_clause = "" if cross_user else " AND owner_id = ?"
+    deleted, not_found = 0, []
+    for aid in ids:
+        params = (_valid_pk_int64(aid),) if cross_user else (_valid_pk_int64(aid), uid)
+        cur = db.execute(
+            "UPDATE fb_accounts SET deleted_at = datetime('now','localtime'), "
+            "       updated_at = datetime('now','localtime') "
+            f"WHERE id = ?{owner_clause} AND deleted_at IS NULL", params)
+        if cur.rowcount:
+            deleted += 1
+        else:
+            not_found.append(_valid_pk_int64(aid))
+    db.commit()
+    return ok({'deleted': deleted, 'not_found': not_found})
+
+
 @fb_bp.route('/api/fb/accounts/create', methods=['POST'])
 @jwt_required()
 @fb_required

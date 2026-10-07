@@ -838,3 +838,94 @@ class TestFbBatchLookup:
         for body in ({"account_ids": []}, {"account_ids": "x"}, {}):
             resp = client.post("/api/fb/accounts/batch-lookup", json=body, headers=hdr)
             assert resp.status_code == 400, f"未拦下：{body!r}"
+
+
+# ==================== FB 账户面板批量能力（Task 2：批量软删） ====================
+#
+# 形状照 GG 的 `main.accounts_batch_delete`，但**归属隔离**：非跨用户角色只删自己的；
+# 「不存在」与「无权」一律归入 `not_found`（逐条 UPDATE + rowcount 才能区分二者）。
+
+
+class TestFbBatchDelete:
+    """POST /api/fb/accounts/batch-delete —— 批量软删账户。
+
+    夹具沿用本文件既有的 `_fb_user(client, username, role, platform)` 与
+    `_mk_fb_account(db, owner_id, account_id, ...)` helper（本文件没有 fb_user_headers 之类）。
+    """
+
+    def test_deletes_only_own_and_reports_others_as_not_found(self, client):
+        """自己的删掉；别人的计入 not_found 且**未被越权改动**。"""
+        own_hdr, own_id = _fb_user(client, "t_bd_own")
+        _, other_id = _fb_user(client, "t_bd_other")
+        db = database.get_db()
+        pk_own = _mk_fb_account(db, own_id, "T-BD-OWN", "我的账户")
+        pk_other = _mk_fb_account(db, other_id, "T-BD-OTHER", "别人的账户")
+        db.close()
+
+        resp = client.post("/api/fb/accounts/batch-delete",
+                           json={"ids": [pk_own, pk_other]}, headers=own_hdr)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["deleted"] == 1
+        assert data["not_found"] == [pk_other]
+
+        db = database.get_db()
+        own_del = db.execute("SELECT deleted_at FROM fb_accounts WHERE id=?",
+                             (pk_own,)).fetchone()["deleted_at"]
+        other_del = db.execute("SELECT deleted_at FROM fb_accounts WHERE id=?",
+                               (pk_other,)).fetchone()["deleted_at"]
+        db.close()
+        assert own_del is not None, "自己的账户没被软删"
+        assert other_del is None, "他人的账户被越权软删了"
+
+    def test_already_soft_deleted_id_goes_to_not_found_and_is_not_counted(self, client):
+        """**已是软删状态的 id 再被批量删 ⇒ 进 not_found，且不计入 deleted。**
+
+        `AND deleted_at IS NULL` 保证的行。生产代码若不正确，这条会暴露
+        「重复删同一批 id 时 deleted 计数虚高」。
+        """
+        hdr, uid = _fb_user(client, "t_bd_again")
+        db = database.get_db()
+        pk = _mk_fb_account(db, uid, "T-BD-AGAIN", "已删账户")
+        db.execute("UPDATE fb_accounts SET deleted_at=datetime('now','localtime') WHERE id=?",
+                   (pk,))
+        db.commit()
+        db.close()
+
+        resp = client.post("/api/fb/accounts/batch-delete",
+                           json={"ids": [pk]}, headers=hdr)
+        data = resp.get_json()
+        assert data["deleted"] == 0, "已软删的 id 被重复计入 deleted"
+        assert data["not_found"] == [pk]
+
+    def test_cross_user_role_can_delete_others_account(self, client):
+        """**对照腿**：跨用户角色能删别人的（防「一律只删得到自己」的过度收口）。"""
+        _, owner_id = _fb_user(client, "t_bd_target")
+        dev_hdr, _ = _fb_user(client, "t_bd_dev", role="developer", platform="fb")
+        db = database.get_db()
+        pk = _mk_fb_account(db, owner_id, "T-BD-CROSS", "被代管账户")
+        db.close()
+
+        resp = client.post("/api/fb/accounts/batch-delete",
+                           json={"ids": [pk]}, headers=dev_hdr)
+        data = resp.get_json()
+        assert data["deleted"] == 1
+        assert data["not_found"] == []
+        db = database.get_db()
+        deleted_at = db.execute("SELECT deleted_at FROM fb_accounts WHERE id=?",
+                                (pk,)).fetchone()["deleted_at"]
+        db.close()
+        assert deleted_at is not None
+
+    def test_empty_ids_is_400(self, client):
+        hdr, _ = _fb_user(client, "t_bd_empty")
+        assert client.post("/api/fb/accounts/batch-delete", json={"ids": []},
+                           headers=hdr).status_code == 400
+
+    def test_oversized_or_non_ascii_id_is_400_not_500(self, client):
+        """非法 / 超 int64 的 id 元素必须 400，不能漏到 sqlite 绑定处变 500。"""
+        hdr, _ = _fb_user(client, "t_bd_bad")
+        for bad in (10 ** 30, "９", "abc", True):
+            resp = client.post("/api/fb/accounts/batch-delete", json={"ids": [bad]},
+                               headers=hdr)
+            assert resp.status_code == 400, bad
