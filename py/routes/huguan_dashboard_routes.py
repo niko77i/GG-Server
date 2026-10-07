@@ -208,8 +208,14 @@ def dashboard_push():
         undo_db.close()
 
     try:
+        # 定位列必须与快照用的同一列（`hd.KEY_COL[platform]`）：写表按它找行，
+        # 快照也按它找行，两边不一致时快照记的行集合与真正被写的行就对不上。
+        # 写入器的默认值是 "C"（GG/TT 的账户ID列），但 **FB 的账户ID在 D 列**
+        # （C 是「账户名称」），所以 fb 路径不传就会按错误的列定位、写空。
+        # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
         res = gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                           conf["sheet_name"], rows)
+                                           conf["sheet_name"], rows,
+                                           key_col=hd.KEY_COL[platform])
     except Exception:
         # 写表抛异常 ⇒ 整批一个字都没写（update_rows_by_account_id 的单次
         # batchUpdate 是原子的）⇒ 本次同步不算成功，快照没有撤回资格。作废后原样

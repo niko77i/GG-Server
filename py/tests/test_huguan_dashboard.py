@@ -1386,7 +1386,7 @@ def _stub_sheets(monkeypatch, captured):
 
     def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
         captured.append({"spreadsheet_id": spreadsheet_id, "sheet_name": sheet_name,
-                         "rows": rows})
+                         "rows": rows, "key_col": key_col})
         return {"updated": len(rows), "not_found": []}
 
     monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
@@ -2373,6 +2373,124 @@ class TestPushEndpoint:
         assert client.post("/api/huguan/dashboard/push", headers=hg,
                            json=[1, 2]).status_code == 400
         assert captured == []
+
+
+class TestPushKeyColumn:
+    """修复轮 2 · Minor：写表的定位列必须与快照用的 `hd.KEY_COL[platform]` 一致。
+
+    写入器 `update_rows_by_account_id` 的 `key_col` 默认值是 "C"，而 FB 的账户ID
+    在 **D** 列（`KEY_COL["fb"] == "D"`，C 是「账户名称」）。route 此前不传 key_col，
+    fb 路径便按错误的列定位行 —— 快照按 D 记下的行集合与真正被写的行对不上。
+    """
+
+    def test_gg_push_passes_its_key_col(self, client, monkeypatch):
+        """GG 的 KEY_COL 是 "C"，与写入器默认值相同 ⇒ 显式传参对它必须是无操作。
+
+        对照组：这条同时挡住「不看平台、一律硬传 D」的变异体（那样 GG 会红）。
+        """
+        hg, uid = _create_user(client, "_push_keycol_gg", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        _seed_account(db, "KC-GG", uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "gg"})
+        assert resp.status_code == 200
+        assert captured, "对照：写入器必须被调用过，否则下面的断言无判别力"
+        assert captured[0]["key_col"] == "C"
+
+    def test_fb_push_passes_key_col_D(self, client, monkeypatch):
+        """FB 路径必须传 "D"：不传就退回默认 "C"、按「账户名称」列找账户 → 整批写空。
+
+        去掉 route 里的 `key_col=hd.KEY_COL[platform]` 本用例立刻变红（实得 "C"）。
+        """
+        from huguan_dashboard import KEY_COL
+        assert KEY_COL["fb"] == "D", "前提：FB 定位列是 D；若列规格变了本用例要重写"
+
+        hg, uid = _create_user(client, "_push_keycol_fb", role="huguan", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','KC-FB',?)",
+                   (uid,))
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "fb"})
+        assert resp.status_code == 200
+        assert captured, "对照：写入器必须被调用过，否则下面的断言是空集上的恒真式"
+        assert captured[0]["key_col"] == "D"
+
+
+class TestPushSnapshotReadFailure:
+    """修复轮 2 · Important：读快照失败必须冒泡 + 上一份快照原封不动。
+
+    commit 949cd4f 撤掉了 `/push` 快照读取处的宽容（原为 `except ...GoogleSheetsServiceError`），
+    让读失败照常抛 —— 这是那个 commit 的**全部意义**，但此前**没有任何已提交的测试**
+    钉它（当时只用一次性临时用例验过）。本类把该性质提交进测试网。
+    """
+
+    def test_read_failure_propagates_and_keeps_previous_snapshot(self, client, monkeypatch):
+        """读表失败 ⇒ 异常冒泡、一行未写、上一份快照不变。
+
+        判别力：把宽容加回去（`except Exception: pass` 之流），请求不再抛异常、且写入器
+        会被调用 —— `pytest.raises` 与 `captured == []` 双双变红。
+
+        异常如何露出：conftest 以 TESTING=True 起 app，Flask 的 PROPAGATE_EXCEPTIONS
+        随之取 True，未捕获异常**直接抛给 `client.post` 调用者**（不是 500 响应体）。
+        """
+        import google_sheets_service as gs
+        import huguan_dashboard as hd
+        import main as m
+        from google_sheets_service import GoogleSheetsServiceError
+
+        hg, uid = _create_user(client, "_push_readfail", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        _seed_account(db, "RF-1", uid)
+        # 预置一份「上一次成功同步」留下的快照（哨兵值，便于与「无快照」区分）
+        stale = {"spreadsheet_id": "SS", "sheet_name": "S",
+                 "cells": [{"account_id": "RF-1", "cells": {"C": "上次的原值"}}]}
+        hd.save_undo(db, uid, "gg", "push", stale)
+        db.commit()
+        db.close()
+
+        def _boom(*a, **k):
+            raise GoogleSheetsServiceError("读取工作表失败: boom")
+
+        monkeypatch.setattr(hd, "read_sheet_values", _boom)
+
+        captured = []
+
+        def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
+            captured.append(rows)
+            return {"updated": len(rows), "not_found": []}
+
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+
+        with pytest.raises(GoogleSheetsServiceError):
+            client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "gg"})
+
+        # 读失败在写表之前抛出 ⇒ 写入器一次都没被调用（表里一个字都没写）
+        assert captured == []
+        # 旧快照原封不动：既没被覆盖成新值，也没被作废删掉
+        db = database.get_db()
+        got = hd.load_undo(db, uid, "gg", "push")
+        db.close()
+        assert got == stale
+
 
 # ---------- Task 9: TT 触发点 + TT reassign 跨用户 ----------
 
