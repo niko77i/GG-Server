@@ -91,3 +91,43 @@ class TestUndoPrimitives:
         with pytest.raises(ValueError):
             hd.save_undo(db, fb_user, "fb", "redo", {"v": 1})
         db.close()
+
+    # ---------- load_undo 的坏 payload 契约：坏数据 → None，绝不抛 ----------
+
+    def test_load_invalid_json_returns_none(self, client, fb_user):
+        """payload 不是合法 JSON ⇒ None（撤回入口据此禁用），不得抛异常。"""
+        db = database.get_db()
+        db.execute("INSERT INTO huguan_sync_undo(user_id, platform, direction, payload) "
+                   "VALUES(?, 'fb', 'push', ?)", (fb_user, "{not json"))
+        db.commit()
+        assert hd.load_undo(db, fb_user, "fb", "push") is None
+        db.close()
+
+    @pytest.mark.parametrize("raw", ["[1,2]", "null", '"str"', "42"])
+    def test_load_valid_json_not_dict_returns_none(self, client, fb_user, raw):
+        """合法 JSON 但不是 dict ⇒ None（快照协议只认 dict）。"""
+        db = database.get_db()
+        db.execute("INSERT INTO huguan_sync_undo(user_id, platform, direction, payload) "
+                   "VALUES(?, 'fb', 'push', ?)", (fb_user, raw))
+        db.commit()
+        assert hd.load_undo(db, fb_user, "fb", "push") is None
+        db.close()
+
+    def test_load_empty_payload_returns_none(self, client, fb_user):
+        """payload 为空串 ⇒ None（与「无行」同一条短路分支）。"""
+        db = database.get_db()
+        db.execute("INSERT INTO huguan_sync_undo(user_id, platform, direction, payload) "
+                   "VALUES(?, 'fb', 'push', '')", (fb_user,))
+        db.commit()
+        assert hd.load_undo(db, fb_user, "fb", "push") is None
+        db.close()
+
+    def test_save_delete_do_not_commit(self, client, fb_user):
+        """原语与调用方共用事务：save_undo / delete_undo 都不得 commit。"""
+        db = database.get_db()
+        assert db.in_transaction is False, "前置：连接应处于无事务状态"
+        hd.save_undo(db, fb_user, "fb", "push", {"v": 1})
+        assert db.in_transaction is True, "save_undo 不得 commit"
+        hd.delete_undo(db, fb_user, "fb", "push")
+        assert db.in_transaction is True, "delete_undo 不得 commit"
+        db.close()
