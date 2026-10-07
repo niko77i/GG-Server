@@ -9385,6 +9385,104 @@ def admin_trigger_tt_delist_check():
         return jsonify(success=False, error=str(e)), 500
 
 
+# 任务 → 平台 / 配置字段映射。GET 与 PUT 共用，避免两处口径漂移。
+_SCHEDULER_TASKS = [
+    {"key": "gg_delist", "name": "掉包检测", "platform": "gg", "kind": "interval",
+     "field": "gg_delist_minutes"},
+    {"key": "tt_delist", "name": "TT 掉包检测", "platform": "tt", "kind": "interval",
+     "field": "tt_delist_minutes"},
+    {"key": "cleanup", "name": "每周清理", "platform": "gg", "kind": "weekly",
+     "field": None},
+]
+
+
+def _visible_scheduler_tasks(user) -> list:
+    """该用户有权管理的任务。developer 看全部；admin 只看本平台；其余为空。"""
+    if user.get("role") == "developer":
+        return list(_SCHEDULER_TASKS)
+    if user.get("role") == "admin":
+        return [t for t in _SCHEDULER_TASKS if t["platform"] == user.get("platform")]
+    return []
+
+
+@app.route("/api/admin/scheduler/config", methods=["GET"])
+@jwt_required()
+def admin_scheduler_config_get():
+    """读取定时任务配置。
+
+    权限：任何 admin/developer 都可读 —— 刻意**不用** scheduler_required(platform)，
+    否则 FB 管理员（无任务）会拿到 403 而不是空列表，前端就没法渲染空态。
+    """
+    user = auth.get_user_by_id(int(get_jwt_identity()))
+    if not user or user.get("role") not in ("developer", "admin"):
+        return jsonify(success=False, error="权限不足，仅管理员可操作"), 403
+
+    cfg = _get_scheduler_config()
+    last = _get_last_run()
+    lo, hi = _SCHEDULER_LIMITS["min_minutes"], _SCHEDULER_LIMITS["max_minutes"]
+
+    tasks = []
+    for t in _visible_scheduler_tasks(user):
+        item = {"key": t["key"], "name": t["name"], "platform": t["platform"], "kind": t["kind"]}
+        if t["kind"] == "interval":
+            # 一并回传字段名：前端保存时直接用它拼 payload，
+            # 避免前后端各维护一份 key → field 映射而漂移
+            item.update({"value": cfg[t["field"]], "min": lo, "max": hi, "field": t["field"]})
+        else:
+            item.update({"weekday": cfg["cleanup_weekday"], "hour": cfg["cleanup_hour"]})
+        item["last_run"] = last.get(t["key"])      # None = 从未执行（区别于 ok=False）
+        tasks.append(item)
+
+    return jsonify(success=True, tasks=tasks)
+
+
+@app.route("/api/admin/scheduler/config", methods=["PUT"])
+@jwt_required()
+def admin_scheduler_config_put():
+    """修改定时任务配置。只接受调用者有权管理的字段，越权字段一律 403。"""
+    user = auth.get_user_by_id(int(get_jwt_identity()))
+    if not user or user.get("role") not in ("developer", "admin"):
+        return jsonify(success=False, error="权限不足，仅管理员可操作"), 403
+
+    body = request.get_json(silent=True) or {}
+    if not body:
+        return jsonify(success=False, error="请求体为空"), 400
+
+    allowed = set()
+    for t in _visible_scheduler_tasks(user):
+        if t["field"]:
+            allowed.add(t["field"])
+        else:
+            allowed.update({"cleanup_weekday", "cleanup_hour"})
+    known = {"gg_delist_minutes", "tt_delist_minutes", "cleanup_weekday", "cleanup_hour"}
+
+    # 越权字段 → 403（不静默忽略：静默会让用户以为改成功了）
+    if set(body) - allowed:
+        if set(body) & known:
+            return jsonify(success=False, error="无权修改该定时任务"), 403
+        return jsonify(success=False, error=f"未知字段: {', '.join(sorted(set(body) - known))}"), 400
+
+    lo, hi = _SCHEDULER_LIMITS["min_minutes"], _SCHEDULER_LIMITS["max_minutes"]
+    cfg = _get_scheduler_config()
+
+    for key, val in body.items():
+        if not isinstance(val, int) or isinstance(val, bool):
+            return jsonify(success=False, error=f"{key} 必须是整数"), 400
+        if key in ("gg_delist_minutes", "tt_delist_minutes"):
+            if not (lo <= val <= hi):
+                return jsonify(success=False, error=f"{key} 需在 {lo}~{hi} 分钟之间"), 400
+        elif key == "cleanup_weekday":
+            if not (0 <= val <= 6):
+                return jsonify(success=False, error="cleanup_weekday 需在 0~6 之间（0=周一）"), 400
+        elif key == "cleanup_hour":
+            if not (0 <= val <= 23):
+                return jsonify(success=False, error="cleanup_hour 需在 0~23 之间"), 400
+        cfg[key] = val
+
+    database.config_set("scheduler_config", json.dumps(cfg, ensure_ascii=False))
+    return jsonify(success=True, config=cfg)
+
+
 # ============================================================
 #  产品成效素材 API
 # ============================================================

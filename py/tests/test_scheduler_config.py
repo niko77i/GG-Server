@@ -487,3 +487,100 @@ class TestTriggerEndpoints:
         assert resp.status_code == 500
         assert main._get_last_run()["gg_delist"]["ok"] is False
 
+
+# ============================================================
+#  Task 5：GET / PUT /api/admin/scheduler/config
+# ============================================================
+
+class TestSchedulerConfigApi:
+    def test_gg_admin_sees_gg_tasks_only(self, client, admin_gg_headers):
+        """GG 管理员：看到掉包检测 + 每周清理，看不到 TT。"""
+        res = client.get("/api/admin/scheduler/config", headers=admin_gg_headers).get_json()
+        keys = [t["key"] for t in res["tasks"]]
+        assert keys == ["gg_delist", "cleanup"]
+
+    def test_tt_admin_sees_tt_task_only(self, client, admin_tt_headers):
+        res = client.get("/api/admin/scheduler/config", headers=admin_tt_headers).get_json()
+        assert [t["key"] for t in res["tasks"]] == ["tt_delist"]
+
+    def test_fb_admin_gets_empty_list(self, client, admin_fb_headers):
+        """⚠️ FB 管理员是「200 + 空数组」，不是 403 —— 前端据此渲染空态。"""
+        resp = client.get("/api/admin/scheduler/config", headers=admin_fb_headers)
+        assert resp.status_code == 200
+        assert resp.get_json()["tasks"] == []
+
+    def test_developer_sees_all_three(self, client, dev_headers):
+        res = client.get("/api/admin/scheduler/config", headers=dev_headers).get_json()
+        assert [t["key"] for t in res["tasks"]] == ["gg_delist", "tt_delist", "cleanup"]
+
+    def test_defaults_are_reported(self, client, admin_gg_headers):
+        res = client.get("/api/admin/scheduler/config", headers=admin_gg_headers).get_json()
+        gg = next(t for t in res["tasks"] if t["key"] == "gg_delist")
+        assert gg["value"] == 60 and gg["min"] == 10 and gg["max"] == 1440
+        assert gg["last_run"] is None          # 从未执行
+
+    def test_update_interval(self, client, admin_gg_headers):
+        res = client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                         json={"gg_delist_minutes": 120}).get_json()
+        assert res["success"] is True
+        assert main._get_scheduler_config()["gg_delist_minutes"] == 120
+
+    def test_below_lower_bound_rejected(self, client, admin_gg_headers):
+        """下限 10 分钟是硬闸：绕过它的路径必须被 400 堵死。"""
+        resp = client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                          json={"gg_delist_minutes": 9})
+        assert resp.status_code == 400
+        assert main._get_scheduler_config()["gg_delist_minutes"] == 60   # 未被写入
+
+    def test_above_upper_bound_rejected(self, client, admin_gg_headers):
+        assert client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                          json={"gg_delist_minutes": 1441}).status_code == 400
+
+    def test_non_integer_rejected(self, client, admin_gg_headers):
+        assert client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                          json={"gg_delist_minutes": "60"}).status_code == 400
+
+    def test_tt_admin_cannot_write_gg_field(self, client, admin_tt_headers):
+        """⚠️ 越权字段必须 403，不能静默忽略 —— 静默忽略会让用户以为改成功了。"""
+        resp = client.put("/api/admin/scheduler/config", headers=admin_tt_headers,
+                          json={"gg_delist_minutes": 120})
+        assert resp.status_code == 403
+        assert main._get_scheduler_config()["gg_delist_minutes"] == 60
+
+    def test_fb_admin_cannot_write_anything(self, client, admin_fb_headers):
+        assert client.put("/api/admin/scheduler/config", headers=admin_fb_headers,
+                          json={"gg_delist_minutes": 120}).status_code == 403
+
+    def test_update_cleanup_schedule(self, client, admin_gg_headers):
+        client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                   json={"cleanup_weekday": 3, "cleanup_hour": 8})
+        cfg = main._get_scheduler_config()
+        assert cfg["cleanup_weekday"] == 3 and cfg["cleanup_hour"] == 8
+
+    def test_invalid_hour_rejected(self, client, admin_gg_headers):
+        assert client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                          json={"cleanup_hour": 24}).status_code == 400
+
+    def test_invalid_weekday_rejected(self, client, admin_gg_headers):
+        assert client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                          json={"cleanup_weekday": 7}).status_code == 400
+
+    def test_unknown_field_rejected(self, client, admin_gg_headers):
+        """未知字段直接 400 —— 防拼错字段名后「保存成功」却没生效。"""
+        assert client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                          json={"gg_delist_minutse": 120}).status_code == 400
+
+    def test_update_does_not_clobber_last_run(self, client, admin_gg_headers):
+        """⚠️ 配置与运行记录分表存的意义：改周期不得抹掉上次执行时间。"""
+        main._mark_task_run("gg_delist", ok=True)
+        client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                   json={"gg_delist_minutes": 120})
+        assert main._get_last_run()["gg_delist"]["ok"] is True
+
+    def test_partial_update_keeps_other_fields(self, client, admin_gg_headers):
+        client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                   json={"cleanup_hour": 5})
+        cfg = main._get_scheduler_config()
+        assert cfg["cleanup_hour"] == 5
+        assert cfg["cleanup_weekday"] == 6 and cfg["gg_delist_minutes"] == 60   # 对照
+
