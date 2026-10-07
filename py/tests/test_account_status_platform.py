@@ -303,3 +303,90 @@ class TestUnknownStatusBucket:
         assert ids == {"202-000-0001", "202-000-0002"}, (
             "合并计数了，筛选就必须把两批行都给出"
         )
+
+
+# ---------- 悬挂 status_id（指向已删字典行）的统计口径 ----------
+
+class TestDanglingStatusCountsAsUnknown:
+    """悬挂 status_id 的账户：表格显示「未知」，统计与筛选也必须都是「未知」。
+
+    根因（与 NULL 桶同族、本次修的第二条腿）：`status_id` 指向一条**已不存在**的
+    字典行时，LEFT JOIN 状态表得 NULL ⇒ 显示 `row.status || '未知'`、统计的 NULL 桶
+    都把它当「未知」；但旧筛选是 `status_id IS NULL`（假）或
+    `IN (SELECT id ... name=?)`（悬挂 id 不在集合里）⇒ **任何**状态都筛不到它，
+    又是一次「按钮上写着 N、点下去 0 条」。
+
+    判别力在「悬挂那条在不在」：把筛选改回 `IS NULL OR IN (按 name 取 id)`
+    或 `a.status_id IN (SELECT id ...)`，悬挂那条即漏 → 本用例变红。
+    负对照（异状态户必须不在）防「退化成返回全部」。
+    """
+
+    def _mk_dangling_account(self, db_path, account_id, owner_id, dangling_id):
+        """绕过 get_db()（它开着 foreign_keys=ON）造一条悬挂外键。
+
+        `account_statuses(id)` 是主键、`accounts.status_id` 是外键，直接插悬挂值会被
+        拒。用一条**独立** raw 连接先关 FK 再插（get_db() 那条连接可能已带未提交
+        事务，事务内的 PRAGMA foreign_keys 是静默 no-op）——同本文件既有做法。
+        """
+        import sqlite3
+
+        raw = sqlite3.connect(db_path)
+        raw.execute("PRAGMA foreign_keys=OFF")
+        raw.execute(
+            "INSERT INTO accounts(name, account_id, owner_id, status_id) VALUES(?,?,?,?)",
+            (account_id, account_id, owner_id, dangling_id),
+        )
+        raw.commit()
+        raw.close()
+
+    def test_dangling_rows_counted_as_unknown_and_filter_into_it(self, client):
+        h, uid = _register(client, "dangleuser")
+        db = database.get_db()
+        alive_id = _mk_status(db, "存活", "gg", owner_id=1)
+        dead_id = _mk_status(db, "死亡", "gg", owner_id=1)
+        _mk_account(db, "301-000-0001", uid, alive_id)   # 正常存活
+        _mk_account(db, "301-000-0002", uid, dead_id)    # 异状态（负对照）
+        db.close()
+
+        dangling_id = 999000222  # 保证不存在的 id
+        self._mk_dangling_account(database._db_path(), "301-000-0003", uid, dangling_id)
+
+        # 前置断言：确认真是悬挂
+        chk = database.get_db()
+        assert chk.execute("SELECT COUNT(*) FROM account_statuses WHERE id=?",
+                           (dangling_id,)).fetchone()[0] == 0, "前置条件：该 id 无对应字典行"
+        chk.close()
+
+        counts = client.get("/api/accounts/list", headers=h).get_json()["status_counts"]
+        assert counts.get("未知") == 1, "悬挂 status_id 的账户必须计入「未知」"
+        assert counts.get("存活") == 1, "「存活」计数不得把悬挂行算进来"
+
+        # 正腿：按「未知」筛选必须捞到悬挂那条
+        resp = client.get("/api/accounts/list", query_string={"status": "未知"}, headers=h)
+        ids = {a["account_id"] for a in resp.get_json()["accounts"]}
+        assert ids == {"301-000-0003"}, (
+            "统计里「未知」有几条，点开就该有几条 —— 悬挂那条漏了就是死链"
+        )
+
+        # 负对照 + 非别名 category 行为未变：按「死亡」只筛出死亡户
+        resp = client.get("/api/accounts/list", query_string={"status": "死亡"}, headers=h)
+        assert resp.get_json()["total"] == 1
+        ids = {a["account_id"] for a in resp.get_json()["accounts"]}
+        assert ids == {"301-000-0002"}, "非别名 category 的筛选被本次改动带偏"
+
+    def test_unknown_key_total_still_matches_filter_with_dangling(self, client):
+        """不变式（悬挂版）：`status_counts` 里每个 key 的计数必须等于按它筛出的条数。"""
+        h, uid = _register(client, "dangleuser2")
+        db = database.get_db()
+        alive_id = _mk_status(db, "存活", "gg", owner_id=1)
+        _mk_account(db, "302-000-0001", uid, alive_id)
+        _mk_account(db, "302-000-0002", uid, None)
+        db.close()
+        self._mk_dangling_account(database._db_path(), "302-000-0003", uid, 999000333)
+
+        counts = client.get("/api/accounts/list", headers=h).get_json()["status_counts"]
+        for name, cnt in counts.items():
+            resp = client.get("/api/accounts/list", query_string={"status": name}, headers=h)
+            assert resp.get_json()["total"] == cnt, (
+                f"「{name}」计数 {cnt}，按它筛选却得到 {resp.get_json()['total']} 条"
+            )

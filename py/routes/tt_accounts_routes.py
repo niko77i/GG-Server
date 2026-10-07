@@ -232,28 +232,34 @@ def list_accounts():
     if agent_id:
         where.append("a.agent_id = ?"); params.append(agent_id)
     if status_id:
-        # 「存活」在 TT 是**并集口径**：status_id 为 NULL 的户在列表里渲染成「存活」
-        # （`it['status'] = ... or '存活'`），统计也把它并进「存活」那一个 bucket。
-        # 若筛选只按 id 等值，那批 NULL 户恒筛不出来 —— 与统计口径分裂，
-        # 表现为「按钮上写着 N、点下去 0 条」。GG 侧同型先例见 accounts_list 的
-        # `status == "未知"` 分支（py/main.py:4102），此处判据对着 TT 的别名（存活）写。
+        # 筛选必须与**统计/显示**同口径，否则「按钮上写着 N、点下去 0 条」：
+        #   显示：`it['status'] = it.get('status_name') or '存活'` —— LEFT JOIN 状态表
+        #         得 NULL 时（status_id 为 NULL 或**悬挂**）兜底成「存活」；
+        #   统计：`GROUP BY st.name` 后把 st.name 为 NULL 的桶并进「存活」。
+        # 故筛选也一律**按名字判定**，兜底别名取同一个「存活」。
         #
-        # ⚠️ 用**按名字+平台取全部 id 的子查询**，而不是拿客户端传来的那一个 id：
-        #   ① 不信任客户端 id（它只是个查询参数）；
-        #   ② 状态表按 (name, platform) 唯一，但历史数据里可能残留指向**他平台同名行**的
-        #      status_id（跨库拷贝/旧备份导入），那种行统计算「存活」而等值筛不到 ——
-        #      子查询一并覆盖；
-        #   ③ 省掉每请求一次额外的 SELECT。
-        #   ⚠️ 名字而非 id 是稳定契约：id 会因状态表重建而变（2026-10-06 曾删过 TT 状态行）。
-        #
-        # 仍需先查一次 _st 拿名字：用户传进来的是 id，要先判断它是不是「存活」。
+        # ⚠️ 旧写法为什么不行（勿改回）：
+        #   ① `a.status_id = ?` 按 id 等值：status_id 为 NULL 的户（渲染成「存活」）
+        #      与**悬挂** status_id（指向已删字典行，LEFT JOIN 得 NULL ⇒ 也渲染成「存活」）
+        #      两类都恒筛不出来；
+        #   ② `a.status_id IS NULL OR a.status_id IN (SELECT id ... name='存活' AND
+        #      platform='tt')` 补上了 NULL，但悬挂行的 id 不在该子查询里、`IS NULL`
+        #      又为假 ⇒ 悬挂那条仍漏。
+        # 现以**自包含相关子查询**逐字复刻统计口径：按 id 解析名字、解析不出即取别名。
+        #   ⚠️ 子查询**不加 platform 条件**：TT 账户的 status_id 若因跨库拷贝/旧备份
+        #      指向他平台同名行（如 fb 的「存活」），统计按 st.name 计入「存活」，
+        #      筛选也必须一并计入，否则又是一次分裂。
+        #   ⚠️ 不用客户端传来的 id 直接比：id 会因状态表重建而变（2026-10-06 删过 TT
+        #      状态行），名字才是稳定契约。
         _st = db.execute("SELECT name FROM account_statuses WHERE id=?", (status_id,)).fetchone()
-        if _st and (_st["name"] or "").strip() == "存活":
+        if _st is not None and (_st["name"] or "").strip():
+            # 解析出名字 → 按同一口径筛，真行 / NULL / 悬挂 / 他平台同名行一并覆盖
             where.append(
-                "(a.status_id IS NULL OR a.status_id IN "
-                "(SELECT id FROM account_statuses WHERE name='存活' AND platform='tt'))"
-            )
+                "COALESCE((SELECT name FROM account_statuses WHERE id = a.status_id), '存活') = ?")
+            params.append(_st["name"])
         else:
+            # 解析不出名字（不存在的 id / 非数字）：**保持原行为** —— `a.status_id = ?`
+            # 等值匹配，正常情形恒筛不到（0 行）。绝不退化成「不加条件」，那会返回全部。
             where.append("a.status_id = ?")
             params.append(status_id)
     if timezone:

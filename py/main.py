@@ -4093,23 +4093,27 @@ def accounts_list():
         params += [f"%{search}%", f"%{search}%"]
     if mcc_id:
         where.append("a.mcc_id = ?"); params.append(mcc_id)
-    if status == "未知":
-        # 空状态（status_id IS NULL）在列表里渲染成「未知」（前端 `row.status || '未知'`），
-        # 统计里也归到「未知」这一个 key（见下面 status_counts）。统计的 key 又会被前端
-        # 直接当状态按钮、点了原样回传成本参数（availableStatuses / toggleStatus），
-        # 所以筛选必须一并认这个字面量，否则那个按钮点下去恒为空。
-        # 与统计保持同一并集口径：真有一行叫「未知」的字典行时，两边都算上。
+    if status:
+        # 本参数据**本来就是名字**：下面 status_counts 的 key 会被前端直接当状态按钮
+        # （availableStatuses / toggleStatus）、点了原样回传成此参数，所以筛选必须与
+        # 统计/显示**同口径**，否则那个按钮点下去恒为空。
+        #   显示：`row.status || '未知'` —— 状态表 LEFT JOIN 得 NULL 时兜底成「未知」；
+        #   统计：`GROUP BY st.name` 后把 st.name 为 NULL 的桶并进「未知」。
+        # 故筛选也按名字判定，兜底别名取同一个「未知」。
+        #
+        # ⚠️ 旧写法为什么不行（勿改回）：
+        #   ① `a.status_id IN (SELECT id ... name=? AND platform='gg')` 按 id 等值 ——
+        #      status_id 为 NULL（渲染成「未知」）与**悬挂** status_id（指向已删字典行，
+        #      LEFT JOIN 得 NULL ⇒ 同样渲染成「未知」）两类都恒筛不出来；
+        #   ② 曾为 NULL 单开一个 `status == "未知"` 特例补 `IS NULL`，但悬挂行
+        #      `IS NULL` 为假、其 id 也不在按 name 取的子查询里 ⇒ 悬挂那条仍漏
+        #      （本次由统一判据一并收编，特例已删）。
+        # 现以**自包含相关子查询**逐字复刻统计口径：按 id 解析名字、解析不出即取别名。
+        #   ⚠️ 子查询**不加 platform 条件**：账户 status_id 若指向他平台同名行，
+        #      统计按 st.name 计入该名字，筛选也必须一并计入，否则又是一次分裂。
         where.append(
-            "(a.status_id IS NULL OR a.status_id IN "
-            "(SELECT id FROM account_statuses WHERE name='未知' AND platform='gg'))"
-        )
-    elif status:
-        # 状态字典按 (name, platform) 唯一，owner_id 记的是**创建者**、与账户归属无关，
-        # 且缺 platform 条件时 `name=?` 会同时命中 fb / gg / tt 三行（唯一索引按
-        # (name, platform) 排序 → 'fb' < 'gg' < 'tt'，fetchone() 稳定拿 fb 行）。
-        # 故这里只按 name + platform='gg' 取行，不收窄 owner（本表即 GG 账户表）。
-        where.append("a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND platform='gg')")
-        params += [status]
+            "COALESCE((SELECT name FROM account_statuses WHERE id = a.status_id), '未知') = ?")
+        params.append(status)
     if agent:
         if sub_owner is None:
             where.append("a.agent_id IN (SELECT id FROM agents WHERE name LIKE ?)")

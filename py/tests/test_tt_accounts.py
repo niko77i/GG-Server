@@ -165,6 +165,77 @@ def test_list_status_filter_alive_includes_null_status(client, tt_headers):
     assert "3333333333333" not in adv_ids, "异状态（死亡）户不应被存活筛选返回"
 
 
+def _ensure_tt_status(db, name):
+    """取（无则建）platform='tt' 的字典行 id。"""
+    row = db.execute(
+        "SELECT id FROM account_statuses WHERE name=? AND platform='tt'", (name,)
+    ).fetchone()
+    if row is None:
+        db.execute("INSERT INTO account_statuses(name, platform) VALUES(?, 'tt')", (name,))
+        db.commit()
+        row = db.execute(
+            "SELECT id FROM account_statuses WHERE name=? AND platform='tt'", (name,)
+        ).fetchone()
+    return row["id"]
+
+
+def test_list_status_filter_alive_includes_dangling_status(client, tt_headers):
+    """**悬挂** status_id（指向已删字典行）也必须出现在「存活」筛选里。
+
+    根因（与上一条同族、本次修的第二条腿）：LEFT JOIN 状态表得 NULL ⇒ 计数/显示
+    都把它归入「存活」；但旧筛选 `IS NULL` 为假、`= id` 也为假 ⇒ **任何**状态都
+    筛不到它，又是一次「按钮上写着 N、点下去 0 条」。
+    判别力在「悬挂那条在不在」：把修法改回 `IS NULL OR IN (按 name 取 id)` 或
+    `a.status_id = ?`，本用例即变红。
+    另加**负对照**（异状态户必须不在）：否则「退化成返回全部」的错误实现也会绿。
+    """
+    import sqlite3
+
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    alive_id = _ensure_tt_status(db, "存活")
+    dead_id = _ensure_tt_status(db, "死亡")
+
+    # 两条能正常解析的户：真「存活」+ 异状态「死亡」（负对照）
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+               ("真存活户", "1111111111111", alive_id, uid))
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+               ("死亡户", "3333333333333", dead_id, uid))
+    db.commit()
+    db.close()
+
+    # 造**悬挂** status_id。`account_statuses(id)` 是主键、`accounts.status_id` 是外键，
+    # 而 get_db() 的连接开着 PRAGMA foreign_keys=ON ⇒ 直接插悬挂值会被拒。
+    # 用一条**独立** raw 连接先关 FK 再插（get_db() 那条连接可能已带未提交事务，
+    # 事务内的 PRAGMA foreign_keys 是静默 no-op，不可靠）——同
+    # test_account_status_platform.py 的既有做法。
+    dangling_id = 999000111  # 保证不存在的 id
+    raw = sqlite3.connect(database._db_path())
+    raw.execute("PRAGMA foreign_keys=OFF")
+    raw.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+                ("悬挂状态户", "4444444444444", dangling_id, uid))
+    raw.commit()
+    raw.close()
+
+    # 前置断言：确认真是悬挂（指向不存在的字典行）
+    chk = database.get_db()
+    assert chk.execute("SELECT COUNT(*) FROM account_statuses WHERE id=?",
+                       (dangling_id,)).fetchone()[0] == 0, "前置条件：该 id 无对应字典行"
+    chk.close()
+
+    resp = client.get(f"/api/tt/accounts/list?status_id={alive_id}", headers=tt_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    adv_ids = {it["advertiser_id"] for it in body["items"]}
+    assert "4444444444444" in adv_ids, "悬挂 status_id 的户（渲染成「存活」）应被存活筛选返回"
+    assert "1111111111111" in adv_ids, "真「存活」户应返回"
+    assert "3333333333333" not in adv_ids, "异状态（死亡）户不应被存活筛选返回（负对照）"
+    # 计数侧同口径：悬挂户与真存活户一起算进「存活」
+    assert body["status_counts"].get("存活") == 2, (
+        "悬挂户在计数里归「存活」，筛选结果就必须同口径"
+    )
+
+
 def test_update_account_clear_agent(client, tt_headers):
     """update_account 应支持 agent_id=null 显式清空代理（对齐 GG）。"""
     resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
