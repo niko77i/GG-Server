@@ -11,6 +11,11 @@ if _py_dir not in sys.path:
 
 import database  # noqa: E402
 
+# conftest 的 app fixture 用 15 字节的 "test-secret-key" 作为 JWT 密钥，PyJWT 会为
+# 每一次编解码抛 InsecureKeyLengthWarning。这是测试夹具的既有产物、非本文件引入，
+# 按类精确静音，保持测试输出干净（只屏蔽这一种，别的 warning 仍会显示）。
+pytestmark = pytest.mark.filterwarnings("ignore::jwt.warnings.InsecureKeyLengthWarning")
+
 
 @pytest.fixture
 def test_conn():
@@ -265,3 +270,216 @@ def test_login_returns_platform(app, client):
     resp2 = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
     me = resp2.get_json()
     assert 'platform' in me['user'], f"/api/auth/me 缺少 platform: {me['user']}"
+
+
+# ==================== FB 像素 / 像素BM 归属收口（B-6 / B-7） ====================
+#
+# 缺陷：pixels / pixel-bms 两族端点此前只卡「是不是 FB 平台用户」，不卡归属 ——
+# 任何 FB 用户按 id 就能改/删**别人**的像素、软删他人 BM、往他人 BM 塞像素、
+# 读他人 BM 的像素、列出全库 BM 选项。本类逐个钉住每个收口点。
+#
+# 归属解析：像素无 owner 列，归属看父表 `fb_pixel_bms.owner_id`（见下方 helper）。
+# 每个越权用例都以**已登录的另一个 FB 用户**身份发起（不是匿名），才是「越权」而非「未登录」。
+
+
+def _fb_user(client, username, role="user", platform="fb"):
+    """注册 → 改写 role/platform → 登录，返回 (headers, user_id)。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role=?, platform=? WHERE username=?",
+               (role, platform, username))
+    db.commit()
+    uid = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()["id"]
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    return {"Authorization": f"Bearer {resp.get_json().get('access_token', '')}"}, uid
+
+
+def _mk_pixel_bm(db, owner_id, bm_id, name="像素BM"):
+    db.execute("INSERT INTO fb_pixel_bms(name, bm_id, owner_id) VALUES(?,?,?)",
+               (name, bm_id, owner_id))
+    db.commit()
+    return db.execute("SELECT id FROM fb_pixel_bms WHERE bm_id=?", (bm_id,)).fetchone()["id"]
+
+
+def _mk_pixel(db, pixel_bm_id, pixel_id, name="像素"):
+    db.execute("INSERT INTO fb_pixels(pixel_bm_id, pixel_name, pixel_id) VALUES(?,?,?)",
+               (pixel_bm_id, name, pixel_id))
+    db.commit()
+    return db.execute("SELECT id FROM fb_pixels WHERE pixel_id=?", (pixel_id,)).fetchone()["id"]
+
+
+def _seed_two_users(client, tag):
+    """造 A、B 两个 FB 普通用户；各带一个像素BM + 一条像素。返回各 id 与 A 的认证头。"""
+    a_hdr, a_id = _fb_user(client, f"{tag}_a")
+    b_hdr, b_id = _fb_user(client, f"{tag}_b")
+    db = database.get_db()
+    a_bm = _mk_pixel_bm(db, a_id, f"{tag}-A-BM", "A的BM")
+    b_bm = _mk_pixel_bm(db, b_id, f"{tag}-B-BM", "B的BM")
+    a_px = _mk_pixel(db, a_bm, f"{tag}-A-PX", "A的像素")
+    b_px = _mk_pixel(db, b_bm, f"{tag}-B-PX", "B的像素")
+    db.close()
+    return dict(a_hdr=a_hdr, a_id=a_id, b_hdr=b_hdr, b_id=b_id,
+                a_bm=a_bm, b_bm=b_bm, a_px=a_px, b_px=b_px)
+
+
+def _px_name(db, pxid):
+    return db.execute("SELECT pixel_name FROM fb_pixels WHERE id=?", (pxid,)).fetchone()["pixel_name"]
+
+
+class TestFbPixelOwnershipClosure:
+    """B-6 / B-7：pixels / pixel-bms 两族补齐归属校验（跨租户越权收口）。"""
+
+    # ---------------- 像素写：他人 ⇒ 403，本人 ⇒ 200 ----------------
+
+    def test_user_cannot_update_others_pixel(self, client):
+        s = _seed_two_users(client, "t_pxupd")
+        resp = client.put(f"/api/fb/pixels/{s['b_px']}",
+                          json={"pixel_name": "被改名"}, headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        assert _px_name(db, s["b_px"]) == "B的像素"   # 证伪：去掉校验会 200 且真改了
+        db.close()
+
+    def test_user_can_update_own_pixel(self, client):
+        s = _seed_two_users(client, "t_pxupd_ok")
+        resp = client.put(f"/api/fb/pixels/{s['a_px']}",
+                          json={"pixel_name": "我改了"}, headers=s["a_hdr"])
+        assert resp.status_code == 200
+        db = database.get_db()
+        assert _px_name(db, s["a_px"]) == "我改了"    # 防「一律 403」的过度收口
+        db.close()
+
+    def test_user_cannot_delete_others_pixel(self, client):
+        s = _seed_two_users(client, "t_pxdel")
+        resp = client.delete(f"/api/fb/pixels/{s['b_px']}", headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        assert db.execute("SELECT 1 FROM fb_pixels WHERE id=?", (s["b_px"],)).fetchone() is not None
+        db.close()
+
+    # ---------------- 像素BM 写：他人 ⇒ 403，本人 ⇒ 200 ----------------
+
+    def test_user_cannot_update_others_pixel_bm(self, client):
+        s = _seed_two_users(client, "t_bmupd")
+        resp = client.put(f"/api/fb/pixel-bms/{s['b_bm']}",
+                          json={"name": "被改名"}, headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        name = db.execute("SELECT name FROM fb_pixel_bms WHERE id=?", (s["b_bm"],)).fetchone()["name"]
+        db.close()
+        assert name == "B的BM"
+
+    def test_user_can_update_own_pixel_bm(self, client):
+        s = _seed_two_users(client, "t_bmupd_ok")
+        resp = client.put(f"/api/fb/pixel-bms/{s['a_bm']}",
+                          json={"name": "我改了"}, headers=s["a_hdr"])
+        assert resp.status_code == 200
+        db = database.get_db()
+        name = db.execute("SELECT name FROM fb_pixel_bms WHERE id=?", (s["a_bm"],)).fetchone()["name"]
+        db.close()
+        assert name == "我改了"
+
+    def test_user_cannot_delete_others_pixel_bm(self, client):
+        s = _seed_two_users(client, "t_bmdel")
+        resp = client.delete(f"/api/fb/pixel-bms/{s['b_bm']}", headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        deleted = db.execute("SELECT deleted_at FROM fb_pixel_bms WHERE id=?",
+                             (s["b_bm"],)).fetchone()["deleted_at"]
+        db.close()
+        assert deleted is None                        # 未被软删
+
+    def test_user_can_delete_own_pixel_bm(self, client):
+        s = _seed_two_users(client, "t_bmdel_ok")
+        resp = client.delete(f"/api/fb/pixel-bms/{s['a_bm']}", headers=s["a_hdr"])
+        assert resp.status_code == 200
+        db = database.get_db()
+        deleted = db.execute("SELECT deleted_at FROM fb_pixel_bms WHERE id=?",
+                             (s["a_bm"],)).fetchone()["deleted_at"]
+        db.close()
+        assert deleted is not None
+
+    # ---------------- 往他人 BM 塞像素 ----------------
+
+    def test_user_cannot_create_pixel_in_others_bm(self, client):
+        s = _seed_two_users(client, "t_pxnew")
+        resp = client.post(f"/api/fb/pixel-bms/{s['b_bm']}/pixels",
+                           json={"pixel_name": "塞进去", "pixel_id": "9000001"},
+                           headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        assert db.execute("SELECT 1 FROM fb_pixels WHERE pixel_id='9000001'").fetchone() is None
+        db.close()
+
+    def test_user_can_create_pixel_in_own_bm(self, client):
+        s = _seed_two_users(client, "t_pxnew_ok")
+        resp = client.post(f"/api/fb/pixel-bms/{s['a_bm']}/pixels",
+                           json={"pixel_name": "我的新像素", "pixel_id": "9000002"},
+                           headers=s["a_hdr"])
+        assert resp.status_code == 200
+        db = database.get_db()
+        assert db.execute("SELECT 1 FROM fb_pixels WHERE pixel_id='9000002'").fetchone() is not None
+        db.close()
+
+    # ---------------- 读：list / options ----------------
+
+    def test_user_cannot_list_others_bm_pixels(self, client):
+        s = _seed_two_users(client, "t_pxlist")
+        others = client.get(f"/api/fb/pixel-bms/{s['b_bm']}/pixels", headers=s["a_hdr"]).get_json()["data"]
+        assert others == []                          # 去掉过滤时会返回 B 的像素
+        mine = client.get(f"/api/fb/pixel-bms/{s['a_bm']}/pixels", headers=s["a_hdr"]).get_json()["data"]
+        assert {p["pixel_id"] for p in mine} == {"t_pxlist-A-PX"}   # 非空，防「一律空」
+
+    def test_pixel_bm_options_scoped_to_owner(self, client):
+        s = _seed_two_users(client, "t_opt")
+        opts = client.get("/api/fb/pixel-bms/options", headers=s["a_hdr"]).get_json()["data"]
+        ids = {o["bm_id"] for o in opts}
+        assert ids == {"t_opt-A-BM"}                 # 不含 B 的；去掉收窄时会含 B 的
+        assert ids
+
+    # ---------------- 契约：行不存在时行为保持既有（不因新校验变 404/500） ----------------
+
+    def test_missing_rows_keep_existing_contract(self, client):
+        """写端点对「行不存在」的既有语义必须保留（这是刻意不动的口径）。
+
+        本改动只新增 403 一条路径：`existing` 为 None 时不拦，落回既有行为 ——
+        UPDATE/DELETE 0 行仍 200；往不存在 BM 塞像素仍落回外键报错 → 400。
+        若将来有人把校验前移成「先查行、无行即 404」，这几条会立刻变红。
+        """
+        hdr, _ = _fb_user(client, "t_missing")
+        assert client.put("/api/fb/pixel-bms/999999", json={"name": "x"},
+                          headers=hdr).status_code == 200
+        assert client.delete("/api/fb/pixel-bms/999999", headers=hdr).status_code == 200
+        assert client.put("/api/fb/pixels/999999", json={"pixel_name": "x"},
+                          headers=hdr).status_code == 200
+        assert client.delete("/api/fb/pixels/999999", headers=hdr).status_code == 200
+        assert client.post("/api/fb/pixel-bms/999999/pixels",
+                           json={"pixel_name": "x", "pixel_id": "9000009"},
+                           headers=hdr).status_code == 400
+        assert client.get("/api/fb/pixel-bms/999999/pixels",
+                          headers=hdr).get_json()["data"] == []
+
+    # ---------------- 对照组：跨用户角色仍可操作全部 ----------------
+
+    def test_cross_user_role_can_operate_others_objects(self, client):
+        """developer/admin/户管 属 CROSS_USER_ROLES，必须仍能操作他人对象（既有行为不退化）。"""
+        s = _seed_two_users(client, "t_cross")
+        hg, _ = _fb_user(client, "t_cross_hg", role="huguan", platform="gg")
+
+        assert client.put(f"/api/fb/pixel-bms/{s['b_bm']}",
+                          json={"name": "户管改的BM"}, headers=hg).status_code == 200
+        assert client.put(f"/api/fb/pixels/{s['b_px']}",
+                          json={"pixel_name": "户管改的像素"}, headers=hg).status_code == 200
+        assert client.post(f"/api/fb/pixel-bms/{s['b_bm']}/pixels",
+                           json={"pixel_name": "户管加的", "pixel_id": "9000003"},
+                           headers=hg).status_code == 200
+
+        lst = client.get(f"/api/fb/pixel-bms/{s['b_bm']}/pixels", headers=hg)
+        assert lst.status_code == 200
+        assert {p["pixel_id"] for p in lst.get_json()["data"]} == {"t_cross-B-PX", "9000003"}
+
+        assert client.delete(f"/api/fb/pixels/{s['b_px']}", headers=hg).status_code == 200
+
+        opts = client.get("/api/fb/pixel-bms/options", headers=hg).get_json()["data"]
+        assert {o["bm_id"] for o in opts} == {"t_cross-A-BM", "t_cross-B-BM"}   # 跨用户看全部

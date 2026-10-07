@@ -978,9 +978,17 @@ def create_pixel_bm():
 @fb_required
 def update_pixel_bm(bid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
     data = parse_body()
     name = data.get('name', '').strip()
     note = data.get('note', '').strip()
+    # 归属校验（口径同 reassign_account）：非跨用户角色只能改自己名下的像素BM。
+    # 少了这道闸，任何 FB 用户按 id 就能改**别人**的 BM 名。行不存在时不拦
+    # （existing 为 None），保持既有「UPDATE 0 行仍返回 200」的行为。
+    existing = db.execute("SELECT owner_id FROM fb_pixel_bms WHERE id=?", (bid,)).fetchone()
+    if existing and role not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     if name:
         db.execute(
             "UPDATE fb_pixel_bms SET name=?, note=?, updated_at=datetime('now','localtime') WHERE id=?",
@@ -994,6 +1002,13 @@ def update_pixel_bm(bid):
 @fb_required
 def delete_pixel_bm(bid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    # 归属校验：非跨用户角色只能软删自己的像素BM（否则可软删他人 BM）。
+    # 行不存在时不拦，保持既有 200。
+    existing = db.execute("SELECT owner_id FROM fb_pixel_bms WHERE id=?", (bid,)).fetchone()
+    if existing and role not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     db.execute("UPDATE fb_pixel_bms SET deleted_at=datetime('now','localtime') WHERE id=?", (bid,))
     db.commit()
     return ok()
@@ -1004,8 +1019,24 @@ def delete_pixel_bm(bid):
 @fb_required
 def pixel_bm_options():
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    # 收窄口径同 list_pixel_bms：非跨用户角色强制只看自己的像素BM；
+    # 跨用户角色可用 owner_id 收窄，不带则看全部。原实现返回**全库**，属跨租户可见。
+    cross_user = role in CROSS_USER_ROLES
+    owner_filter = (request.args.get('owner_id') or '').strip() if cross_user else ''
+    where = ["status='normal'", "deleted_at IS NULL"]
+    params = []
+    if cross_user:
+        if owner_filter:
+            where.append("owner_id = ?")
+            params.append(owner_filter)
+    else:
+        where.append("owner_id = ?")
+        params.append(uid)
+    where_clause = " AND ".join(where)
     rows = db.execute(
-        "SELECT id, name, bm_id FROM fb_pixel_bms WHERE status='normal' AND deleted_at IS NULL ORDER BY name"
+        f"SELECT id, name, bm_id FROM fb_pixel_bms WHERE {where_clause} ORDER BY name", params
     ).fetchall()
     return ok([dict(r) for r in rows])
 
@@ -1017,6 +1048,15 @@ def pixel_bm_options():
 @fb_required
 def list_pixels(bid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    # 归属过滤口径同 list_all_pixels：像素归属由父表 fb_pixel_bms.owner_id 决定。
+    # 非跨用户角色只能看自己名下的像素BM —— 否则按 bid 就能读**别人**的像素。
+    # 返回空列表（而非 403），与既有 list 端点口径一致；BM 不存在时同样落到 ok([])。
+    if role not in CROSS_USER_ROLES:
+        bm = db.execute("SELECT owner_id FROM fb_pixel_bms WHERE id=?", (bid,)).fetchone()
+        if not bm or bm["owner_id"] != uid:
+            return ok([])
     rows = db.execute(
         "SELECT * FROM fb_pixels WHERE pixel_bm_id=? ORDER BY pixel_name", (bid,)
     ).fetchall()
@@ -1037,6 +1077,14 @@ def create_pixel(bid):
     if not pixel_id.isdigit():
         return err('像素ID必须是纯数字', 400)
 
+    # 归属校验：目标像素BM必须属于调用者（跨用户角色不限）—— 否则就是把像素
+    # 塞进**别人**的 BM。行不存在时不拦，落回既有 INSERT → 外键报错 → err(...)。
+    uid = get_uid()
+    role = _get_role(db, uid)
+    bm = db.execute("SELECT owner_id FROM fb_pixel_bms WHERE id=?", (bid,)).fetchone()
+    if bm and role not in CROSS_USER_ROLES and bm["owner_id"] != uid:
+        return err("无权限", 403)
+
     try:
         db.execute(
             "INSERT INTO fb_pixels (pixel_bm_id, pixel_name, pixel_id) VALUES (?, ?, ?)",
@@ -1052,8 +1100,18 @@ def create_pixel(bid):
 @fb_required
 def update_pixel(pxid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
     data = parse_body()
     pixel_name = data.get('pixel_name', '').strip()
+    # 归属经父表解析（fb_pixels 无 owner 列）：非跨用户角色只能改自己名下 BM 的像素。
+    # 像素不存在时不拦，保持既有「UPDATE 0 行仍返回 200」的行为。
+    row = db.execute(
+        "SELECT pb.owner_id FROM fb_pixels p "
+        "JOIN fb_pixel_bms pb ON pb.id = p.pixel_bm_id WHERE p.id=?", (pxid,)
+    ).fetchone()
+    if row and role not in CROSS_USER_ROLES and row["owner_id"] != uid:
+        return err("无权限", 403)
     if pixel_name:
         db.execute("UPDATE fb_pixels SET pixel_name=? WHERE id=?", (pixel_name, pxid))
         db.commit()
@@ -1065,6 +1123,15 @@ def update_pixel(pxid):
 @fb_required
 def delete_pixel(pxid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    # 归属经父表解析：非跨用户角色只能删自己名下 BM 的像素。像素不存在时不拦，保持既有 200。
+    row = db.execute(
+        "SELECT pb.owner_id FROM fb_pixels p "
+        "JOIN fb_pixel_bms pb ON pb.id = p.pixel_bm_id WHERE p.id=?", (pxid,)
+    ).fetchone()
+    if row and role not in CROSS_USER_ROLES and row["owner_id"] != uid:
+        return err("无权限", 403)
     db.execute("DELETE FROM fb_pixels WHERE id=?", (pxid,))
     db.commit()
     return ok()
