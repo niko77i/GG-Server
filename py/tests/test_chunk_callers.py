@@ -16,7 +16,7 @@ if _py_dir not in sys.path:
 # main.py 用的是 `from utils import chunk`，那是模块级的独立名字绑定，
 # 改 utils 里那个对 main.chunk 没有任何影响（这正是本测试要防的
 # 「以为分块了其实没有」）。
-_CHUNK_CONSUMERS = ("main", "huguan_dashboard", "routes.tt_accounts_routes")
+_CHUNK_CONSUMERS = ("main", "huguan_dashboard")
 
 
 class _ChunkSpy:

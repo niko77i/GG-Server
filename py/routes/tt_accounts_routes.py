@@ -9,7 +9,6 @@ from flask_jwt_extended import jwt_required
 
 import database
 from cache import cache as _app_cache
-from utils import chunk
 
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES, parse_pagination
 from .decorators import tt_required, tt_write_required
