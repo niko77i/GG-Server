@@ -357,6 +357,9 @@ FB 的已删除列表**已经分页**（`fb_routes.py:457`），照它抄。
 
 ### 6.2 通用闸门：`size` 上限（B7）
 
+> **执行时更正**：本节原记「全仓 15 处」，实测为 **17 处** —— 漏了 `py/routes/tt_routes.py:51`
+> 与 `:184`，因为当初的 grep 只指定了三个文件、从未搜索 `tt_routes.py`。
+
 全仓 **15 处** `size = int(request.args.get("size", …))` 全部无上限。
 
 **复用既有的 `helpers.parse_pagination`，不新增 helper**：

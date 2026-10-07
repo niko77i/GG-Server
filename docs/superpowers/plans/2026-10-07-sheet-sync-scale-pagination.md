@@ -1,5 +1,16 @@
 # 上万户规模治理 · 第 ③ 部分：分页与列表 实现计划
 
+> **执行中的更正记录（2026-10-07，落地时实测）**
+> 本计划有两处**基于不完整 grep 得出的错误清单**，已在执行中由实测纠正，切勿再依据原文行事：
+> 1. **`size` 调用点实为 17 处，不是 15 处** —— 原文漏了 `py/routes/tt_routes.py:51`
+>    （`/api/tt/bcs/list`）与 `:184`（`/api/tt/products/list`）。原因：当初的 grep 只指定了
+>    `main.py`、`tt_accounts_routes.py`、`fb_routes.py` 三个文件，从未搜 `tt_routes.py`。
+> 2. **`py/routes/tt_accounts_routes.py` 里一个 `IN (` 子句都没有** —— 原文 Task 6 指的
+>    186/244 实为 `batch_lookup_accounts` 的逐 id N+1 循环与 `list_accounts` 的 `COUNT(*)`
+>    （动态 WHERE，无 IN）。据此误加的 `from utils import chunk` 已在 `63d2882` 删除。
+> 3. `huguan_dashboard.py` 那条「查现有账户」的 IN 在 **`build_diff`** 里，不是 `apply_diff`
+>    （后者在 `huguan_dashboard.py:842`，是另一个函数）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让所有列表端点在数据量到上万级时既不卡浏览器也不被绕过分页 —— 修掉两个无分页的「已删除账户」端点，给全部 15 处 `size` 参数加服务端上限，并消除 FB 列表的 N+1 查询。
@@ -1221,6 +1232,11 @@ git commit -m "perf(fb): 列表 BM 改批量查询，消除每行一次的 N+1"
 ---
 
 ## Task 6: 既有 `IN (...)` 接入 `chunk`
+
+> ⚠️ **执行时已更正**：原文列的两处 `py/routes/tt_accounts_routes.py`（约 186、244）**不存在** ——
+> 该文件零个 `IN (` 子句。同时 `main.py` 实为 **5 处**（原文 4 处），第 5 处在 GG 同步 §10c，
+> 与 §7 共用同一个 `placeholders` 变量，必须一并分块，否则留下死变量且该端点 3.3 万行时仍会 500。
+> 两者的实测处置见文件顶部的更正记录。
 
 **Files:**
 - Modify: `py/main.py`（`batch-lookup` 约 4337、`batch-delete` 计数约 5070、`batch-update` 反查约 5155、GG sync 约 5307）
