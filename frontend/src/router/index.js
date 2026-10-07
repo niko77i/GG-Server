@@ -197,10 +197,6 @@ router.beforeEach((to, from, next) => {
     next(platformHome)
     return
   }
-  if (to.meta.developer && !auth.isDeveloper) {
-    next(platformHome)
-    return
-  }
   // viewer 只能访问 /accounts/products，不能访问其他账户子页面
   if (auth.isViewer && to.path.startsWith('/accounts') && to.path !== '/accounts/products' && !to.path.startsWith('/accounts/products/')) {
     next('/accounts/products')
