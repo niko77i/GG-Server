@@ -4,6 +4,7 @@
 本文件只做取参/鉴权/调逻辑层，状态机与执行器都在 py/sheet_write.py。
 """
 import json
+import logging
 
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
@@ -13,7 +14,13 @@ from .helpers import ok, err, get_uid, get_db
 
 sheet_write_bp = Blueprint("sheet_write", __name__)
 
+log = logging.getLogger("gg-server")
+
 _PLATFORMS = ("gg", "tt", "fb")
+
+# build_sync 抛 KeyError 的语义是「target 不在注册表里」（sheet_write.build_sync）。
+# 详情（含客户端入参 target）只落日志；响应回固定文案，不直出 `str(e)`。
+_BUILD_SYNC_FAILED_MSG = "未注册的写表目标，详情见服务端日志"
 
 
 @sheet_write_bp.route("/api/sheet-write/status", methods=["GET"])
@@ -98,7 +105,8 @@ def sheet_write_retry():
         sync_fn = sheet_write.build_sync(target, uid, business_key, payload)
     except KeyError as e:
         db.close()
-        return err(str(e), 400)
+        log.warning("写表重试：构建同步器失败 target=%s：%s", target, e)
+        return err(_BUILD_SYNC_FAILED_MSG, 400)
 
     # 原子闸门：把「检查状态」与「置为 pending」合成一条守卫式 UPDATE，
     # 按 rowcount 决定是否放行。原来是 check-then-act，两个并发 POST 会双双

@@ -6,6 +6,7 @@ from .decorators import fb_required, no_huguan
 import huguan_dashboard as hd
 import logging
 import re
+import sqlite3
 import threading
 
 fb_bp = Blueprint('fb', __name__)
@@ -16,6 +17,16 @@ log = logging.getLogger("gg-server")
 # IntegrityError（UNIQUE / NOT NULL / FOREIGN KEY），原文含 schema 列名与英文约束名。
 _FB_DB_FAILED_MSG = "操作失败，详情见服务端日志"
 _FB_SHEETS_FAILED_MSG = "表格同步失败，详情见服务端日志"
+
+
+def _is_unique_conflict(e):
+    """是否为 UNIQUE 约束冲突 —— 与 FOREIGN KEY / NOT NULL 等其它完整性错误区分开。
+
+    口径照 GG 侧 `main.py`（`except _sqlite3.IntegrityError` + `"unique" in str(e).lower()`）：
+    只有 UNIQUE 冲突才是「重复键」这个用户可操作的信号，回「已存在」；
+    其余完整性错误（尤其 FK）仍走固定文案，不得被误导成「已存在」。
+    """
+    return isinstance(e, sqlite3.IntegrityError) and "unique" in str(e).lower()
 
 
 # ==================== BM 管理 ====================
@@ -155,6 +166,8 @@ def create_bm():
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
         log.exception("FB 创建BM失败 bm_id=%s", bm_id)
+        if _is_unique_conflict(e):
+            return err(f"BM ID「{bm_id}」已存在")
         return err(_FB_DB_FAILED_MSG)
 
 
@@ -394,6 +407,8 @@ def create_account():
         return ok({'id': acc_pk})
     except Exception as e:
         log.exception("FB 创建账户失败 account_id=%s", account_id)
+        if _is_unique_conflict(e):
+            return err(f"账户 ID「{account_id}」已存在")
         return err(_FB_DB_FAILED_MSG)
 
 
@@ -777,6 +792,8 @@ def create_product():
         return ok({'id': pid})
     except Exception as e:
         log.exception("FB 创建产品失败 product_name=%s", product_name)
+        if _is_unique_conflict(e):
+            return err(f"产品「{product_name}」已存在")
         return err(_FB_DB_FAILED_MSG)
 
 
@@ -1107,6 +1124,8 @@ def create_pixel(bid):
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
         log.exception("FB 创建像素失败 pixel_bm_id=%s", bid)
+        if _is_unique_conflict(e):
+            return err(f"像素 ID「{pixel_id}」已存在")
         return err(_FB_DB_FAILED_MSG)
 
 

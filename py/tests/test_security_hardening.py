@@ -2047,3 +2047,67 @@ class TestE11ScraperDelistSourceSanitized:
         assert "无法判定" in err
         assert "english boom" not in err
         assert "english boom" in caplog.text, "异常详情没进日志"
+
+
+class TestE11AiUpstreamBodySanitized:
+    """上游 AI provider 的响应体（`resp.text`）是外部数据，不得回进客户端。
+
+    `/api/ad-reports/multi-ai-chat` 与 `/api/ad-reports/analyze` 的非 200 分支一度把
+    `resp.text[:300]` 拼进 `answer` 直出 —— 那是**上游 provider 的响应体**（多为英文
+    错误 JSON），不是本地异常变量，所以前几轮 grep `str(e)` / `{e}` 一律命中不了。
+    修复后：客户端只收固定中文文案（保留 HTTP 状态码），原文落 `log.warning`。
+    """
+
+    _SENTINEL = "UPSTREAM-PROVIDER-RAW-BODY-9x7"
+
+    @staticmethod
+    def _enable_ai(client, uid):
+        db = database.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO config(key, value) VALUES (?, ?)",
+            (f"ai_analysis_{uid}", json.dumps({
+                "enabled": True, "provider": "volcano", "model": "m",
+                "api_key": "k", "endpoint": "https://provider.invalid/v1/chat",
+            })))
+        db.commit()
+        db.close()
+
+    @pytest.mark.parametrize("path,uname", [
+        ("/api/ad-reports/multi-ai-chat", "ai_body_mac"),
+        ("/api/ad-reports/analyze", "ai_body_ana"),
+    ])
+    def test_upstream_error_body_not_echoed_but_logged(self, client, caplog, monkeypatch, path, uname):
+        import main
+        hdr, uid = _create_user(client, uname)
+        self._enable_ai(client, uid)
+
+        if path.endswith("/analyze"):
+            # ⚠️ 前置缺陷（**不在本次修复范围**，详见 b5-fix6-report.md）：
+            # analyze 读完配置后 `db.close()` 了请求级共享连接，紧随其后的
+            # `db2 = _yt_db()` 取回的是同一个已关闭连接 ⇒ `ProgrammingError: Cannot
+            # operate on a closed database`（main.py:11290 → :11313），AI 未启用时不触发、
+            # 启用后必 500。本用例的 SUT 只是「非 200 分支的 sanitize」，为隔离该无关
+            # 缺陷，把 _yt_db 换成每次新开连接的 database.get_db（不改产品代码）。
+            monkeypatch.setattr(main, "_yt_db", database.get_db)
+
+        class _FakeResp:
+            status_code = 503
+            text = ('{"error":{"type":"upstream_failure","message":"'
+                    + TestE11AiUpstreamBodySanitized._SENTINEL + '"}}')
+
+        def _fake_post(url, *a, **k):
+            return _FakeResp()
+
+        monkeypatch.setattr(main.requests, "post", _fake_post)
+
+        with caplog.at_level(logging.WARNING, logger="gg-server"):
+            resp = client.post(path, json={"question": "花费如何？"}, headers=hdr)
+
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+        body = resp.get_json()
+        assert body.get("answer"), "应仍给出 answer"
+        raw = resp.get_data(as_text=True)
+        assert self._SENTINEL not in raw, f"上游响应体被回显：{raw[:300]!r}"
+        assert "503" in body["answer"], "对用户有用的 HTTP 状态码应保留"
+        assert self._SENTINEL in caplog.text, "上游原文没进日志"
+

@@ -502,6 +502,32 @@ def test_retry_missing_record_returns_404(client):
     assert resp.status_code == 404
 
 
+def test_retry_build_keyerror_not_echoed_but_logged(client, caplog):
+    """未注册 target 的 400 文案必须是**固定文案**，不得直出 `str(KeyError)`。
+
+    `sheet_write.build_sync` 抛的是 `KeyError("未注册的写表目标: <target>")`，
+    原实现 `err(str(e), 400)` 把它整条（含客户端入参 target）回给客户端 ——
+    反模式：将来 rebuild 工厂改抛别的 KeyError 就变成真泄露。改为固定文案 + e 落日志。
+    去掉修复（回退成 `str(e)`）时，响应体会带上 target ⇒ 本用例变红。
+    """
+    import logging
+    h, uid = _tt_user(client, "_sw_retry_raw")
+    db = database.get_db()
+    _mk_log(db, uid, "no_such_target", "acc_raw", status="retry_failed")
+    db.close()
+
+    with caplog.at_level(logging.WARNING, logger="gg-server"):
+        resp = client.post("/api/sheet-write/retry", headers=h,
+                           json={"platform": "tt", "target": "no_such_target",
+                                 "business_key": "acc_raw"})
+
+    assert resp.status_code == 400
+    err = resp.get_json()["error"]
+    assert "no_such_target" not in err, f"回显了 KeyError 原文（含入参）：{err!r}"
+    assert err == "未注册的写表目标，详情见服务端日志"
+    assert "no_such_target" in caplog.text, "KeyError 详情没进日志"
+
+
 def test_retry_gate_is_atomic_against_concurrent_submit(client, monkeypatch):
     """闸门必须是原子 claim：两个并发 POST 不得双双通过。
 

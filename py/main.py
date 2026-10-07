@@ -11240,7 +11240,10 @@ def ad_reports_multi_ai_chat():
             body = resp.json()
             answer = body.get("choices", [{}])[0].get("message", {}).get("content", "AI 未返回有效回复")
         else:
-            answer = f"AI 服务返回错误({resp.status_code}): {resp.text[:300]}"
+            # resp.text 是**上游 provider 的响应体**（多为英文错误 JSON，含其内部细节），
+            # 不能进响应体。只留 HTTP 状态码这个对用户有用的信息，原文落日志。
+            log.warning("AI 服务返回非 200：status=%s body=%s", resp.status_code, resp.text[:300])
+            answer = f"AI 服务返回错误({resp.status_code})"
     except Exception as e:
         log.exception("AI 服务调用失败")
         answer = "AI 服务调用失败，请查看控制台日志"
@@ -11363,7 +11366,9 @@ def ad_reports_analyze():
             body_resp = resp.json()
             answer = body_resp.get("choices", [{}])[0].get("message", {}).get("content", "AI 未返回有效回复")
         else:
-            answer = f"AI 服务返回错误({resp.status_code}): {resp.text[:300]}"
+            # 同 multi-ai-chat：resp.text 是上游 provider 响应体，只落日志、不进响应。
+            log.warning("AI 服务返回非 200：status=%s body=%s", resp.status_code, resp.text[:300])
+            answer = f"AI 服务返回错误({resp.status_code})"
     except Exception as e:
         log.exception("AI 服务调用失败")
         answer = "AI 服务调用失败，请查看控制台日志"

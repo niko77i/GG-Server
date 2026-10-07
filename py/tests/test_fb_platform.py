@@ -534,7 +534,14 @@ class TestE11FbDirectWriteSitesSanitized:
     "UNIQUE constraint failed: fb_bms.bm_id")`，正是改前直出的原文形态。
     """
 
-    def test_create_bm_duplicate_returns_fixed_text(self, client, caplog):
+    def test_create_bm_duplicate_returns_exists_message(self, client, caplog):
+        """撞 UNIQUE 必须回「已存在」这个用户可操作的信号，而非笼统的「操作失败」。
+
+        `fb_bms.bm_id` 有 UNIQUE 约束 ⇒ 第二次同 bm_id 抛
+        `sqlite3.IntegrityError("UNIQUE constraint failed: fb_bms.bm_id")`。
+        （收口前直出的是库原文，收口后一度退化成「操作失败」—— 这一条把
+        「重复键 ⇒ 已存在」的映射钉住，去掉映射即变红。）
+        """
         import logging
         from routes import fb_routes
         hdr, _ = _fb_user(client, "e11_bm")
@@ -548,10 +555,65 @@ class TestE11FbDirectWriteSitesSanitized:
                               json={"name": "E11BM2", "bm_id": "9000011"}, headers=hdr)
 
         assert dup.status_code == 400
-        assert dup.get_json()["error"] == fb_routes._FB_DB_FAILED_MSG, (
-            f"撞 UNIQUE 仍回显库原文：{dup.get_json()['error']!r}")
+        msg = dup.get_json()["error"]
+        assert "已存在" in msg, f"撞 UNIQUE 没回「已存在」：{msg!r}"
+        assert msg != fb_routes._FB_DB_FAILED_MSG
+        assert "BM" in msg and "9000011" in msg, f"文案未指明是哪个 BM ID：{msg!r}"
         _assert_no_fb_leak(dup)
         assert "UNIQUE constraint failed: fb_bms.bm_id" in caplog.text, "异常详情没进日志"
+
+    def test_create_account_duplicate_returns_exists_message(self, client):
+        """同族另一站点（账户 create）：`fb_accounts.account_id` 也是 UNIQUE。"""
+        from routes import fb_routes
+        hdr, _ = _fb_user(client, "e11_acc")
+        assert client.post("/api/fb/accounts/create",
+                           json={"name": "E11A1", "account_id": "8100011"},
+                           headers=hdr).status_code == 200
+        dup = client.post("/api/fb/accounts/create",
+                          json={"name": "E11A2", "account_id": "8100011"}, headers=hdr)
+        assert dup.status_code == 400
+        msg = dup.get_json()["error"]
+        assert "已存在" in msg and "账户" in msg and "8100011" in msg, msg
+        assert msg != fb_routes._FB_DB_FAILED_MSG
+        _assert_no_fb_leak(dup)
+
+    def test_create_pixel_duplicate_returns_exists_message(self, client):
+        """同族另一站点（像素 create）：`fb_pixels.pixel_id` 也是 UNIQUE。"""
+        from routes import fb_routes
+        hdr, uid = _fb_user(client, "e11_px")
+        db = database.get_db()
+        bm = _mk_pixel_bm(db, uid, "8200011")
+        db.close()
+        assert client.post(f"/api/fb/pixel-bms/{bm}/pixels",
+                           json={"pixel_name": "P1", "pixel_id": "8300011"},
+                           headers=hdr).status_code == 200
+        dup = client.post(f"/api/fb/pixel-bms/{bm}/pixels",
+                          json={"pixel_name": "P2", "pixel_id": "8300011"}, headers=hdr)
+        assert dup.status_code == 400
+        msg = dup.get_json()["error"]
+        assert "已存在" in msg and "像素" in msg and "8300011" in msg, msg
+        assert msg != fb_routes._FB_DB_FAILED_MSG
+        _assert_no_fb_leak(dup)
+
+    def test_non_unique_integrity_error_still_fixed_text(self, client, caplog):
+        """对照组：非 UNIQUE 的完整性错误（这里是 FK 失败）仍是固定文案。
+
+        往**不存在**的像素BM 塞像素 ⇒ `FOREIGN KEY constraint failed`（不是重复键）。
+        若把「所有 IntegrityError」都当成「已存在」误报，这一条即变红。
+        """
+        import logging
+        from routes import fb_routes
+        hdr, _ = _fb_user(client, "e11_fk")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/fb/pixel-bms/999999/pixels",
+                               json={"pixel_name": "P", "pixel_id": "8400011"},
+                               headers=hdr)
+        assert resp.status_code == 400
+        msg = resp.get_json()["error"]
+        assert msg == fb_routes._FB_DB_FAILED_MSG, f"FK 失败被误报成：{msg!r}"
+        assert "已存在" not in msg
+        _assert_no_fb_leak(resp)
+        assert "FOREIGN KEY constraint failed" in caplog.text, "FK 详情应落日志"
 
     def test_create_pixel_bm_duplicate_returns_fixed_text(self, client):
         """同族站点（像素BM 的 create）：同一形态、另一端点，防「只修一处」。"""
