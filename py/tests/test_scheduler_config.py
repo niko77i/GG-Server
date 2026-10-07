@@ -410,6 +410,20 @@ class TestTriggerEndpoints:
         resp = client.post("/api/admin/trigger-delist-check", headers=admin_gg_headers)
         assert resp.status_code == 200
 
+    def test_developer_passes_all_real_endpoints(self, client, dev_headers, monkeypatch):
+        """⚠️ developer 本是改造前**唯一**被放行的角色，改造后必须照旧放行 —— 纯增量的底线。
+
+        三个接口都过一遍：若某个接口漏挂 / 挂错装饰器（或 scheduler_required 的
+        developer 分支写漏），本用例即红。Task 1 只测了探针路由，测不到接线。
+        """
+        monkeypatch.setattr(main, "_run_delist_check_once",
+                            lambda: {"total": 0, "delisted": 0, "results": []})
+        monkeypatch.setattr(main, "_run_tt_delist_check_once",
+                            lambda: {"total": 0, "delisted": 0, "results": []})
+        monkeypatch.setattr(main, "_run_weekly_cleanup_once", lambda: None)
+        for path, _ in self.ENDPOINTS:
+            assert client.post(path, headers=dev_headers).status_code == 200
+
     def test_tt_admin_blocked_from_gg_endpoint(self, client, admin_tt_headers):
         assert client.post("/api/admin/trigger-delist-check", headers=admin_tt_headers).status_code == 403
 
