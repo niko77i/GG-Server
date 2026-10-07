@@ -838,8 +838,35 @@ def _gg_recharge_rebuild(user_id, business_key, payload):
     return _sync
 
 
+def build_many_sync(user_id, business_keys, payload):
+    """**首跑**用：一次后台写表覆盖 N 条充值记录。
+
+    `run_write_many` 只执行 sync_fn **一次**（一个后台线程）。若拿单键工厂
+    `build_sync(target, user_id, keys[0], payload)` 顶上，只有第一条会被写进表，
+    而 N 行日志**全部**落 `synced` —— 静默漏写，比改前的串行循环更糟。
+
+    重试仍走单键 `build_sync`：重试按 business_key 逐行触发，让重试也覆盖整批
+    会让前端逐行重试退化成 N² 次写调用。
+    """
+    rids = []
+    for k in business_keys:
+        try:
+            rids.append(int(k))
+        except (TypeError, ValueError):
+            raise RuntimeError(f"非法的充值记录 id: {k}")
+
+    def _sync():
+        _gg_recharge_write(rids)
+
+    return _sync
+
+
 sheet_write.register_target(TARGET, rebuild=_gg_recharge_rebuild)
 ```
+
+> `main.py` 需像 Task 2 那样顶层 import 本模块以注册 target：
+> `import routes.gg_recharge_sheet`（并在批量点位用 `_gg_recharge_sheet.build_many_sync(...)`，
+> 导入方式与该文件既有的 `routes.gg_dashboard_sheet` 写法保持一致）。
 
 > `recharge_records` 的列名以现场代码为准（既有 `_on_fail` 用的是 `sheets_synced`/`sheets_error`，而插入语句用 `agent_id`）。**实现前先读一遍 `recharge_records` 的建表语句**（`py/database.py`），确认 `agent` / `operator` / `status` 三列的确切名字与类型，必要时调整上面 SELECT。
 
@@ -867,10 +894,19 @@ sheet_write.register_target(TARGET, rebuild=_gg_recharge_rebuild)
                     sheet_write.run_write_many(
                         db, user_id=user_id, platform="gg", target="gg_recharge",
                         business_keys=_keys,
-                        sync_fn=sheet_write.build_sync(
-                            "gg_recharge", user_id, _keys[0], _payload),
+                        sync_fn=_gg_recharge_sheet.build_many_sync(user_id, _keys, _payload),
                         payload=_payload)
 ```
+
+> ⚠️ **勘误（2026-10-07，Task 2 实施时发现的同类缺陷）**：初稿这里写的是
+> `sync_fn=sheet_write.build_sync("gg_recharge", user_id, _keys[0], _payload)` ——
+> **那是错的，而且错得静默**：`run_write_many` 只执行 `sync_fn` **一次**（一个后台线程），
+> 拿单键工厂顶上会让**只有第一户被写进表**，而 N 行日志**全部**落 `synced`。
+> 比改前的串行循环更糟（改前是一个线程串行写 N 户）。
+>
+> 所以 `gg_recharge` 也必须提供 `build_many_sync`（覆盖全部 N 键），与
+> `gg_dashboard_sheet.build_many_sync` 同形。**重试仍走单键 `build_sync`** ——
+> 重试是按 business_key 逐行触发的，让重试也覆盖整批会让前端逐行重试退化成 N² 次写。
 
 **四个 `_on_fail` 全部删除** —— 状态由统一机制落 `sheet_write_log`。
 `recharge_records.sheets_synced` / `sheets_error` 两列**保留但不再写入**。
