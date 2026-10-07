@@ -29,12 +29,16 @@ def test_concurrent_get_db_on_fresh_db_raises_nothing():
     """
     db_fd, db_path = tempfile.mkstemp(suffix=".db")
     original_path = database._db_path
+    # 保存原标记，收尾时**还原**而非硬重置 —— 硬重置会逼下一个测试重走 ~105ms 冷路径。
+    original_verified = database._schema_verified
+    original_verified_path = database._schema_verified_path
     database._db_path = lambda: db_path
     # 重置 schema 缓存 —— 必须让每个线程都真正走到「补列」这一段
     database._schema_verified = False
     database._schema_verified_path = None
 
     errors = []
+    ok = []
     barrier = threading.Barrier(4)
 
     def worker():
@@ -42,6 +46,7 @@ def test_concurrent_get_db_on_fresh_db_raises_nothing():
             barrier.wait(timeout=10)  # 尽量让 4 条连接同时起跑
             conn = database.get_db()
             conn.close()
+            ok.append(1)
         except Exception as exc:  # noqa: BLE001 — 收全，交给断言判定
             errors.append(f"{type(exc).__name__}: {exc}")
 
@@ -53,6 +58,8 @@ def test_concurrent_get_db_on_fresh_db_raises_nothing():
             t.join(timeout=30)
 
         assert errors == [], f"并发 get_db() 报错 {len(errors)} 个：{errors}"
+        # 卡住的 worker 既不抛异常、也不写 errors —— 只断言 errors==[] 会空转过测试。
+        assert len(ok) == 4, f"只有 {len(ok)}/4 个 worker 走完 get_db()（有线程卡住/未起跑）"
     finally:
         os.close(db_fd)
         try:
@@ -65,5 +72,5 @@ def test_concurrent_get_db_on_fresh_db_raises_nothing():
             except OSError:
                 pass
         database._db_path = original_path
-        database._schema_verified = False
-        database._schema_verified_path = None
+        database._schema_verified = original_verified
+        database._schema_verified_path = original_verified_path

@@ -40,7 +40,14 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
-    # 整段 schema 变更串行化，且**在锁内 commit**（顺序依赖：建表 → 补列 → 数据迁移）。
+    # 整段 schema 变更在**进程内**串行化，且**在锁内 commit**（顺序依赖：建表 → 补列 → 数据迁移）。
+    #
+    # ⚠️ 保证范围仅限**同一进程的多个线程**。_schema_lock 是 threading.Lock，进程局部的；
+    # 多个**进程**（如服务在跑时另起 manage.py / migrate_from_production.py，或新机器上
+    # 同时起多个进程初始化同一个新库）仍会撞同样的 `duplicate column name` /
+    # `no such column` / `database is locked`（实测 3 进程 × 4 线程：7/15 轮报错）。
+    # 要关闭跨进程这一路，需要 DB 级互斥（把整段包进 BEGIN IMMEDIATE + busy_timeout），
+    # 属独立改动，本提交未做。
     #
     # 为什么 `_ensure_columns` 必须在锁内：它是「PRAGMA 查列 → 条件 ALTER」两步，
     # 且**每次连库都跑**（不能缓存 —— `_cleanup_old_option_columns` 会 DROP 列，补列
@@ -62,17 +69,25 @@ def get_db() -> sqlite3.Connection:
     # 需要独占锁，锁外 4 线程同时切会直接 `OperationalError: database is locked`
     # （每个测试都是全新临时库，必现）。切完一次后是同库 no-op。
     #
-    # 实测（全新临时库、4 线程并发 get_db()）：修复前 100/100 轮全错，本实现
-    # 3 个独立进程 × 100 轮 = 300/300 轮零异常。
+    # 实测（全新临时库、4 线程并发 get_db()）：修复前 100/100 轮全错；本实现在
+    # **同一进程内**的 4 线程并发下零异常（回归用例 test_db_connect_race.py 钉住）。
+    # ⚠️ 此前注释里「3 个独立进程 × 100 轮 = 300/300 轮零异常」的记录**不成立、已删**：
+    # 独立复现显示 3 进程 × 4 线程并发同一新库仍 7/15 轮报错（见上方 ⚠️ 的保证范围）。
     with _schema_lock:
         conn.execute("PRAGMA journal_mode=WAL")
-        if not _schema_verified or _schema_verified_path != db_path:
+        need_schema = (not _schema_verified) or (_schema_verified_path != db_path)
+        if need_schema:
             _ensure_schema(conn)
-            _schema_verified = True
-            _schema_verified_path = db_path
         _ensure_columns(conn)
         _migrate_if_needed(conn)
         conn.commit()
+        # 标记必须在 commit **之后**才置位：若上面任一步抛异常或 commit 失败，
+        # CREATE TABLE 会随连接析构回滚，而标记一旦提前置 True，此后每次
+        # get_db() 都会跳过 _ensure_schema，直接撞 no such table: config ——
+        # 该进程被永久打死直到重启。
+        if need_schema:
+            _schema_verified = True
+            _schema_verified_path = db_path
     return conn
 
 
