@@ -11290,7 +11290,10 @@ def ad_reports_analyze():
     ai_config_row = db.execute(
         f"SELECT value FROM config WHERE key='ai_analysis_{user_id}'"
     ).fetchone()
-    db.close()
+    # **不在这里 close**：`_yt_db()` 返回的是 flask.g 里的请求级共享连接，
+    # 关掉之后本函数下面再调 `_yt_db()` 会取回**同一个已关闭的连接** ⇒ 必炸
+    # （`Cannot operate on a closed database`）。本函数是少数**两次**取共享连接的地方，
+    # 所以它是唯一踩到这个坑的（同口径见 google_sheets_update_zuobiao 里那条注释）。
 
     ai_enabled = False
     ai_provider = "atlas"

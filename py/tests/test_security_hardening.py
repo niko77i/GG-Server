@@ -2081,14 +2081,12 @@ class TestE11AiUpstreamBodySanitized:
         hdr, uid = _create_user(client, uname)
         self._enable_ai(client, uid)
 
-        if path.endswith("/analyze"):
-            # ⚠️ 前置缺陷（**不在本次修复范围**，详见 b5-fix6-report.md）：
-            # analyze 读完配置后 `db.close()` 了请求级共享连接，紧随其后的
-            # `db2 = _yt_db()` 取回的是同一个已关闭连接 ⇒ `ProgrammingError: Cannot
-            # operate on a closed database`（main.py:11290 → :11313），AI 未启用时不触发、
-            # 启用后必 500。本用例的 SUT 只是「非 200 分支的 sanitize」，为隔离该无关
-            # 缺陷，把 _yt_db 换成每次新开连接的 database.get_db（不改产品代码）。
-            monkeypatch.setattr(main, "_yt_db", database.get_db)
+        # （2026-10-07）此处原有 `monkeypatch.setattr(main, "_yt_db", database.get_db)` 的绕行：
+        # 当时 `analyze` 会提前 `close()` 请求级共享连接，那是**另一个独立缺陷**，
+        # 为隔离它才把 `_yt_db` 换成每次新开连接。那句 `close()` 现已修
+        # （回归守卫见 `test_ad_reports.TestAdReportsAnalyze
+        # ::test_analyze_enabled_does_not_500_on_closed_db`），故**撤除绕行** ——
+        # 留着它，本用例就不再覆盖真实的共享连接路径了。
 
         class _FakeResp:
             status_code = 503
