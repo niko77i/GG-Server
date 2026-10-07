@@ -236,3 +236,77 @@ def run_write(db, *, user_id, platform, target, business_key, sync_fn,
         with _inflight_lock:
             _inflight.discard(key)
         log.error("写表后台任务启动失败 target=%s key=%s: %s", target, business_key, e)
+
+
+def run_write_many(db, *, user_id, platform, target, business_keys,
+                   sync_fn, payload=None, snapshot=None):
+    """一次后台写表，登记 N 行日志（每个 business_key 一行），结果统一落。
+
+    用于「一次操作影响 N 个账户」的场景（批量改状态、sync-from-sheet 回写）。
+
+    为什么不是逐键调用 run_write：那会变成 **N 个后台线程 + N 次并行 Sheets API
+    突发**（原实现是一个线程串行 N 次调用），被取消的还要各自睡 30s 重试。
+    为什么不是只登记一行：行内标记就失去按账户定位的能力 —— 那正是本设计的意义。
+
+    除「N 行日志 / N 个业务键」外，语义与 run_write 完全一致。绝不抛异常。
+    """
+    keys = list(business_keys)
+    if not keys:
+        return
+
+    for bk in keys:
+        try:
+            record_pending(db, user_id=user_id, platform=platform, target=target,
+                           business_key=bk, payload=payload, snapshot=snapshot)
+        except Exception as e:
+            # 登记失败不该阻断写表本身，但必须有痕迹
+            log.error("写表任务登记失败 target=%s key=%s: %s", target, bk, e)
+
+    inflight_keys = [(user_id, target, bk) for bk in keys]
+
+    def _on_result(status, err_msg):
+        import database
+        _db = None
+        try:
+            _db = database.get_db()
+            for bk in keys:
+                row = _db.execute(
+                    "SELECT * FROM sheet_write_log "
+                    "WHERE user_id=? AND target=? AND business_key=?",
+                    (user_id, target, bk)).fetchone()
+                if row is None:
+                    continue
+                if status == "synced":
+                    settle(_db, user_id=user_id, target=target, business_key=bk,
+                           status="synced", error_msg="")
+                elif status == "failed":
+                    settle(_db, user_id=user_id, target=target, business_key=bk,
+                           status="failed", error_msg=(err_msg or "")[:500])
+                else:
+                    _apply_final(_db, row, (err_msg or "")[:500])
+        except Exception as e:
+            log.error("写表状态落库失败 target=%s: %s", target, e)
+        finally:
+            if _db is not None:
+                try:
+                    _db.close()
+                except Exception:
+                    pass
+            # 同 run_write：只在**终态**摘除在途登记（中间态 "failed" 时同一线程
+            # 还会再试一次，摘了会让重试窗口失去保护）。
+            if status in TERMINAL:
+                with _inflight_lock:
+                    for k in inflight_keys:
+                        _inflight.discard(k)
+
+    with _inflight_lock:
+        for k in inflight_keys:
+            _inflight.add(k)
+    try:
+        from main import _sync_sheets_background
+        _sync_sheets_background(sync_fn, _on_result)
+    except Exception as e:
+        with _inflight_lock:
+            for k in inflight_keys:
+                _inflight.discard(k)
+        log.error("写表后台任务启动失败 target=%s: %s", target, e)

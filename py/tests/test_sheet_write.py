@@ -720,3 +720,110 @@ def test_final_failure_with_incomplete_snapshot_does_not_claim_re_edit(client, m
     assert "被再次修改" not in r["error_msg"], \
         f"快照不完整却断言账户被再次修改: {r['error_msg']}"
     assert "回滚过程出错" in r["error_msg"], f"未点明回滚出错: {r['error_msg']}"
+
+
+def test_run_write_many_registers_one_row_per_key(client):
+    """N 个 business_key ⇒ N 行日志，且都从 pending 起。（此时还没起线程，故仍为 pending）"""
+    import sheet_write
+    db = database.get_db()
+    sheet_write.run_write_many(
+        db, user_id=1, platform="gg", target="_t_many",
+        business_keys=["a1", "a2", "a3"], sync_fn=lambda: None)
+    # 立即读：登记是同步的，线程结果尚未落
+    rows = db.execute(
+        "SELECT business_key, status FROM sheet_write_log "
+        "WHERE user_id=1 AND target='_t_many' ORDER BY business_key").fetchall()
+    db.close()
+    assert [r["business_key"] for r in rows] == ["a1", "a2", "a3"]
+    assert all(r["status"] in ("pending", "synced") for r in rows), \
+        "登记后应至少是 pending（线程可能已抢先落 synced，但绝不该是别的）"
+
+
+def test_run_write_many_settles_all_keys_on_success(client):
+    """一次后台写表成功后，N 行**全部**落 synced。"""
+    import sheet_write
+    calls = []
+    db = database.get_db()
+    sheet_write.run_write_many(
+        db, user_id=2, platform="gg", target="_t_many_ok",
+        business_keys=["b1", "b2"], sync_fn=lambda: calls.append(1))
+
+    for _ in range(200):
+        rows = db.execute(
+            "SELECT status FROM sheet_write_log WHERE user_id=2 AND target='_t_many_ok'").fetchall()
+        if len(rows) == 2 and all(r["status"] == "synced" for r in rows):
+            break
+        _poll_sleep(0.02)
+    db.close()
+    assert len(calls) == 1, "sync_fn 只应执行一次（一个后台线程），不是每 key 一次"
+    assert [r["status"] for r in rows] == ["synced", "synced"]
+
+
+def test_run_write_many_settles_all_keys_on_final_failure(client, monkeypatch):
+    """最终失败时 N 行全部落 retry_failed，且都带原因。"""
+    import sheet_write
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)      # 跳过 30s
+
+    def _boom():
+        raise RuntimeError("Sheets 挂了")
+
+    db = database.get_db()
+    sheet_write.run_write_many(
+        db, user_id=3, platform="gg", target="_t_many_fail",
+        business_keys=["c1", "c2", "c3"], sync_fn=_boom)
+
+    for _ in range(300):
+        rows = db.execute(
+            "SELECT status, error_msg FROM sheet_write_log "
+            "WHERE user_id=3 AND target='_t_many_fail'").fetchall()
+        if len(rows) == 3 and all(r["status"] == "retry_failed" for r in rows):
+            break
+        _poll_sleep(0.02)
+    db.close()
+    assert len(rows) == 3
+    assert {r["status"] for r in rows} == {"retry_failed"}, \
+        f"应全部终态失败，实际 {[r['status'] for r in rows]}"
+    assert all("Sheets 挂了" in (r["error_msg"] or "") for r in rows)
+
+
+def test_run_write_many_marks_all_keys_inflight(client, monkeypatch):
+    """N 个 key 都要进 _inflight —— 否则 sweep_stale 会把在途的行误收敛，
+    重试闸门放行后起第二个写手（一期修复轮 2 的教训）。"""
+    import sheet_write
+    import time as _time
+    seen = {}
+
+    def _capture(_s):
+        with sheet_write._inflight_lock:
+            seen["keys"] = set(sheet_write._inflight)
+
+    monkeypatch.setattr(_time, "sleep", _capture)   # 30s 重试前会被调用
+
+    def _boom():
+        raise RuntimeError("挂")
+
+    sheet_write.run_write_many(
+        database.get_db(), user_id=4, platform="gg", target="_t_many_inflight",
+        business_keys=["d1", "d2"], sync_fn=_boom)
+
+    for _ in range(200):
+        if seen:
+            break
+        _poll_sleep(0.01)
+    assert seen.get("keys", set()) >= {(4, "_t_many_inflight", "d1"),
+                                       (4, "_t_many_inflight", "d2")}
+
+
+def test_run_write_many_empty_keys_is_noop(client):
+    """空列表不登记、不起线程。"""
+    import sheet_write
+    calls = []
+    sheet_write.run_write_many(
+        database.get_db(), user_id=5, platform="gg", target="_t_many_empty",
+        business_keys=[], sync_fn=lambda: calls.append(1))
+    db = database.get_db()
+    n = db.execute("SELECT COUNT(*) FROM sheet_write_log WHERE user_id=5").fetchone()[0]
+    db.close()
+    assert n == 0
+    assert calls == []
