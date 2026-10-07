@@ -59,6 +59,21 @@ def build_sync(target, user_id, business_key, payload):
     return entry["rebuild"](user_id, business_key, payload or {})
 
 
+def build_sync_safe(target, user_id, business_key, payload):
+    """配置未就绪时返回 None 而不抛 —— 调用点用它短路（与既有 `if sheet_id and dashboard_name:` 等价）。
+
+    与 build_sync 的区别：build_sync 对**未注册**的 target 抛 KeyError（契约的一部分，
+    重试端点据此返回 400）；本函数只吞掉 rebuild 工厂内部的**配置缺失**异常。
+    """
+    try:
+        return build_sync(target, user_id, business_key, payload)
+    except KeyError:
+        raise                      # 未注册是契约错误，不能吞
+    except Exception as e:
+        log.warning("写表目标重建失败 target=%s: %s", target, e)
+        return None
+
+
 def record_pending(db, *, user_id, platform, target, business_key,
                    payload=None, snapshot=None):
     """登记一条写表任务。同键 upsert 回 pending 并清空上轮结果。

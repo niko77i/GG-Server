@@ -375,6 +375,8 @@ app.register_blueprint(huguan_dashboard_bp)
 # 写表失败治理（跨平台）
 from routes.sheet_write_routes import sheet_write_bp
 app.register_blueprint(sheet_write_bp)
+import sheet_write
+import routes.gg_dashboard_sheet  # noqa: F401  —— 注册 gg_my_dashboard target
 
 try:
     auth.init_developer(APP_CONFIG)
@@ -4761,27 +4763,16 @@ def accounts_update(aid):
                         _db.commit(); _db.close()
                     _sync_sheets_background(_do_sync, _on_fail)
 
-        # 新增：状态变更时同步「我的看板」备注列（独立于清账逻辑，所有状态变更都触发）
+        # 状态变更时写「我的看板」（独立于清账逻辑，所有状态变更都触发）
         if new_status and old_status and new_status != old_status["status_name"]:
-            dashboard_name = _get_my_dashboard_name(db, user_id)
-            sync_sheet_id = _get_sync_spreadsheet_id(db)
-            if sync_sheet_id and dashboard_name:
-                _sync_account_id = old_status["account_id"]
-                _sync_new_status = new_status
-                _dash_name = dashboard_name
-                _s_id = sync_sheet_id
-
-                def _sync_dashboard():
-                    import google_sheets_service as gs
-                    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                    gs.update_cell_by_account_id(service, _s_id, _dash_name,
-                                                  _sync_account_id, _sync_new_status)
-
-                def _on_dash_fail(status, err_msg):
-                    if err_msg:
-                        log.warning("我的看板同步失败: %s", err_msg)
-
-                _sync_sheets_background(_sync_dashboard, _on_dash_fail)
+            _acct_id = old_status["account_id"]
+            _payload = {"dash_uid": user_id}
+            if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _acct_id, _payload):
+                sheet_write.run_write(
+                    db, user_id=user_id, platform="gg", target="gg_my_dashboard",
+                    business_key=_acct_id,
+                    sync_fn=sheet_write.build_sync("gg_my_dashboard", user_id, _acct_id, _payload),
+                    payload=_payload)
 
         db.commit()
         # 户管看板单行回写（规格 §6.2）。只写可写列，绝不碰「重新分配」列。
@@ -4941,18 +4932,15 @@ def accounts_delete(aid):
         )
         db.commit()
 
-        # 后台同步 Sheet H 列"解绑"
-        sheet_id = _get_sync_spreadsheet_id(db)
-        dashboard_name = _get_my_dashboard_name(db, ac["owner_id"])
-        if sheet_id and dashboard_name:
-            _sync_aid = ac["account_id"]
-            _sid = sheet_id
-            _dname = dashboard_name
-            def _sync_unbind():
-                import google_sheets_service as gs
-                svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                gs.update_cell_by_account_id(svc, _sid, _dname, _sync_aid, "解绑", col_index=7)
-            _sync_sheets_background(_sync_unbind, lambda s, e: log.warning("解绑同步失败: %s", e) if e else None)
+        # 后台写「我的看板」H 列（解绑）
+        _acct_id = ac["account_id"]
+        _payload = {"dash_uid": ac["owner_id"]}
+        if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _acct_id, _payload):
+            sheet_write.run_write(
+                db, user_id=user_id, platform="gg", target="gg_my_dashboard",
+                business_key=_acct_id,
+                sync_fn=sheet_write.build_sync("gg_my_dashboard", user_id, _acct_id, _payload),
+                payload=_payload)
 
         return jsonify({"success": True})
     finally:
@@ -5013,18 +5001,15 @@ def accounts_restore(aid):
         )
         db.commit()
 
-        # 后台清空 Sheet H 列"解绑"
-        sheet_id = _get_sync_spreadsheet_id(db)
-        dashboard_name = _get_my_dashboard_name(db, ac["owner_id"])
-        if sheet_id and dashboard_name:
-            _sync_aid = ac["account_id"]
-            _sid = sheet_id
-            _dname = dashboard_name
-            def _sync_unbind_clear():
-                import google_sheets_service as gs
-                svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                gs.update_cell_by_account_id(svc, _sid, _dname, _sync_aid, "", col_index=7)
-            _sync_sheets_background(_sync_unbind_clear, lambda s, e: log.warning("解绑清除失败: %s", e) if e else None)
+        # 后台清空「我的看板」H 列（解绑）
+        _acct_id = ac["account_id"]
+        _payload = {"dash_uid": ac["owner_id"]}
+        if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _acct_id, _payload):
+            sheet_write.run_write(
+                db, user_id=user_id, platform="gg", target="gg_my_dashboard",
+                business_key=_acct_id,
+                sync_fn=sheet_write.build_sync("gg_my_dashboard", user_id, _acct_id, _payload),
+                payload=_payload)
 
         return jsonify({"success": True})
     finally:
@@ -5231,30 +5216,19 @@ def accounts_batch_update():
                                         (err_msg, rid))
                     _db.commit(); _db.close()
                 _sync_sheets_background(_do_sync, _on_fail)
-        # 新增：批量状态变更时同步「我的看板」（独立于清账逻辑）
+        # 批量状态变更时写「我的看板」（独立于清账逻辑）
         if field in ("status", "status_id") and value and dashboard_sync_rows:
-            dashboard_name = _get_my_dashboard_name(db, user_id)
-            sync_sheet_id = _get_sync_spreadsheet_id(db)
-            if sync_sheet_id and dashboard_name:
-                _dname = dashboard_name
-                _sid = sync_sheet_id
-                _status_updates = [{"account_id": aid, "new_status": st} for aid, st in dashboard_sync_rows]
-
-                def _sync_batch_dashboard():
-                    import google_sheets_service as gs
-                    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                    for u in _status_updates:
-                        try:
-                            gs.update_cell_by_account_id(
-                                service, _sid, _dname,
-                                u["account_id"], u["new_status"]
-                            )
-                        except Exception as e:
-                            log.warning("我的看板同步失败 account_id=%s: %s",
-                                        u["account_id"], e)
-
-                _sync_sheets_background(_sync_batch_dashboard,
-                                        lambda s, e: log.warning("我的看板同步失败: %s", e) if e else None)
+            _keys = [r[0] for r in dashboard_sync_rows]
+            _payload = {"dash_uid": user_id}
+            if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _keys[0], _payload):
+                # sync_fn 用 build_many_sync（覆盖全部 N 户），不是单户 build_sync：
+                # run_write_many 只执行 sync_fn **一次**，拿单户工厂会让只有第一户
+                # 被写进表、N 行却全落 synced（静默漏写）。
+                sheet_write.run_write_many(
+                    db, user_id=user_id, platform="gg", target="gg_my_dashboard",
+                    business_keys=_keys,
+                    sync_fn=routes.gg_dashboard_sheet.build_many_sync(user_id, _keys, _payload),
+                    payload=_payload)
         return jsonify({"success": True, "updated": len(ids)})
     finally:
         db.close()
@@ -5513,23 +5487,15 @@ def accounts_sync_from_sheet():
                     ))
 
             if _sync_back_rows:
-                def _sync_back_to_dashboard():
-                    import google_sheets_service as gs
-                    svc = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                    for aid, st, deleted in _sync_back_rows:
-                        try:
-                            # 备注列（F列）：写状态
-                            gs.update_cell_by_account_id(svc, sheet_id, dashboard_name, aid, st)
-                            # 是否解绑（H列）：已删除写"解绑"，未删除清空
-                            gs.update_cell_by_account_id(
-                                svc, sheet_id, dashboard_name, aid,
-                                "解绑" if deleted else "", col_index=7
-                            )
-                        except Exception as e:
-                            log.warning("同步Sheet失败 account_id=%s: %s", aid, e)
-
-                _sync_sheets_background(_sync_back_to_dashboard,
-                                        lambda s, e: log.warning("批量同步Sheet失败: %s", e) if e else None)
+                _keys = [r[0] for r in _sync_back_rows]
+                _payload = {"dash_uid": user_id}
+                if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _keys[0], _payload):
+                    # 同上：sync_fn 必须覆盖全部 N 户（理由见 batch-update 处的注释）
+                    sheet_write.run_write_many(
+                        db, user_id=user_id, platform="gg", target="gg_my_dashboard",
+                        business_keys=_keys,
+                        sync_fn=routes.gg_dashboard_sheet.build_many_sync(user_id, _keys, _payload),
+                        payload=_payload)
     finally:
         db.close()
 
