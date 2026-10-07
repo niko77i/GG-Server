@@ -384,6 +384,336 @@ def _huguan_headers(client, username, platform="fb"):
     return _make_user(client, username, role="huguan", platform=platform)
 
 
+# ---------- Task 4: sync 方向（表 → 系统）的快照记录 ----------
+
+_PAYLOAD_KEYS = {"updates", "owner_changes", "created", "created_statuses", "sheet_back"}
+
+
+def _seed_user(db, username, display_name, platform="gg", role="huguan"):
+    """造一个可被归属解析命中的用户（resolve_owner_id 认 display_name，回退 username）。"""
+    db.execute("INSERT INTO users(username, password, role, display_name, platform) "
+               "VALUES(?, 'x', ?, ?, ?)", (username, role, display_name, platform))
+    return db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def _seed_gg_account(db, account_id, owner_id):
+    db.execute("INSERT INTO accounts(account_id, name, owner_id, death_date) "
+               "VALUES(?, ?, ?, '')", (account_id, account_id, owner_id))
+    return db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def _seed_fb_account(db, account_id, owner_id, **over):
+    cols = {"name": account_id, "account_id": account_id, "owner_id": owner_id}
+    cols.update(over)
+    keys = ", ".join(cols)
+    marks = ", ".join("?" for _ in cols)
+    db.execute(f"INSERT INTO fb_accounts({keys}) VALUES({marks})", tuple(cols.values()))
+    return db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+def _gg_row(account_id, owner_name="", owner_channel=""):
+    """GG 一行原始值（A:N）。C=账户ID(2)、G=运营(6)、H=重新分配(7)。"""
+    row = [""] * 14
+    row[2], row[6], row[7] = account_id, owner_name, owner_channel
+    return row
+
+
+def _tt_row(account_id, owner_name=""):
+    """TT 一行原始值（A:M）。C=账户ID(2)、G=接户运营(6)、L=换绑情况(11)。"""
+    row = [""] * 13
+    row[2], row[6] = account_id, owner_name
+    return row
+
+
+def _fb_row(account_id, acceptor="", owner_name=""):
+    """FB 一行原始值（A:Q）。D=资产UID(3)、I=接户运营(8)、J=在用运营(9)。"""
+    row = [""] * 17
+    row[3], row[8], row[9] = account_id, acceptor, owner_name
+    return row
+
+
+def _sheet_from(parsed, platform):
+    """路由（Task 5 的接线）要做的同一件事：按账户ID 把表侧原值映射好传给 apply_diff。
+
+    表侧原值只有 `parse_row` 的结果里才有，而 `build_diff` 的返回值是干跑响应体
+    （前端契约）—— 不许为了新功能给它加键。故由调用方算好、按 `account_id` 传入。
+    """
+    return {parsed["account_id"]: hd._owner_sheet_from(parsed, platform)}
+
+
+class _ReadSpy(dict):
+    """记账 dict：`.get` 每被调用一次就 +1（用来钉「默认档根本没读它」）。
+
+    必须非空 —— 空 dict 在 `(sheet_from or {})` 里会被 `or` 短路成字面量 `{}`，
+    那样即使代码真的读了也读不到本对象，探针就恒为 0（测不出东西）。
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.gets = 0
+
+    def get(self, *a, **kw):
+        self.gets += 1
+        return super().get(*a, **kw)
+
+
+class TestSyncSnapshot:
+    """`apply_diff(collect_undo=True)` 收集 sync 方向撤回快照（spec §5.2）。
+
+    Task 5 的 `undo_sync` **逐键**消费这份 payload，故键集与每项的形状都是接口契约：
+      {"updates":          [{"account_id", "cols": {列名: {"old", "new"}}}],
+       "owner_changes":    [同 updates 项的形状 —— Task 5 用同一个 CAS 循环处理两者],
+       "created":          [账户ID],
+       "created_statuses": [{"name", "platform"}],
+       "sheet_back":       [{"account_id", "cells": {列字母: 表里原值}}]}
+    """
+
+    def test_collect_undo_off_by_default(self, client, fb_user):
+        """既有调用不带 collect_undo ⇒ 返回里没有 undo 键（纯增量）。"""
+        db = database.get_db()
+        diff = {"to_create": [], "to_update": [], "owner_changes": [],
+                "to_skip": [], "warnings": [], "summary": {}}
+        out = hd.apply_diff(db, diff, "fb", {}, fb_user)
+        db.close()
+        assert "undo" not in out
+
+    def test_payload_has_all_five_keys(self, client, fb_user):
+        """键集必须齐 —— Task 5 逐键消费，缺一个就静默漏掉一整类撤回。"""
+        db = database.get_db()
+        diff = {"to_create": [], "to_update": [], "owner_changes": [],
+                "to_skip": [], "warnings": [], "summary": {}}
+        out = hd.apply_diff(db, diff, "fb", {}, fb_user, collect_undo=True)
+        db.close()
+        assert set(out["undo"]) == _PAYLOAD_KEYS
+
+    def test_unconfirmed_rows_are_not_recorded(self, client, fb_user):
+        """没被 confirm 的行一个字都没写 ⇒ 不得进快照（否则撤回会去回滚没发生过的写）。"""
+        db = database.get_db()
+        pk = _seed_fb_account(db, "SY-NC", fb_user, unit_price="10")
+        db.commit()
+        diff = {"to_create": [], "to_skip": [], "warnings": [], "summary": {},
+                "owner_changes": [],
+                "to_update": [{"row": 2, "account_id": "SY-NC", "existing_id": pk,
+                               "fields": {"unit_price": "99"}, "pending_status": None,
+                               "scope_owner_id": fb_user, "clears": []}]}
+        out = hd.apply_diff(db, diff, "fb", {}, fb_user, collect_undo=True)
+        db.close()
+        assert out["undo"]["updates"] == []
+
+    # ---------- updates：列级旧值 + 新值 ----------
+
+    def test_records_old_and_new_values_for_updates(self, client, fb_user):
+        """列级旧值必须记下来，且要带上「本次写入的新值」（Task 5 的 CAS 靠它比对）。
+
+        旧值读错时机（UPDATE 之后才读）会得到 "99" —— 断言会红，故本测试能证伪。
+        """
+        db = database.get_db()
+        pk = _seed_fb_account(db, "SY1", fb_user, unit_price="10")
+        db.commit()
+        diff = {"to_create": [], "to_skip": [], "warnings": [], "summary": {},
+                "owner_changes": [],
+                "to_update": [{"row": 2, "account_id": "SY1", "existing_id": pk,
+                               "fields": {"unit_price": "99"}, "pending_status": None,
+                               "scope_owner_id": fb_user, "clears": []}]}
+        out = hd.apply_diff(db, diff, "fb", {"update": ["SY1"]}, fb_user, collect_undo=True)
+        db.commit()
+        db.close()
+        ups = out["undo"]["updates"]
+        assert ups == [{"account_id": "SY1",
+                        "cols": {"unit_price": {"old": "10", "new": "99"}}}]
+
+    def test_records_every_changed_column(self, client, fb_user):
+        """一行的多列变更都要进同一条 updates 项（不能只记第一列）。"""
+        db = database.get_db()
+        pk = _seed_fb_account(db, "SY2", fb_user, unit_price="10", remark="旧备注")
+        db.commit()
+        diff = {"to_create": [], "to_skip": [], "warnings": [], "summary": {},
+                "owner_changes": [],
+                "to_update": [{"row": 2, "account_id": "SY2", "existing_id": pk,
+                               "fields": {"unit_price": "99", "remark": "新备注"},
+                               "pending_status": None, "scope_owner_id": fb_user,
+                               "clears": []}]}
+        out = hd.apply_diff(db, diff, "fb", {"update": ["SY2"]}, fb_user, collect_undo=True)
+        db.commit()
+        db.close()
+        cols = out["undo"]["updates"][0]["cols"]
+        assert cols == {"unit_price": {"old": "10", "new": "99"},
+                        "remark": {"old": "旧备注", "new": "新备注"}}
+
+    # ---------- created ----------
+
+    def test_records_created_ids(self, client, fb_user):
+        db = database.get_db()
+        diff = {"to_skip": [], "warnings": [], "summary": {}, "owner_changes": [],
+                "to_update": [],
+                "to_create": [{"row": 2, "account_id": "SY3", "owner_id": fb_user,
+                               "owner_name": "", "db_values": {"_is_dead": False},
+                               "pending_status": None}]}
+        out = hd.apply_diff(db, diff, "fb", {"create": ["SY3"]}, fb_user, collect_undo=True)
+        db.commit()
+        db.close()
+        assert out["undo"]["created"] == ["SY3"]
+
+    # ---------- created_statuses：本次**真正新建**的状态行 ----------
+
+    def test_created_status_recorded_via_to_create_branch(self, client, fb_user):
+        db = database.get_db()
+        diff = {"to_skip": [], "warnings": [], "summary": {}, "owner_changes": [],
+                "to_update": [],
+                "to_create": [{"row": 2, "account_id": "SY4", "owner_id": fb_user,
+                               "owner_name": "", "db_values": {"_is_dead": False},
+                               "pending_status": "待优化"}]}
+        out = hd.apply_diff(db, diff, "fb", {"create": ["SY4"]}, fb_user, collect_undo=True)
+        # 先确认真建了行（否则下面断言的是「记了一个并不存在的状态」）
+        n = db.execute("SELECT COUNT(*) FROM account_statuses "
+                       "WHERE name='待优化' AND platform='fb'").fetchone()[0]
+        db.commit()
+        db.close()
+        assert n == 1
+        assert out["undo"]["created_statuses"] == [{"name": "待优化", "platform": "fb"}]
+
+    def test_created_status_recorded_via_to_update_branch(self, client, fb_user):
+        """to_update 分支同样会建状态行 —— 两处调用点都要接上收集。"""
+        db = database.get_db()
+        pk = _seed_fb_account(db, "SY5", fb_user)
+        db.commit()
+        diff = {"to_create": [], "to_skip": [], "warnings": [], "summary": {},
+                "owner_changes": [],
+                "to_update": [{"row": 2, "account_id": "SY5", "existing_id": pk,
+                               "fields": {}, "pending_status": "待优化",
+                               "scope_owner_id": fb_user, "clears": []}]}
+        out = hd.apply_diff(db, diff, "fb", {"update": ["SY5"]}, fb_user, collect_undo=True)
+        db.commit()
+        db.close()
+        assert out["undo"]["created_statuses"] == [{"name": "待优化", "platform": "fb"}]
+
+    def test_already_existing_status_is_not_recorded(self, client, fb_user):
+        """系统里已有的状态**不是**本次新建 ⇒ 不进快照。
+
+        否则 Task 5 会把它当成「本次新建」删掉 —— 而它可能有别的账户在用。
+        （去掉 `existed is None` 判定，本测试即红。）
+        """
+        db = database.get_db()
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) "
+                   "VALUES('待优化', ?, 'fb')", (fb_user,))
+        pk = _seed_fb_account(db, "SY6", fb_user)
+        db.commit()
+        diff = {"to_create": [], "to_skip": [], "warnings": [], "summary": {},
+                "owner_changes": [],
+                "to_update": [{"row": 2, "account_id": "SY6", "existing_id": pk,
+                               "fields": {}, "pending_status": "待优化",
+                               "scope_owner_id": fb_user, "clears": []}]}
+        out = hd.apply_diff(db, diff, "fb", {"update": ["SY6"]}, fb_user, collect_undo=True)
+        db.commit()
+        db.close()
+        assert out["undo"]["created_statuses"] == []
+
+    # ---------- owner_changes：库侧归属旧值（走的是 owner_changes 分支，不是 to_update） ----------
+
+    def test_owner_change_records_db_side_old_and_new(self, client, fb_user):
+        """归属变更的库侧旧值必须在 owner_changes 分支里记 —— 否则撤回时库里的归属纹丝不动。
+
+        `_collect_updates` 不产出 owner_id ⇒ 归属变更完全不经过 to_update。
+        """
+        db = database.get_db()
+        new_owner = _seed_user(db, "u_sy_li", "李四", platform="fb")
+        pk = _seed_fb_account(db, "SY7", fb_user, acceptor="旧接户记录")
+        db.commit()
+        parsed = dict(hd.parse_row(_fb_row("SY7", owner_name="李四"), "fb"), row=2)
+        diff = hd.build_diff(db, [parsed], "fb")
+        out = hd.apply_diff(db, diff, "fb", {"owner": ["SY7"]}, fb_user, collect_undo=True,
+                            sheet_from=_sheet_from(parsed, "fb"))
+        row = db.execute("SELECT owner_id, acceptor FROM fb_accounts WHERE id=?",
+                         (pk,)).fetchone()
+        db.commit()
+        db.close()
+        assert row["owner_id"] == new_owner            # 落库真的生效了
+        assert out["undo"]["owner_changes"] == [{
+            "account_id": "SY7",
+            "cols": {"owner_id": {"old": fb_user, "new": new_owner},
+                     # FB 独有的库侧写点：acceptor 被写成「{旧}转{新}」
+                     "acceptor": {"old": "旧接户记录", "new": "u_undo转李四"}}}]
+
+    def test_owner_change_on_non_fb_has_no_acceptor_key(self, client):
+        """acceptor 只对 fb 记：别的平台的表没这一列，记了 Task 5 会拼出非法 UPDATE。"""
+        db = database.get_db()
+        u_zhang = _seed_user(db, "u_sy_zhang", "张三")
+        u_li = _seed_user(db, "u_sy_li2", "李四")
+        _seed_gg_account(db, "SY8", u_zhang)
+        db.commit()
+        parsed = dict(hd.parse_row(_gg_row("SY8", "张三", "李四"), "gg"), row=2)
+        diff = hd.build_diff(db, [parsed], "gg")
+        out = hd.apply_diff(db, diff, "gg", {"owner": ["SY8"]}, u_zhang, collect_undo=True,
+                            sheet_from=_sheet_from(parsed, "gg"))
+        db.commit()
+        db.close()
+        item = out["undo"]["owner_changes"][0]
+        assert item["account_id"] == "SY8"
+        assert set(item["cols"]) == {"owner_id"}
+        assert item["cols"]["owner_id"] == {"old": u_zhang, "new": u_li}
+
+    # ---------- sheet_back：落库后回写表的那几列的**原值** ----------
+
+    def test_owner_sheet_from_covers_exactly_the_platform_columns(self, client):
+        """表侧记哪几列**按平台分流**（规格 §3.3）：TT 没有通道列，FB 是 J + I。"""
+        assert hd._owner_sheet_from(hd.parse_row(_gg_row("A", "张三", "李四"), "gg"),
+                                    "gg") == {"G": "张三", "H": "李四"}
+        assert hd._owner_sheet_from(hd.parse_row(_tt_row("A", "王五"), "tt"),
+                                    "tt") == {"G": "王五"}
+        assert hd._owner_sheet_from(hd.parse_row(_fb_row("A", "接户旧", "赵六"), "fb"),
+                                    "fb") == {"J": "赵六", "I": "接户旧"}
+
+    def test_sheet_back_records_sheet_original_values(self, client):
+        """GG 侧：运营列 + 通道列两列的原值都要记（通道列同步后会被清空）。
+
+        记的是**表里的真实原值**，不是「回退成旧归属名」—— 后者对通道列是错的。
+        """
+        db = database.get_db()
+        u_zhang = _seed_user(db, "u_sb_zhang", "张三")
+        u_li = _seed_user(db, "u_sb_li", "李四")
+        _seed_gg_account(db, "SB-GG", u_zhang)
+        db.commit()
+        parsed = dict(hd.parse_row(_gg_row("SB-GG", "张三", "李四"), "gg"), row=2)
+        diff = hd.build_diff(db, [parsed], "gg")
+        out = hd.apply_diff(db, diff, "gg", {"owner": ["SB-GG"]}, u_zhang,
+                            collect_undo=True, sheet_from=_sheet_from(parsed, "gg"))
+        db.commit()
+        db.close()
+        assert out["undo"]["sheet_back"] == [
+            {"account_id": "SB-GG", "cells": {"G": "张三", "H": "李四"}}]
+
+    def test_sheet_back_on_fb_covers_in_use_and_acceptor_columns(self, client, fb_user):
+        """FB 侧：J（在用运营）+ I（接户运营）两列的原值。"""
+        db = database.get_db()
+        _seed_user(db, "u_sb_li3", "李四", platform="fb")
+        _seed_fb_account(db, "SB-FB", fb_user, acceptor="旧接户记录")
+        db.commit()
+        parsed = dict(hd.parse_row(_fb_row("SB-FB", "旧接户记录", "李四"), "fb"), row=2)
+        diff = hd.build_diff(db, [parsed], "fb")
+        out = hd.apply_diff(db, diff, "fb", {"owner": ["SB-FB"]}, fb_user,
+                            collect_undo=True, sheet_from=_sheet_from(parsed, "fb"))
+        db.commit()
+        db.close()
+        assert out["undo"]["sheet_back"] == [
+            {"account_id": "SB-FB", "cells": {"J": "李四", "I": "旧接户记录"}}]
+
+    def test_sheet_from_is_not_read_when_not_collecting(self, client, fb_user):
+        """`collect_undo=False` 时新入参完全不被读取（纯增量：默认档一次都不碰它）。"""
+        db = database.get_db()
+        pk = _seed_fb_account(db, "SY9", fb_user)
+        db.commit()
+        spy = _ReadSpy({"SY9": {"J": "旧在用"}})
+        diff = {"to_create": [], "to_update": [], "to_skip": [], "warnings": [],
+                "summary": {},
+                "owner_changes": [{"row": 2, "account_id": "SY9", "existing_id": pk,
+                                   "from": "u_undo", "to": "u_undo",
+                                   "to_owner_id": fb_user, "via": "owner_name"}]}
+        out = hd.apply_diff(db, diff, "fb", {"owner": ["SY9"]}, fb_user, sheet_from=spy)
+        db.close()
+        assert "undo" not in out
+        assert spy.gets == 0, "collect_undo=False 时不得读取 sheet_from"
+
+
 class TestUndoStatusRoute:
     """GET /api/huguan/dashboard/undo：两方向各有无可撤快照 + 时间（spec §7 / §八）。"""
 

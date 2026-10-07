@@ -433,6 +433,36 @@ def _parseable_fields(platform: str) -> tuple:
     return _PARSEABLE_FIELDS[platform]
 
 
+# 按平台给出「归属变更会写到表侧的那几列」，用于把表里原值记进撤回快照。
+# **必须按平台分流**（规格 §3.3）：
+#   GG：运营列 G + 通道列 H（同步后 H 被清空）
+#   TT：只有接户运营列 G（L「换绑情况」只读回不回写，没有通道列）
+#   FB：在用运营列 J + 接户运营列 I（同步后 I 被写成「{旧}转{新}」）
+# 与路由收尾回写（routes/huguan_dashboard_routes.py 的 dashboard_sync）实际会写的
+# 列一一对应 —— 多记一列会让撤回写脏表侧，少记一列则漏撤回。
+_OWNER_SHEET_COLS = {"gg": ("G", "H"), "tt": ("G",), "fb": ("J", "I")}
+
+
+def _owner_sheet_from(parsed: dict, platform: str) -> dict:
+    """取「归属变更会碰的那几列」在**表里的原值**：{列字母: 单元格值}。
+
+    撤回时要用它把表侧盖回原样（规格 §5.2 的 `sheet_back`）。记的是**真实原值**，
+    不是「回退成旧归属名」—— 后者对 GG 的通道列是错的：通道列在同步前存的是户管
+    填的**新**归属名，不是旧归属名。记原值对三个平台一致正确。
+
+    值取自 `parse_row` 的结果：这几列在 `COLUMN_SPEC` 里都是 `readable=True`
+    （GG 的 G/H = owner_name/_owner_channel，TT 的 G = owner_name，
+    FB 的 J/I = owner_name/acceptor），解析结果里必然有对应字段，无需回读原始 values。
+    """
+    field_by_col = {c[0]: c[2] for c in COLUMN_SPEC[platform]}
+    out = {}
+    for col in _OWNER_SHEET_COLS[platform]:
+        field = field_by_col.get(col)
+        if field:
+            out[col] = "" if parsed.get(field) is None else str(parsed.get(field))
+    return out
+
+
 def build_diff(db, parsed_rows: list, platform: str) -> dict:
     """表 → 系统 的逐行比对，产出五类差异（规格 §8.3）。
 
@@ -793,7 +823,18 @@ def _insert_channel_history(db, platform: str, account_pk: int, old_val, new_val
         (account_pk, old_val, new_val, changed_by, change_type))
 
 
-def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> dict:
+def _read_old_value(db, table: str, col: str, pk: int):
+    """读某行某列的当前值（撤回快照要的「旧值」）。
+
+    ⚠️ **必须在 UPDATE 之前调用** —— 写完就读不到了。与 `_record_channel_change`
+    读旧 MCC/BC、FB 主 BM 分支读旧主 BM 是同一条纪律（三处都靠「写前读」）。
+    """
+    row = db.execute(f"SELECT {col} AS v FROM {table} WHERE id=?", (pk,)).fetchone()
+    return row["v"] if row else None
+
+
+def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
+               *, collect_undo: bool = False, sheet_from: dict | None = None) -> dict:
     """执行户管确认过的差异（规格 §8.3 步骤 8）。
 
     confirmed: {"create": [账户ID...], "update": [账户ID...], "owner": [账户ID...]}
@@ -804,10 +845,28 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
     另一个账户上（diff 各项里仍保留 "row"，但只用于在 errors 里报「第几行出错」）。
     返回里的 "not_applied" 收集「confirmed 勾了、当前 diff 里却没有任何一项
     account_id 命中」的账户 —— 确认被静默丢弃比报错更危险：户管会以为改过了。
+
+    `collect_undo=True` 时额外收集一份**撤回快照**放进返回的 "undo" 键（规格 §5.2），
+    由路由层 `save_undo` 落库、Task 5 的 `undo_sync` 消费。**默认 False**：既有调用
+    与既有测试的行为逐字节不变，且不产生任何多余的读。
+
+    快照为什么必须在这里收集：updates / owner_changes 的**旧值必须在 UPDATE 之前**
+    读到（写完就读不到了），而这个位置只有本函数内部有。
+
+    `sheet_from`：`{账户ID: {列字母: 表里的原值}}`，只服务快照里的 `sheet_back`
+    （「落库后回写表的那几列的原值」）。**表侧原值只有 `parse_row` 的结果里才有**，
+    所以由调用方用 `_owner_sheet_from(parsed, platform)` 逐行算好后传进来 ——
+    **键按账户ID、不按行号**（与函数内其它一切匹配同一个理由：行号会位移）。
+    `collect_undo=False` 时本参数**完全不被读取**。
     """
     conf = confirmed or {}
     created = updated = owner_changed = 0
     errors = []
+    # 撤回快照的四个收集容器（collect_undo=False 时全部为空、不进返回值）。
+    # owner_changes 与 updates 项**刻意同形状**（{account_id, cols:{列:{old,new}}}）：
+    # Task 5 的 CAS 循环拿同一个函数处理两者。
+    undo_updates, undo_owner_changes = [], []
+    undo_created, undo_statuses, undo_sheet_back = [], [], []
     # 行级「非致命、但户管要知道」的提示（与 build_diff 的 warnings 同形：row + message）。
     # 落库阶段唯一的此类情形是 FB「位置」列的 BM 名无法唯一匹配 —— 该列被跳过，
     # 但不该让整行失败。errors 装的是异常，语义不同，故单列一个列表。
@@ -824,6 +883,27 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
 
     table = _TABLE_FOR_PLATFORM[platform]
     key_field = ACCOUNT_KEY_FIELD[platform]
+
+    def _ensure_status(name, owner_id):
+        """建缺失的状态行，并在 collect_undo 时记下「这次真的新建了」。
+
+        查重键必须是 **(name, platform)**，与 `resolve_status_id` 内部一致（不含
+        owner_id）：带上 owner_id 会漏判「别人已建过同名同平台状态」，撤回时就会把
+        别人的状态误删（spec §5.2 的 `created_statuses` 只该记**本次新建**的行）。
+
+        刻意不改 `resolve_status_id` 的签名/返回值 —— 它另有本任务不该碰的调用方
+        （`build_diff` 的 `_collect_updates` 等），加出参会把契约撑破。
+        """
+        name = (name or "").strip()
+        if not collect_undo:
+            # 纯增量：不收集时直调，连多出来的一次 SELECT 都不做
+            return resolve_status_id(db, name, owner_id, platform)
+        existed = db.execute("SELECT id FROM account_statuses WHERE name=? AND platform=?",
+                             (name, platform)).fetchone()
+        sid = resolve_status_id(db, name, owner_id, platform)
+        if existed is None and sid is not None:
+            undo_statuses.append({"name": name, "platform": platform})
+        return sid
 
     for item in diff.get("to_create", []):
         if item["account_id"] not in conf.get("create", []):
@@ -858,8 +938,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读）
             pending = item.get("pending_status")
             if pending:
-                src[_target_column(platform, "status_name")] = resolve_status_id(
-                    db, pending, item.get("owner_id"), platform)
+                src[_target_column(platform, "status_name")] = _ensure_status(
+                    pending, item.get("owner_id"))
             src[key_field] = item["account_id"]
             src["name"] = item["account_id"]
             src["owner_id"] = item.get("owner_id")
@@ -889,6 +969,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
                     _record_bm_change(db, new_id, None, bid, user_id)
             _apply_death(db, platform, new_id, want_dead)
             created += 1
+            if collect_undo:
+                # 只在建号成功之后记（上面任一步抛异常都跳到 except，不记）
+                undo_created.append(item["account_id"])
         except Exception as e:
             errors.append({"row": item["row"], "error": str(e)})
 
@@ -909,8 +992,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             # 步骤 7/8）。owner 取该行作用域归属，只记「谁先建的」——不参与查重。
             pending = item.get("pending_status")
             if pending:
-                fields[_target_column(platform, "status_name")] = resolve_status_id(
-                    db, pending, item.get("scope_owner_id"), platform)
+                fields[_target_column(platform, "status_name")] = _ensure_status(
+                    pending, item.get("scope_owner_id"))
             # 状态真的变了（build_diff 只在状态真变了才把它放进 fields）⇒
             # 「状态变更时间」必须跟着刷新，否则前端显示的永远是旧值。
             # 注意 `datetime('now','localtime')` 是 SQL 表达式不是值：只能作为
@@ -947,10 +1030,28 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
                                    (item["existing_id"],))
                     _record_bm_change(db, item["existing_id"],
                                       old["bm_id"] if old else None, bid, user_id)
+            # 撤回快照：列级旧值必须在 UPDATE **之前**读 —— 写完就读不到了
+            # （与上面 _record_channel_change / 主 BM 两处同一条纪律）。
+            # 新值（fields[k]）一并记下：Task 5 的 CAS 要拿它与库里的当前值比，
+            # 只有仍等于「本次写的那个值」才敢回滚。
+            old_cols = {}
+            if collect_undo and fields:
+                for k in fields:
+                    if k.startswith("_"):
+                        # 合成键（_is_dead 等）不是数据库列，拼进 SELECT 会直接报错
+                        continue
+                    old_cols[k] = _read_old_value(db, table, k, item["existing_id"])
             if sets:
                 db.execute(f"UPDATE {table} SET {', '.join(sets)}, "
                            "updated_at=datetime('now','localtime') WHERE id=?",
                            tuple(fields.values()) + (item["existing_id"],))
+            # 记在写**成功之后**：UPDATE 抛异常的行不该进快照（那些新值根本没落库，
+            # Task 5 的 CAS 拿它去比只会误报冲突）。
+            if old_cols:
+                undo_updates.append({
+                    "account_id": item["account_id"],
+                    "cols": {k: {"old": v, "new": fields[k]}
+                             for k, v in old_cols.items()}})
             if is_dead_val is not None:
                 _apply_death(db, platform, item["existing_id"], bool(is_dead_val))
             updated += 1
@@ -962,6 +1063,23 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
             continue
         hit["owner"].add(item["account_id"])
         try:
+            # 撤回快照：归属变更走的是**本分支**，不经过 to_update
+            # （`_collect_updates` 不产出 owner_id）—— 旧值不在这里记，撤回时库里的
+            # 归属纹丝不动。旧值同样必须在 UPDATE **之前**读。
+            undo_oc = None
+            if collect_undo:
+                cols = {"owner_id": {
+                    "old": _read_old_value(db, table, "owner_id", item["existing_id"]),
+                    "new": item["to_owner_id"]}}
+                if platform == "fb":
+                    # acceptor 只对 fb 记：其它平台的表没有这一列，记了会让 Task 5
+                    # 拼出 `UPDATE ... SET acceptor=?` 直接报错。
+                    cols["acceptor"] = {
+                        "old": _read_old_value(db, "fb_accounts", "acceptor",
+                                               item["existing_id"]),
+                        "new": _fb_owner_transition(item.get("from") or "",
+                                                    item.get("to") or "")}
+                undo_oc = {"account_id": item["account_id"], "cols": cols}
             db.execute(f"UPDATE {table} SET owner_id=?, "
                        "updated_at=datetime('now','localtime') WHERE id=?",
                        (item["to_owner_id"], item["existing_id"]))
@@ -972,6 +1090,15 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
                 db.execute("UPDATE fb_accounts SET acceptor=? WHERE id=?",
                            (_fb_owner_transition(old_name, new_name), item["existing_id"]))
             owner_changed += 1
+            if undo_oc is not None:
+                undo_owner_changes.append(undo_oc)
+            if collect_undo:
+                # 表侧：这几列在**表里的原值**（由调用方从 parse_row 的结果算好传入）。
+                # 空 cells 由 Task 5 自行跳过（没有可回退的表侧内容）。
+                undo_sheet_back.append({
+                    "account_id": item["account_id"],
+                    "cells": dict((sheet_from or {}).get(item["account_id"]) or {}),
+                })
             # 带上 "to"（新归属名）：路由收尾直接用它回写运营列，不必再拿行号反查。
             # "from" 一并带上：路由收尾的 FB 定向回写要用它拼「旧转新」。
             applied_owner_rows.append({"account_id": item["account_id"],
@@ -992,11 +1119,17 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int) -> 
                 not_applied.append({"account_id": aid, "category": cat})
 
     db.commit()
-    return {"created": created, "updated": updated, "owner_changed": owner_changed,
-            "applied_owner_rows": applied_owner_rows, "not_applied": not_applied,
-            "remark_m_writeback": remark_m_writeback,
-            "remark_operator_push": remark_operator_push,
-            "errors": errors, "warnings": warnings}
+    result = {"created": created, "updated": updated, "owner_changed": owner_changed,
+              "applied_owner_rows": applied_owner_rows, "not_applied": not_applied,
+              "remark_m_writeback": remark_m_writeback,
+              "remark_operator_push": remark_operator_push,
+              "errors": errors, "warnings": warnings}
+    if collect_undo:
+        # 快照键集是 Task 5 的接口契约（逐键消费）：少一个键就静默漏掉一整类撤回。
+        result["undo"] = {"updates": undo_updates, "owner_changes": undo_owner_changes,
+                          "created": undo_created, "created_statuses": undo_statuses,
+                          "sheet_back": undo_sheet_back}
+    return result
 
 
 def _fb_owner_transition(old_name: str, new_name: str) -> str:
