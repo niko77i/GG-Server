@@ -17,7 +17,7 @@ export const accountsApi = {
   syncFromSheet: (body) => api.post('/accounts/sync-from-sheet', body),
   restore: (id) => api.post(`/accounts/${id}/restore`),
   permanentDelete: (id) => api.delete(`/accounts/${id}/permanent`),
-  listDeleted: () => api.get('/accounts/deleted'),
+  listDeleted: (params) => api.get('/accounts/deleted', { params }),
 }
 
 export const mccApi = {

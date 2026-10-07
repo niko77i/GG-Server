@@ -83,9 +83,10 @@ export const useAccountStore = defineStore('accounts', {
     async permanentDeleteAccount(id) {
       await accountsApi.permanentDelete(id)
     },
-    async loadDeletedAccounts() {
-      const res = await accountsApi.listDeleted()
-      return res.accounts || []
+    async loadDeletedAccounts(params = {}) {
+      // 返回形状从「数组」改为后端的分页对象 {accounts, total, page, size}。
+      // 上万行时前端只拿一页，不再全量拉取渲染。
+      return accountsApi.listDeleted(params)
     },
 
     // ---- option actions: agents ----
