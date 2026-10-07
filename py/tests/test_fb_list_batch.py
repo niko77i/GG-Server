@@ -89,6 +89,9 @@ def test_fb_list_bms_are_grouped_correctly(app, client, admin_fb_headers):
         # BM 名必须与该账户自身的挂载对应，不是别人那批
         expected_idx = int(item["account_id"].replace("fbacc", "")) % 3
         assert item["bms"][0]["name"] == f"BM{expected_idx}"
+        # 列表侧必须**带** is_primary（前端靠它标「主 BM / 位置」列）。
+        # 与 deleted 侧的「必须**不带**」构成一对，双向钉死形状漂移。
+        assert "is_primary" in item["bms"][0]
 
 
 def test_fb_list_primary_bm_name_is_populated(app, client, admin_fb_headers):
@@ -99,6 +102,9 @@ def test_fb_list_primary_bm_name_is_populated(app, client, admin_fb_headers):
     db.close()
 
     body = client.get("/api/fb/accounts/list?size=500", headers=admin_fb_headers).get_json()
+    # 先断言条数：否则 items 为空时下面的循环空转 0 次，测试**假通过**。
+    assert body["total"] == 6
+    assert len(body["items"]) == 6
     for item in body["items"]:
         assert item["primary_bm_name"].startswith("BM")
 
@@ -131,5 +137,54 @@ def test_fb_deleted_list_bms_are_grouped_correctly(app, client, admin_fb_headers
 
     body = client.get("/api/fb/accounts/deleted?size=500", headers=admin_fb_headers).get_json()
     assert body["total"] == 9
+    # 先断言条数：否则 items 为空时下面的循环空转 0 次，测试**假通过**。
+    assert len(body["items"]) == 9
     for item in body["items"]:
         assert len(item["bms"]) == 1
+        # 已删除端点的响应必须与旧的「三键」（name/id/bm_id）**逐字节兼容**：
+        # 不能多出 is_primary。这里把「不带」也钉成断言 —— 否则该要求
+        # 只存在于源码注释里，改回去也没人拦。
+        assert "is_primary" not in item["bms"][0]
+
+
+def test_fb_deleted_list_makes_one_bm_query_not_per_row(app, client, admin_fb_headers, monkeypatch):
+    """**N+1 守卫（已删除端点）**：BM 查询次数必须是 1，不随行数增长。
+
+    与 `test_fb_list_makes_one_bm_query_not_per_row` 同机制：用
+    `sqlite3.Connection.set_trace_callback` 观测真实执行的 SQL，数其中含
+    `fb_account_bm` 的语句。
+
+    相邻的 `test_fb_deleted_list_bms_are_grouped_correctly` 只断言了
+    `total == 9` / `len(bms) == 1` —— 这两个判据**改前改后都成立**，
+    把批查改回每行一次也照样通过。唯有查询次数能在改动前先失败：
+    改前 50 行 = 50 次，改后 = 1 次。
+    """
+    import database
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='adminfb'").fetchone()["id"]
+    acc_ids, _bm_ids = _seed(db, uid, 50, 5)
+    for aid in acc_ids:
+        db.execute("UPDATE fb_accounts SET deleted_at=datetime('now','localtime') WHERE id=?", (aid,))
+    db.commit()
+    db.close()
+
+    import routes.helpers as helpers
+    seen = []
+
+    def counting_get_db():
+        conn = helpers.get_db()
+        # 每次 get_db() 都设一遍是刻意的：request 级连接在 g.db 里缓存，
+        # 重复设置只是替换回调，不会叠加。
+        conn.set_trace_callback(lambda sql: seen.append(sql))
+        return conn
+
+    monkeypatch.setattr("routes.fb_routes.get_db", counting_get_db)
+
+    body = client.get("/api/fb/accounts/deleted?size=50", headers=admin_fb_headers).get_json()
+    assert body["total"] == 50
+    assert len(body["items"]) == 50
+
+    bm_queries = [s for s in seen if "fb_account_bm" in s]
+    assert len(bm_queries) == 1, (
+        f"BM 查询应为 1 次（批量），实际 {len(bm_queries)} 次 —— N+1 未消除"
+    )
