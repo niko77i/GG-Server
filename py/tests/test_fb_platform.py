@@ -957,3 +957,172 @@ class TestFbBatchDelete:
             resp = client.post("/api/fb/accounts/batch-delete", json={"ids": [bad]},
                                headers=hdr)
             assert resp.status_code == 400, bad
+
+
+# ==================== FB 账户面板批量能力（Task 3：批量建户） ====================
+#
+# 形状照本文件既有的 `create_account`（FB 没有 MCC / 代理；`operator` 是**冻结字段**，
+# 服务端填创建者名字快照、请求体同名键一律忽略）。
+#
+# ⚠️ **与本 Task brief 的一处偏差（测试数据，非语义）**：brief 用 "BC-1"/"BC-2" 这类
+# **非纯数字**账户 ID 当测试数据，但本文件既有的 `create_account` 有
+# `account_id.isdigit()` 校验（非纯数字 ⇒ 400），batch-create 照抄该校验
+# （brief 自带的 test 5 正是钉这条）。⇒ 那些 ID 会走 `errors` 而不是落库，
+# brief 的 test 1/2/3/4 里 `created` 恒为 0、断言必红。故改用**纯数字**资产 UID
+# （FB 资产 UID 本就是数字串，与 `create_account` 口径一致）。断言语义一字未改。
+
+
+def _fb_accounts_by_ids(account_ids):
+    """按 account_id 读回 fb_accounts 行（**断言必须查库**，不能只看响应体）。
+
+    「返回 created=2 但库里没落」这种情况只有查库才测得出来。
+    """
+    db = database.get_db()
+    ph = ",".join(["?"] * len(account_ids))
+    rows = db.execute(
+        f"SELECT account_id, name, timezone, status_id, owner_id, operator "
+        f"FROM fb_accounts WHERE account_id IN ({ph})", list(account_ids)).fetchall()
+    db.close()
+    return [{k: r[k] for k in r.keys()} for r in rows]
+
+
+class TestFbBatchCreate:
+    """POST /api/fb/accounts/batch-create —— 批量建户（共用默认值 + 逐行 overrides）。
+
+    夹具沿用本文件既有的 `_fb_user(client, username, role, platform)` helper
+    （本文件没有 `fb_user_headers` 之类的 fixture）。
+    """
+
+    def test_creates_rows_with_common_defaults(self, client):
+        hdr, uid = _fb_user(client, "t_bc_defaults")
+        resp = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100001", "9100002"], "name_prefix": "前缀", "timezone": "UTC+8",
+        }, headers=hdr)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["created"] == 2
+        assert sorted(data["created_ids"]) == ["9100001", "9100002"]
+        # 落库校验（不是只看响应体）：名称 / 时区 / 归属 / 冻结的 operator 快照
+        rows = _fb_accounts_by_ids(["9100001", "9100002"])
+        assert {r["name"] for r in rows} == {"前缀 9100001", "前缀 9100002"}
+        assert {r["timezone"] for r in rows} == {"UTC+8"}
+        assert {r["owner_id"] for r in rows} == {uid}
+        assert {r["operator"] for r in rows} == {"t_bc_defaults"}
+
+    def test_operator_is_frozen_request_key_ignored(self, client):
+        """`operator` 是冻结字段（规格 6.1）：请求体同名键被忽略，服务端填创建者名字快照。"""
+        hdr, _ = _fb_user(client, "t_bc_frozen")
+        data = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100009"], "operator": "冒名者",
+        }, headers=hdr).get_json()
+        assert data["created"] == 1
+        rows = _fb_accounts_by_ids(["9100009"])
+        assert rows[0]["operator"] == "t_bc_frozen", "请求体的 operator 键没被忽略"
+
+    def test_overrides_win_over_common(self, client):
+        hdr, _ = _fb_user(client, "t_bc_override")
+        resp = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100003", "9100004"], "timezone": "UTC+8",
+            "overrides": {"9100003": {"timezone": "UTC+9", "name": "手填名"}},
+        }, headers=hdr)
+        assert resp.get_json()["created"] == 2
+        rows = {r["account_id"]: r for r in _fb_accounts_by_ids(["9100003", "9100004"])}
+        assert rows["9100003"]["timezone"] == "UTC+9"   # override 生效
+        assert rows["9100003"]["name"] == "手填名"        # overrides.name 直接当完整名称
+        assert rows["9100004"]["timezone"] == "UTC+8"   # 未覆盖的走共用值
+
+    def test_duplicate_account_id_reports_exists_not_generic(self, client):
+        """撞 UNIQUE ⇒ 「已存在」，不是「操作失败」。"""
+        hdr, _ = _fb_user(client, "t_bc_dup")
+        client.post("/api/fb/accounts/create",
+                    json={"name": "dup", "account_id": "9100005"}, headers=hdr)
+        data = client.post("/api/fb/accounts/batch-create",
+                           json={"account_ids": ["9100005"]}, headers=hdr).get_json()
+        assert data["created"] == 0
+        assert [e["account_id"] for e in data["errors"]] == ["9100005"]
+        assert "已存在" in data["errors"][0]["error"]
+
+    def test_partial_failure_does_not_abort_batch(self, client):
+        """一条失败不影响其余（逐行独立 try/except）。"""
+        hdr, _ = _fb_user(client, "t_bc_partial")
+        client.post("/api/fb/accounts/create",
+                    json={"name": "dup", "account_id": "9100006"}, headers=hdr)
+        data = client.post("/api/fb/accounts/batch-create",
+                           json={"account_ids": ["9100007", "9100006", "9100008"]},
+                           headers=hdr).get_json()
+        assert data["created"] == 2
+        assert sorted(data["created_ids"]) == ["9100007", "9100008"]
+        assert [e["account_id"] for e in data["errors"]] == ["9100006"]
+        # 查库：两条成功的确实落了
+        rows = _fb_accounts_by_ids(["9100006", "9100007", "9100008"])
+        assert sorted(r["account_id"] for r in rows) == ["9100006", "9100007", "9100008"]
+
+    def test_row_failing_after_insert_does_not_land_in_db(self, client):
+        """**在 INSERT 之后才失败的条目，不得留下半截行。**
+
+        `primary_bm_id` 指向不存在的 BM ⇒ `_set_primary_bm` 的 INSERT 触发 FK 约束
+        （`IntegrityError`，**不是** UNIQUE）⇒ 该条进 errors + 固定文案。
+        但此时账户行的 INSERT 只是**待提交**状态：若不 rollback，**下一条**成功条目的
+        `commit()` 会把它一并提交 ⇒ 「报错却在库里」。故断言查库必无此行。
+        本用例同时钉住 FK 不得被误报成「已存在」（`_is_unique_conflict` 只判类型会踩）。
+        """
+        hdr, _ = _fb_user(client, "t_bc_phantom")
+        data = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100010", "9100011"],
+            "overrides": {"9100010": {"primary_bm_id": 999999999}},
+        }, headers=hdr).get_json()
+        assert data["created"] == 1
+        assert data["created_ids"] == ["9100011"]
+        assert [e["account_id"] for e in data["errors"]] == ["9100010"]
+        assert "已存在" not in data["errors"][0]["error"], "FK 约束被误报成「已存在」"
+        assert _fb_accounts_by_ids(["9100010"]) == [], "报错的那条却落库了（缺 rollback）"
+
+    def test_non_digit_account_id_goes_to_errors_not_500(self, client):
+        """账户ID 非纯数字 ⇒ 落 errors（照 create_account 的既有校验），不是 500。"""
+        hdr, _ = _fb_user(client, "t_bc_nondigit")
+        data = client.post("/api/fb/accounts/batch-create",
+                           json={"account_ids": ["不是数字"]}, headers=hdr).get_json()
+        assert data["created"] == 0
+        assert "纯数字" in data["errors"][0]["error"]
+
+    def test_blank_entries_are_skipped_not_errored(self, client):
+        """空白条目进 skipped（不是 errors）—— 形状照 brief 的实现。"""
+        hdr, _ = _fb_user(client, "t_bc_blank")
+        data = client.post("/api/fb/accounts/batch-create",
+                           json={"account_ids": ["9100012", "", "   "]},
+                           headers=hdr).get_json()
+        assert data["created"] == 1
+        assert data["skipped"] == ["", ""]
+        assert data["errors"] == []
+
+    def test_blank_and_non_list_are_400(self, client):
+        hdr, _ = _fb_user(client, "t_bc_400")
+        for body in ({"account_ids": []}, {"account_ids": "x"}, {}):
+            assert client.post("/api/fb/accounts/batch-create", json=body,
+                               headers=hdr).status_code == 400, body
+
+    def test_rejects_non_dict_body(self, client):
+        """**非 dict 请求体（JSON 数组）⇒ 400，不是 500。**
+
+        同族两条（batch-lookup / batch-delete）已各配一条；`parse_body()` 的
+        `or {}` 兜不住非空数组，去掉 `isinstance(data, dict)` 守卫这条会变红。
+        """
+        hdr, _ = _fb_user(client, "t_bc_arr")
+        resp = client.post("/api/fb/accounts/batch-create", json=[1, 2], headers=hdr)
+        assert resp.status_code == 400, resp.get_data(as_text=True)
+
+    def test_illegal_status_or_bm_id_is_silently_none_not_500(self, client):
+        """`status_id` / `primary_bm_id` 非法值 ⇒ **静默 None**（不设状态 / 不挂主 BM），不 500。
+
+        这是有意的取舍（写进端点 docstring）：批量建户是「尽量多建几条」的语义，
+        一个字段格式不对不该让整批失败。超 int64 上界时 Python 的 `int()` 能解析、
+        绑定处却抛 OverflowError（内建）⇒ 500 + 英文原文，故必须先过 `_valid_pk_int64` 归一。
+        """
+        hdr, _ = _fb_user(client, "t_bc_gate")
+        data = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100013"], "status_id": "abc", "primary_bm_id": 10 ** 30,
+        }, headers=hdr).get_json()
+        assert data["created"] == 1
+        assert data["errors"] == []
+        rows = _fb_accounts_by_ids(["9100013"])
+        assert rows[0]["status_id"] is None, "非法 status_id 没有静默变 None"

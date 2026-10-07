@@ -471,6 +471,101 @@ def batch_delete_accounts():
     return ok({'deleted': deleted, 'not_found': not_found})
 
 
+@fb_bp.route('/api/fb/accounts/batch-create', methods=['POST'])
+@jwt_required()
+@fb_required
+def batch_create_accounts():
+    """批量创建 FB 账户：共用默认值 + 逐账户 overrides。
+
+    字段形状照本文件的 `create_account`（FB 没有 MCC/代理，且 status_id 由前端直接给数值）。
+    `operator` 是**冻结字段**（规格 6.1）—— 服务端填创建者名字快照，请求体同名键一律忽略。
+    名称：`overrides[<id>].name` 直接当**完整**名称；否则 `name_prefix + ' ' + 账户ID`
+    （name_prefix 为空就直接用账户ID）。账户ID 仍照 `create_account` 的既有校验要求**纯数字**。
+
+    **有意的取舍（不是漏校验）：`status_id` / `primary_bm_id` 过 `_valid_pk_int64` 归一，
+    非法值（非 ASCII 数字串 / 超 int64 上界）静默变成 `None`（＝该条不设状态 / 不挂主 BM），
+    而不是 400 拒绝整批。** 理由：批量建户是「尽量多建几条」的语义（单条失败进 `errors`
+    而不中断整批），一个字段格式不对不该让整批失败；归一同时也拦掉超 int64 上界，
+    免得漏到 sqlite 绑定处抛 OverflowError ⇒ 500 + 英文异常原文。
+
+    逐条独立 try/except：一条失败进 `errors`、不中断整批。撞 `fb_accounts.account_id`
+    的 UNIQUE ⇒ 「已存在」；其余异常（含 FK / NOT NULL）⇒ 固定文案 + 服务端日志。
+    """
+    db = get_db()
+    data = parse_body()
+    if not isinstance(data, dict):
+        return err('请求体格式错误', 400)
+    account_ids = data.get('account_ids') or []
+    if not account_ids or not isinstance(account_ids, list):
+        return err('请提供 account_ids 列表', 400)
+
+    common = {
+        'name_prefix': (data.get('name_prefix') or '').strip(),
+        'timezone': (data.get('timezone') or ''),
+        'status_id': _valid_pk_int64(data['status_id']) if data.get('status_id') is not None else None,
+        'primary_bm_id': _valid_pk_int64(data['primary_bm_id']) if data.get('primary_bm_id') is not None else None,
+        'acquired_date': data.get('acquired_date', ''),
+    }
+    overrides = data.get('overrides') or {}
+    if not isinstance(overrides, dict):
+        return err('overrides 必须是对象', 400)
+
+    uid = get_uid()
+    # operator 是**冻结字段**（规格 6.1），理由同 `create_account`。
+    operator = _display_name(db, uid)
+    created, skipped, errors = [], [], []
+    written_ids = []          # 仅用于最后一次性回写看板
+
+    for raw_aid in account_ids:
+        aid = str(raw_aid).strip()
+        if not aid:
+            skipped.append(aid)
+            continue
+        ov = overrides.get(aid) or {}
+        # 名称：overrides.name 直接用作完整名称；否则 name_prefix + ID
+        name = (ov.get('name') or '').strip() or \
+               ((common['name_prefix'] + ' ' + aid).strip() if common['name_prefix'] else aid)
+        timezone = ov['timezone'] if 'timezone' in ov else common['timezone']
+        status_id = (_valid_pk_int64(ov['status_id'])
+                     if 'status_id' in ov and ov['status_id'] is not None else common['status_id'])
+        primary_bm_id = (_valid_pk_int64(ov['primary_bm_id'])
+                         if 'primary_bm_id' in ov and ov['primary_bm_id'] is not None
+                         else common['primary_bm_id'])
+        acquired_date = ov['acquired_date'] if 'acquired_date' in ov else common['acquired_date']
+
+        if not aid.isdigit():
+            errors.append({'account_id': aid, 'error': '账户ID必须是纯数字'})
+            continue
+        try:
+            db.execute(
+                "INSERT INTO fb_accounts (name, account_id, timezone, status_id, "
+                "       acquired_date, owner_id, operator) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, aid, timezone, status_id, acquired_date, uid, operator))
+            acc_pk = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            if primary_bm_id:
+                _set_primary_bm(db, acc_pk, primary_bm_id)
+            db.commit()
+            created.append(aid)
+            written_ids.append(aid)
+        except Exception as e:
+            # 必须 rollback：本条账户行的 INSERT 此刻只是**待提交**状态（commit 在后面），
+            # 不回滚的话，**下一条**成功条目的 commit() 会把它一并提交 ⇒
+            # 「报错却在库里」——`created`/看板回写与库内容对不上。
+            db.rollback()
+            log.exception("FB 批量建户失败 account_id=%s", aid)
+            if _is_unique_conflict(e):
+                errors.append({'account_id': aid, 'error': f"账户 ID「{aid}」已存在"})
+            else:
+                errors.append({'account_id': aid, 'error': _FB_DB_FAILED_MSG})
+
+    if written_ids:
+        hd.writeback_rows(uid, "fb", written_ids)
+
+    return ok({'created': len(created), 'created_ids': created,
+               'skipped': skipped, 'errors': errors})
+
+
 @fb_bp.route('/api/fb/accounts/create', methods=['POST'])
 @jwt_required()
 @fb_required
