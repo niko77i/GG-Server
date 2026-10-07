@@ -999,24 +999,46 @@ FB 删账户前显式清 fb_account_bm_history（无 CASCADE）。"
 
 ```python
 class TestDeleteUserCleanup:
-    def test_deleting_user_clears_undo_rows(self, client, fb_user):
-        """huguan_sync_undo.user_id 无 ON DELETE 且外键开着 —— 不清理会 500。"""
+    def test_deleting_user_via_endpoint_succeeds_with_undo_row_present(self, client, fb_user):
+        """**驱动真实端点**：户管有快照时删他，不能以 FOREIGN KEY constraint failed 收场。
+
+        ⚠️ 这条**不能**自己 DELETE 再断言行没了 —— 那是自证式空转，测不到 admin_delete_user。
+        必须在删之前留下快照，然后走真实删用户路径，断言它成功且快照也没了。
+
+        `developer` 身份发起（`admin_delete_user` 需要 admin/developer）。
+        """
         db = database.get_db()
         hd.save_undo(db, fb_user, "fb", "push", {"v": 1})
         db.commit()
-        db.close()
-        # 直接调清理：admin_delete_user 的清理清单里必须有本表
-        db = database.get_db()
-        db.execute("DELETE FROM huguan_sync_undo WHERE user_id=?", (fb_user,))
-        db.execute("DELETE FROM users WHERE id=?", (fb_user,))
+        # 目标用户不能是 developer/admin，否则会被同级保护拦掉
+        db.execute("UPDATE users SET role='user' WHERE id=?", (fb_user,))
         db.commit()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('del_dev', 'test123', 'developer', 'gg')")
+        db.commit()
+        db.close()
+
+        token = client.post("/api/auth/login",
+                            json={"username": "del_dev", "password": "test123"}
+                            ).get_json()["access_token"]
+        h = {"Authorization": f"Bearer {token}"}
+
+        # 先读现行 main.py 确认删用户的实际路由与形状，再按它写；下面是常见形状
+        r = client.delete(f"/api/admin/users/{fb_user}", headers=h)
+        assert r.status_code == 200, r.get_json()
+
+        db = database.get_db()
         n = db.execute("SELECT COUNT(*) FROM huguan_sync_undo WHERE user_id=?",
                        (fb_user,)).fetchone()[0]
         db.close()
         assert n == 0
 
     def test_undo_table_is_in_delete_user_cleanup_list(self):
-        """静态守卫：admin_delete_user 的代码里必须出现 huguan_sync_undo。"""
+        """静态守卫：admin_delete_user 的代码里必须出现 huguan_sync_undo。
+
+        上面那条是端到端行为（更强），这条是**直指根因**的守卫 ——
+        将来有人重构删用户逻辑、把清理行弄丢了，这条会立刻红并说清原因。
+        """
         import inspect
         import main
         src = inspect.getsource(main.admin_delete_user)
