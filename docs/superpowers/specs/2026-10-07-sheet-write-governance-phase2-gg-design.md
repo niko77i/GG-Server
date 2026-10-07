@@ -175,6 +175,36 @@ def run_write_many(db, *, user_id, platform, target, business_keys,
 
 沿用一期 `sheetWriteHint()` 的三句，不改。
 
+### 6.4 轮询触发点（**这一节是需求「失败必须有提示」的承重部分**）
+
+用户的要求是「**即时提示 + 持久标记**」两者都要。**持久标记**由列表加载时拉一次 `/api/sheet-write/status` 得到；**即时提示**则必须在**每次触发写表的操作之后主动轮询**，否则就只剩标记、没有提示。
+
+一期 TT 只有 2 个触发入口（单条改状态、批量改状态），两边都接了轮询。GG 侧有 **6 个**，逐个都要接 —— 漏一个，那个入口就退化成「只有标记」：
+
+| 前端动作 | 要轮询的 business_key |
+|---|---|
+| 改状态（`PUT /api/accounts/<aid>`） | 该 `account_id` + 本次产生的 `recharge_records.id`（自动清账） |
+| **删户**（`DELETE /api/accounts/<aid>`） | 该 `account_id` |
+| **恢复**（`POST /api/accounts/<aid>/restore`） | 该 `account_id` |
+| 批量改状态（`POST /api/accounts/batch-update`） | 本批全部 `account_id` + 全部产生的 rid |
+| **从表同步**（`POST /api/accounts/sync-from-sheet`，dry_run=false） | 本次涉及的全部 `account_id` |
+| 单笔充值 / 批量充值 | 本次产生的全部 rid |
+
+**实现要求**：
+
+1. 复用一期 TT 的轮询实现（`pollSheetWrite`）与其**按 business_key 独立计时**的 `Map` —— 一期修复轮 1 已证明共用单个 timer 会让批量场景只有最后一个账户保留轮询。
+2. **轮询所需的 key 必须由接口返回** —— 这是**已核实存在的后端改动**，不是待查项：
+
+| 接口 | 现状（已核实） | 结论 |
+|---|---|---|
+| `POST /api/recharge/submit` | 返回 `{"success": True, "id": record_id}`（`main.py:5719` 附近） | ✅ 已有 rid |
+| `PUT /api/accounts/<int:aid>` | 只返回 `resp = {"success": True}`（+ 可选 `recharge_note`，`main.py:4790-4793`） | ❌ **不含清账记录的 rid**。该 id 在函数内是现成的局部变量 `clear_record_id`（`:4741` 附近），**只是没放进响应** ⇒ 需补一个字段 |
+| `POST /api/accounts/batch-update`、`POST /api/accounts/sync-from-sheet`、`POST /api/recharge/batch-submit` | 未逐个核实 | 实现计划阶段逐个核对，缺则同样补 |
+
+   **为什么必须补**：前端拿不到 rid 就无法对 `gg_recharge` 这个 target 轮询 ⇒ 那条写表失败只有持久标记、没有即时提示 —— 半个需求落不了地。
+3. 轮询上限沿用一期的 `SHEET_WRITE_POLL_MAX`（~42s，覆盖 30s 重试窗口）。
+4. 轮询失败/超限**静默退出**，靠持久标记兜底 —— 与一期一致。
+
 ---
 
 ## 7. 测试
@@ -189,6 +219,8 @@ def run_write_many(db, *, user_id, platform, target, business_keys,
 | **无回滚** | 两个 target 最终失败落 `retry_failed`（**不是** `rolled_back`/`rollback_abandoned`） |
 | 充值点不再首败报警 | 首次失败后 `sheet_write_log.status='failed'`，且该状态**不在** `ATTENTION` 里（列表标记与终态提示都不出） |
 | 前端 | 充值 tooltip 与账户行标记都只在 `retry_failed` 出现 |
+| **响应体带轮询所需的 key** | 清账/充值类接口的响应含本次产生的 `recharge_records.id`；`sync-from-sheet` 的响应含本次涉及的 `account_id` 列表 —— **逐接口断言**，缺了前端就无从轮询（§6.4 第 2 条） |
+| **每个触发入口都接了轮询** | 6 个入口（改状态/删户/恢复/批量/从表同步/充值）逐个核对前端是否启动了轮询 —— 这是「失败必须有提示」里「即时提示」那一半的承重项，漏一个该入口就退化成只有标记 |
 
 回归：`test_security_hardening.py`、`test_ad_reports.py`、`test_huguan_dashboard.py`（GG 账户路径相关）。
 
