@@ -134,3 +134,149 @@ def test_gg_deleted_huge_page_does_not_500(app, client, auth_headers):
     SQLite 抛 OverflowError ⇒ 500。page 闸门必须钳住它。"""
     resp = client.get("/api/accounts/deleted?page=1000000000000000000", headers=auth_headers)
     assert resp.status_code == 200
+
+
+# --- TT /api/tt/accounts/deleted ---
+#
+# 响应键是 `items`（不是 GG 的 `accounts`）—— 前端读的就是 `res.items`。
+
+
+def _seed_deleted_tt(db, owner_id, n):
+    """给 owner_id 播种 n 户「已删除」的 TT 账户。
+
+    advertiser_id 带上 owner_id 前缀：tt_accounts.advertiser_id 是**全局
+    UNIQUE**，而归属隔离用例要给两个 owner 各播一批。用一个不带 owner 的
+    全局计数器会在第二批撞 UNIQUE 约束（Task 3 的 GG 播种器踩过同一个坑）。
+    """
+    for i in range(n):
+        db.execute(
+            "INSERT INTO tt_accounts(advertiser_id, owner_id, deleted_at) "
+            "VALUES(?,?,datetime('now','localtime'))",
+            (f"ttdel{owner_id}-{i:06d}", owner_id),
+        )
+    db.commit()
+
+
+def _tt_uid(db):
+    return db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+
+
+def test_tt_deleted_returns_total_and_page_meta(app, client, tt_headers):
+    import database
+    db = database.get_db()
+    _seed_deleted_tt(db, _tt_uid(db), 120)
+    db.close()
+
+    body = client.get("/api/tt/accounts/deleted", headers=tt_headers).get_json()
+    assert body["success"] is True
+    assert body["total"] == 120
+    assert body["page"] == 1
+    assert body["size"] == 50
+    assert len(body["items"]) == 50
+
+
+def test_tt_deleted_second_page_is_disjoint(app, client, tt_headers):
+    import database
+    db = database.get_db()
+    _seed_deleted_tt(db, _tt_uid(db), 120)
+    db.close()
+
+    p1 = client.get("/api/tt/accounts/deleted?page=1&size=50", headers=tt_headers).get_json()
+    p2 = client.get("/api/tt/accounts/deleted?page=2&size=50", headers=tt_headers).get_json()
+    ids1 = {a["advertiser_id"] for a in p1["items"]}
+    ids2 = {a["advertiser_id"] for a in p2["items"]}
+    assert len(ids1) == 50 and len(ids2) == 50
+    assert not (ids1 & ids2)
+
+
+def test_tt_deleted_search_by_advertiser_id(app, client, tt_headers):
+    import database
+    db = database.get_db()
+    uid = _tt_uid(db)
+    _seed_deleted_tt(db, uid, 120)
+    db.execute(
+        "INSERT INTO tt_accounts(advertiser_id, owner_id, deleted_at) "
+        "VALUES('FINDME_TT', ?, datetime('now','localtime'))", (uid,)
+    )
+    db.commit()
+    db.close()
+
+    body = client.get("/api/tt/accounts/deleted?search=FINDME_TT", headers=tt_headers).get_json()
+    assert body["total"] == 1
+    assert body["items"][0]["advertiser_id"] == "FINDME_TT"
+
+
+def test_tt_deleted_search_by_name(app, client, tt_headers):
+    import database
+    db = database.get_db()
+    uid = _tt_uid(db)
+    db.execute(
+        "INSERT INTO tt_accounts(advertiser_id, name, owner_id, deleted_at) "
+        "VALUES('ttname001', '独特名称', ?, datetime('now','localtime'))", (uid,)
+    )
+    db.commit()
+    db.close()
+
+    body = client.get("/api/tt/accounts/deleted?search=独特名称", headers=tt_headers).get_json()
+    assert body["total"] == 1
+
+
+def test_tt_deleted_excludes_live_accounts(app, client, tt_headers):
+    import database
+    db = database.get_db()
+    uid = _tt_uid(db)
+    _seed_deleted_tt(db, uid, 3)
+    db.execute("INSERT INTO tt_accounts(advertiser_id, owner_id) VALUES('TTLIVE001',?)", (uid,))
+    db.commit()
+    db.close()
+
+    body = client.get("/api/tt/accounts/deleted", headers=tt_headers).get_json()
+    assert body["total"] == 3
+    assert all(a["advertiser_id"] != "TTLIVE001" for a in body["items"])
+
+
+def test_tt_deleted_only_returns_own_accounts(app, client, tt_headers):
+    import database
+    db = database.get_db()
+    db.execute("INSERT OR IGNORE INTO users(id, username, password, role) VALUES(998,'ttother','x','user')")
+    _seed_deleted_tt(db, 998, 5)
+    _seed_deleted_tt(db, _tt_uid(db), 2)
+    db.commit()
+    db.close()
+
+    body = client.get("/api/tt/accounts/deleted?size=500", headers=tt_headers).get_json()
+    assert body["total"] == 2
+
+
+def test_tt_deleted_cross_user_role_sees_all(app, client, admin_tt_headers):
+    """跨用户角色（admin/huguan/developer）仍应看到全部 —— 回归守卫。"""
+    import database
+    db = database.get_db()
+    db.execute("INSERT OR IGNORE INTO users(id, username, password, role) VALUES(997,'ttu2','x','user')")
+    _seed_deleted_tt(db, 997, 4)
+    db.commit()
+    db.close()
+
+    body = client.get("/api/tt/accounts/deleted?size=500", headers=admin_tt_headers).get_json()
+    assert body["total"] >= 4
+
+
+def test_tt_deleted_clamps_oversized_size(app, client, tt_headers):
+    """本端点的 size 闸门。
+
+    判据与 Task 2 的列表闸门相同，但**必须落在本任务**：Task 2 时点这个端点
+    还没有 size 参数，传 size=999999 会返回全部行，用例在那个时点必然失败。
+    """
+    import database
+    db = database.get_db()
+    _seed_deleted_tt(db, _tt_uid(db), 600)
+    db.close()
+
+    body = client.get("/api/tt/accounts/deleted?size=999999", headers=tt_headers).get_json()
+    assert len(body["items"]) <= 500
+
+
+def test_tt_deleted_non_numeric_size_does_not_500(app, client, tt_headers):
+    """现状的裸 int() 会 ValueError ⇒ 500；闸门必须回落默认值。"""
+    resp = client.get("/api/tt/accounts/deleted?size=abc", headers=tt_headers)
+    assert resp.status_code == 200

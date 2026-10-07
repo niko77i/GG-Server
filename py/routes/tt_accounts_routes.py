@@ -706,31 +706,63 @@ def permanent_delete_account(aid):
 @jwt_required()
 @tt_required
 def deleted_accounts_list():
+    """已删除账户列表（**分页** + 服务端搜索）。
+
+    分页理由与 GG 的 `/api/accounts/deleted` 相同（见 main.py 该端点的 docstring）。
+    响应在原有 `items` 之外**追加** `total` / `page` / `size` —— 纯增量。
+
+    归属口径与 GG 不同，且是**既有行为**，这里原样保留：跨用户角色
+    （CROSS_USER_ROLES）看全部人的已删账户；普通角色只看自己的。
+    """
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
-    if role in CROSS_USER_ROLES:
-        rows = db.execute(
-            "SELECT a.id, a.name, a.advertiser_id, a.deleted_at, "
-            "ag.name AS agent_name, st.name AS status_name "
-            "FROM tt_accounts a LEFT JOIN agents ag ON a.agent_id = ag.id "
-            "LEFT JOIN account_statuses st ON a.status_id = st.id "
-            "WHERE a.deleted_at IS NOT NULL ORDER BY a.deleted_at DESC").fetchall()
+    page, size = parse_pagination(default=50)
+    cross_user = role in CROSS_USER_ROLES
+    owner_filter = request.args.get('owner_id', '').strip()
+    if not cross_user:
+        owner_filter = ''
+    search = request.args.get('search', '').strip()
+
+    where = ["a.deleted_at IS NOT NULL"]
+    params = []
+    if cross_user:
+        if owner_filter:
+            where.append("a.owner_id = ?")
+            params.append(owner_filter)
     else:
-        rows = db.execute(
-            "SELECT a.id, a.name, a.advertiser_id, a.deleted_at, "
-            "ag.name AS agent_name, st.name AS status_name "
-            "FROM tt_accounts a LEFT JOIN agents ag ON a.agent_id = ag.id "
-            "LEFT JOIN account_statuses st ON a.status_id = st.id "
-            "WHERE a.owner_id=? AND a.deleted_at IS NOT NULL ORDER BY a.deleted_at DESC",
-            (uid,)).fetchall()
+        where.append("a.owner_id = ?")
+        params.append(uid)
+    if search:
+        # 与前端原来的客户端过滤口径对齐：账户ID / 名称 / 代理名。
+        where.append("(a.advertiser_id LIKE ? OR a.name LIKE ? OR ag.name LIKE ?)")
+        like = f"%{search}%"
+        params += [like, like, like]
+    where_sql = " AND ".join(where)
+
+    total = db.execute(
+        f"SELECT COUNT(*) FROM tt_accounts a LEFT JOIN agents ag ON a.agent_id = ag.id "
+        f"WHERE {where_sql}",
+        params
+    ).fetchone()[0]
+    rows = db.execute(
+        f"""SELECT a.id, a.name, a.advertiser_id, a.deleted_at,
+                   ag.name AS agent_name, st.name AS status_name
+            FROM tt_accounts a
+            LEFT JOIN agents ag ON a.agent_id = ag.id
+            LEFT JOIN account_statuses st ON a.status_id = st.id
+            WHERE {where_sql}
+            ORDER BY a.deleted_at DESC, a.id DESC LIMIT ? OFFSET ?""",
+        params + [size, (page - 1) * size]
+    ).fetchall()
+
     items = []
     for r in rows:
         d = dict(r)
         d["agent"] = d.get("agent_name") or ""
         d["status"] = d.get("status_name") or ""
         items.append(d)
-    return ok({"items": items})
+    return ok({"items": items, "total": total, "page": page, "size": size})
 
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>/bc-history', methods=['GET'])
