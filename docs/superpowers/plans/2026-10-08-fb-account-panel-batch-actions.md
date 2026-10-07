@@ -549,7 +549,10 @@ git commit -m "feat(fb-ui): 账户面板补批量按钮与多选列"
 
 **Interfaces:**
 - Consumes: `fbApi.batchCreate`
-- Produces: `<FbAccountBatchImportModal v-model:visible="batchImportVisible" @imported="load" />`
+- Produces: `<FbAccountBatchImportModal v-model:visible="batchImportVisible" @imported="loadData" />`
+
+> ⚠️ **勘误（Task 4 实现者发现）**：原稿写 `@imported="load"`，但 **FB 面板的加载函数叫 `loadData`，没有 `load`**。
+> 写错**构建不报错、运行时静默失效**（导入完不刷新列表）。以现行代码为准。
 
 - [ ] **Step 1: 读样板** — 通读 `frontend/src/components/AccountBatchImportModal.vue`（GG 版）与 TT 的 `components/tt/TtAccountBatchImportModal.vue`，确认：共用默认值区 + **逐行可覆盖**的编辑表格、`overrides` 的构造、提交后 `errors` 的呈现。**照它写，字段换成 FB 的**：共用默认值 = 名称前缀 / 时区 / 状态 / 主 BM（**去掉 MCC、代理**）。
 - [ ] **Step 2: 建组件**（`fbApi.batchCreate`）
@@ -567,7 +570,9 @@ git commit -m "feat(fb-ui): 账户面板补批量按钮与多选列"
 
 **Interfaces:**
 - Consumes: `fbApi.listDeleted` / `restoreAccount` / `permanentDeleteAccount`（**已存在的端点**）
-- Produces: `<FbAccountDeletedModal v-model:visible="deletedVisible" @changed="load" />`
+- Produces: `<FbAccountDeletedModal v-model:visible="deletedVisible" @changed="loadData" />`
+
+> ⚠️ **同上勘误**：原稿写 `@changed="load"`，应为 **`loadData`**（FB 面板没有 `load`）。写错会**静默失效**。
 
 - [ ] **Step 1: 读样板** — 通读 `frontend/src/components/AccountDeletedModal.vue`（GG 版）：列表、分页、恢复、永久删除（二次确认）、`@changed` 通知父组件刷新。
 - [ ] **Step 2: 建组件**（三个 api 均为**已存在**端点，**不要新建后端**）
