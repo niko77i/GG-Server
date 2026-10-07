@@ -1532,6 +1532,172 @@ def undo_push(user_id: int, platform: str) -> dict:
     return {"updated": res["updated"], "not_found": res["not_found"]}
 
 
+# 「这一项不能撤」的文案：库里的值与本次同步写下去的值不等 ⇒ 同步之后有人改过它。
+# 库侧 CAS（字段 / 归属）与「新建账户被别人改过」两种情况共用这一句，
+# 前端的冲突报告按原样显示（spec §八）。
+_UNDO_CONFLICT_REASON = "同步后被改过"
+
+# created_statuses 的引用检查要扫的三张表 —— `status_id` 在这三张表上都外键引用
+# account_statuses(id)（database.py:272 / :719 / :977）。**必须三张全扫**：
+# 只扫快照那个 platform 对应的表会漏判跨平台引用，删出一条悬空 status_id
+# （2026-09-24 的「69 户 status_id 悬空」是同类后果：外键方向是「账户 → 状态」，
+# 删状态行没有任何外键保护，判据只能自己查全）。宁可少删也不能删出悬空引用。
+_STATUS_REF_TABLES = ("accounts", "fb_accounts", "tt_accounts")
+
+
+def undo_sync(user_id: int, platform: str) -> dict:
+    """撤回上一次「从表同步到系统」（spec §6.2）。
+
+    **顺序铁律：先回退表，再回退库。不能反。** 反了会让下次同步把撤回又自动撤销掉
+    （spec §6.2 有完整推演）：先回库再回表，表那步一旦失败 —— 库里归属已回到张三、
+    表里运营列还是李四 —— 下次同步立刻判定出归属变更，把撤回重做一遍。
+
+    库部分用 CAS：只回滚「当前值仍等于本次写入的新值」的列，别人在同步之后改过的
+    一律跳过并进冲突报告，绝不覆盖。`updates`（字段）与 `owner_changes`（归属）走
+    同一段 CAS，但**逐条各自判定**（同一账户可能两类都有，合成一条会让冲突定错类）。
+
+    快照**只在库事务提交成功之后**才删（中途失败可重试；表写入是幂等的，写固定值）。
+
+    返回 `{"reverted", "conflicts", "kept", "not_found"}` —— 无论有没有快照，键集都一致。
+    `reverted` 是撤回成功的项数（一条 updates / 一条 owner_changes / 一个被删的账户 /
+    一个被删的状态各算一项）。报告项的形状（Task 6 前端按此渲染）：
+      - `conflicts`：账户类 `{"account_id", "kind": "update"|"owner", "reason"}`；
+        状态类 `{"name", "platform", "kind": "status", "reason"}`（`kind` 用来区分是哪一类）
+      - `kept`：`{"account_id", "reason"}`（新建账户被别人改过 —— 保留、不删）
+      - `not_found`：表侧回退时表里找不到的账户ID 列表（原样透传写入器的返回）
+    """
+    db = _open_db()
+    try:
+        conf = get_platform_config(db, user_id, platform)
+        payload = load_undo(db, user_id, platform, "sync")
+    finally:
+        db.close()
+    if not payload:
+        # 键集必须与成功路径一致：前端逐键取字段，少一个就报错（Task 5 补充说明）
+        return {"reverted": 0, "conflicts": [], "kept": [], "not_found": []}
+
+    table = _TABLE_FOR_PLATFORM[platform]
+    key_field = ACCOUNT_KEY_FIELD[platform]
+
+    # ---- 1. 先回退表 ----
+    # 空 cells 跳过：没有可回退的表侧内容。未配置看板时这一步不做（快照里那几列
+    # 本来也没地方可写），库那步照常走。
+    # **必须显式传 key_col=KEY_COL[platform]**：写入器默认 "C"（GG/TT 的账户ID列），
+    # 而 **FB 的账户ID在 D 列**，不传就按错误的列定位、整批静默写空（不抛异常）。
+    # 这是本仓库已修五处的同一缺陷族，对照 push_rows / owner_channel_cells 调用点。
+    back = [{"account_id": item["account_id"], "cells": dict(item["cells"])}
+            for item in payload.get("sheet_back", []) if item.get("cells")]
+    table_result = {"updated": 0, "not_found": []}
+    if back and conf["spreadsheet_id"] and conf["sheet_name"]:
+        import google_sheets_service as gs
+        from main import _GOOGLE_SHEETS_CONFIG
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        table_result = gs.update_rows_by_account_id(
+            service, conf["spreadsheet_id"], conf["sheet_name"], back,
+            key_col=KEY_COL[platform])
+
+    # ---- 2. 再回退库（单事务）----
+    reverted, conflicts, kept = 0, [], []
+    db = _open_db()
+    try:
+        def _norm(value) -> str:
+            """CAS 比较用的归一化：None 与空串同形（与表侧「空值=清空」口径一致）。"""
+            return "" if value is None else str(value)
+
+        def _cas_revert(item, kind):
+            """CAS 回滚一条 `{account_id, cols:{列:{old,new}}}`。"""
+            nonlocal reverted
+            aid = item["account_id"]
+            row = db.execute(f"SELECT * FROM {table} WHERE {key_field}=?", (aid,)).fetchone()
+            if row is None:
+                # 账户已不存在（同步后被删）⇒ 没有可回滚的东西，不算冲突
+                return
+            keys = row.keys()
+            sets, vals = [], []
+            for col, pair in (item.get("cols") or {}).items():
+                if col not in keys:
+                    # 快照列在当前 schema 里不存在：`row[col]` 会 IndexError、拼进
+                    # UPDATE 会 OperationalError —— 两种都会杀掉整次撤回。按冲突报出。
+                    conflicts.append({"account_id": aid, "kind": kind,
+                                      "reason": f"库中无列 {col}，未撤回"})
+                    return
+                if _norm(row[col]) != _norm(pair.get("new")):
+                    # 别人在同步之后改过这一列 ⇒ 整条跳过，绝不覆盖（spec §6.2）
+                    conflicts.append({"account_id": aid, "kind": kind,
+                                      "reason": _UNDO_CONFLICT_REASON})
+                    return
+                sets.append(f"{col}=?")
+                vals.append(pair.get("old"))
+            if sets:
+                # 刻意不刷 updated_at：撤回应被读作「回到同步前」，不是一次新的编辑
+                # （也避免与上面 created 的 updated_at 判定互相干扰）。
+                db.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE id=?",
+                           tuple(vals) + (row["id"],))
+                reverted += 1
+
+        for item in payload.get("updates", []):
+            _cas_revert(item, "update")
+        for item in payload.get("owner_changes", []):
+            _cas_revert(item, "owner")
+
+        # 删本次新建的账户：`updated_at` 仍等于 `created_at`（没人动过它）才删。
+        for aid in payload.get("created", []):
+            row = db.execute(f"SELECT id, updated_at, created_at FROM {table} "
+                             f"WHERE {key_field}=?", (aid,)).fetchone()
+            if row is None:
+                continue
+            if _norm(row["updated_at"]) != _norm(row["created_at"]):
+                kept.append({"account_id": aid, "reason": _UNDO_CONFLICT_REASON})
+                continue
+            # `fb_account_bm_history` 没有 ON DELETE CASCADE（`account_mcc_history` /
+            # `tt_account_bc_history` 有）⇒ 必须先显式清掉，否则 PRAGMA foreign_keys=ON
+            # 会用外键把整次删除挡下来（spec §9.1）。
+            if platform == "fb":
+                db.execute("DELETE FROM fb_account_bm_history WHERE account_id=?",
+                           (row["id"],))
+            db.execute(f"DELETE FROM {table} WHERE id=?", (row["id"],))
+            reverted += 1
+
+        # 删本次新建的状态：**三张表全查、零引用**才删（spec §6.2 / §十.4）。
+        for item in payload.get("created_statuses", []):
+            name = (item.get("name") or "").strip()
+            plat = item.get("platform") or platform
+            srow = db.execute("SELECT id FROM account_statuses WHERE name=? AND platform=?",
+                              (name, plat)).fetchone()
+            if srow is None:
+                continue
+            sid = srow["id"]
+            refs = sum(db.execute(f"SELECT COUNT(*) AS n FROM {t} WHERE status_id=?",
+                                  (sid,)).fetchone()["n"]
+                       for t in _STATUS_REF_TABLES)
+            if refs:
+                # 有引用即保留（宁可少删，也不能删出一条悬空 status_id）
+                conflicts.append({"name": name, "platform": plat, "kind": "status",
+                                  "reason": f"状态仍被 {refs} 个账户引用"})
+                continue
+            db.execute("DELETE FROM account_statuses WHERE id=?", (sid,))
+            reverted += 1
+
+        db.commit()
+    except Exception:
+        # 库那步失败 ⇒ 整个事务回滚（但**不回退**已经落定的表那步）。此时快照必须
+        # 留着可重试，故绝不在这里 delete_undo；异常原样抛出，由路由层定错误码。
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # 快照只在库提交成功之后才删（spec §6.2 末句）。自己开连接：上面那条已关闭。
+    db = _open_db()
+    try:
+        delete_undo(db, user_id, platform, "sync")
+        db.commit()
+    finally:
+        db.close()
+    return {"reverted": reverted, "conflicts": conflicts, "kept": kept,
+            "not_found": table_result.get("not_found", [])}
+
+
 def push_remark_to_operator_dashboard(owner_id: int, account_id: str, value: str) -> None:
     """把备注写进该投手「我的看板」的 J 列（按 D 列定位行）。
 

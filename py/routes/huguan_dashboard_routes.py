@@ -120,7 +120,25 @@ def dashboard_sync():
             if v is not None and not isinstance(v, list):
                 return err(f"confirmed.{k} 必须是账户ID数组", 400)
 
-        result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid)
+        # 撤回快照（子项目 ③，spec §5.2）：`sheet_from` 是「归属变更会碰的那几列在
+        # 表里的原值」，而表侧原值只有 `parse_row` 的结果里才有 ⇒ 由本层按账户ID 算好
+        # 传进 apply_diff（`build_diff` 的返回值是前端契约，不许为它加键）。
+        # **必须传**：不传则快照的 `sheet_back` 全空 ⇒ 表侧撤回静默失效（不报错、
+        # 不抛异常）。键按 `account_id`、**不按行号** —— 行号在重新拉表后会整体位移。
+        sheet_from = {p["account_id"]: hd._owner_sheet_from(p, platform)
+                      for p in parsed_rows if p.get("account_id")}
+        try:
+            result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid,
+                                   collect_undo=True, sheet_from=sheet_from)
+        except Exception:
+            # apply_diff 抛异常（中途失败）⇒ 部分落库的库状态无法用一份残缺快照安全
+            # 反向（spec §5.3）⇒ 作废快照后原样抛出，维持既有的 500 行为。
+            _discard_undo(uid, platform, "sync")
+            raise
+        # apply_diff 正常返回 ⇒ 本次同步完整成功，快照才有撤回资格。
+        # 先摘出 "undo"：它是内部凭据，不随响应体发给前端。
+        hd.save_undo(db, uid, platform, "sync", result.pop("undo"))
+        db.commit()
 
         # 规格 §8.3 步骤 8：落库后清缓存（账户写入了，代理/列表下拉必须立即刷新）。
         # 只放在路由层 —— 纯逻辑的 apply_diff 不该依赖 cache。
@@ -233,21 +251,26 @@ def dashboard_push():
                           "not_found": res["not_found"]}})
 
 
-def _discard_push_undo(uid: int, platform: str) -> None:
-    """作废某户管某平台的 push 快照（空写 / 写表失败时调用）。
+def _discard_undo(uid: int, platform: str, direction: str) -> None:
+    """作废某户管某平台某方向的撤回快照（空写 / 写失败时调用）。
 
     自己开连接：调用点的 `db` 要么已经关闭，要么正处在异常处理里，都不能复用。
-    **绝不抛异常** —— 它在 except 分支里也会被调用，抛出去会顶掉原始的写表错误。
+    **绝不抛异常** —— 它在 except 分支里也会被调用，抛出去会顶掉原始的错误。
     """
     try:
         db = database.get_db()
         try:
-            hd.delete_undo(db, uid, platform, "push")
+            hd.delete_undo(db, uid, platform, direction)
             db.commit()
         finally:
             db.close()
     except Exception as e:
-        log.warning("作废 push 撤回快照失败: %s", e)
+        log.warning("作废 %s 撤回快照失败: %s", direction, e)
+
+
+def _discard_push_undo(uid: int, platform: str) -> None:
+    """作废 push 快照（dashboard_push 的两个调用点保持原样）。"""
+    _discard_undo(uid, platform, "push")
 
 
 @huguan_dashboard_bp.route("/api/huguan/dashboard/undo", methods=["GET"])
@@ -286,6 +309,40 @@ def dashboard_undo_status():
                                   "created_at": meta["created_at"]}
     finally:
         db.close()
+    return ok(out)
+
+
+@huguan_dashboard_bp.route("/api/huguan/dashboard/undo", methods=["POST"])
+@jwt_required()
+@huguan_required
+def dashboard_undo_apply():
+    """执行一次撤回（spec §7）。body `{"platform": …, "direction": …}`。
+
+    只撤自己的：uid 一律取自 JWT，**请求体不接受 uid** —— 与「表地址一律取自自己的
+    配置」同一口径（spec §7 / 2026-09-23 设计 §8.2）。
+
+    `hd.undo_push` / `hd.undo_sync` **有意不吞异常**（写表失败、库事务失败都必须
+    可见）。路由层在这里定错误码：500 + 中文说明，并落日志 —— 绝不「吞掉却不说」。
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return err("请求体必须是 JSON 对象", 400)
+    platform = str(data.get("platform") or "").strip()
+    if platform not in hd.PLATFORMS:
+        return err("platform 必须是 gg、tt 或 fb", 400)
+    direction = str(data.get("direction") or "").strip()
+    if direction not in hd.UNDO_DIRECTIONS:
+        return err("direction 必须是 push 或 sync", 400)
+
+    uid = get_uid()
+    try:
+        if direction == "push":
+            out = hd.undo_push(uid, platform)
+        else:
+            out = hd.undo_sync(uid, platform)
+    except Exception as e:
+        log.exception("撤回失败: platform=%s direction=%s", platform, direction)
+        return err(f"撤回失败：{e}", 500)
     return ok(out)
 
 

@@ -3,6 +3,8 @@
 设计见 docs/superpowers/specs/2026-10-06-huguan-sync-undo-design.md。
 本文件不打真实 Google API。
 """
+import sqlite3
+
 import pytest
 
 import database
@@ -774,3 +776,661 @@ class TestUndoStatusRoute:
         h, _ = _make_user(client, "_undo_status_user", role="user")
         assert client.get("/api/huguan/dashboard/undo?platform=gg",
                           headers=h).status_code == 403
+
+
+# ========== Task 5: sync 撤回的执行（先表后库 + 库侧 CAS + 新建对象判定） ==========
+
+def _empty_sync_payload(**over):
+    """一份「什么都没改」的 sync 快照，按需覆盖某几键（键集固定为契约的五键）。"""
+    p = {"updates": [], "owner_changes": [], "created": [], "created_statuses": [],
+         "sheet_back": []}
+    p.update(over)
+    return p
+
+
+def _sync_env(monkeypatch, conf=None, calls=None, result=None):
+    """undo_sync 的通用打桩。
+
+    - `_open_db` 走到真库：`undo_sync` 会开三条连接（读快照 / 库事务 / 删快照），
+      每次必须拿到**新**连接（`database.get_db()` 每次新建，不复用）
+    - `conf` 缺省 = 未配置看板 ⇒ 表侧那步不做，专测库侧
+    - 表侧写入换成记账 writer，返回的 calls 用来断言写了几列、定位列是哪个
+    """
+    monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+    monkeypatch.setattr(hd, "get_platform_config",
+                        lambda db_, uid, p: conf or {"spreadsheet_id": "", "sheet_name": ""})
+    calls = [] if calls is None else calls
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda path: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id",
+                        lambda svc, sid, name, rows, key_col="C":
+                        calls.append({"sid": sid, "name": name, "rows": rows,
+                                      "key_col": key_col})
+                        or (result or {"updated": len(rows), "not_found": []}))
+    return calls
+
+
+class TestSyncUndoExec:
+    """`undo_sync`：先表后库；库侧 CAS（updates + owner_changes）；新建对象判定。"""
+
+    def test_cas_reverts_when_value_untouched(self, client, fb_user, monkeypatch):
+        """当前值 == 本次写入的新值 ⇒ 写回旧值（spec §6.2 CAS 正例）。"""
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        pk = _seed_fb_account(db, "C1", fb_user, unit_price="99")
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            updates=[{"account_id": "C1",
+                      "cols": {"unit_price": {"old": "10", "new": "99"}}}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        got = db.execute("SELECT unit_price FROM fb_accounts WHERE id=?", (pk,)).fetchone()[0]
+        db.close()
+        assert got == "10"
+        assert out["reverted"] == 1
+        assert out["conflicts"] == []
+
+    def test_cas_skips_when_value_changed(self, client, fb_user, monkeypatch):
+        """当前值 != 本次写入的新值 ⇒ 跳过并报冲突（别人改过了），绝不覆盖。"""
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        pk = _seed_fb_account(db, "C2", fb_user, unit_price="77")
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            updates=[{"account_id": "C2",
+                      "cols": {"unit_price": {"old": "10", "new": "99"}}}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        got = db.execute("SELECT unit_price FROM fb_accounts WHERE id=?", (pk,)).fetchone()[0]
+        db.close()
+        assert got == "77"                       # 没被覆盖
+        assert out["reverted"] == 0
+        # 冲突要能定位到具体账户与原因（只断言计数会让「静默跳过」也变绿）
+        assert out["conflicts"] == [{"account_id": "C2", "kind": "update",
+                                     "reason": "同步后被改过"}]
+
+    def test_created_deleted_when_untouched(self, client, fb_user, monkeypatch):
+        """新建账户没人动过（updated_at == created_at）⇒ 删掉。"""
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        _seed_fb_account(db, "C3", fb_user)
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(created=["C3"]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM fb_accounts WHERE account_id='C3'").fetchone()[0]
+        db.close()
+        assert n == 0
+        assert out["reverted"] >= 1
+
+    # ---------- 补齐 1：owner_changes 必须走同一段 CAS ----------
+
+    def test_owner_change_cas_reverts_db_side(self, client, fb_user, monkeypatch):
+        """归属变更的库侧回滚（含 FB 的 acceptor 写点）。
+
+        计划示例只遍历 `payload["updates"]` ⇒ 归属变更纹丝不动，本测试即红。
+        """
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        new_owner = _seed_user(db, "u_oc_li", "李四", platform="fb")
+        pk = _seed_fb_account(db, "OC1", new_owner, acceptor="u_undo转李四")
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            owner_changes=[{"account_id": "OC1",
+                            "cols": {"owner_id": {"old": fb_user, "new": new_owner},
+                                     "acceptor": {"old": "旧接户记录",
+                                                  "new": "u_undo转李四"}}}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        row = db.execute("SELECT owner_id, acceptor FROM fb_accounts WHERE id=?",
+                         (pk,)).fetchone()
+        db.close()
+        assert row["owner_id"] == fb_user
+        assert row["acceptor"] == "旧接户记录"
+        assert out["reverted"] == 1
+        assert out["conflicts"] == []
+
+    def test_owner_change_conflict_reports_owner_kind(self, client, fb_user, monkeypatch):
+        """归属被同步之后又改过 ⇒ 保留现值 + 冲突（kind=owner，与字段冲突可区分）。"""
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        new_owner = _seed_user(db, "u_oc2_new", "李四", platform="fb")
+        other = _seed_user(db, "u_oc2_other", "王五", platform="fb")
+        pk = _seed_fb_account(db, "OC2", other)
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            owner_changes=[{"account_id": "OC2",
+                            "cols": {"owner_id": {"old": fb_user, "new": new_owner}}}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        got = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (pk,)).fetchone()[0]
+        db.close()
+        assert got == other                       # 别人后来的改动没被覆盖
+        assert out["reverted"] == 0
+        assert out["conflicts"] == [{"account_id": "OC2", "kind": "owner",
+                                     "reason": "同步后被改过"}]
+
+    def test_same_account_reverts_field_and_owner_independently(self, client, fb_user,
+                                                                monkeypatch):
+        """同一账户同时有字段变更与归属变更 ⇒ 两条各自 CAS、各自回滚（不合并成一条）。"""
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        new_owner = _seed_user(db, "u_both_li", "李四", platform="fb")
+        pk = _seed_fb_account(db, "BO1", new_owner, unit_price="99")
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            updates=[{"account_id": "BO1",
+                      "cols": {"unit_price": {"old": "10", "new": "99"}}}],
+            owner_changes=[{"account_id": "BO1",
+                            "cols": {"owner_id": {"old": fb_user, "new": new_owner}}}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        row = db.execute("SELECT owner_id, unit_price FROM fb_accounts WHERE id=?",
+                         (pk,)).fetchone()
+        db.close()
+        assert (row["owner_id"], row["unit_price"]) == (fb_user, "10")
+        assert out["reverted"] == 2
+
+    # ---------- 第十条第 4 条：新建对象（三小项） ----------
+
+    def test_created_modified_after_sync_is_kept(self, client, fb_user, monkeypatch):
+        """建号后被别人改过（updated_at != created_at）⇒ 保留并报冲突，绝不删。"""
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        pk = _seed_fb_account(db, "CK1", fb_user)
+        db.execute("UPDATE fb_accounts SET updated_at='2099-01-01 00:00:00' WHERE id=?",
+                   (pk,))
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(created=["CK1"]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM fb_accounts WHERE id=?", (pk,)).fetchone()[0]
+        db.close()
+        assert n == 1
+        assert out["reverted"] == 0
+        assert out["kept"] == [{"account_id": "CK1", "reason": "同步后被改过"}]
+
+    def test_deleting_created_account_drops_history_rows(self, client, monkeypatch):
+        """GG：新建账户被删时 account_mcc_history 随 CASCADE 一并消失（第十条第 4 条）。"""
+        _sync_env(monkeypatch)
+        _hg, uid = _huguan_headers(client, "_undo_delhist", platform="gg")
+        db = database.get_db()
+        pk = _seed_gg_account(db, "CD1", uid)
+        db.execute("INSERT INTO account_mcc_history(account_id, changed_by) VALUES(?,?)",
+                   (pk, uid))
+        hd.save_undo(db, uid, "gg", "sync", _empty_sync_payload(created=["CD1"]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(uid, "gg")
+        db = database.get_db()
+        acc_n = db.execute("SELECT COUNT(*) FROM accounts WHERE id=?", (pk,)).fetchone()[0]
+        hist_n = db.execute("SELECT COUNT(*) FROM account_mcc_history WHERE account_id=?",
+                            (pk,)).fetchone()[0]
+        db.close()
+        assert (acc_n, hist_n) == (0, 0)
+        assert out["reverted"] == 1
+
+    def test_deleting_created_fb_account_clears_bm_history_first(self, client, fb_user,
+                                                                 monkeypatch):
+        """FB 特有（第十条第 8 条）：`fb_account_bm_history` 没有 ON DELETE CASCADE ⇒
+        必须先显式清掉，否则 foreign_keys=ON 用外键把删除挡下来（本测试会报错）。
+        """
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        pk = _seed_fb_account(db, "BF1", fb_user)
+        db.execute("INSERT INTO fb_account_bm_history(account_id, changed_by) VALUES(?,?)",
+                   (pk, fb_user))
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(created=["BF1"]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        acc_n = db.execute("SELECT COUNT(*) FROM fb_accounts WHERE id=?", (pk,)).fetchone()[0]
+        hist_n = db.execute("SELECT COUNT(*) FROM fb_account_bm_history WHERE account_id=?",
+                            (pk,)).fetchone()[0]
+        db.close()
+        assert (acc_n, hist_n) == (0, 0)
+        assert out["reverted"] == 1
+
+    # ---------- 补齐 2：created_statuses 的回滚 ----------
+
+    def test_created_status_deleted_when_unreferenced(self, client, fb_user, monkeypatch):
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) "
+                   "VALUES('待优化', ?, 'fb')", (fb_user,))
+        sid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            created_statuses=[{"name": "待优化", "platform": "fb"}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM account_statuses WHERE id=?", (sid,)).fetchone()[0]
+        db.close()
+        assert n == 0
+        assert out["reverted"] == 1
+        assert out["conflicts"] == []
+
+    def test_created_status_kept_when_referenced(self, client, fb_user, monkeypatch):
+        """有引用 ⇒ 保留并报冲突。去掉引用检查（无条件删）本测试即红。"""
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) "
+                   "VALUES('待优化', ?, 'fb')", (fb_user,))
+        sid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        pk = _seed_fb_account(db, "ST1", fb_user)
+        db.execute("UPDATE fb_accounts SET status_id=? WHERE id=?", (sid, pk))
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            created_statuses=[{"name": "待优化", "platform": "fb"}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM account_statuses WHERE id=?", (sid,)).fetchone()[0]
+        db.close()
+        assert n == 1
+        assert out["reverted"] == 0
+        assert out["conflicts"] == [{"name": "待优化", "platform": "fb", "kind": "status",
+                                     "reason": "状态仍被 1 个账户引用"}]
+
+    def test_status_reference_check_covers_all_three_tables(self, client, fb_user, monkeypatch):
+        """引用检查必须扫**三张表**：`tt_accounts` 引用了本次新建的 fb 状态，同样不许删。
+
+        只查快照那个 platform 对应的表（fb_accounts）就会漏判，删出一条悬空 status_id。
+
+        探针刻意用 `tt_accounts` 而不是 `accounts`：`_migrate_account_status_platform`
+        （database.py:1390，**每次 get_db() 都跑**）会把「GG 账户挂在非 gg 状态行上」
+        的引用挪回 gg 同名行，中途就把 `accounts` 里的探针引走，测不出东西。
+        `tt_accounts` / `fb_accounts` 不受那条迁移影响。
+        """
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) "
+                   "VALUES('跨平台', ?, 'fb')", (fb_user,))
+        sid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # 引用来自 **tt_accounts** —— 不是快照 platform 对应的 fb_accounts
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, owner_id, status_id) "
+                   "VALUES('TTREF', 'TTREF', ?, ?)", (fb_user, sid))
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            created_statuses=[{"name": "跨平台", "platform": "fb"}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM account_statuses WHERE id=?", (sid,)).fetchone()[0]
+        db.close()
+        assert n == 1
+        assert out["conflicts"] == [{"name": "跨平台", "platform": "fb", "kind": "status",
+                                     "reason": "状态仍被 1 个账户引用"}]
+
+    # ---------- 表侧回退：按平台分流列 + 显式传定位列（第十条第 7 条） ----------
+
+    @pytest.mark.parametrize("platform,key_col,cells", [
+        ("gg", "C", {"G": "张三", "H": "李四"}),      # 运营列 + 通道列
+        ("tt", "C", {"G": "王五"}),                   # 只有接户运营列，无通道列
+        ("fb", "D", {"J": "赵六", "I": "接户旧"}),    # 在用运营列 + 接户运营列
+    ])
+    def test_sheet_back_uses_platform_columns_and_key_col(
+            self, client, fb_user, monkeypatch, platform, key_col, cells):
+        """三平台分流 + **显式传该平台的定位列**。
+
+        不传 key_col ⇒ FB（账户ID 在 D 列）按默认 "C"（账户名称）定位，整批静默写空。
+        """
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        db = database.get_db()
+        hd.save_undo(db, fb_user, platform, "sync", _empty_sync_payload(
+            sheet_back=[{"account_id": "SB1", "cells": cells}]))
+        db.commit()
+        db.close()
+        hd.undo_sync(fb_user, platform)
+        assert calls[0]["sid"] == "SID"
+        assert calls[0]["key_col"] == key_col
+        assert calls[0]["rows"] == [{"account_id": "SB1", "cells": cells}]
+
+    def test_sheet_back_empty_cells_skips_table_write(self, client, fb_user, monkeypatch):
+        """没有可回退的表侧内容（cells 空）⇒ 一个字都不写表。"""
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            sheet_back=[{"account_id": "SB0", "cells": {}}]))
+        db.commit()
+        db.close()
+        hd.undo_sync(fb_user, "fb")
+        assert calls == []
+
+    def test_table_not_found_is_reported(self, client, fb_user, monkeypatch):
+        """表里找不到的行进 not_found 报告，不算错误（spec §6.1 同口径）。"""
+        _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"},
+                  result={"updated": 0, "not_found": ["NF1"]})
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            sheet_back=[{"account_id": "NF1", "cells": {"J": "x"}}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        assert out["not_found"] == ["NF1"]
+
+    # ---------- 顺序铁律（第十条第 5 条）与快照生命周期 ----------
+
+    def test_db_step_failure_keeps_table_reverted_and_snapshot(self, client, fb_user,
+                                                               monkeypatch):
+        """库那步失败时：表**已经**回退（顺序对），库事务整体回滚，快照留着可重试。
+
+        库那步的失败用「old 指向不存在的用户」造出来：CAS 通过后 UPDATE 撞
+        `owner_id REFERENCES users(id)`。
+        """
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        db = database.get_db()
+        pk = _seed_fb_account(db, "OR1", fb_user)
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            owner_changes=[{"account_id": "OR1",
+                            "cols": {"owner_id": {"old": 999999, "new": fb_user}}}],
+            sheet_back=[{"account_id": "OR1", "cells": {"J": "三", "I": "旧"}}]))
+        db.commit()
+        db.close()
+        with pytest.raises(sqlite3.IntegrityError):
+            hd.undo_sync(fb_user, "fb")
+        assert calls and calls[0]["rows"][0]["cells"] == {"J": "三", "I": "旧"}
+        db = database.get_db()
+        got = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (pk,)).fetchone()[0]
+        payload = hd.load_undo(db, fb_user, "fb", "sync")
+        db.close()
+        assert got == fb_user, "库那步失败 ⇒ 事务回滚，归属没被改"
+        assert payload is not None, "库那步失败 ⇒ 快照不能被删（要能重试）"
+
+    def test_table_step_failure_leaves_db_untouched(self, client, monkeypatch):
+        """顺序铁律的语义侧面：表那步失败 ⇒ 库一个字没动、快照还在。
+
+        反了（先库后表）就会在表失败后留下「库里已回旧归属、表里还是新归属」，
+        下次同步立刻判定出归属变更、把撤回重做一遍（spec §6.2 的推演）。
+        """
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, uid, p: {"spreadsheet_id": "SID",
+                                                 "sheet_name": "N"})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        wrote = []
+
+        def _boom(svc, sid, name, rows, key_col="C"):
+            wrote.append(rows)
+            raise RuntimeError("表炸了")
+
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _boom)
+
+        _hg, uid = _huguan_headers(client, "_undo_tfail", platform="gg")
+        db = database.get_db()
+        u_zhang = _seed_user(db, "u_tf_zhang", "张三")
+        u_li = _seed_user(db, "u_tf_li", "李四")
+        pk = _seed_gg_account(db, "TF1", u_li)          # 同步已把归属改成李四
+        hd.save_undo(db, uid, "gg", "sync", _empty_sync_payload(
+            owner_changes=[{"account_id": "TF1",
+                            "cols": {"owner_id": {"old": u_zhang, "new": u_li}}}],
+            sheet_back=[{"account_id": "TF1", "cells": {"G": "张三", "H": "李四"}}]))
+        db.commit()
+        db.close()
+
+        with pytest.raises(RuntimeError):
+            hd.undo_sync(uid, "gg")
+        assert wrote, "表那步必须先被调用"
+
+        db = database.get_db()
+        got = db.execute("SELECT owner_id FROM accounts WHERE id=?", (pk,)).fetchone()[0]
+        payload = hd.load_undo(db, uid, "gg", "sync")
+        # 下次同步：表还是同步之后的样子（G=李四、通道列已清空），库也是李四
+        parsed = dict(hd.parse_row(_gg_row("TF1", "李四", ""), "gg"), row=2)
+        diff = hd.build_diff(db, [parsed], "gg")
+        db.close()
+        assert got == u_li, "表那步失败时库绝不能已经回退"
+        assert payload is not None, "表那步失败时快照必须留着可重试"
+        assert [o for o in diff["owner_changes"] if o["account_id"] == "TF1"] == [], \
+            "回退失败后不得让下次同步重做那次归属变更"
+
+    def test_snapshot_column_missing_from_schema_reports_conflict(self, client, fb_user,
+                                                                 monkeypatch):
+        """快照里的列在当前 schema 已不存在 ⇒ 报冲突，**不是**把整次撤回炸掉。
+
+        去掉那个 `col not in keys` 守卫，`row[col]` 会 IndexError 把整批撤回带崩。
+        """
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        _seed_fb_account(db, "MC1", fb_user)
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
+            updates=[{"account_id": "MC1",
+                      "cols": {"no_such_col": {"old": "a", "new": "b"}}}]))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        assert out["reverted"] == 0
+        assert out["conflicts"] == [{"account_id": "MC1", "kind": "update",
+                                     "reason": "库中无列 no_such_col，未撤回"}]
+
+    def test_snapshot_deleted_after_successful_undo(self, client, fb_user, monkeypatch):
+        _sync_env(monkeypatch)
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload())
+        db.commit()
+        db.close()
+        hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        assert hd.load_undo(db, fb_user, "fb", "sync") is None
+        db.close()
+
+    def test_no_snapshot_returns_full_key_set(self, client, fb_user, monkeypatch):
+        """没有快照 ⇒ 全零，键集与成功路径一致，且一个字都不写表。"""
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        out = hd.undo_sync(fb_user, "fb")
+        assert out == {"reverted": 0, "conflicts": [], "kept": [], "not_found": []}
+        assert calls == []
+
+    def test_does_not_touch_other_users_snapshot(self, client, fb_user, monkeypatch):
+        """只撤自己的：另一个户管的快照取不到、也删不掉。"""
+        _sync_env(monkeypatch)
+        other_payload = _empty_sync_payload(created=["X1"])
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('u_undo_other_sync', 'x', 'huguan', 'fb')")
+        other = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        hd.save_undo(db, other, "fb", "sync", other_payload)
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "fb")
+        db = database.get_db()
+        still = hd.load_undo(db, other, "fb", "sync")
+        db.close()
+        assert out["reverted"] == 0
+        assert still == other_payload
+
+    def test_writeback_rows_does_not_write_undo_snapshot(self, client, fb_user, monkeypatch):
+        """第十条第 9 条：自动回写（writeback_rows → push_rows）绝不碰 huguan_sync_undo。
+
+        自动回写是「编辑某个账户」的副作用，单独撤它只会让表和库当场不一致（spec §二.4）。
+        """
+        import main
+        import google_sheets_service as gs
+        db = database.get_db()
+        hd.save_config(db, fb_user, "fb", "SID", "Sheet1")
+        hd.save_undo(db, fb_user, "fb", "push",
+                     {"cells": [{"account_id": "KEEP", "cells": {}}]})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: {"updated": 0, "not_found": []})
+        monkeypatch.setattr(main, "_sync_sheets_background", lambda fn, cb: fn())
+        hd.writeback_rows(fb_user, "fb")
+        db = database.get_db()
+        push_payload = hd.load_undo(db, fb_user, "fb", "push")
+        sync_payload = hd.load_undo(db, fb_user, "fb", "sync")
+        db.close()
+        assert push_payload == {"cells": [{"account_id": "KEEP", "cells": {}}]}
+        assert sync_payload is None
+
+
+class TestUndoApplyRoute:
+    """`POST /api/huguan/dashboard/undo`：两个方向都接上，uid 只从 JWT 取（spec §7）。"""
+
+    def test_push_direction_calls_undo_push(self, client, monkeypatch):
+        hg, uid = _huguan_headers(client, "_undo_post_push")
+        called = []
+        monkeypatch.setattr(hd, "undo_push",
+                            lambda u, p: called.append(("push", u, p))
+                            or {"updated": 3, "not_found": []})
+        monkeypatch.setattr(hd, "undo_sync",
+                            lambda u, p: called.append(("sync", u, p)) or {})
+        resp = client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "fb", "direction": "push"}, headers=hg)
+        assert resp.status_code == 200
+        assert called == [("push", uid, "fb")]
+        assert resp.get_json()["updated"] == 3
+
+    def test_sync_direction_calls_undo_sync(self, client, monkeypatch):
+        hg, uid = _huguan_headers(client, "_undo_post_sync")
+        called = []
+        monkeypatch.setattr(hd, "undo_sync",
+                            lambda u, p: called.append((u, p))
+                            or {"reverted": 1, "conflicts": [], "kept": [],
+                                "not_found": []})
+        resp = client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "fb", "direction": "sync"}, headers=hg)
+        assert resp.status_code == 200
+        assert called == [(uid, "fb")]
+        assert resp.get_json()["reverted"] == 1
+
+    def test_body_uid_is_ignored(self, client, monkeypatch):
+        """请求体带 uid 也不接受：一律按 JWT 里的 uid 撤（spec §7）。"""
+        hg, uid = _huguan_headers(client, "_undo_post_uid")
+        seen = []
+        monkeypatch.setattr(hd, "undo_push",
+                            lambda u, p: seen.append(u)
+                            or {"updated": 0, "not_found": []})
+        resp = client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "fb", "direction": "push", "uid": 999999},
+                           headers=hg)
+        assert resp.status_code == 200
+        assert seen == [uid]
+
+    def test_bad_platform_400(self, client):
+        hg, _ = _huguan_headers(client, "_undo_post_badp")
+        assert client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "xx", "direction": "push"},
+                           headers=hg).status_code == 400
+
+    def test_bad_direction_400(self, client):
+        hg, _ = _huguan_headers(client, "_undo_post_badd")
+        assert client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "fb", "direction": "redo"},
+                           headers=hg).status_code == 400
+
+    def test_missing_direction_400(self, client):
+        hg, _ = _huguan_headers(client, "_undo_post_nodir")
+        assert client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "fb"}, headers=hg).status_code == 400
+
+    def test_non_json_body_400(self, client):
+        hg, _ = _huguan_headers(client, "_undo_post_badbody")
+        assert client.post("/api/huguan/dashboard/undo", data="not json",
+                           headers=hg).status_code == 400
+
+    def test_non_huguan_403(self, client):
+        h, _ = _make_user(client, "_undo_post_user", role="user")
+        assert client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "gg", "direction": "push"},
+                           headers=h).status_code == 403
+
+    def test_requires_jwt(self, client):
+        assert client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "gg", "direction": "push"}
+                           ).status_code in (401, 422)
+
+    def test_execution_failure_returns_500_with_message(self, client, monkeypatch):
+        """执行侧有意不吞异常 ⇒ 路由层要把它转成 500 + 中文说明（不许静默吞掉）。"""
+        hg, _ = _huguan_headers(client, "_undo_post_500")
+
+        def _boom(u, p):
+            raise RuntimeError("表炸了")
+
+        monkeypatch.setattr(hd, "undo_push", _boom)
+        resp = client.post("/api/huguan/dashboard/undo",
+                           json={"platform": "fb", "direction": "push"}, headers=hg)
+        assert resp.status_code == 500
+        body = resp.get_json()
+        assert body["success"] is False
+        assert "表炸了" in body["error"]
+
+
+class TestSyncRouteSnapshotWiring:
+    """`dashboard_sync` 路由：apply_diff 带 collect_undo + sheet_from，快照按成败落库/作废。
+
+    这是 Task 4 明确留给本任务的接线（spec §5.3）。
+    """
+
+    def _wire_sync(self, client, monkeypatch, username, grid):
+        """把 sync 路由的 Sheets I/O 全打桩（读表返回 grid、后台回写不跑）。"""
+        import main
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "read_sheet_values", lambda svc, sid, name, rng: grid)
+        monkeypatch.setattr(main, "_sync_sheets_background", lambda fn, cb: None)
+        hg, uid = _huguan_headers(client, username, platform="gg")
+        db = database.get_db()
+        hd.save_config(db, uid, "gg", "SID", "Sheet1")
+        db.commit()
+        db.close()
+        return hg, uid
+
+    def test_route_stores_snapshot_with_sheet_back(self, client, monkeypatch):
+        """`sheet_from` 必须真的传进去：不传 ⇒ sheet_back 全空、表侧撤回静默失效。"""
+        hg, uid = self._wire_sync(client, monkeypatch, "_undo_wire_ok",
+                                  [[""] * 14, _gg_row("WR1", "张三", "李四")])
+        db = database.get_db()
+        _seed_user(db, "u_wire_zhang", "张三")
+        _seed_user(db, "u_wire_li", "李四")
+        _seed_gg_account(db, "WR1", db.execute(
+            "SELECT id FROM users WHERE display_name='张三'").fetchone()["id"])
+        db.commit()
+        db.close()
+        resp = client.post("/api/huguan/dashboard/sync",
+                           json={"platform": "gg", "dry_run": False,
+                                 "confirmed": {"owner": ["WR1"]}},
+                           headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        payload = hd.load_undo(db, uid, "gg", "sync")
+        db.close()
+        assert payload["sheet_back"] == [{"account_id": "WR1",
+                                          "cells": {"G": "张三", "H": "李四"}}]
+        assert payload["owner_changes"][0]["account_id"] == "WR1"
+        # 快照是内部凭据，不随响应体发给前端
+        assert "undo" not in resp.get_json()["result"]
+
+    def test_route_discards_snapshot_when_apply_diff_raises(self, client, monkeypatch):
+        """apply_diff 抛异常 ⇒ 作废快照（部分落库的库状态无法用残缺快照安全反向）。"""
+        hg, uid = self._wire_sync(client, monkeypatch, "_undo_wire_fail",
+                                  [[""] * 14, _gg_row("WR2", "张三", "")])
+        db = database.get_db()
+        hd.save_undo(db, uid, "gg", "sync",
+                     _empty_sync_payload(updates=[{"account_id": "OLD"}]))
+        db.commit()
+        db.close()
+
+        def _boom(*a, **k):
+            raise RuntimeError("库炸了")
+
+        monkeypatch.setattr(hd, "apply_diff", _boom)
+        with pytest.raises(RuntimeError):
+            client.post("/api/huguan/dashboard/sync",
+                        json={"platform": "gg", "dry_run": False,
+                              "confirmed": {"create": ["WR2"]}}, headers=hg)
+        db = database.get_db()
+        assert hd.load_undo(db, uid, "gg", "sync") is None
+        db.close()
+
