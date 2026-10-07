@@ -9340,7 +9340,7 @@ def _start_tt_delist_scheduler():
 
 
 # ============================================================
-#  定时任务手动触发 API（仅 developer 可调用）
+#  定时任务手动触发 API（按平台的管理员 / developer）
 # ============================================================
 
 @app.route("/api/admin/trigger-weekly-cleanup", methods=["POST"])

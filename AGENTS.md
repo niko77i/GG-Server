@@ -185,7 +185,7 @@ GG-Server/
 │   │   │   ├── ToolkitView.vue         # 做表数据 + 音频替换
 │   │   │   ├── AnalysisView.vue        # 数据分析看板
 │   │   │   ├── DataManageView.vue      # 数据管理
-│   │   │   ├── SchedulerView.vue       # 定时任务手动触发（developer）
+│   │   │   ├── SchedulerView.vue       # 定时任务（按平台管理员）
 │   │   │   ├── fb/                     # FB 平台页面
 │   │   │       ├── FbAccountPanel.vue  # FB 账户管理
 │   │   │       ├── FbBmPanel.vue       # FB 账户 BM 管理
@@ -341,11 +341,19 @@ GG-Server/
 | GET | /api/delist/pending | 获取当前用户待处理通知（按产品聚合） |
 | POST | /api/delist/dismiss | 关闭掉包通知（支持批量） |
 
-### 定时任务（仅 developer）
+### 定时任务（按平台的管理员 / developer）
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | /api/admin/trigger-delist-check | 手动触发掉包检测 |
+| POST | /api/admin/trigger-tt-delist-check | 手动触发 TT 掉包检测 |
 | POST | /api/admin/trigger-weekly-cleanup | 手动触发每周清理 |
+| GET | /api/admin/scheduler/config | 读取本平台定时任务配置 + 上次执行时间 |
+| PUT | /api/admin/scheduler/config | 修改本平台定时任务周期（越权字段 403） |
+
+**权限归属**：GG 管理员 → `trigger-delist-check` + `trigger-weekly-cleanup`；TT 管理员 → `trigger-tt-delist-check`；
+FB 管理员 → 该平台无定时任务（页面显示空态）；户管 / 普通用户 → 一律 403（首页菜单里本就没有入口）。
+⚠️ **这层限制勿用 `require_platform`** —— `PLATFORM_SWITCH_ROLES` 含户管，用了等于给户管开后门；
+定时任务走专用装饰器 `scheduler_required(platform)`（developer 跨平台放行，admin 须平台匹配）。
 
 ### 做表数据 / Google Sheets
 | 方法 | 路径 | 说明 |
@@ -573,9 +581,16 @@ GG-Server/
 
 ### 定时任务系统
 
-- **掉包检测**：后台 daemon 线程自动执行 —— **GG 每 1 小时，TT 每 30 分钟**（2026-10-07 起两侧刻意不同频）
-- **每周清理**：清理过期爬取图片和生成视频
-- **手动触发**：SchedulerView 页面，仅 developer 角色可见，支持即时执行
+- **掉包检测**：后台 daemon 线程自动执行 —— 默认 **GG 每 1 小时、TT 每 30 分钟**（2026-10-07 起两侧刻意不同频）
+- **每周清理**：清理过期爬取图片和生成视频，默认**周日 00:00**
+- **手动触发**：SchedulerView 页面，**按平台的管理员可见**（GG 管理员见 GG 掉包检测 + 每周清理；TT 管理员见 TT 掉包检测；
+  FB 管理员为空态），developer 可见全部三项，支持即时执行
+- **周期可在页面配置**：存 `config.scheduler_config`（单键 JSON：`gg_delist_minutes` / `tt_delist_minutes` /
+  `cleanup_weekday` / `cleanup_hour`），调度线程每 `_TICK_SECONDS = 30` 秒重读一次 ⇒ **改完 30 秒内生效、无需重启**
+- **上次执行另存 `config.scheduler_last_run`**：与配置分开存 —— 配置由管理员 PUT 写、上次执行由调度线程写，
+  混在一个键里会变成 read-modify-write 互相覆盖
+- **周期下限 10 分钟 / 上限 1440 分钟**：下限是后端硬闸（越界一律 400），因为掉包检测要经代理池访问 Google Play，
+  而现行 `_TIMEOUT = 5`、代理池只有 2 个代理，再短会把它打爆
 
 ### 大规模重构（进行中）
 
