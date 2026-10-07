@@ -9168,18 +9168,28 @@ def _get_scheduler_config() -> dict:
     cfg = dict(_SCHEDULER_DEFAULTS)
     lo, hi = _SCHEDULER_LIMITS["min_minutes"], _SCHEDULER_LIMITS["max_minutes"]
 
+    # 存量值非法（越界 / 类型错）→ 回落默认值。此处必须留一条 warning：
+    # 有人手工改库写了越界值时会静默不生效，没有日志就查无实据。
+    # ⚠️ 只在「值存在但非法」时记 —— 字段缺失是正常情形（首次运行 / 只配了部分字段），
+    #    本函数每 30 秒被调度线程调一次，对缺失也打日志会刷屏。
     for key in ("gg_delist_minutes", "tt_delist_minutes"):
         val = data.get(key)
         if isinstance(val, int) and not isinstance(val, bool) and lo <= val <= hi:
             cfg[key] = val
+        elif val is not None:
+            log.warning(f"定时任务配置 {key}={val!r} 非法（需 {lo}~{hi} 的整数），已回落默认值 {cfg[key]}")
 
     val = data.get("cleanup_weekday")
     if isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 6:
         cfg["cleanup_weekday"] = val
+    elif val is not None:
+        log.warning(f"定时任务配置 cleanup_weekday={val!r} 非法（需 0~6 的整数，0=周一），已回落默认值 {cfg['cleanup_weekday']}")
 
     val = data.get("cleanup_hour")
     if isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 23:
         cfg["cleanup_hour"] = val
+    elif val is not None:
+        log.warning(f"定时任务配置 cleanup_hour={val!r} 非法（需 0~23 的整数），已回落默认值 {cfg['cleanup_hour']}")
 
     return cfg
 
