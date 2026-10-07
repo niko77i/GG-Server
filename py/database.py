@@ -769,6 +769,22 @@ def _ensure_schema(conn: sqlite3.Connection):
             UNIQUE(name, platform)
         );
 
+        -- 户管看板同步撤回快照（子项目 ③）。
+        -- UNIQUE(user_id, platform, direction) 实现「每个户管每平台每方向只留最近一条」，
+        -- 写入用 INSERT OR REPLACE，不需要清理策略。
+        -- ⚠️ user_id 无 ON DELETE，且连接开着 PRAGMA foreign_keys=ON ⇒
+        -- admin_delete_user 必须一并删除本表的行，否则删任何用过看板的户管都会
+        -- FOREIGN KEY constraint failed（见本计划 Task 6）。
+        CREATE TABLE IF NOT EXISTS huguan_sync_undo (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL REFERENCES users(id),
+            platform    TEXT    NOT NULL,
+            direction   TEXT    NOT NULL,
+            created_at  TEXT    DEFAULT (datetime('now','localtime')),
+            payload     TEXT    NOT NULL DEFAULT '{}',
+            UNIQUE(user_id, platform, direction)
+        );
+
         CREATE TABLE IF NOT EXISTS fb_products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_name TEXT NOT NULL,

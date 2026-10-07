@@ -230,6 +230,44 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
     db.commit()
 
 
+# ---------- 子项目 ③：同步撤回的快照原语 ----------
+
+UNDO_DIRECTIONS = ("push", "sync")
+
+
+def save_undo(db, user_id: int, platform: str, direction: str, payload: dict) -> None:
+    """写入/覆盖某户管某平台某方向的撤回快照。
+
+    `UNIQUE(user_id, platform, direction)` + `INSERT OR REPLACE` ⇒ 天然「只留最近一条」。
+    **不 commit**：与调用方共用事务（快照必须与它描述的那次写入同生共死）。
+    """
+    if direction not in UNDO_DIRECTIONS:
+        raise ValueError(f"不支持的撤回方向: {direction}")
+    db.execute("INSERT OR REPLACE INTO huguan_sync_undo(user_id, platform, direction, payload) "
+               "VALUES(?,?,?,?)",
+               (user_id, platform, direction, json.dumps(payload, ensure_ascii=False)))
+
+
+def load_undo(db, user_id: int, platform: str, direction: str) -> dict | None:
+    """读某方向的快照；没有或 JSON 坏掉都返回 None（撤回入口据此禁用）。"""
+    row = db.execute("SELECT payload FROM huguan_sync_undo "
+                     "WHERE user_id=? AND platform=? AND direction=?",
+                     (user_id, platform, direction)).fetchone()
+    if not row or not row["payload"]:
+        return None
+    try:
+        loaded = json.loads(row["payload"])
+    except Exception:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def delete_undo(db, user_id: int, platform: str, direction: str) -> None:
+    """作废某方向的快照。**不 commit**。"""
+    db.execute("DELETE FROM huguan_sync_undo "
+               "WHERE user_id=? AND platform=? AND direction=?", (user_id, platform, direction))
+
+
 def resolve_named_id(db, sql: str, params: tuple = ()) -> int | None:
     """按名称查唯一主键。命中 0 条或 ≥2 条都返回 None（规格 §8.4）。
 
