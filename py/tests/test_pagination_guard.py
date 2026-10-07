@@ -24,6 +24,26 @@ def _insert_accounts(db, owner_id, n):
     db.commit()
 
 
+def _insert_tt_bcs(db, owner_id, n):
+    """插入 n 个 TT BC。"""
+    for i in range(n):
+        db.execute(
+            "INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES(?,?,?)",
+            (f"bc{i}", f"bc{i:08d}", owner_id),
+        )
+    db.commit()
+
+
+def _insert_tt_products(db, owner_id, n):
+    """插入 n 个 TT 产品（默认未归档，走 /api/tt/products/list 的默认分支）。"""
+    for i in range(n):
+        db.execute(
+            "INSERT INTO tt_products(product_name, owner_id) VALUES(?,?)",
+            (f"prod{i}", owner_id),
+        )
+    db.commit()
+
+
 def test_gg_accounts_list_clamps_oversized_size(app, client, auth_headers):
     """/api/accounts/list —— 传 size=999999 必须被压到 500 以内。"""
     import database
@@ -56,5 +76,31 @@ def test_tt_accounts_list_clamps_oversized_size(app, client, tt_headers):
 
 def test_fb_accounts_list_clamps_oversized_size(app, client, admin_fb_headers):
     resp = client.get("/api/fb/accounts/list?size=999999", headers=admin_fb_headers)
+    assert resp.status_code == 200
+    assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE
+
+
+def test_tt_bcs_list_clamps_oversized_size(app, client, tt_headers):
+    """/api/tt/bcs/list —— 传 size=999999 必须被压到 500 以内。"""
+    import database
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    _insert_tt_bcs(db, uid, 600)
+    db.close()
+
+    resp = client.get("/api/tt/bcs/list?size=999999", headers=tt_headers)
+    assert resp.status_code == 200
+    assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE
+
+
+def test_tt_products_list_clamps_oversized_size(app, client, tt_headers):
+    """/api/tt/products/list —— 传 size=999999 必须被压到 500 以内。"""
+    import database
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    _insert_tt_products(db, uid, 600)
+    db.close()
+
+    resp = client.get("/api/tt/products/list?size=999999", headers=tt_headers)
     assert resp.status_code == 200
     assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE

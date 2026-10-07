@@ -7,7 +7,7 @@ import urllib.parse
 
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
-from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
+from .helpers import ok, err, get_uid, get_db, parse_body, parse_pagination, CROSS_USER_ROLES
 from .decorators import tt_required, tt_write_required, no_huguan, reject_huguan, require_platform
 
 # 与 main.py / huguan_dashboard_routes.py 同一个 logger：handler 由 logging_setup 挂在 root 上。
@@ -47,8 +47,7 @@ tt_bp = Blueprint('tt', __name__)
 @tt_required
 def list_bcs():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     status = request.args.get('status', '')
     search = request.args.get('search', '')
     offset = (page - 1) * size
@@ -180,8 +179,7 @@ def bc_options():
 @tt_required
 def list_products():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     search = request.args.get('search', '')
     status = request.args.get('status', '')
     region = request.args.get('region', '')
