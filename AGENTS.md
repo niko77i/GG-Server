@@ -347,13 +347,14 @@ GG-Server/
 | POST | /api/admin/trigger-delist-check | 手动触发掉包检测 |
 | POST | /api/admin/trigger-tt-delist-check | 手动触发 TT 掉包检测 |
 | POST | /api/admin/trigger-weekly-cleanup | 手动触发每周清理 |
-| GET | /api/admin/scheduler/config | 读取本平台定时任务配置 + 上次执行时间 |
-| PUT | /api/admin/scheduler/config | 修改本平台定时任务周期（越权字段 403） |
+| GET | /api/admin/scheduler/config | 读取定时任务配置 + 上次执行时间（admin 限本平台；developer 全部三项） |
+| PUT | /api/admin/scheduler/config | 修改定时任务周期（admin 限本平台字段；developer 全部字段；越权字段 403） |
 
 **权限归属**：GG 管理员 → `trigger-delist-check` + `trigger-weekly-cleanup`；TT 管理员 → `trigger-tt-delist-check`；
 FB 管理员 → 该平台无定时任务（页面显示空态）；户管 / 普通用户 → 一律 403（首页菜单里本就没有入口）。
-⚠️ **这层限制勿用 `require_platform`** —— `PLATFORM_SWITCH_ROLES` 含户管，用了等于给户管开后门；
-定时任务走专用装饰器 `scheduler_required(platform)`（developer 跨平台放行，admin 须平台匹配）。
+⚠️ **这层限制勿用 `require_platform`** —— `PLATFORM_SWITCH_ROLES` 含户管，用了等于给户管开后门。
+三个 trigger 的 POST 与 PUT 走专用装饰器 `scheduler_required(platform)`（developer 跨平台放行，admin 须平台匹配）；
+**GET 刻意不套它** —— 仅要求 admin/developer，好让无任务的 FB 管理员拿到**空数组**而非 403（空数组 ≠ 无权限），前端据此渲染空态。
 
 ### 做表数据 / Google Sheets
 | 方法 | 路径 | 说明 |

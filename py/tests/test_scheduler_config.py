@@ -84,6 +84,25 @@ class TestSchedulerRequired:
         """普通 user（platform=gg）也是 403 —— 只有 admin 才够格，平台匹配不是唯一条件。"""
         assert probe_client.post("/api/_probe/gg", headers=auth_headers).status_code == 403
 
+    def test_unauthenticated_fallback_direct_call(self, app):
+        """⚠️ 兜底分支：绕过 Flask 的 @jwt_required() 栈，直接调用被装饰函数。
+
+        真实路由一律 @jwt_required() 在**外**、本装饰器在**内**，未认证请求在外层就被
+        拦下，根本到不了 scheduler_required（见 decorators.py 的中文注释），故这条 401
+        分支平时覆盖不到。直接调用 wrapper 时，get_jwt_identity() 在无 JWT 上下文中抛错
+        → 命中 except → 401「未认证」。删掉该 except 分支，本用例即红 —— 钉的是「万一
+        上层漏挂 / 摘下 @jwt_required()，这道闸门仍在」。另一分支「用户不存在」需伪造
+        JWT 身份才可造，成本高于价值，不测。
+        """
+        @scheduler_required("gg")
+        def _fn():
+            return jsonify(success=True)
+
+        with app.app_context():
+            resp, code = _fn()
+        assert code == 401
+        assert resp.get_json()["error"] == "未认证"
+
 
 class TestSchedulerConfigDefaults:
     def test_missing_key_falls_back_to_defaults(self, app):
@@ -300,13 +319,13 @@ class TestIntervalLoop:
         monkeypatch.setattr(main, "_time", ft)
         reads = []
 
-        def _spy(field, default):
+        def _spy(field):
             reads.append(field)
             return 1440                       # 目标 86400 秒，测试期内永不触发
 
         monkeypatch.setattr(main, "_get_scheduler_int", _spy)
         with pytest.raises(_StopLoop):
-            main._interval_loop("gg_delist", "gg_delist_minutes", 60, lambda: None, "测试")
+            main._interval_loop("gg_delist", "gg_delist_minutes", lambda: None, "测试")
 
         assert reads == ["gg_delist_minutes"] * 5
 
@@ -343,7 +362,7 @@ class TestIntervalLoop:
 
         monkeypatch.setattr(main, "_time", _MutatingTime())
         with pytest.raises(_StopLoop):
-            main._interval_loop("gg_delist", "gg_delist_minutes", 60,
+            main._interval_loop("gg_delist", "gg_delist_minutes",
                                 lambda: runs.append(ticks["n"]), "测试")
 
         assert main._get_scheduler_config()["gg_delist_minutes"] == 10   # 对照：改值确已落库
@@ -352,30 +371,30 @@ class TestIntervalLoop:
     def test_does_not_run_before_full_period(self, app, monkeypatch):
         """启动后不足一个周期 → 不执行（原实现「启动立即执行一次」本就是注释掉的，语义保持）。"""
         monkeypatch.setattr(main, "_TICK_SECONDS", 1)
-        monkeypatch.setattr(main, "_get_scheduler_int", lambda f, d: 1)   # 目标 60 秒
+        monkeypatch.setattr(main, "_get_scheduler_int", lambda f: 1)   # 目标 60 秒
         ft = _FakeTime(stop_after=30)         # 只累计 30 秒 < 60 秒
         monkeypatch.setattr(main, "_time", ft)
         runs = []
         with pytest.raises(_StopLoop):
-            main._interval_loop("gg_delist", "gg_delist_minutes", 60, lambda: runs.append(1), "测试")
+            main._interval_loop("gg_delist", "gg_delist_minutes", lambda: runs.append(1), "测试")
         assert runs == []
 
     def test_due_runs_once_and_marks_ok(self, app, monkeypatch):
         """累计满一个周期 → 执行一次，并记 ok=True。"""
         monkeypatch.setattr(main, "_TICK_SECONDS", 1)
-        monkeypatch.setattr(main, "_get_scheduler_int", lambda f, d: 1)   # 目标 60 秒
+        monkeypatch.setattr(main, "_get_scheduler_int", lambda f: 1)   # 目标 60 秒
         ft = _FakeTime(stop_after=60)         # 第 60 次 tick 刚好触发
         monkeypatch.setattr(main, "_time", ft)
         runs = []
         with pytest.raises(_StopLoop):
-            main._interval_loop("gg_delist", "gg_delist_minutes", 60, lambda: runs.append(1), "测试")
+            main._interval_loop("gg_delist", "gg_delist_minutes", lambda: runs.append(1), "测试")
         assert runs == [1]
         assert main._get_last_run()["gg_delist"]["ok"] is True
 
     def test_first_failure_retries_after_60s_then_ok(self, app, monkeypatch):
         """首次抛异常 → 等 60 秒重试；重试成功记 ok=True（原实现的重试语义保留）。"""
         monkeypatch.setattr(main, "_TICK_SECONDS", 1)
-        monkeypatch.setattr(main, "_get_scheduler_int", lambda f, d: 1)   # 目标 60 秒
+        monkeypatch.setattr(main, "_get_scheduler_int", lambda f: 1)   # 目标 60 秒
         ft = _FakeTime(stop_after=61)         # 60 tick + 1 次出错重试的 sleep(60)
         monkeypatch.setattr(main, "_time", ft)
         calls = []
@@ -386,7 +405,7 @@ class TestIntervalLoop:
                 raise RuntimeError("网络炸了")
 
         with pytest.raises(_StopLoop):
-            main._interval_loop("gg_delist", "gg_delist_minutes", 60, _run, "测试")
+            main._interval_loop("gg_delist", "gg_delist_minutes", _run, "测试")
 
         assert len(calls) == 2
         assert ft.secs[60] == 60              # 第 61 次 sleep 是出错重试的 60 秒
@@ -395,7 +414,7 @@ class TestIntervalLoop:
     def test_retry_failure_marks_not_ok_and_keeps_looping(self, app, monkeypatch):
         """两次都失败 → 记 ok=False，且线程不得死（还能继续下一轮 tick）。"""
         monkeypatch.setattr(main, "_TICK_SECONDS", 1)
-        monkeypatch.setattr(main, "_get_scheduler_int", lambda f, d: 1)   # 目标 60 秒
+        monkeypatch.setattr(main, "_get_scheduler_int", lambda f: 1)   # 目标 60 秒
         ft = _FakeTime(stop_after=61)         # 第 62 次 sleep 抛哨兵 ⇒ 证明循环活着
         monkeypatch.setattr(main, "_time", ft)
 
@@ -403,7 +422,7 @@ class TestIntervalLoop:
             raise RuntimeError("还是炸")
 
         with pytest.raises(_StopLoop):
-            main._interval_loop("gg_delist", "gg_delist_minutes", 60, _run, "测试")
+            main._interval_loop("gg_delist", "gg_delist_minutes", _run, "测试")
 
         assert main._get_last_run()["gg_delist"]["ok"] is False
 
@@ -415,20 +434,24 @@ class TestSchedulerWiring:
         box = _capture_thread(monkeypatch)
         main._start_delist_scheduler()
         assert box["target"] is main._interval_loop
-        assert box["args"] == ("gg_delist", "gg_delist_minutes", 60,
+        assert box["args"] == ("gg_delist", "gg_delist_minutes",
                                main._run_delist_check_once, "掉包定时检测")
         assert box["daemon"] is True
         assert box["started"] is True
+        # 默认值不再由 _interval_loop 的形参携带（死参已删），唯一来源是 _SCHEDULER_DEFAULTS。
+        # 走真实读链（空配置 → 播种默认）钉住 GG 仍默认 60 分钟。
+        assert main._get_scheduler_int("gg_delist_minutes") == 60
 
     def test_tt_delist_wiring(self, app, monkeypatch):
         """TT 默认 30 分钟、key 独立 —— 顺手「对齐」成 GG 的 60/gg_delist 本测试即红。"""
         box = _capture_thread(monkeypatch)
         main._start_tt_delist_scheduler()
         assert box["target"] is main._interval_loop
-        assert box["args"] == ("tt_delist", "tt_delist_minutes", 30,
+        assert box["args"] == ("tt_delist", "tt_delist_minutes",
                                main._run_tt_delist_check_once, "TT 掉包定时检测")
         assert box["daemon"] is True
         assert box["started"] is True
+        assert main._get_scheduler_int("tt_delist_minutes") == 30
 
 
 class TestWeeklyCleanupLoop:
@@ -709,18 +732,29 @@ class TestSchedulerConfigApi:
         assert main._get_scheduler_config() == main._SCHEDULER_DEFAULTS   # 一个都没写进去
 
     def test_non_object_json_body_rejected(self, client, admin_gg_headers):
-        """⚠️ truthy 的非对象 JSON（标量/字符串/数组）必须 400，不能 500。
+        """⚠️ 任意非对象 JSON（标量/字符串/数组，**无论真假值**）必须 400「必须是 JSON 对象」。
 
         守卫是 `isinstance(body, dict)`：删掉它，`set(123)` 直接抛 TypeError → 500；
         `"abc"` 会走过 `set(...)`、在 `', '.join(...)` 处炸 → 也是 500。
-        ⚠️ 刻意只用 **truthy** 的非对象：`0 / false / "" / []` 会先落进既有的
-        「请求体为空」分支（同为 400 但文案不同），命中不了这一条守卫 —— 用它们
-        等于测了另一条闸门，守卫删掉也不会红。
+        ⚠️ falsy 非对象（`0 / false / "" / []`）曾因 `request.get_json(...) or {}` 被吞成
+        `{}`、落进「请求体为空」分支 —— 同为 400 但文案对不上真实原因（findings #12）。
+        现按真实原因统一为「必须是 JSON 对象」，故这里连 falsy 一起钉住，防 `or {}` 回退。
         """
-        for bad in (123, "abc", [1]):
+        for bad in (123, "abc", [1], 0, False, "", []):
             resp = client.put("/api/admin/scheduler/config", headers=admin_gg_headers, json=bad)
             assert resp.status_code == 400, f"body={bad!r} 应 400，实得 {resp.status_code}"
             assert resp.get_json()["error"] == "请求体必须是 JSON 对象"
+
+    def test_empty_object_body_reports_empty(self, client, admin_gg_headers):
+        """⚠️ 空对象 `{}` 是「无字段可改」的合法空体，报「请求体为空」—— 不得误判成非对象。
+
+        与上一条互为对照：`{}` 是 dict，绝不能落进「必须是 JSON 对象」。若有人把判据
+        简化成 `not body`，falsy 非对象又会蒙混回「空体」分支（上一条即红）；若有人
+        把 `{}` 也当成非对象，本用例即红。两条一起才锁死这条分界。
+        """
+        resp = client.put("/api/admin/scheduler/config", headers=admin_gg_headers, json={})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "请求体为空"
 
     def test_non_integer_rejected(self, client, admin_gg_headers):
         assert client.put("/api/admin/scheduler/config", headers=admin_gg_headers,

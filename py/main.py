@@ -9194,9 +9194,15 @@ def _get_scheduler_config() -> dict:
     return cfg
 
 
-def _get_scheduler_int(field: str, default: int) -> int:
-    """取单个整数配置项（带默认值兜底）。"""
-    return int(_get_scheduler_config().get(field, default))
+def _get_scheduler_int(field: str) -> int:
+    """取单个整数配置项；缺省值唯一来源是 `_SCHEDULER_DEFAULTS`。
+
+    ⚠️ 刻意不收调用方的 default 形参：`_get_scheduler_config()` 恒以
+    `_SCHEDULER_DEFAULTS` 播种每一个键，故缺省值永远取自那张表。多传一份默认值
+    只会造成「两处默认值」，日后分叉时静默以表为准（旧的 `default_minutes` 正是
+    这样一个永不生效的死参）。要改默认值就去改 `_SCHEDULER_DEFAULTS`。
+    """
+    return int(_get_scheduler_config()[field])
 
 
 def _next_cleanup_at(now, weekday: int, hour: int):
@@ -9252,7 +9258,7 @@ def _mark_task_run(task_key: str, ok: bool):
         log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
 
 
-def _interval_loop(task_key, config_field, default_minutes, run_once, log_tag):
+def _interval_loop(task_key, config_field, run_once, log_tag):
     """固定间隔任务的通用循环：每 _TICK_SECONDS 醒一次，重算目标周期。
 
     改配置最多 _TICK_SECONDS 秒生效，**不需要重启服务**。
@@ -9266,7 +9272,7 @@ def _interval_loop(task_key, config_field, default_minutes, run_once, log_tag):
     elapsed = 0
     while True:
         _time.sleep(_TICK_SECONDS)
-        target = _get_scheduler_int(config_field, default_minutes) * 60
+        target = _get_scheduler_int(config_field) * 60
         due, elapsed = _interval_tick(elapsed, target)
         if not due:
             continue
@@ -9315,7 +9321,7 @@ def _start_delist_scheduler():
     """启动 GG 掉包检测定时任务（周期可配置，默认 1 小时）。"""
     t = threading.Thread(
         target=_interval_loop,
-        args=("gg_delist", "gg_delist_minutes", 60, _run_delist_check_once, "掉包定时检测"),
+        args=("gg_delist", "gg_delist_minutes", _run_delist_check_once, "掉包定时检测"),
         daemon=True,
     )
     t.start()
@@ -9441,7 +9447,7 @@ def _start_tt_delist_scheduler():
     """
     t = threading.Thread(
         target=_interval_loop,
-        args=("tt_delist", "tt_delist_minutes", 30, _run_tt_delist_check_once, "TT 掉包定时检测"),
+        args=("tt_delist", "tt_delist_minutes", _run_tt_delist_check_once, "TT 掉包定时检测"),
         daemon=True,
     )
     t.start()
@@ -9555,11 +9561,16 @@ def admin_scheduler_config_put():
     if not user or user.get("role") not in ("developer", "admin"):
         return jsonify(success=False, error="权限不足，仅管理员可操作"), 403
 
-    body = request.get_json(silent=True) or {}
-    if not body:
+    body = request.get_json(silent=True)
+    # 分两种 400，按**真实原因**给文案：
+    #   - 空体（无 body / JSON null / 空对象 {}）→「请求体为空」（无字段可改）；
+    #   - 其余非对象 JSON（0 / false / "" / [] 这类 falsy 标量，以及 123 / "abc" / [1]
+    #     这类 truthy 标量）→「请求体必须是 JSON 对象」。
+    # ⚠️ 勿改回 `request.get_json(...) or {}` —— 那个 `or {}` 会把 falsy 非对象一并吞成
+    #    `{}`，让 0/false/""/[] 借「空体」分支蒙混（findings #12）；非对象直接 set()/items()
+    #    又会抛 TypeError → 500，故必须显式挡住。
+    if body is None or (isinstance(body, dict) and not body):
         return jsonify(success=False, error="请求体为空"), 400
-    # 非对象的 JSON（如标量 123、字符串）是 truthy，直接 set()/items() 会抛 TypeError → 500；
-    # 这里干净地拒成 400（与「不能对真值非 dict 的 body 直接 .get」同一思路）。
     if not isinstance(body, dict):
         return jsonify(success=False, error="请求体必须是 JSON 对象"), 400
 
