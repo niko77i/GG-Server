@@ -4,6 +4,7 @@
 本文件不打真实 Google API：服务层调用一律用桩替换。
 """
 import json
+import logging
 import re
 import sqlite3
 
@@ -1994,6 +1995,134 @@ class TestSyncEndpoint:
         assert resp.status_code == 200
         assert resp.get_json()["result"]["created"] == 1
         assert _created() == 1
+
+
+class TestSyncErrorsSanitized:
+    """apply_diff 逐行 `except` 把原始异常原文塞进响应体 —— 必须收口成固定文案。
+
+    泄漏链（活）：`apply_diff` 的返回 result 在 routes/huguan_dashboard_routes.py
+    被 `ok({"result": result, "diff": diff})` **整体**回出，其中 `errors` 没有被
+    pop（只 pop 了 undo / applied_owner_rows / remark_m_writeback /
+    remark_operator_push）⇒ POST /api/huguan/dashboard/sync 的响应体里
+    `result.errors[].error` 就是原始异常原文（含英文 errno / sqlite 消息 /
+    源码绝对路径）。
+
+    逐行累积是刻意保留的：户管仍要知道「第几行失败」—— 收口的只是**每条的 error
+    值**。异常详情不得一起砍掉，必须照旧进 gg-server 日志（caplog 钉住；本模块是
+    纯逻辑层，用模块级 `log = logging.getLogger("gg-server")`）。
+
+    三条用例分别钉 apply_diff 的三个 except 站点（to_create / to_update /
+    owner_changes），driving 真实端点、去掉修复即红。
+    """
+
+    # 夹具登录会撞 PyJWT 的 15 字节密钥告警（既有产物），本类精确静音保持输出干净。
+    pytestmark = pytest.mark.filterwarnings(
+        "ignore::jwt.warnings.InsecureKeyLengthWarning")
+
+    _LEAK = ("内部炸了 sqlite3.OperationalError "
+             "D:\\server\\cc\\GG-Server\\py\\huguan_dashboard.py:42")
+
+    def _hg_with_conf(self, client, name):
+        hg, uid = _create_user(client, name, role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+        return hg, uid
+
+    def _boom(self, *_a, **_k):
+        raise RuntimeError(self._LEAK)
+
+    def _assert_sanitized(self, resp, caplog, fixed):
+        assert resp.status_code == 200
+        errs = resp.get_json()["result"]["errors"]
+        assert len(errs) == 1
+        # 定位信息必须保留（哪一行失败）
+        assert errs[0]["row"] == 2
+        # 固定中文文案，且不是原始异常原文
+        assert errs[0]["error"] == fixed
+        raw = resp.get_data(as_text=True)
+        assert self._LEAK not in raw, "响应体重新带上了原始异常原文"
+        for tok in ("sqlite3", "Traceback", "huguan_dashboard.py"):
+            assert tok not in raw, f"响应体泄漏了内部符号 {tok!r}"
+        # 异常详情不得被一起砍掉：仍须进 gg-server 日志
+        assert self._LEAK in caplog.text, "异常详情没进日志 —— 排查线索被脱敏一并砍掉"
+
+    def test_create_error_is_sanitized_but_row_kept(self, client, monkeypatch, caplog):
+        """to_create 分支的 except（huguan_dashboard.py:987 附近）。"""
+        import google_sheets_service as gs
+        import huguan_dashboard as hd
+
+        hg, _uid = self._hg_with_conf(client, "_err_create")
+        db = database.get_db()
+        _seed(db, "_err_c_zhang", "张三")
+        db.close()
+
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["日期", "是否封户", "账户ID", "MCC", "国家", "所属渠道", "运营",
+             "重新分配", "时区", "大MCC", "状态"],
+            ["", "", "ERRC-1", "", "", "", "张三", "", "", "", ""]])
+        _stub_sheets(monkeypatch, [])
+        # 建号成功之后、计数之前的那一步炸掉 ⇒ 落进 to_create 的 except
+        monkeypatch.setattr(hd, "_record_channel_assign", self._boom)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                               json={"platform": "gg", "dry_run": False,
+                                     "confirmed": {"create": ["ERRC-1"]}})
+        self._assert_sanitized(resp, caplog, "创建失败，详情见服务端日志")
+
+    def test_update_error_is_sanitized_but_row_kept(self, client, monkeypatch, caplog):
+        """to_update 分支的 except（huguan_dashboard.py:1085 附近）。"""
+        import google_sheets_service as gs
+        import huguan_dashboard as hd
+
+        hg, _uid = self._hg_with_conf(client, "_err_update")
+        db = database.get_db()
+        zhang = _seed(db, "_err_u_zhang", "张三")
+        _seed_account(db, "ERRU-1", zhang)
+        db.close()
+
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["日期", "是否封户", "账户ID", "MCC", "国家", "所属渠道", "运营",
+             "重新分配", "时区", "大MCC", "状态"],
+            ["", "", "ERRU-1", "", "", "", "张三", "", "Asia/Tokyo", "", ""]])
+        _stub_sheets(monkeypatch, [])
+        monkeypatch.setattr(hd, "_record_channel_change", self._boom)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                               json={"platform": "gg", "dry_run": False,
+                                     "confirmed": {"update": ["ERRU-1"]}})
+        self._assert_sanitized(resp, caplog, "更新失败，详情见服务端日志")
+
+    def test_owner_error_is_sanitized_but_row_kept(self, client, monkeypatch, caplog):
+        """owner_changes 分支的 except（huguan_dashboard.py:1134 附近）。"""
+        import google_sheets_service as gs
+        import huguan_dashboard as hd
+
+        hg, _uid = self._hg_with_conf(client, "_err_owner")
+        db = database.get_db()
+        zhang = _seed(db, "_err_o_zhang", "张三")
+        _seed(db, "_err_o_li", "李四")
+        _seed_account(db, "ERRO-1", zhang)
+        db.close()
+
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["日期", "是否封户", "账户ID", "MCC", "国家", "所属渠道", "运营",
+             "重新分配", "时区", "大MCC", "状态"],
+            ["", "", "ERRO-1", "", "", "", "李四", "", "", "", ""]])
+        _stub_sheets(monkeypatch, [])
+        # 撤回快照的「旧值」读取（路由 collect_undo=True）炸掉 ⇒ 落进 owner 的 except
+        monkeypatch.setattr(hd, "_read_old_value", self._boom)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                               json={"platform": "gg", "dry_run": False,
+                                     "confirmed": {"owner": ["ERRO-1"]}})
+        self._assert_sanitized(resp, caplog, "归属变更失败，详情见服务端日志")
 
 
 class TestApplyDiffUncoveredBranches:
