@@ -6,6 +6,9 @@
 import os
 import json
 import logging
+import functools
+import inspect
+import threading
 
 log = logging.getLogger("gg-server")
 
@@ -15,6 +18,99 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 class GoogleSheetsServiceError(Exception):
     """Google Sheets 服务错误。"""
     pass
+
+
+# ── 写表并发探测（一期只观测，不加锁） ──────────────────────────────
+# 设计见 docs/superpowers/specs/2026-10-07-sheet-concurrent-write-probe-design.md
+#
+# 本模块的写函数普遍是 read-modify-write（先 get 整张表、再写回）。两个线程
+# 对**同一张** Sheet 同时走这条路时，后写的会覆盖先写的 —— 且双方都成功返回，
+# 没有任何错误信号。sheet_write.py 的 _inflight 只防「同一 (user_id, target,
+# business_key)」，防不住「不同账户写同一张表」。
+#
+# 实测（2026-10-07）：当前仅 6 人用写表，跨用户并发 0 次，无法外推到 80 人。
+# 所以先只**观测**、用真实数据决定要不要加锁 —— 现在加锁是基于猜测，而锁会
+# 让写表串行化、白付延迟代价。
+
+# (spreadsheet_id, sheet_name) -> {线程 ident: 重入深度}
+#
+# 存「线程 → 深度」而非「线程集合」：同一线程嵌套调用（外层调内层）时，
+# 内层返回不能把 key 整个删掉 —— 外层还在写。只存集合的话内层退出即清空，
+# 注册表会谎报「没人写」，外层在途期间的所有并发都漏报。
+_active_writes = {}
+_active_writes_lock = threading.Lock()
+
+
+def _concurrent_peers(sid, sname, tid):
+    """本 spreadsheet 下可能与本次写冲突的**其它线程** ident 集合。
+
+    sheet_name 为 None 表示「该入口不掌握具体 sheet」（`upsert_zuobiao` /
+    `_upsert_rows` 的签名里没有这个参数），此时按整个 spreadsheet 保守匹配同
+    sid 的所有在途写 —— **宁可多报不可漏报**：漏掉的恰好是 read-modify-write
+    的那两个写函数，而它们正是最容易丢更新的路径。
+    """
+    peers = set()
+    for (s2, sn2), depths in _active_writes.items():
+        if s2 != sid:
+            continue
+        # 两边都明确知道 sheet 名且不同 → 确实不冲突
+        if sname is not None and sn2 is not None and sname != sn2:
+            continue
+        peers.update(t for t in depths if t != tid)
+    return peers
+
+
+def probe_concurrent_write(fn):
+    """探测同一张 Sheet 的并发在途写，命中记 WARNING。对业务完全透明。
+
+    只观测、不改行为：不阻塞、不排序、不重试，函数返回值与异常原样透传。
+    """
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            bound = sig.bind(*args, **kwargs)
+            sid = bound.arguments.get("spreadsheet_id")
+            sname = bound.arguments.get("sheet_name")
+        except TypeError:
+            # 签名绑定失败不该影响真正的写表 —— 原函数自己会抛它该抛的错
+            return fn(*args, **kwargs)
+
+        if sid is None:
+            # 解析不出 spreadsheet_id（形参改名、或新装饰了没有该参数的函数）。
+            # 必须直接跳过：否则键退化成 (None, None)，所有这类调用挤在同一键上
+            # 互相误报。探测宁可完全不生效，也不要刷出满屏假告警。
+            return fn(*args, **kwargs)
+
+        key = (sid, sname)
+        tid = threading.get_ident()
+        with _active_writes_lock:
+            peers = _concurrent_peers(sid, sname, tid)
+            depths = _active_writes.setdefault(key, {})
+            depths[tid] = depths.get(tid, 0) + 1
+
+        if peers:
+            log.warning(
+                "Sheet 并发写探测：同一表 %d 个线程在途 — spreadsheet_id=%s sheet=%r 入口=%s",
+                len(peers) + 1, sid, sname, fn.__name__,
+            )
+
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            with _active_writes_lock:
+                depths = _active_writes.get(key)
+                if depths is not None:
+                    left = depths.get(tid, 0) - 1
+                    if left > 0:
+                        depths[tid] = left  # 仍在嵌套内层，key 必须留着
+                    else:
+                        depths.pop(tid, None)
+                        if not depths:
+                            del _active_writes[key]
+
+    return wrapper
 
 
 def check_configured(credentials_path: str) -> dict:
@@ -121,6 +217,7 @@ def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
     }
 
 
+@probe_concurrent_write
 def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
                    region: str, report_date: str, sales_person: str,
                    agency_ratio, operator_name: str) -> dict:
@@ -283,6 +380,7 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
     return {"updated": len(updates), "inserted": len(appends)}
 
 
+@probe_concurrent_write
 def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -> dict:
     """将充值记录追加到 Google Sheets 指定 sheet 表。
 
@@ -366,6 +464,7 @@ def append_recharge(service, spreadsheet_id: str, sheet_name: str, rows: list) -
     return {"appended": len(new_rows)}
 
 
+@probe_concurrent_write
 def append_recharge_tt(service, spreadsheet_id: str, sheet_name: str, rows: list) -> dict:
     """TT 充值表专用：只写前三列（时间/账户ID/金额），不覆盖 D~I 列公式。
 
@@ -447,6 +546,7 @@ def append_recharge_tt(service, spreadsheet_id: str, sheet_name: str, rows: list
     return {"appended": len(new_rows)}
 
 
+@probe_concurrent_write
 def append_recycle(service, spreadsheet_id: str, sheet_name: str, rows: list) -> dict:
     """将回收记录追加到「回收户清单」sheet。
 
@@ -587,6 +687,7 @@ def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: 
         raise GoogleSheetsServiceError(f"读取工作表失败: {e}") from e
 
 
+@probe_concurrent_write
 def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
                                account_id: str, value: str, col_index: int = 5) -> dict:
     """在指定 sheet 中按 account_id（B 列）定位行，更新指定列。
@@ -649,6 +750,7 @@ def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
     return {"updated": 1}
 
 
+@probe_concurrent_write
 def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
                               rows: list, key_col: str = "C") -> dict:
     """按「账户ID 列」定位行，一次写多列；未出现在 cells 里的列一律不碰。
@@ -805,6 +907,7 @@ def upsert_fb_reports(db, user_id: int, product_name: str, line_name: str,
     return result
 
 
+@probe_concurrent_write
 def _upsert_rows(user_id: int, spreadsheet_id: str, rows: list,
                  report_date: str, product_name: str,
                  region: str, date_str: str = "", line_name: str = "") -> dict:
