@@ -483,3 +483,179 @@ class TestFbPixelOwnershipClosure:
 
         opts = client.get("/api/fb/pixel-bms/options", headers=hg).get_json()["data"]
         assert {o["bm_id"] for o in opts} == {"t_cross-A-BM", "t_cross-B-BM"}   # 跨用户看全部
+
+
+# ==================== E-11：fb_routes 异常文本收口（数据流） ====================
+#
+# 结论文件的两个 Critical 组：
+#   ① 8 处 `except Exception as e: return err(str(e))` —— 直出 sqlite 的
+#      IntegrityError 原文（UNIQUE / NOT NULL / FOREIGN KEY + schema 列名）。
+#   ② `sheets_sync_log.error_msg` 落 `str(e)[:500]`，再由两个 GET 与
+#      `failed[].error` 回进响应体。
+#
+# 本组逐个点名，用**真实异常**驱动：去掉修复，响应体即回显英文库原文 ⇒ 转红。
+
+_FB_LEAK_MARKERS = ("constraint failed", "UNIQUE", "NOT NULL", "FOREIGN KEY",
+                    "IntegrityError", "sqlite3", "Traceback", "HttpError",
+                    "sheets.googleapis.com")
+
+
+def _assert_no_fb_leak(target):
+    raw = target if isinstance(target, str) else target.get_data(as_text=True)
+    for marker in _FB_LEAK_MARKERS:
+        assert marker not in raw, f"响应体泄露内部细节 {marker!r}: {raw[:300]!r}"
+
+
+class _InlineThread:
+    """把 `threading.Thread(...).start()` 就地跑完（fb 后台写表线程同步化）。"""
+
+    def __init__(self, target=None, daemon=None, args=(), kwargs=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout=None):
+        pass
+
+
+def _boom_fb_sheets(*_a, **_k):
+    import google_sheets_service as gs
+    raise gs.GoogleSheetsServiceError(
+        "读取工作表失败: <HttpError 404> https://sheets.googleapis.com/v4/spreadsheets/FB-SHEET")
+
+
+class TestE11FbDirectWriteSitesSanitized:
+    """① 8 处直出站点：以 `POST /api/fb/bms/create` 撞 UNIQUE 为真实驱动。
+
+    `fb_bms.bm_id` 有 UNIQUE 约束 ⇒ 第二次同 bm_id 必抛 `sqlite3.IntegrityError(
+    "UNIQUE constraint failed: fb_bms.bm_id")`，正是改前直出的原文形态。
+    """
+
+    def test_create_bm_duplicate_returns_fixed_text(self, client, caplog):
+        import logging
+        from routes import fb_routes
+        hdr, _ = _fb_user(client, "e11_bm")
+
+        first = client.post("/api/fb/bms/create",
+                            json={"name": "E11BM", "bm_id": "9000011"}, headers=hdr)
+        assert first.status_code == 200, first.get_data(as_text=True)[:200]
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            dup = client.post("/api/fb/bms/create",
+                              json={"name": "E11BM2", "bm_id": "9000011"}, headers=hdr)
+
+        assert dup.status_code == 400
+        assert dup.get_json()["error"] == fb_routes._FB_DB_FAILED_MSG, (
+            f"撞 UNIQUE 仍回显库原文：{dup.get_json()['error']!r}")
+        _assert_no_fb_leak(dup)
+        assert "UNIQUE constraint failed: fb_bms.bm_id" in caplog.text, "异常详情没进日志"
+
+    def test_create_pixel_bm_duplicate_returns_fixed_text(self, client):
+        """同族站点（像素BM 的 create）：同一形态、另一端点，防「只修一处」。"""
+        from routes import fb_routes
+        hdr, _ = _fb_user(client, "e11_pbm")
+        assert client.post("/api/fb/pixel-bms/create",
+                           json={"name": "E11PBM", "bm_id": "9000012"},
+                           headers=hdr).status_code == 200
+        dup = client.post("/api/fb/pixel-bms/create",
+                          json={"name": "E11PBM2", "bm_id": "9000012"}, headers=hdr)
+        assert dup.status_code == 400
+        assert dup.get_json()["error"] == fb_routes._FB_DB_FAILED_MSG
+        _assert_no_fb_leak(dup)
+
+
+class TestE11FbSheetsSyncLogSink:
+    """② `sheets_sync_log.error_msg` 是「异常落库 → 读取端点回出」的中间落点。"""
+
+    def _seed_log_and_records(self, client, uid, log_id_out=None):
+        db = database.get_db()
+        db.execute(
+            "INSERT INTO sheets_sync_log (user_id, product_name, line_name, report_date, "
+            "spreadsheet_id, status, rows_json) VALUES (?,?,?,?,?,'failed','[]')",
+            (uid, "E11产品", "E11线", "2026-01-01", "FB-SHEET"))
+        log_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute(
+            "INSERT INTO fb_ad_reports (user_id, product_name, line_name, report_date, "
+            "account_name, account_id, cost) VALUES (?,?,?,?,?,?,?)",
+            (uid, "E11产品", "E11线", "2026-01-01", "户A", "111", 1.0))
+        db.commit()
+        db.close()
+        return log_id
+
+    def test_retry_sync_by_id_sanitizes_response_and_db(self, client, monkeypatch, caplog):
+        import logging
+        import google_sheets_service as gs
+        from routes import fb_routes
+
+        hdr, uid = _fb_user(client, "e11_retry")
+        log_id = self._seed_log_and_records(client, uid)
+        monkeypatch.setattr(gs, "upsert_fb_reports", _boom_fb_sheets)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/fb/reports/retry-sync",
+                               json={"id": log_id}, headers=hdr)
+
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == "重试失败，详情见服务端日志", (
+            f"重试失败仍直出异常原文：{resp.get_json()['error']!r}")
+        _assert_no_fb_leak(resp)
+
+        # 读取端点（sync-status/<id> 与 last-sync）都不得把原文回出来
+        st = client.get(f"/api/fb/reports/sync-status/{log_id}", headers=hdr)
+        assert st.get_json()["error_msg"] == fb_routes._FB_SHEETS_FAILED_MSG, (
+            f"error_msg 落进了异常原文：{st.get_json()['error_msg']!r}")
+        _assert_no_fb_leak(st)
+        last = client.get("/api/fb/reports/last-sync", headers=hdr)
+        _assert_no_fb_leak(last)
+        assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
+
+    def test_batch_retry_failed_entry_sanitized(self, client, monkeypatch, caplog):
+        """批量重试的 `failed[].error` 直接进响应体 —— 同样必须是固定文案。"""
+        import logging
+        import google_sheets_service as gs
+        from routes import fb_routes
+
+        hdr, uid = _fb_user(client, "e11_batch")
+        self._seed_log_and_records(client, uid)
+        monkeypatch.setattr(gs, "upsert_fb_reports", _boom_fb_sheets)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/fb/reports/retry-sync", json={}, headers=hdr)
+
+        body = resp.get_json()
+        assert body["retried"] == 0 and body["failed"], f"未走到失败分支：{body!r}"
+        assert body["failed"][0]["error"] == fb_routes._FB_SHEETS_FAILED_MSG, (
+            f"failed[].error 直出异常原文：{body['failed'][0]['error']!r}")
+        _assert_no_fb_leak(resp)
+        assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
+
+    def test_async_write_failure_sanitized(self, client, monkeypatch, caplog):
+        """`_schedule_fb_sheets_write` 的后台线程落点（extract/save 起的那条）。"""
+        import logging
+        import main as main_mod
+        import google_sheets_service as gs
+        from routes import fb_routes
+
+        monkeypatch.setattr(fb_routes.threading, "Thread", _InlineThread)
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        monkeypatch.setattr(gs, "upsert_fb_reports", _boom_fb_sheets)
+
+        hdr, uid = _fb_user(client, "e11_async")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/fb/extract/save",
+                               json={"product_name": "E11异步", "line_name": "线",
+                                     "report_date": "2026-02-02",
+                                     "records": [{"account_name": "户B", "account_id": "222",
+                                                  "cost": 1.0}]},
+                               headers=hdr)
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+        log_id = resp.get_json()["sync_log_id"]
+
+        st = client.get(f"/api/fb/reports/sync-status/{log_id}", headers=hdr)
+        assert st.get_json()["error_msg"] == fb_routes._FB_SHEETS_FAILED_MSG, (
+            f"后台写失败把异常原文落进了 error_msg：{st.get_json()['error_msg']!r}")
+        _assert_no_fb_leak(st)
+        assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"

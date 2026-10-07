@@ -129,7 +129,10 @@ def check_configured(credentials_path: str) -> dict:
         with open(credentials_path, "r", encoding="utf-8") as f:
             creds_data = json.load(f)
     except (json.JSONDecodeError, IOError) as e:
-        result["message"] = f"凭据文件格式无效: {e}"
+        # 原文是英文库异常（"Expecting value: line 1 column 1"）→ 只留中文可操作说明，
+        # 详情进日志。本 message 会经 /api/google-sheets/status 原样回给客户端。
+        log.warning("凭据文件格式无效 path=%s: %s", credentials_path, e)
+        result["message"] = "凭据文件格式无效，请确认为服务账号 JSON 密钥文件"
         return result
 
     if creds_data.get("type") != "service_account":
@@ -152,7 +155,9 @@ def _get_credentials(credentials_path: str):
     from google.oauth2 import service_account
 
     if not os.path.isfile(credentials_path):
-        raise GoogleSheetsServiceError(f"凭据文件不存在: {credentials_path}")
+        # 绝对路径是服务端内部细节，不回给客户端；详情进日志。
+        log.warning("凭据文件不存在: %s", credentials_path)
+        raise GoogleSheetsServiceError("凭据文件不存在，请在设置中重新配置服务账号密钥")
 
     try:
         creds = service_account.Credentials.from_service_account_file(
@@ -160,7 +165,9 @@ def _get_credentials(credentials_path: str):
         )
         return creds
     except Exception as e:
-        raise GoogleSheetsServiceError(f"加载服务账号凭据失败: {e}") from e
+        # `{e}` 内插会把上游库原文（英文 + 密钥文件路径）带进响应体 ⇒ 换固定文案。
+        log.exception("加载服务账号凭据失败 path=%s", credentials_path)
+        raise GoogleSheetsServiceError("加载服务账号凭据失败，请确认密钥文件有效") from e
 
 
 def build_service(credentials_path: str):
@@ -174,7 +181,8 @@ def build_service(credentials_path: str):
     except GoogleSheetsServiceError:
         raise
     except Exception as e:
-        raise GoogleSheetsServiceError(f"构建 Google Sheets 服务失败: {e}") from e
+        log.exception("构建 Google Sheets 服务失败")
+        raise GoogleSheetsServiceError("构建 Google Sheets 服务失败，请稍后重试") from e
 
 
 def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
@@ -188,7 +196,8 @@ def get_spreadsheet_info(service, spreadsheet_id: str) -> dict:
     try:
         ss = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     except Exception as e:
-        raise GoogleSheetsServiceError(f"获取表格信息失败: {e}") from e
+        log.exception("获取表格信息失败 spreadsheet_id=%s", spreadsheet_id)
+        raise GoogleSheetsServiceError("获取表格信息失败，请确认表格 ID 与共享权限") from e
 
     title = ss.get("properties", {}).get("title", "")
 
@@ -684,7 +693,8 @@ def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: 
         ).execute()
         return result.get("values", [])
     except Exception as e:
-        raise GoogleSheetsServiceError(f"读取工作表失败: {e}") from e
+        log.exception("读取工作表失败 sheet=%s range=%s", sheet_name, range_str)
+        raise GoogleSheetsServiceError("读取工作表失败，请确认工作表名称与共享权限") from e
 
 
 @probe_concurrent_write
@@ -744,7 +754,8 @@ def update_cell_by_account_id(service, spreadsheet_id: str, sheet_name: str,
             body={"values": [[value]]},
         ).execute()
     except Exception as e:
-        raise GoogleSheetsServiceError(f"更新{col_letter}列失败: {e}") from e
+        log.exception("更新 %s 列失败 account_id=%s", col_letter, account_id)
+        raise GoogleSheetsServiceError(f"更新{col_letter}列失败，请稍后重试") from e
 
     log.info("update_cell_by_account_id: account_id=%s %s列已更新为 '%s'", account_id, col_letter, value)
     return {"updated": 1}
@@ -820,9 +831,14 @@ def update_rows_by_account_id(service, spreadsheet_id: str, sheet_name: str,
         except Exception as e:
             # 单次请求原子：失败即整批未写入，故「本次已写入 0 行」是如实表述，
             # 不再有「前面的行已经落表」的半写。
+            #
+            # account_id 与「已写入 0 行」是**用户可操作**的定位信息（哪个账户没写进去、
+            # 要不要重试），故保留；上游库原文（英文 + URL）换成固定文案，详情进日志。
+            log.exception("批量更新行失败（本次已写入 0 行）涉及 account_id=%s",
+                          ",".join(pending_aids))
             raise GoogleSheetsServiceError(
                 f"批量更新行失败（本次已写入 0 行，涉及 account_id="
-                f"{','.join(pending_aids)}）: {e}") from e
+                f"{','.join(pending_aids)}），详情见服务端日志") from e
     else:
         # data 为空：要么 rows 全未找到（not_found 已记），要么找到的行 cells 为空。
         # 无待写区间，跳过 API 调用；updated 仍按「已定位到的行数」计，与旧契约一致。

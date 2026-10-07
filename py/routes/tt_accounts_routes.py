@@ -802,7 +802,7 @@ def _is_valid_amount(amount):
 
 def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
     """后台异步写充值表；成功置 sheets_synced=1，失败写 sheets_error。"""
-    from main import _GOOGLE_SHEETS_CONFIG, _sync_sheets_background
+    from main import _GOOGLE_SHEETS_CONFIG, _SHEETS_SYNC_FAILED_MSG, _sync_sheets_background
 
     def _do_sync():
         import google_sheets_service as gs
@@ -816,8 +816,12 @@ def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
             for rid in rids:
                 _db.execute("UPDATE tt_recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?", (rid,))
         else:
+            # `sheets_error` 会被 GET /api/tt/accounts/<aid>/recharge-records 原样回给
+            # 客户端（`SELECT r.*` + `dict(r)`）⇒ 写固定文案，异常原文只进日志
+            # （_sync_sheets_background 已按 status 落 warning/error）。
             for rid in rids:
-                _db.execute("UPDATE tt_recharge_records SET sheets_error=? WHERE id=?", (err_msg, rid))
+                _db.execute("UPDATE tt_recharge_records SET sheets_error=? WHERE id=?",
+                            (_SHEETS_SYNC_FAILED_MSG, rid))
         _db.commit()
         _db.close()
 

@@ -20,6 +20,11 @@ ATTENTION = ("retry_failed", "rolled_back", "rollback_abandoned")
 # 说明推进它的线程已经不在了（进程重启 / 后台线程启动失败），需要惰性收敛。
 STALE_AFTER_SECONDS = 90
 
+# 落库的失败文案。`sheet_write_log.error_msg` 会经 GET /api/sheet-write/status
+# 原样回进响应体（`WHERE user_id=?` 只是隔离了租户，不是脱敏）⇒ 异常原文不得入库，
+# 详情改由 `_sync_sheets_background` / `_apply_final` 的日志承担。
+_WRITE_FAILED_MSG = "写表失败，详情见服务端日志"
+
 # 在途写表任务的进程内登记，key = (user_id, target, business_key)。
 # 让 sweep_stale 跳过「线程还活着、只是 Sheets 调用挂住了」的行：
 # build_service 未设 timeout（google_sheets_service.py 全文零 timeout），黑洞式
@@ -166,13 +171,15 @@ def _apply_final(db, row, err_msg):
                error_msg=err_msg)
     else:
         if rb_error is not None:
-            # 回滚器自己炸了 —— 不能断言「账户被再次修改」，那是另一回事
-            note = f"自动撤销失败（回滚过程出错：{rb_error}），业务变更仍生效，请手工核对"
+            # 回滚器自己炸了 —— 不能断言「账户被再次修改」，那是另一回事。
+            # 异常原文（rb_error）只进上面的 log.error，不拼进 error_msg ——
+            # 该列会被 GET /api/sheet-write/status 原样回给客户端。
+            note = "自动撤销失败，回滚过程出错，业务变更仍生效，请手工核对"
         else:
             note = "该账户在写表期间被再次修改，未自动撤销，请手工核对"
         settle(db, user_id=row["user_id"], target=row["target"],
                business_key=row["business_key"], status="rollback_abandoned",
-               error_msg=f"{err_msg}（{note}）")
+               error_msg=f"{err_msg}；{note}" if err_msg else note)
 
 
 def run_write(db, *, user_id, platform, target, business_key, sync_fn,
@@ -196,6 +203,10 @@ def run_write(db, *, user_id, platform, target, business_key, sync_fn,
         import database
         _db = None
         try:
+            # 回调收到的 err_msg 是后台线程抛出的**异常原文**（_sync_sheets_background
+            # 如实透传，供日志与排查）。它进了 sheet_write_log.error_msg 后会被
+            # GET /api/sheet-write/status 回给客户端 ⇒ 落库前统一换成固定文案。
+            _msg = _WRITE_FAILED_MSG if err_msg else ""
             _db = database.get_db()
             row = _db.execute(
                 "SELECT * FROM sheet_write_log WHERE user_id=? AND target=? AND business_key=?",
@@ -208,9 +219,9 @@ def run_write(db, *, user_id, platform, target, business_key, sync_fn,
             elif status == "failed":
                 # 中间态：30s 重试在途。前端据此继续轮询，但**不提示**。
                 settle(_db, user_id=user_id, target=target, business_key=business_key,
-                       status="failed", error_msg=(err_msg or "")[:500])
+                       status="failed", error_msg=_msg)
             else:
-                _apply_final(_db, row, (err_msg or "")[:500])
+                _apply_final(_db, row, _msg)
         except Exception as e:
             log.error("写表状态落库失败 target=%s key=%s: %s", target, business_key, e)
         finally:

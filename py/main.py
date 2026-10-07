@@ -1427,8 +1427,12 @@ def audio_replace():
             _env["FONTCONFIG_PATH"] = _fc_dir
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=_env)
         if result.returncode != 0:
+            # FFmpeg 的 stderr 会把**服务端绝对路径**（输入/输出文件）回显出来 ⇒ 只落日志。
+            # 与 :689 / :1064 的 OSError 同口径：客户端只收固定文案。
             err_tail = result.stderr[-300:] if result.stderr else "(无输出)"
-            return jsonify({"success": False, "error": f"FFmpeg 执行失败: {err_tail}"}), 500
+            log.error("音轨替换 FFmpeg 执行失败 returncode=%s stderr=%s",
+                      result.returncode, err_tail)
+            return jsonify({"success": False, "error": "FFmpeg 执行失败，详情见服务端日志"}), 500
 
         # 清理上传的临时文件
         for p in (video_tmp, audio_tmp):
@@ -4765,7 +4769,7 @@ def accounts_update(aid):
                                         (_rid,))
                         else:
                             _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                        (err_msg, _rid))
+                                        (_SHEETS_SYNC_FAILED_MSG, _rid))
                         _db.commit(); _db.close()
                     _sync_sheets_background(_do_sync, _on_fail)
 
@@ -5238,7 +5242,7 @@ def accounts_batch_update():
                     else:
                         for rid in _rids:
                             _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                        (err_msg, rid))
+                                        (_SHEETS_SYNC_FAILED_MSG, rid))
                     _db.commit(); _db.close()
                 _sync_sheets_background(_do_sync, _on_fail)
         # 新增：批量状态变更时同步「我的看板」（独立于清账逻辑）
@@ -5703,7 +5707,7 @@ def recharge_submit():
                 else:
                     _db = database.get_db()
                     _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                (err_msg, record_id))
+                                (_SHEETS_SYNC_FAILED_MSG, record_id))
                     _db.commit(); _db.close()
 
             _sync_sheets_background(_do_sync, _on_fail)
@@ -5802,7 +5806,7 @@ def recharge_batch_submit():
                 else:
                     for rid in _ids:
                         _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                    (err_msg, rid))
+                                    (_SHEETS_SYNC_FAILED_MSG, rid))
                 _db.commit(); _db.close()
 
             _sync_sheets_background(_do_sync, _on_fail)
@@ -5929,11 +5933,12 @@ def recharge_retry_sheets(rid):
         db.close()
         return jsonify({"success": True})
     except Exception as e:
-        # 详情仍落库（sheets_error 是内部列，供排查）+ 落日志；客户端只收固定文案。
+        # 详情只落日志；`sheets_error` 会经 /api/accounts/<aid>/recharge-records 原样
+        # 回给客户端，故写固定文案而非异常原文（客户端本就只收固定文案）。
         log.exception("充值记录 Sheets 重试失败 rid=%s", rid)
-        msg = str(e)
         try:
-            db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?", (msg, rid))
+            db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
+                       (_SHEETS_SYNC_FAILED_MSG, rid))
             db.commit()
         except: pass
         try: db.close()
@@ -7550,7 +7555,8 @@ def google_sheets_update_zuobiao():
                 """INSERT OR REPLACE INTO sheets_sync_log
                    (user_id, product_name, spreadsheet_id, sheet_gid, status, error_msg, rows_json, retry_count, updated_at)
                    VALUES (?, ?, ?, '', ?, ?, ?, ?, datetime('now','localtime'))""",
-                (_user_id, _product_name, _spreadsheet_id, status, err_msg,
+                (_user_id, _product_name, _spreadsheet_id, status,
+                 _SHEETS_SYNC_FAILED_MSG,
                  json.dumps(formatted, ensure_ascii=False),
                  1 if status == "retry_failed" else 0)
             )
@@ -7687,12 +7693,11 @@ def google_sheets_retry_sync():
             "inserted": result["inserted"],
         })
     except Exception as e:
-        msg = str(e)
         db2 = database.get_db()
         db2.execute(
             "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
             "updated_at=datetime('now','localtime') WHERE id=?",
-            (msg, log_row["id"])
+            (_SHEETS_SYNC_FAILED_MSG, log_row["id"])
         )
         db2.commit(); db2.close()
         log.exception("投手看板表格写入失败")
@@ -8078,6 +8083,13 @@ _GOOGLE_SHEETS_CONFIG = {
                      "config", "fit-boulevard-503111-u4-812bc02c2000.json")
     ),
 }
+
+
+# 落库的 Sheets 同步失败文案 —— `sheets_error` / `sheets_sync_log.error_msg` 会被
+# 读取端点原样回进响应体（`/api/accounts/<aid>/recharge-records`、
+# `/api/google-sheets/sync-status`），故**不得**写异常原文；详情由
+# `_sync_sheets_background` 的 log.warning/log.error 承担。
+_SHEETS_SYNC_FAILED_MSG = "表格同步失败，详情见服务端日志"
 
 
 def _sync_sheets_background(sync_fn, on_result_fn):
