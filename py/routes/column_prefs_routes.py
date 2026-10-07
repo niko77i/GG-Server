@@ -42,6 +42,12 @@ def column_prefs_put():
         return err("无法识别当前用户", 401)
 
     body = parse_body()
+    # parse_body 只保证「解析失败 → {}」，**不保证是 dict**：请求体是合法 JSON
+    # 但不是对象（[1,2] / 5 / "x"）时它原样返回，`body.get` 会 AttributeError → 500。
+    # 同仓守卫先例：huguan_dashboard_routes.py:49/78/197/332、sheet_write_routes.py:72。
+    if not isinstance(body, dict):
+        return err("请求体必须是 JSON 对象")
+
     panel = body.get("panel")
     if panel not in cp.PANELS:
         return err(f"不支持的面板: {panel!r}")

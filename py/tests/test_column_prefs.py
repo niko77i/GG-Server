@@ -252,10 +252,18 @@ def test_put_ignores_uid_in_body(client, alice, bob):
     {"panel": "gg_ads", "order": [f"k{i}" for i in range(65)], "hidden": []},   # 超 64 项
     {"panel": "gg_ads", "order": ["a"], "hidden": "x"},
     {"panel": "gg_ads", "order": ["a"], "hidden": [1]},
+    # 合法 JSON 但**不是对象**：parse_body 会原样返回（它只兜「解析失败 → {}」），
+    # 缺守卫时 body.get 直接 AttributeError ⇒ 500。这三项专门钉住那条守卫。
+    [1, 2],
+    5,
+    "x",
 ])
 def test_put_rejects_malformed_body(client, alice, body):
     headers, _ = alice
     resp = client.put(URL, json=body, headers=headers)
+    # 先明确与 500 划清界限：非 dict 请求体漏守卫时会变成 AttributeError/500，
+    # 这正是本用例存在的意义（400 与 500 的区别）。
+    assert resp.status_code != 500, resp.get_json()
     assert resp.status_code == 400, resp.get_json()
 
 
