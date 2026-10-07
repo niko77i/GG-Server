@@ -133,7 +133,7 @@ export default defineConfig({
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>卡天皇运营工具箱</title>
+  <title>LM-Server</title>
 </head>
 <body>
   <div id="app"></div>
@@ -246,7 +246,7 @@ export default createRouter({
     style="height:100vh;border-right:1px solid #e5e7eb;"
   >
     <div style="padding:20px 20px 12px;font-size:13px;font-weight:600;color:#555770;letter-spacing:0.15em;">
-      🖼️ 卡天皇莫乱来
+      🖼️ GG-Server
     </div>
     <el-menu-item index="/accounts">
       <span>🏢 账户管理</span>
