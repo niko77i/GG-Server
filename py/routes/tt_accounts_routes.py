@@ -233,18 +233,29 @@ def list_accounts():
         where.append("a.agent_id = ?"); params.append(agent_id)
     if status_id:
         # 「存活」在 TT 是**并集口径**：status_id 为 NULL 的户在列表里渲染成「存活」
-        # （`it['status'] = ... or '存活'`），统计也归到「存活」那一个 key。
+        # （`it['status'] = ... or '存活'`），统计也把它并进「存活」那一个 bucket。
         # 若筛选只按 id 等值，那批 NULL 户恒筛不出来 —— 与统计口径分裂，
         # 表现为「按钮上写着 N、点下去 0 条」。GG 侧同型先例见 accounts_list 的
-        # `status == "未知"` 分支；此处判据对着 TT 的别名（存活）写。
-        # 判据用**名字**而非硬编码 id：id 会因状态表重建而变（2026-10-06 曾删过
-        # TT 状态行），名字才是稳定契约。
+        # `status == "未知"` 分支（py/main.py:4102），此处判据对着 TT 的别名（存活）写。
+        #
+        # ⚠️ 用**按名字+平台取全部 id 的子查询**，而不是拿客户端传来的那一个 id：
+        #   ① 不信任客户端 id（它只是个查询参数）；
+        #   ② 状态表按 (name, platform) 唯一，但历史数据里可能残留指向**他平台同名行**的
+        #      status_id（跨库拷贝/旧备份导入），那种行统计算「存活」而等值筛不到 ——
+        #      子查询一并覆盖；
+        #   ③ 省掉每请求一次额外的 SELECT。
+        #   ⚠️ 名字而非 id 是稳定契约：id 会因状态表重建而变（2026-10-06 曾删过 TT 状态行）。
+        #
+        # 仍需先查一次 _st 拿名字：用户传进来的是 id，要先判断它是不是「存活」。
         _st = db.execute("SELECT name FROM account_statuses WHERE id=?", (status_id,)).fetchone()
         if _st and (_st["name"] or "").strip() == "存活":
-            where.append("(a.status_id IS NULL OR a.status_id = ?)")
+            where.append(
+                "(a.status_id IS NULL OR a.status_id IN "
+                "(SELECT id FROM account_statuses WHERE name='存活' AND platform='tt'))"
+            )
         else:
             where.append("a.status_id = ?")
-        params.append(status_id)
+            params.append(status_id)
     if timezone:
         where.append("a.timezone = ?"); params.append(timezone)
 
