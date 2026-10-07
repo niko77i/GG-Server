@@ -197,21 +197,12 @@ def dashboard_push():
     # 撤回快照（子项目 ③，规格 §6.1）：**写表之前**先把「本次将写到的每个格」的原值
     # 读下来存好 —— 写完原值就没了。上面那条连接已在 finally 里关闭，不可复用；写表是
     # 网络调用，快照事务不能挂在它上面等（会长时间持写锁），故单独开一条短连接。
+    # 读表失败就照常抛（与其它 Sheets 调用同口径）：此时快照没 commit ⇒ 一行都没写，
+    # 上一份快照原封不动，仍可撤回上一次真正成功的同步。
     undo_db = database.get_db()
     try:
-        try:
-            snapshot = hd.snapshot_push_targets(service, conf, platform, rows)
-        except gs.GoogleSheetsServiceError as e:
-            # 表此刻读不到 ⇒ 记不下新的基线，**必须把上一份快照作废**：写表一旦成功，
-            # 表里就是新值，旧快照记的是更早一版的相邻状态，写回去只会把表改成从未
-            # 存在过的样子 —— 宁可撤回不可用，也不能让它写错值。
-            # 不在此处提前返回：写表那一步自己还要读一次表，真读不到时它会以同样的
-            # 错误冒泡（仍是 500，与改动前一致）。只吞 GoogleSheetsServiceError，
-            # 快照代码自身的缺陷仍要炸出来，不能被吞成「这次没有快照」。
-            log.warning("push 快照读取失败，本次不记录快照: %s", e)
-            hd.delete_undo(undo_db, uid, platform, "push")
-        else:
-            hd.save_undo(undo_db, uid, platform, "push", snapshot)
+        hd.save_undo(undo_db, uid, platform, "push",
+                     hd.snapshot_push_targets(service, conf, platform, rows))
         undo_db.commit()
     finally:
         undo_db.close()

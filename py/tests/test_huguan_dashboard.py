@@ -1381,6 +1381,7 @@ class TestBuildDiff:
 def _stub_sheets(monkeypatch, captured):
     """把 update_rows_by_account_id 换成桩，记录调用（同步执行，见下）。"""
     import google_sheets_service as gs
+    import huguan_dashboard as hd
     import main as m
 
     def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
@@ -1390,6 +1391,14 @@ def _stub_sheets(monkeypatch, captured):
 
     monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
     monkeypatch.setattr(gs, "build_service", lambda path: object())
+    # `/push` 现在在写表前还要读一次整片表（记录撤回快照，子项目 ③）。不桩它，
+    # 读就会落到真函数、拿上面那个 object() 去打 Google API。
+    #
+    # 打的是 **huguan_dashboard.read_sheet_values**，不是 gs.read_sheet_values：
+    # 快照走的是前者；而用本桩的 sync 用例各自把后者桩成自己那张表，打 gs 那个
+    # 会把它们的表冲掉。这里回空表即可 —— `/push` 的用例只断言 HTTP 契约
+    # （状态码 / rows 计数），快照内容的断言在 tests/test_huguan_undo.py。
+    monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: [])
     # 端点经 main._sync_sheets_background 起**后台线程**写表。不拦住它，断言就会
     # 和后台线程抢时间 —— 本机快时偶然通过、CI 慢时红，是最难查的一类间歇失败。
     # 换成直接调用，让「后台」在测试里同步发生。端点用的是函数体内
