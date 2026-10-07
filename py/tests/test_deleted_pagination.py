@@ -127,3 +127,10 @@ def test_gg_deleted_non_numeric_size_does_not_500(app, client, auth_headers):
     """现状的裸 int() 会 ValueError ⇒ 500；闸门必须回落默认值。"""
     resp = client.get("/api/accounts/deleted?size=abc", headers=auth_headers)
     assert resp.status_code == 200
+
+
+def test_gg_deleted_huge_page_does_not_500(app, client, auth_headers):
+    """page 没有上界时，(page-1)*size 绑进 OFFSET 超过 2^63-1，
+    SQLite 抛 OverflowError ⇒ 500。page 闸门必须钳住它。"""
+    resp = client.get("/api/accounts/deleted?page=1000000000000000000", headers=auth_headers)
+    assert resp.status_code == 200

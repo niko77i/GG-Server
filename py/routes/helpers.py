@@ -11,6 +11,12 @@ GLOBAL_OPTION_ROLES = ("developer", "admin", HUGUAN_ROLE)
 # 注意：admin 不在其中 —— 管理员本身按平台隔离（见用户角色平台隔离设计）。
 PLATFORM_SWITCH_ROLES = ("developer", HUGUAN_ROLE)
 
+# 页号上限。端点把 (page - 1) * size 绑进 SQL 的 OFFSET，SQLite 的整数是
+# int64；page 无上界时该值会溢出，抛 OverflowError 把接口打成 500。
+# 10 万页在 500 行/页下是 5000 万行，远超任何真实数据量，但让 OFFSET 稳稳
+# 落在 int64 内（10 万 * 500 = 5*10^7）。
+PAGE_MAX = 100_000
+
 from flask import request, jsonify, g
 from flask_jwt_extended import get_jwt_identity
 import database
@@ -91,6 +97,11 @@ def parse_pagination(default: int = 20, maximum: int = 500,
     都很小，但服务端此前没有任何上限，任何客户端传 `size=999999` 就能把整张
     表拉回去。
 
+    page 也有上界（PAGE_MAX）：端点会把 `(page - 1) * size` 绑进 SQL 的
+    OFFSET，page 无上界时该值可超过 2^63-1，SQLite 直接抛
+    `OverflowError: Python int too large to convert to SQLite INTEGER` ⇒ 500。
+    同样是「用户能随便拼的参数不得把接口打成 500」，故一并钳制。
+
     Args:
         default: 缺省页尺寸。**各调用点保持自己的原值**（GG 是 20，TT/FB 是 50），
                  迁移时不得统一成 20 —— 那会改变既有端点的行为。
@@ -98,9 +109,9 @@ def parse_pagination(default: int = 20, maximum: int = 500,
         name: 页尺寸的查询参数名，默认 "size"。`main.py:8423` 用的是 `page_size`。
 
     Returns:
-        (page, size)，满足 `page >= 1` 且 `1 <= size <= maximum`。
+        (page, size)，满足 `1 <= page <= PAGE_MAX` 且 `1 <= size <= maximum`。
     """
-    page = max(1, _safe_int(request.args.get("page"), 1))
+    page = max(1, min(PAGE_MAX, _safe_int(request.args.get("page"), 1)))
     size = max(1, min(maximum, _safe_int(request.args.get(name), default)))
     return page, size
 

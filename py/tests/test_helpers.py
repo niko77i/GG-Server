@@ -148,6 +148,14 @@ class TestParsePagination:
     def test_non_numeric_page_falls_back_to_one(self, app):
         assert self._call(app, "page=abc") == (1, 20)
 
+    def test_huge_page_is_clamped_to_ceiling(self, app):
+        """超大 page 会变成 (page-1)*size 绑进 SQL OFFSET，超过 2^63-1 时
+        SQLite 抛 OverflowError ⇒ 500。必须钳到上界，不能把接口打成 500。"""
+        assert self._call(app, "page=1000000000000000000") == (100_000, 20)
+
+    def test_page_exactly_at_ceiling_passes(self, app):
+        assert self._call(app, "page=100000") == (100_000, 20)
+
     def test_custom_default_preserves_caller_behavior(self, app):
         """TT/FB 的默认页尺寸是 50，迁移时不得把它变成 20。"""
         assert self._call(app, "", default=50) == (1, 50)

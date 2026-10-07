@@ -5096,7 +5096,7 @@ def accounts_deleted_list():
                 LEFT JOIN agents ag ON a.agent_id = ag.id
                 LEFT JOIN account_statuses st ON a.status_id = st.id
                 WHERE {where_sql}
-                ORDER BY a.deleted_at DESC LIMIT ? OFFSET ?""",
+                ORDER BY a.deleted_at DESC, a.id DESC LIMIT ? OFFSET ?""",
             params + [size, (page - 1) * size]
         ).fetchall()
     finally:
