@@ -23,7 +23,11 @@
 - **禁止 `git add -A`**：本仓库有并行会话共用工作区，只 `git add` 本计划涉及的具体文件。
 - **提交信息用中文**，格式 `type(scope): 描述`，与仓库既有提交一致。
 - **测试命令**：`cd py && python -m pytest tests/ -q`；前端 `cd frontend && npm run build`。
-- **不要动**：`py/main.py` 的 `/api/accounts/list`（4074 那处是列表主端点，只加闸门不改行为）、`fb_routes.py` 的已删除列表（它已经有分页，只加闸门）。
+- **只加闸门、不改分页逻辑的端点**（别误读成「不许碰」）：
+  - `py/main.py` 的 `/api/accounts/list`（4074 那处是列表主端点）—— 只把它的 `size`/`page` 解析换成
+    `parse_pagination()`，**不改它的筛选、排序、响应形状**
+  - `py/routes/fb_routes.py` 的已删除列表（`464` 那处）—— 它**已经有分页**，只是缺上限，
+    同样只换 `parse_pagination(default=50)`
 
 ---
 
@@ -355,24 +359,6 @@ def test_gg_accounts_list_non_numeric_size_does_not_500(app, client, auth_header
     assert resp.status_code == 200
 
 
-def test_gg_deleted_list_clamps_oversized_size(app, client, auth_headers):
-    import database
-    db = database.get_db()
-    uid = db.execute("SELECT id FROM users WHERE username='testuser'").fetchone()["id"]
-    for i in range(600):
-        db.execute(
-            "INSERT INTO accounts(name, account_id, owner_id, deleted_at) "
-            "VALUES(?,?,?,datetime('now','localtime'))",
-            (f"del{i}", f"gdel{i:06d}", uid),
-        )
-    db.commit()
-    db.close()
-
-    resp = client.get("/api/accounts/deleted?size=999999", headers=auth_headers)
-    assert resp.status_code == 200
-    assert len(resp.get_json()["accounts"]) <= MAX_PAGE_SIZE
-
-
 def test_mcc_list_clamps_oversized_size(app, client, auth_headers):
     resp = client.get("/api/mcc/list?size=999999", headers=auth_headers)
     assert resp.status_code == 200
@@ -380,12 +366,6 @@ def test_mcc_list_clamps_oversized_size(app, client, auth_headers):
 
 def test_tt_accounts_list_clamps_oversized_size(app, client, tt_headers):
     resp = client.get("/api/tt/accounts/list?size=999999", headers=tt_headers)
-    assert resp.status_code == 200
-    assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE
-
-
-def test_tt_deleted_list_clamps_oversized_size(app, client, tt_headers):
-    resp = client.get("/api/tt/accounts/deleted?size=999999", headers=tt_headers)
     assert resp.status_code == 200
     assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE
 
@@ -452,7 +432,12 @@ from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES, par
 cd py && python -m pytest tests/test_pagination_guard.py -q
 ```
 
-Expected: PASS（7 passed）
+Expected: PASS（5 passed）
+
+> **为什么本文件里没有「已删除列表」的超大 size 用例**：`/api/accounts/deleted` 与
+> `/api/tt/accounts/deleted` 在**本任务时点还没有分页**（分页是 Task 3 / Task 4 才加的），
+> 那时传 `size=999999` 会返回全部行，用例必然失败。它们的超限钳制断言分别落在
+> Task 3 与 Task 4，与各自的实现同批交付。
 
 - [ ] **Step 6: 全量回归**
 
@@ -590,6 +575,27 @@ def test_gg_deleted_only_returns_own_accounts(app, client, auth_headers):
 
     body = client.get("/api/accounts/deleted?size=500", headers=auth_headers).get_json()
     assert body["total"] == 2
+
+
+def test_gg_deleted_clamps_oversized_size(app, client, auth_headers):
+    """本端点的 size 闸门。
+
+    判据与 Task 2 的列表闸门相同，但**必须落在本任务**：Task 2 时点这个端点
+    还没有 size 参数，传 size=999999 会返回全部行，用例在那个时点必然失败。
+    """
+    import database
+    db = database.get_db()
+    _seed_deleted_gg(db, _gg_uid(db), 600)
+    db.close()
+
+    body = client.get("/api/accounts/deleted?size=999999", headers=auth_headers).get_json()
+    assert len(body["accounts"]) <= 500
+
+
+def test_gg_deleted_non_numeric_size_does_not_500(app, client, auth_headers):
+    """现状的裸 int() 会 ValueError ⇒ 500；闸门必须回落默认值。"""
+    resp = client.get("/api/accounts/deleted?size=abc", headers=auth_headers)
+    assert resp.status_code == 200
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -672,7 +678,7 @@ def accounts_deleted_list():
 cd py && python -m pytest tests/test_deleted_pagination.py -q
 ```
 
-Expected: PASS（5 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 5: 全量回归**
 
@@ -819,6 +825,27 @@ def test_tt_deleted_cross_user_role_sees_all(app, client, admin_tt_headers):
 
     body = client.get("/api/tt/accounts/deleted?size=500", headers=admin_tt_headers).get_json()
     assert body["total"] >= 4
+
+
+def test_tt_deleted_clamps_oversized_size(app, client, tt_headers):
+    """本端点的 size 闸门。
+
+    判据与 Task 2 的列表闸门相同，但**必须落在本任务**：Task 2 时点这个端点
+    还没有 size 参数，传 size=999999 会返回全部行，用例在那个时点必然失败。
+    """
+    import database
+    db = database.get_db()
+    _seed_deleted_tt(db, _tt_uid(db), 600)
+    db.close()
+
+    body = client.get("/api/tt/accounts/deleted?size=999999", headers=tt_headers).get_json()
+    assert len(body["items"]) <= 500
+
+
+def test_tt_deleted_non_numeric_size_does_not_500(app, client, tt_headers):
+    """现状的裸 int() 会 ValueError ⇒ 500；闸门必须回落默认值。"""
+    resp = client.get("/api/tt/accounts/deleted?size=abc", headers=tt_headers)
+    assert resp.status_code == 200
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -900,7 +927,7 @@ def deleted_accounts_list():
 cd py && python -m pytest tests/test_deleted_pagination.py -q
 ```
 
-Expected: PASS（12 passed）
+Expected: PASS（14 passed）
 
 - [ ] **Step 5: 全量回归**
 
@@ -970,6 +997,43 @@ def _seed(db, uid, n_accounts, n_bms):
         )
     db.commit()
     return acc_ids, bm_ids
+
+
+def test_fb_list_makes_one_bm_query_not_per_row(app, client, admin_fb_headers, monkeypatch):
+    """**N+1 守卫**：本页的 BM 查询次数必须是 1，不随行数增长。
+
+    这是唯一能在**改动前先失败**的判据。行为类断言在改动前后都通过
+    （现状结果是对的，只是慢），只有查询次数会变：改前 50 行 = 50 次，
+    改后 = 1 次。用 `sqlite3.Connection.set_trace_callback` 观测真实执行的 SQL，
+    数其中含 `fb_account_bm` 的语句。
+
+    ⚠️ 只断言「结果正确」的测试对 N+1 完全失明 —— 而那正是本任务要修的东西。
+    """
+    import database
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='adminfb'").fetchone()["id"]
+    _seed(db, uid, 50, 5)
+    db.close()
+
+    import routes.helpers as helpers
+    seen = []
+
+    def counting_get_db():
+        conn = helpers.get_db()
+        # 每次 get_db() 都设一遍是刻意的：request 级连接在 g.db 里缓存，
+        # 重复设置只是替换回调，不会叠加。
+        conn.set_trace_callback(lambda sql: seen.append(sql))
+        return conn
+
+    monkeypatch.setattr("routes.fb_routes.get_db", counting_get_db)
+
+    body = client.get("/api/fb/accounts/list?size=50", headers=admin_fb_headers).get_json()
+    assert body["total"] == 50
+
+    bm_queries = [s for s in seen if "fb_account_bm" in s]
+    assert len(bm_queries) == 1, (
+        f"BM 查询应为 1 次（批量），实际 {len(bm_queries)} 次 —— N+1 未消除"
+    )
 
 
 def test_fb_list_bms_are_grouped_correctly(app, client, admin_fb_headers):
@@ -1044,12 +1108,12 @@ def test_fb_deleted_list_bms_are_grouped_correctly(app, client, admin_fb_headers
 cd py && python -m pytest tests/test_fb_list_batch.py -q
 ```
 
-Expected: 前三条**可能已经通过**（现状的 N+1 逻辑是正确的，只是慢）—— 本任务的测试是**正确性守卫**，
-用来证明改成批查之后行为没变。若它们已通过，把 `test_fb_deleted_list_bms_are_grouped_correctly`
-作为主判据；**Step 4 之后四条必须仍全绿**。
+Expected: **`test_fb_list_makes_one_bm_query_not_per_row` FAIL** ——
+`AssertionError: BM 查询应为 1 次（批量），实际 50 次 —— N+1 未消除`。
 
-> 说明：N+1 的「快」无法用单测直接断言（查询次数不进响应）。改成批查是否真的生效，
-> 由 Step 4 的代码审查确认「循环里不再有 `db.execute`」。测试负责锁住**行为不变**。
+其余四条（行为守卫）在改动前**就会通过** —— 现状的 N+1 结果是对的，只是慢。
+它们的作用是锁住「改成批查之后行为没变」，**不是**证明 N+1 消失；
+证明 N+1 消失的只有上面那条查询次数守卫。
 
 - [ ] **Step 3: 改写 `list_accounts` 的 BM 循环**
 
@@ -1126,12 +1190,18 @@ Expected: 前三条**可能已经通过**（现状的 N+1 逻辑是正确的，�
 cd py && python -m pytest tests/test_fb_list_batch.py -q
 ```
 
-Expected: PASS（4 passed）
+Expected: PASS（5 passed）
 
-- [ ] **Step 6: 代码审查确认循环里没有 `db.execute`**
+- [ ] **Step 6: 改写另一处（`list_deleted_accounts`）后确认同一守卫仍绿**
 
-人工检查改写后的两段：`for r in rows:` 循环体内**不得**出现 `db.execute`。
-这是本任务唯一真正证明「N+1 已消除」的判据。
+`list_deleted_accounts` 的 N+1 修复没有被单独的次数守卫覆盖
+（`test_fb_deleted_list_bms_are_grouped_correctly` 只管行为）。改完后重跑：
+
+```bash
+cd py && python -m pytest tests/test_fb_list_batch.py -q
+```
+
+并人工确认 `list_deleted_accounts` 的 `for r in rows:` 循环体内也**不再有 `db.execute`**。
 
 - [ ] **Step 7: 全量回归**
 
@@ -1280,16 +1350,14 @@ def test_huguan_collect_rows_uses_chunk(app, monkeypatch):
     assert spy.was_used, "collect_rows_for_push 没有走 chunk"
 
 
-def test_huguan_apply_diff_lookup_uses_chunk(app, monkeypatch):
-    """apply_diff 查现有账户的那条 IN（huguan_dashboard.py 约 500）。"""
-    import huguan_dashboard as hd
-    assert hasattr(hd, "chunk"), "huguan_dashboard 还没有导入 chunk"
 ```
 
-> 最后一条只断言导入存在：`apply_diff` 的入参形状复杂（要造出完整的
-> `parsed_rows` 结构），端到端造起来不划算。它真正的行为守卫由
-> `test_huguan_dashboard.py` 既有的 apply_diff 全套用例承担 —— 本任务
-> 改完后那套用例必须全绿，即证明改写没破坏行为。
+> **`apply_diff` 查现有账户的那条 IN（`huguan_dashboard.py` 约 500）为什么没有专属守卫**：
+> 它要造出完整的 `parsed_rows` 结构才能进到那条查询，端到端造起来不划算。
+> 它的**行为**守卫由 `test_huguan_dashboard.py` 既有的 apply_diff 全套用例承担 ——
+> 本任务改完后那套用例必须全绿，即证明改写没破坏行为。
+> 曾经这里放了一条只断言 `hasattr(hd, "chunk")` 的测试，因为**不断言任何行为**已删除：
+> 那种测试对着失败完全失明，留着只会让人以为这条路径被覆盖了。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -1474,7 +1542,7 @@ from utils import chunk
 cd py && python -m pytest tests/test_chunk_callers.py -q
 ```
 
-Expected: PASS（4 passed）
+Expected: PASS（3 passed）
 
 - [ ] **Step 6: 全量回归**
 
