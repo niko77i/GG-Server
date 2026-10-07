@@ -168,3 +168,222 @@ class TestIntervalTick:
     def test_zero_target_does_not_busy_loop(self, app):
         """防御：target <= 0 不得变成每 tick 都跑。"""
         assert main._interval_tick(0, 0) == (False, main._TICK_SECONDS)
+
+
+# ============================================================
+#  Task 3：三个调度线程改 tick 循环（周期可配置、免重启生效）
+# ============================================================
+
+class _StopLoop(Exception):
+    """哨兵异常：把 while True 的死循环在测试里可控地打断（不参与生产逻辑）。"""
+
+
+class _FakeTime:
+    """time 模块替身：记录每次 sleep 的秒数；调用超过 stop_after 次即抛 _StopLoop 终止循环。"""
+
+    def __init__(self, stop_after):
+        self.secs = []
+        self.stop_after = stop_after
+
+    def sleep(self, s):
+        self.secs.append(s)
+        if len(self.secs) > self.stop_after:
+            raise _StopLoop()
+
+
+def _capture_thread(monkeypatch):
+    """把 main 里的 threading.Thread 换成替身：捕获 target/args/daemon，不真正起线程。"""
+    box = {}
+
+    class _FakeThread:
+        def __init__(self, target=None, args=(), daemon=None, **kw):
+            box["target"] = target
+            box["args"] = tuple(args)
+            box["daemon"] = daemon
+
+        def start(self):
+            box["started"] = True
+
+    monkeypatch.setattr(main.threading, "Thread", _FakeThread)
+    return box
+
+
+class TestIntervalLoop:
+    """两个掉包调度复用的通用循环（GG / TT）。
+
+    循环本体是 while True + sleep，无法直接跑；这里用「替身 sleep 累计 N 次后抛哨兵」
+    把每一轮都驱动起来，再断言行为。
+    """
+
+    def test_recomputes_target_each_tick(self, app, monkeypatch):
+        """⚠️ 每个 tick 都重读配置 —— 把 _get_scheduler_int 提到循环外只读一次，本测试即红。
+
+        这正是「改周期最多 30 秒生效」的实现依据；读一次就退化成旧的硬编码语义。
+        """
+        monkeypatch.setattr(main, "_TICK_SECONDS", 1)
+        ft = _FakeTime(stop_after=5)          # 5 次成功 tick，第 6 次 sleep 抛哨兵
+        monkeypatch.setattr(main, "_time", ft)
+        reads = []
+
+        def _spy(field, default):
+            reads.append(field)
+            return 1440                       # 目标 86400 秒，测试期内永不触发
+
+        monkeypatch.setattr(main, "_get_scheduler_int", _spy)
+        with pytest.raises(_StopLoop):
+            main._interval_loop("gg_delist", "gg_delist_minutes", 60, lambda: None, "测试")
+
+        assert reads == ["gg_delist_minutes"] * 5
+
+    def test_does_not_run_before_full_period(self, app, monkeypatch):
+        """启动后不足一个周期 → 不执行（原实现「启动立即执行一次」本就是注释掉的，语义保持）。"""
+        monkeypatch.setattr(main, "_TICK_SECONDS", 1)
+        monkeypatch.setattr(main, "_get_scheduler_int", lambda f, d: 1)   # 目标 60 秒
+        ft = _FakeTime(stop_after=30)         # 只累计 30 秒 < 60 秒
+        monkeypatch.setattr(main, "_time", ft)
+        runs = []
+        with pytest.raises(_StopLoop):
+            main._interval_loop("gg_delist", "gg_delist_minutes", 60, lambda: runs.append(1), "测试")
+        assert runs == []
+
+    def test_due_runs_once_and_marks_ok(self, app, monkeypatch):
+        """累计满一个周期 → 执行一次，并记 ok=True。"""
+        monkeypatch.setattr(main, "_TICK_SECONDS", 1)
+        monkeypatch.setattr(main, "_get_scheduler_int", lambda f, d: 1)   # 目标 60 秒
+        ft = _FakeTime(stop_after=60)         # 第 60 次 tick 刚好触发
+        monkeypatch.setattr(main, "_time", ft)
+        runs = []
+        with pytest.raises(_StopLoop):
+            main._interval_loop("gg_delist", "gg_delist_minutes", 60, lambda: runs.append(1), "测试")
+        assert runs == [1]
+        assert main._get_last_run()["gg_delist"]["ok"] is True
+
+    def test_first_failure_retries_after_60s_then_ok(self, app, monkeypatch):
+        """首次抛异常 → 等 60 秒重试；重试成功记 ok=True（原实现的重试语义保留）。"""
+        monkeypatch.setattr(main, "_TICK_SECONDS", 1)
+        monkeypatch.setattr(main, "_get_scheduler_int", lambda f, d: 1)   # 目标 60 秒
+        ft = _FakeTime(stop_after=61)         # 60 tick + 1 次出错重试的 sleep(60)
+        monkeypatch.setattr(main, "_time", ft)
+        calls = []
+
+        def _run():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("网络炸了")
+
+        with pytest.raises(_StopLoop):
+            main._interval_loop("gg_delist", "gg_delist_minutes", 60, _run, "测试")
+
+        assert len(calls) == 2
+        assert ft.secs[60] == 60              # 第 61 次 sleep 是出错重试的 60 秒
+        assert main._get_last_run()["gg_delist"]["ok"] is True
+
+    def test_retry_failure_marks_not_ok_and_keeps_looping(self, app, monkeypatch):
+        """两次都失败 → 记 ok=False，且线程不得死（还能继续下一轮 tick）。"""
+        monkeypatch.setattr(main, "_TICK_SECONDS", 1)
+        monkeypatch.setattr(main, "_get_scheduler_int", lambda f, d: 1)   # 目标 60 秒
+        ft = _FakeTime(stop_after=61)         # 第 62 次 sleep 抛哨兵 ⇒ 证明循环活着
+        monkeypatch.setattr(main, "_time", ft)
+
+        def _run():
+            raise RuntimeError("还是炸")
+
+        with pytest.raises(_StopLoop):
+            main._interval_loop("gg_delist", "gg_delist_minutes", 60, _run, "测试")
+
+        assert main._get_last_run()["gg_delist"]["ok"] is False
+
+
+class TestSchedulerWiring:
+    """两个掉包调度线程的接线：target/args/daemon。"""
+
+    def test_gg_delist_wiring(self, app, monkeypatch):
+        box = _capture_thread(monkeypatch)
+        main._start_delist_scheduler()
+        assert box["target"] is main._interval_loop
+        assert box["args"] == ("gg_delist", "gg_delist_minutes", 60,
+                               main._run_delist_check_once, "掉包定时检测")
+        assert box["daemon"] is True
+        assert box["started"] is True
+
+    def test_tt_delist_wiring(self, app, monkeypatch):
+        """TT 默认 30 分钟、key 独立 —— 顺手「对齐」成 GG 的 60/gg_delist 本测试即红。"""
+        box = _capture_thread(monkeypatch)
+        main._start_tt_delist_scheduler()
+        assert box["target"] is main._interval_loop
+        assert box["args"] == ("tt_delist", "tt_delist_minutes", 30,
+                               main._run_tt_delist_check_once, "TT 掉包定时检测")
+        assert box["daemon"] is True
+        assert box["started"] is True
+
+
+class TestWeeklyCleanupLoop:
+    """每周清理调度：分段等待 + 配置每 tick 重算 + 异常兜底。"""
+
+    def test_wait_capped_at_tick_and_config_reread(self, app, monkeypatch):
+        """⚠️ 单次 sleep 不得超过 _TICK_SECONDS，且每 tick 重读配置。
+
+        改回「一次性 sleep(整个周期)」，本测试即红（secs 会是一个巨大的秒数）。
+        """
+        monkeypatch.setattr(main, "_TICK_SECONDS", 30)
+        # 目标在 5 小时后 → 分段等待应封顶为 30 秒
+        monkeypatch.setattr(main, "_next_cleanup_at",
+                            lambda now, wd, h: now + datetime.timedelta(hours=5))
+        monkeypatch.setattr(main, "_run_weekly_cleanup_once", lambda: None)  # 兜底，绝不真清理
+        ft = _FakeTime(stop_after=1)          # 两个 tick（第 3 次 sleep 抛哨兵）
+        monkeypatch.setattr(main, "_time", ft)
+        reads = []
+        _real_cfg = main._get_scheduler_config
+
+        def _spy_cfg():
+            reads.append(1)
+            return _real_cfg()
+
+        monkeypatch.setattr(main, "_get_scheduler_config", _spy_cfg)
+        box = _capture_thread(monkeypatch)
+        main._start_weekly_cleanup()
+        with pytest.raises(_StopLoop):
+            box["target"]()
+
+        assert ft.secs == [30, 30]
+        assert len(reads) == 2                # 每 tick 重读一次配置
+
+    def test_failure_is_caught_and_marked(self, app, monkeypatch):
+        """⚠️ 核心对照腿：原实现是裸调，抛异常会杀死 daemon 线程、每周清理永久静默失效。
+
+        补 try/except 后必须吞掉异常、记 ok=False，并继续循环（否则 RuntimeError 会
+        直接逸出，pytest.raises(_StopLoop) 收不到哨兵）。
+        """
+        monkeypatch.setattr(main, "_TICK_SECONDS", 30)
+        # 目标落在过去 → sleep 后立即进入执行分支
+        monkeypatch.setattr(main, "_next_cleanup_at",
+                            lambda now, wd, h: now - datetime.timedelta(hours=1))
+
+        def _boom():
+            raise RuntimeError("清理炸了")
+
+        monkeypatch.setattr(main, "_run_weekly_cleanup_once", _boom)
+        ft = _FakeTime(stop_after=1)          # 第二次 sleep 抛哨兵 ⇒ 证明线程没死
+        monkeypatch.setattr(main, "_time", ft)
+        box = _capture_thread(monkeypatch)
+        main._start_weekly_cleanup()
+        with pytest.raises(_StopLoop):
+            box["target"]()
+
+        assert main._get_last_run()["cleanup"]["ok"] is False
+
+    def test_success_marks_ok(self, app, monkeypatch):
+        """成功路径记 ok=True（与失败路径的 ok=False 互为对照）。"""
+        monkeypatch.setattr(main, "_TICK_SECONDS", 30)
+        monkeypatch.setattr(main, "_next_cleanup_at",
+                            lambda now, wd, h: now - datetime.timedelta(hours=1))
+        monkeypatch.setattr(main, "_run_weekly_cleanup_once", lambda: None)
+        ft = _FakeTime(stop_after=1)
+        monkeypatch.setattr(main, "_time", ft)
+        box = _capture_thread(monkeypatch)
+        main._start_weekly_cleanup()
+        with pytest.raises(_StopLoop):
+            box["target"]()
+
+        assert main._get_last_run()["cleanup"]["ok"] is True
+

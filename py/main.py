@@ -9075,55 +9075,72 @@ def _mark_task_run(task_key: str, ok: bool):
         log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
 
 
+def _interval_loop(task_key, config_field, default_minutes, run_once, log_tag):
+    """固定间隔任务的通用循环：每 _TICK_SECONDS 醒一次，重算目标周期。
+
+    改配置最多 _TICK_SECONDS 秒生效，**不需要重启服务**。
+    首次执行仍在启动后一整个周期（原实现「启动时立即执行一次」的代码本就是
+    注释掉的，此处保持同一语义）。
+
+    ⚠️ 周期变更**只在两次执行之间被采纳** —— 目标值是在 run_once() **之前**算的，
+    正在跑的那一轮不会被打断（这是刻意设计：不想中途掐掉掉包检测）。别为了
+    「让新周期立刻生效」把重算挪到执行中间或加中断。
+    """
+    elapsed = 0
+    while True:
+        _time.sleep(_TICK_SECONDS)
+        target = _get_scheduler_int(config_field, default_minutes) * 60
+        due, elapsed = _interval_tick(elapsed, target)
+        if not due:
+            continue
+        try:
+            run_once()
+            _mark_task_run(task_key, ok=True)
+        except Exception as e:
+            log.warning(f"{log_tag}出错（将自动重试）: {e}")
+            _time.sleep(60)          # 保留原有的出错重试语义
+            try:
+                run_once()
+                _mark_task_run(task_key, ok=True)
+            except Exception as e2:
+                log.error(f"{log_tag}重试仍失败: {e2}")
+                _mark_task_run(task_key, ok=False)
+
+
 def _start_weekly_cleanup():
-    """每周日 24:00 清理爬取图片和生成视频（音乐库保留）。"""
+    """每周清理定时任务（星期几 + 时刻均可配置，默认周日 00:00）。"""
     import datetime as _dt
 
     def _cleanup():
         while True:
+            cfg = _get_scheduler_config()
             now = _dt.datetime.now()
-            # 计算下个周日 00:00
-            days_until_sunday = (6 - now.weekday()) % 7
-            if days_until_sunday == 0:
-                # 今天是周日，看是否已过 24:00
-                pass
-            next_sunday = now.replace(hour=0, minute=0, second=0, microsecond=0) + _dt.timedelta(days=(days_until_sunday or 7))
-            wait = (next_sunday - now).total_seconds()
-            if wait > 0:
-                _time.sleep(wait)
-
-            _run_weekly_cleanup_once()
+            target = _next_cleanup_at(now, cfg["cleanup_weekday"], cfg["cleanup_hour"])
+            # 分段等待：每 tick 重算目标，改配置最多 _TICK_SECONDS 秒生效
+            wait = min(max((target - now).total_seconds(), 1), _TICK_SECONDS)
+            _time.sleep(wait)
+            if _dt.datetime.now() < target:
+                continue
+            # ⚠️ 原实现此处是裸调，抛异常会直接杀死该 daemon 线程、每周清理永久静默失效；
+            #    补 try/except 是本次顺带的健壮性加固（见设计文档 §5.3）。
+            try:
+                _run_weekly_cleanup_once()
+                _mark_task_run("cleanup", ok=True)
+            except Exception as e:
+                log.error(f"每周清理失败: {e}")
+                _mark_task_run("cleanup", ok=False)
 
     t = threading.Thread(target=_cleanup, daemon=True)
     t.start()
 
 
 def _start_delist_scheduler():
-    """启动掉包检测定时任务：启动时立即执行一次，之后每小时执行一次。"""
-
-    def _loop():
-        # 启动时立即执行一次
-        # print("[DelistScheduler] 启动，执行首次检测...")
-        # try:
-        #     _run_delist_check_once()
-        # except Exception as e:
-        #     print(f"[DelistScheduler] 首次检测出错: {e}")
-
-        # 之后每小时执行一次，异常自动恢复
-        while True:
-            _time.sleep(3600)  # 1 小时
-            try:
-                _run_delist_check_once()
-            except Exception as e:
-                log.warning(f"掉包定时检测出错（将自动重试）: {e}")
-                # 出错后等 60 秒再试一次，避免连续失败
-                _time.sleep(60)
-                try:
-                    _run_delist_check_once()
-                except Exception as e2:
-                    log.error(f"掉包检测重试仍失败: {e2}")
-
-    t = threading.Thread(target=_loop, daemon=True)
+    """启动 GG 掉包检测定时任务（周期可配置，默认 1 小时）。"""
+    t = threading.Thread(
+        target=_interval_loop,
+        args=("gg_delist", "gg_delist_minutes", 60, _run_delist_check_once, "掉包定时检测"),
+        daemon=True,
+    )
     t.start()
 
 
@@ -9240,26 +9257,16 @@ def _run_tt_delist_check_once():
 
 
 def _start_tt_delist_scheduler():
-    """启动 TT 掉包检测定时任务：每 30 分钟执行一次，异常自动恢复。
+    """启动 TT 掉包检测定时任务（周期可配置，默认 30 分钟）。
 
-    ⚠️ TT 是 30 分钟、GG（`_start_delist_scheduler`）是 1 小时 —— 用户 2026-10-07 裁定。
-    两侧刻意不同频，别「顺手对齐」。
+    ⚠️ TT 默认 30 分钟、GG 默认 1 小时 —— 用户 2026-10-07 裁定，两侧刻意不同频。
+    现在两者都可在界面上改，但**默认值不同**这一点别「顺手对齐」。
     """
-
-    def _loop():
-        while True:
-            _time.sleep(1800)  # 30 分钟（TT 专用频率；GG 仍为 3600）
-            try:
-                _run_tt_delist_check_once()
-            except Exception as e:
-                log.warning(f"TT 掉包定时检测出错（将自动重试）: {e}")
-                _time.sleep(60)
-                try:
-                    _run_tt_delist_check_once()
-                except Exception as e2:
-                    log.error(f"TT 掉包检测重试仍失败: {e2}")
-
-    t = threading.Thread(target=_loop, daemon=True)
+    t = threading.Thread(
+        target=_interval_loop,
+        args=("tt_delist", "tt_delist_minutes", 30, _run_tt_delist_check_once, "TT 掉包定时检测"),
+        daemon=True,
+    )
     t.start()
 
 
