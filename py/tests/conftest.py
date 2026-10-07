@@ -100,3 +100,39 @@ def dev_headers(client):
     })
     token = resp.get_json().get("access_token", "")
     return {"Authorization": f"Bearer {token}"}
+
+
+def _make_user_with_headers(client, username, role, platform):
+    """建用户 → 改角色/平台 → 登录 → 返回认证头。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role=?, platform=? WHERE username=?", (role, platform, username))
+    db.commit()
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    token = resp.get_json().get("access_token", "")
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def admin_gg_headers(client):
+    """GG 平台的 admin。"""
+    return _make_user_with_headers(client, "admingg", "admin", "gg")
+
+
+@pytest.fixture
+def admin_tt_headers(client):
+    """TT 平台的 admin。"""
+    return _make_user_with_headers(client, "admintt", "admin", "tt")
+
+
+@pytest.fixture
+def admin_fb_headers(client):
+    """FB 平台的 admin。"""
+    return _make_user_with_headers(client, "adminfb", "admin", "fb")
+
+
+@pytest.fixture
+def huguan_headers(client):
+    """户管。"""
+    return _make_user_with_headers(client, "huguanuser", "huguan", "gg")

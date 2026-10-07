@@ -146,3 +146,29 @@ def tt_write_required(fn):
             return err_resp
         return fn(*args, **kwargs)
     return wrapper
+
+
+def scheduler_required(platform):
+    """定时任务权限：developer 跨平台放行；admin 须 platform 匹配；其余一律 403。
+
+    ⚠️ 刻意不复用 require_platform() —— 它的 PLATFORM_SWITCH_ROLES 含 HUGUAN_ROLE，
+    会把户管无条件放行，等于给户管开定时任务的后门。户管不参与定时任务。
+    """
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                uid = int(get_jwt_identity())
+            except Exception:
+                return err("未认证", 401)
+            user = auth.get_user_by_id(uid)
+            if not user:
+                return err("用户不存在", 401)
+            role = user.get("role")
+            if role == "developer":
+                return fn(*args, **kwargs)
+            if role != "admin" or user.get("platform") != platform:
+                return err("无权管理该定时任务", 403)
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
