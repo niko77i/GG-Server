@@ -283,8 +283,10 @@ def dashboard_undo_status():
     不套一层 "undo" —— 与 spec §7 的接口表、以及本任务 brief 的 Produces 契约行一致
     （brief Step 3 的示例代码写的是 `ok({"undo": out})`，那是计划快照里的笔误）。
 
-    push 的 count 是「快照覆盖的行数」；sync 的 count 是「updates 项数 + created 项数」，
-    与前端要显示的规模口径一致（spec §八 的「影响 N 行」）。
+    push 的 count 是「快照覆盖的行数」；sync 的 count 是快照里**要撤的项**之和
+    （updates + owner_changes + created + created_statuses），与 `undo_sync` 的 `reverted`
+    及前端要显示的规模口径一致（spec §八 的「影响 N 行」）。`sheet_back` 是表侧原值、
+    不作为独立的「要撤的项」计数 —— 它的改动已经体现在其它几类里。
 
     created_at 取自快照行（「上一次：10-06 14:32」），行不存在或 payload 坏掉 → null，
     与「没有快照」同形。
@@ -305,7 +307,9 @@ def dashboard_undo_status():
                                   "created_at": meta["created_at"]}
             else:
                 out[direction] = {"count": len(meta["payload"].get("updates", []))
-                                           + len(meta["payload"].get("created", [])),
+                                           + len(meta["payload"].get("owner_changes", []))
+                                           + len(meta["payload"].get("created", []))
+                                           + len(meta["payload"].get("created_statuses", [])),
                                   "created_at": meta["created_at"]}
     finally:
         db.close()
@@ -340,9 +344,11 @@ def dashboard_undo_apply():
             out = hd.undo_push(uid, platform)
         else:
             out = hd.undo_sync(uid, platform)
-    except Exception as e:
+    except Exception:
+        # 异常详情只落日志：**绝不**把原始异常文本内插进响应体 —— 可能含文件路径 /
+        # SQL 片段等内部信息（既有 sync / push 端点靠 Flask 的泛化 500，不内插）。
         log.exception("撤回失败: platform=%s direction=%s", platform, direction)
-        return err(f"撤回失败：{e}", 500)
+        return err("撤回失败，请重试", 500)
     return ok(out)
 
 

@@ -3,6 +3,7 @@
 设计见 docs/superpowers/specs/2026-10-06-huguan-sync-undo-design.md。
 本文件不打真实 Google API。
 """
+import logging
 import sqlite3
 
 import pytest
@@ -724,7 +725,8 @@ class TestUndoStatusRoute:
         db = database.get_db()
         hd.save_undo(db, uid, "fb", "push",
                      {"cells": [{"account_id": "A"}, {"account_id": "B"}]})
-        # sync 的 count 口径 = updates 项数 + created 项数
+        # sync 的 count 口径 = 五类里「要撤的项」之和
+        # （updates + owner_changes + created + created_statuses；sheet_back 是表侧原值、不算）
         hd.save_undo(db, uid, "fb", "sync",
                      {"updates": [{"account_id": "A"}], "created": [{"account_id": "C"}]})
         db.commit()
@@ -736,6 +738,49 @@ class TestUndoStatusRoute:
         # spec §八：按钮旁小字「上一次：10-06 14:32」需要 created_at
         assert got["push"]["created_at"]
         assert got["sync"]["created_at"]
+
+    def test_sync_count_includes_owner_changes(self, client):
+        """只改归属的同步（updates/created 皆空）⇒ count 不能是 0。
+
+        快照 payload 有五类内容；只数 updates+created 会让「纯归属变更」的同步
+        按钮亮着却显示「影响 0 项」，与 `undo_sync` 的 `reverted` 口径对不上。
+        去掉 owner_changes 的计数，本测试即红。
+        """
+        hg, uid = _huguan_headers(client, "_undo_status_oc")
+        db = database.get_db()
+        hd.save_undo(db, uid, "fb", "sync",
+                     {"updates": [], "owner_changes": [{"account_id": "OC", "cols": {}}],
+                      "created": [], "created_statuses": [], "sheet_back": []})
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
+        assert got["sync"]["count"] == 1
+
+    def test_sync_count_includes_created_statuses(self, client):
+        """同理：本次新建的状态也是要撤的项，必须计入 count。"""
+        hg, uid = _huguan_headers(client, "_undo_status_cs")
+        db = database.get_db()
+        hd.save_undo(db, uid, "fb", "sync",
+                     {"updates": [], "owner_changes": [], "created": [],
+                      "created_statuses": [{"name": "待优化", "platform": "fb"}],
+                      "sheet_back": []})
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
+        assert got["sync"]["count"] == 1
+
+    def test_sync_count_excludes_sheet_back(self, client):
+        """`sheet_back` 是表侧原值（要盖回去的旧值），不是「要撤的项」，不计入 count。"""
+        hg, uid = _huguan_headers(client, "_undo_status_sb")
+        db = database.get_db()
+        hd.save_undo(db, uid, "fb", "sync",
+                     {"updates": [], "owner_changes": [], "created": [],
+                      "created_statuses": [],
+                      "sheet_back": [{"account_id": "SB1", "cells": {"J": "旧"}}]})
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
+        assert got["sync"]["count"] == 0
 
     def test_null_when_no_snapshot(self, client):
         hg, _ = _huguan_headers(client, "_undo_status_none")
@@ -1351,20 +1396,28 @@ class TestUndoApplyRoute:
                            json={"platform": "gg", "direction": "push"}
                            ).status_code in (401, 422)
 
-    def test_execution_failure_returns_500_with_message(self, client, monkeypatch):
-        """执行侧有意不吞异常 ⇒ 路由层要把它转成 500 + 中文说明（不许静默吞掉）。"""
+    def test_execution_failure_returns_500_with_message(self, client, monkeypatch, caplog):
+        """执行侧有意不吞异常 ⇒ 路由层转成 500 + **固定**中文文案（不许静默吞掉）。
+
+        响应体绝不内插原始异常文本：可能含文件路径 / SQL 片段等内部信息。异常详情
+        只落日志 —— 这里用 caplog 钉住「排查线索仍在日志里」。把 `e` 内插回响应即红。
+        """
         hg, _ = _huguan_headers(client, "_undo_post_500")
 
         def _boom(u, p):
             raise RuntimeError("表炸了")
 
         monkeypatch.setattr(hd, "undo_push", _boom)
-        resp = client.post("/api/huguan/dashboard/undo",
-                           json={"platform": "fb", "direction": "push"}, headers=hg)
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/huguan/dashboard/undo",
+                               json={"platform": "fb", "direction": "push"}, headers=hg)
         assert resp.status_code == 500
         body = resp.get_json()
         assert body["success"] is False
-        assert "表炸了" in body["error"]
+        assert body["error"] == "撤回失败，请重试"
+        assert "表炸了" not in body["error"]
+        # 异常详情不得丢：仍在日志里（排查能力不因脱敏而降级）
+        assert "表炸了" in caplog.text
 
 
 class TestSyncRouteSnapshotWiring:
