@@ -947,6 +947,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [定时任务：权限下放到管理员 + 周期可配置](docs/superpowers/specs/2026-10-07-scheduler-admin-access-and-interval-config-design.md)（admin 按平台隔离；周期可配置存 `config.scheduler_config`，上次执行存 `scheduler_last_run`）
 - [定时任务管理页：周期编辑视觉设计](docs/superpowers/specs/2026-10-07-scheduler-frontend-visual-design.md)（卡片内划「调度条」：左周期右上次执行；顺带修 TT 卡片写错的频率文案）
 - [定时任务功能：审查发现清单（**已全部处理**）](docs/superpowers/specs/2026-10-07-scheduler-open-findings.md)（23 条：19 条可修的已修完并附提交号、4 条经判定不是问题；含一处对初版技术论断的勘误）
+- [FB 账户面板批量能力对齐](docs/superpowers/specs/2026-10-08-fb-account-panel-batch-actions-design.md)（批量查户 / 批量新增导入 / 批量删除 / 回收站四项；**不含**同步与批量充值）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
