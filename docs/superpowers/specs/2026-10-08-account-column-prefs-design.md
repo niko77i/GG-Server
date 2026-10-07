@@ -154,7 +154,14 @@ const getColumnElIndex = (children, child) => Array.prototype.indexOf.call(child
 
 **① `frontend/src/stores/columnPrefs.js`（Pinia store）**
 
-选 Pinia 而非裸 composable 的理由：三张表要共享同一份数据，且**启动时只拉一次**。挂在 `App.vue:38-41` 的启动流程里（与 `auth.fetchMe()` 并列），之后切到哪个面板都是现成的，不会每进一次页面发一次请求。`stores/` 下已有 `auth.js`、`taskRunner.js` 先例。
+选 Pinia 而非裸 composable 的理由：三张表要共享同一份数据，且**每个登录会话只拉一次**。`App.vue` 里 `watch(() => auth.user?.id, ...)` —— uid 出现就拉、变空就清空，写法和 `composables/useOwnerPicker.js:35-38` 同源。
+
+**不能写成「`onMounted` 里裸调一次 `ensureLoaded()`」**，有两处会出错：
+
+- `onMounted` 那一刻用户可能还没登录（先落在 `/login`），裸调会 401 且永不重试
+- `stores/auth.js:77-84` 的 `logout()` **不刷新页面**（`fetchMe()` 失败时也走它，见 `stores/auth.js:68`）。同浏览器换号时 store 里还留着上一个人的 prefs，而 `ensureLoaded()` 有 `if (ready.value) return` 守卫不会重拉 —— **B 会看到 A 的列**。所以换号时必须 `clear()`，且 `clear()` 还要清掉未落地的防抖定时器，否则 A 的定时器会带着 B 的新 token 把 A 的配置写进 B 的 key。
+
+`stores/` 下已有 `auth.js`、`taskRunner.js` 先例。
 
 状态与方法：
 
