@@ -92,6 +92,7 @@
     <!-- 弹窗 -->
     <FbAccountBatchImportModal v-model:visible="batchImportVisible" @imported="loadData" />
     <FbAccountBatchLookupModal v-model:visible="lookupVisible" />
+    <FbAccountDeletedModal v-model:visible="deletedVisible" @changed="loadData" />
 
     <el-dialog v-model="dialogVisible" :title="editingId?'编辑账户':'新增账户'" width="520px" class="account-dialog">
       <el-form :model="form" label-width="90px" class="account-form">
@@ -173,6 +174,7 @@ import client from '../../api/client'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 import FbAccountBatchImportModal from '@/components/fb/FbAccountBatchImportModal.vue'
 import FbAccountBatchLookupModal from '@/components/fb/FbAccountBatchLookupModal.vue'
+import FbAccountDeletedModal from '@/components/fb/FbAccountDeletedModal.vue'
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
 const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selected = ref([])
