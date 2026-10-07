@@ -942,6 +942,8 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [户归属下拉按平台隔离](docs/superpowers/specs/2026-09-28-huguan-owner-options-platform-isolation-design.md)
 - [TT「换绑情况」列改造：归属变更通道 → 换绑记录字段](docs/superpowers/specs/2026-10-06-tt-owner-change-note-design.md)（仅 TT；取代 `2026-09-23-huguan-sheet-design.md` §7 的 TT 部分）
 - [TT 备注（remark）跨看板同步优先级](docs/superpowers/specs/2026-10-06-tt-remark-sync-precedence-design.md)（方案 A：首次入库户管触发以投手为准、此后投手权威永久；新建「系统 → 投手看板」推送通路）
+- [定时任务：权限下放到管理员 + 周期可配置](docs/superpowers/specs/2026-10-07-scheduler-admin-access-and-interval-config-design.md)（admin 按平台隔离；周期可配置存 `config.scheduler_config`，上次执行存 `scheduler_last_run`）
+- [定时任务管理页：周期编辑视觉设计](docs/superpowers/specs/2026-10-07-scheduler-frontend-visual-design.md)（卡片内划「调度条」：左周期右上次执行；顺带修 TT 卡片写错的频率文案）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
