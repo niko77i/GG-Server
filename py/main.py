@@ -4767,7 +4767,10 @@ def accounts_update(aid):
         if new_status and old_status and new_status != old_status["status_name"]:
             _acct_id = old_status["account_id"]
             _payload = {"dash_uid": user_id}
-            if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _acct_id, _payload):
+            # 配置闸门（原实现即在此短路）：未配置表格时静默 no-op，不得登记日志行。
+            _sid = _get_sync_spreadsheet_id(db)
+            _dash_name = _get_my_dashboard_name(db, user_id)
+            if _sid and _dash_name:
                 sheet_write.run_write(
                     db, user_id=user_id, platform="gg", target="gg_my_dashboard",
                     business_key=_acct_id,
@@ -4935,7 +4938,10 @@ def accounts_delete(aid):
         # 后台写「我的看板」H 列（解绑）
         _acct_id = ac["account_id"]
         _payload = {"dash_uid": ac["owner_id"]}
-        if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _acct_id, _payload):
+        # 配置闸门（原实现即在此短路）：未配置表格时静默 no-op，不得登记日志行。
+        _sid = _get_sync_spreadsheet_id(db)
+        _dash_name = _get_my_dashboard_name(db, ac["owner_id"])
+        if _sid and _dash_name:
             sheet_write.run_write(
                 db, user_id=user_id, platform="gg", target="gg_my_dashboard",
                 business_key=_acct_id,
@@ -5004,7 +5010,10 @@ def accounts_restore(aid):
         # 后台清空「我的看板」H 列（解绑）
         _acct_id = ac["account_id"]
         _payload = {"dash_uid": ac["owner_id"]}
-        if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _acct_id, _payload):
+        # 配置闸门（原实现即在此短路）：未配置表格时静默 no-op，不得登记日志行。
+        _sid = _get_sync_spreadsheet_id(db)
+        _dash_name = _get_my_dashboard_name(db, ac["owner_id"])
+        if _sid and _dash_name:
             sheet_write.run_write(
                 db, user_id=user_id, platform="gg", target="gg_my_dashboard",
                 business_key=_acct_id,
@@ -5220,7 +5229,10 @@ def accounts_batch_update():
         if field in ("status", "status_id") and value and dashboard_sync_rows:
             _keys = [r[0] for r in dashboard_sync_rows]
             _payload = {"dash_uid": user_id}
-            if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _keys[0], _payload):
+            # 配置闸门（原实现即在此短路）：未配置表格时静默 no-op，不得登记日志行。
+            _sid = _get_sync_spreadsheet_id(db)
+            _dash_name = _get_my_dashboard_name(db, user_id)
+            if _sid and _dash_name:
                 # sync_fn 用 build_many_sync（覆盖全部 N 户），不是单户 build_sync：
                 # run_write_many 只执行 sync_fn **一次**，拿单户工厂会让只有第一户
                 # 被写进表、N 行却全落 synced（静默漏写）。
@@ -5489,13 +5501,13 @@ def accounts_sync_from_sheet():
             if _sync_back_rows:
                 _keys = [r[0] for r in _sync_back_rows]
                 _payload = {"dash_uid": user_id}
-                if sheet_write.build_sync_safe("gg_my_dashboard", user_id, _keys[0], _payload):
-                    # 同上：sync_fn 必须覆盖全部 N 户（理由见 batch-update 处的注释）
-                    sheet_write.run_write_many(
-                        db, user_id=user_id, platform="gg", target="gg_my_dashboard",
-                        business_keys=_keys,
-                        sync_fn=routes.gg_dashboard_sheet.build_many_sync(user_id, _keys, _payload),
-                        payload=_payload)
+                # 闸门已在外层（`if sheet_id and dashboard_name:`，见 10c 之前的解析）——
+                # 此处不再重复判配置。
+                sheet_write.run_write_many(
+                    db, user_id=user_id, platform="gg", target="gg_my_dashboard",
+                    business_keys=_keys,
+                    sync_fn=routes.gg_dashboard_sheet.build_many_sync(user_id, _keys, _payload),
+                    payload=_payload)
     finally:
         db.close()
 

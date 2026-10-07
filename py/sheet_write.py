@@ -52,26 +52,16 @@ def register_target(name, rebuild, rollback=None):
 
 
 def build_sync(target, user_id, business_key, payload):
-    """按注册表构造写表函数。初始写表与重试共用同一条重建路径（DRY）。"""
+    """按注册表构造写表函数。初始写表与重试共用同一条重建路径（DRY）。
+
+    注意这是**纯工厂**：只查 TARGETS 并调用 target 的 rebuild 工厂，后者仅构造并返回
+    闭包 —— 配置在闭包**内部**、后台线程执行时才解析。故本函数不会因配置缺失而失败，
+    也**不可**用作「配置是否就绪」的闸门（配置闸门须由调用点自己判）。
+    """
     entry = TARGETS.get(target)
     if entry is None:
         raise KeyError(f"未注册的写表目标: {target}")
     return entry["rebuild"](user_id, business_key, payload or {})
-
-
-def build_sync_safe(target, user_id, business_key, payload):
-    """配置未就绪时返回 None 而不抛 —— 调用点用它短路（与既有 `if sheet_id and dashboard_name:` 等价）。
-
-    与 build_sync 的区别：build_sync 对**未注册**的 target 抛 KeyError（契约的一部分，
-    重试端点据此返回 400）；本函数只吞掉 rebuild 工厂内部的**配置缺失**异常。
-    """
-    try:
-        return build_sync(target, user_id, business_key, payload)
-    except KeyError:
-        raise                      # 未注册是契约错误，不能吞
-    except Exception as e:
-        log.warning("写表目标重建失败 target=%s: %s", target, e)
-        return None
 
 
 def record_pending(db, *, user_id, platform, target, business_key,
