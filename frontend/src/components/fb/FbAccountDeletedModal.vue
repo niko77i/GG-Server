@@ -1,9 +1,18 @@
 <template>
   <el-dialog :model-value="visible" @update:model-value="$emit('update:visible', $event)"
     title="🗑 已删除账户" width="820px" @open="init">
-    <div v-if="allAccounts.length" style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
-      <el-input v-model="searchText" placeholder="🔍 搜索账户ID / 名称 / 所属BM..." clearable style="flex:1;" />
-      <span style="color:#888;font-size:12px;white-space:nowrap;">{{ filteredAccounts.length }} / {{ allAccounts.length }} 条</span>
+    <div v-if="allAccounts.length" style="margin-bottom:12px;">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <el-input v-model="searchText" placeholder="🔍 搜索账户ID / 名称 / 所属BM..." clearable style="flex:1;" />
+        <span style="color:#888;font-size:12px;white-space:nowrap;">{{ filteredAccounts.length }} / {{ allAccounts.length }} 条</span>
+      </div>
+      <!-- 诚实提示：本弹窗为分页端点，本地搜索只能过滤当前页。仅当确实不止一页
+           （total > size）时显示；单页时本地过滤即全量，此提示是噪音，故隐藏。
+           服务端搜索（把 search 下推到 /api/fb/accounts/deleted）列为 follow-up，
+           本次不引入后端改动。 -->
+      <div v-if="total > size" style="color:#e6a23c;font-size:12px;margin-top:6px;line-height:1.5;">
+        搜索仅覆盖当前页：本页 {{ allAccounts.length }} 条，共 {{ total }} 条已删除账户；查找其余账户请先翻页。
+      </div>
     </div>
     <el-table :data="filteredAccounts" size="small" border stripe v-if="filteredAccounts.length">
       <el-table-column prop="account_id" label="账户ID" min-width="130" show-overflow-tooltip />
