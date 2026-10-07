@@ -947,6 +947,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [定时任务：权限下放到管理员 + 周期可配置](docs/superpowers/specs/2026-10-07-scheduler-admin-access-and-interval-config-design.md)（admin 按平台隔离；周期可配置存 `config.scheduler_config`，上次执行存 `scheduler_last_run`）
 - [定时任务管理页：周期编辑视觉设计](docs/superpowers/specs/2026-10-07-scheduler-frontend-visual-design.md)（卡片内划「调度条」：左周期右上次执行；顺带修 TT 卡片写错的频率文案）
 - [定时任务功能：审查发现清单（**已全部处理**）](docs/superpowers/specs/2026-10-07-scheduler-open-findings.md)（23 条：19 条可修的已修完并附提交号、4 条经判定不是问题；含一处对初版技术论断的勘误）
+- [上万户规模下的看板同步延迟与数据安全治理](docs/superpowers/specs/2026-10-07-sheet-sync-scale-design.md)（设计分三部分，**目前只落地第 ③ 部分「分页与列表」**：17 处列表端点加 `size` 服务端上限（越界钳制 500、非数字回落不报错）+ `page` 上界、GG/TT「已删除账户」列表补分页与服务端搜索（含稳定排序 tiebreaker）、FB 列表 BM 改批量查消除 N+1、既有 `IN (...)` 接入 `chunk(900)`。实现计划见 `docs/superpowers/plans/2026-10-07-sheet-sync-scale-pagination.md`；连带记有 3 处清单勘误与 4 条后续工单）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
