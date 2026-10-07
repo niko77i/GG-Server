@@ -5056,20 +5056,52 @@ def accounts_permanent_delete(aid):
 @app.route("/api/accounts/deleted", methods=["GET"])
 @jwt_required()
 def accounts_deleted_list():
-    """返回当前用户已删除的账户列表。"""
+    """返回当前用户已删除的账户列表（**分页** + 服务端搜索）。
+
+    分页是必须的：上万户规模下全量返回会让前端一次性渲染上万行 DOM 而卡死
+    （2026-10-07 用户原话「不要全量返回 冲烂浏览器」）。
+
+    响应在原有的 `accounts` 之外**追加** `total` / `page` / `size` —— 纯增量，
+    前端旧读取路径 `res.accounts` 不受影响。
+
+    搜索必须走服务端：分页之后前端手里只有当前页，「当前页内过滤」会漏掉
+    其余页的匹配结果，表现为「搜得到但显示不全」。
+    """
     user_id = int(get_jwt_identity())
+    page, size = parse_pagination()
+    search = request.args.get("search", "").strip()
+
+    where = ["a.owner_id=?", "a.deleted_at IS NOT NULL"]
+    params = [user_id]
+    if search:
+        # 与前端原来的客户端过滤口径对齐：账户ID / 名称 / 代理名三个字段。
+        where.append("(a.account_id LIKE ? OR a.name LIKE ? OR ag.name LIKE ?)")
+        like = f"%{search}%"
+        params += [like, like, like]
+    where_sql = " AND ".join(where)
+
     db = _yt_db()
-    rows = db.execute(
-        """SELECT a.id, a.name, a.account_id, a.timezone, a.deleted_at,
-                  ag.name AS agent_name, st.name AS status_name
-           FROM accounts a
-           LEFT JOIN agents ag ON a.agent_id = ag.id
-           LEFT JOIN account_statuses st ON a.status_id = st.id
-           WHERE a.owner_id=? AND a.deleted_at IS NOT NULL
-           ORDER BY a.deleted_at DESC""",
-        (user_id,)
-    ).fetchall()
-    db.close()
+    try:
+        # total 与列表用**同一套** where/params：分两套条件会让总数与实际
+        # 可翻页数不一致，前端算出空页。
+        total = db.execute(
+            f"SELECT COUNT(*) FROM accounts a LEFT JOIN agents ag ON a.agent_id = ag.id "
+            f"WHERE {where_sql}",
+            params
+        ).fetchone()[0]
+        rows = db.execute(
+            f"""SELECT a.id, a.name, a.account_id, a.timezone, a.deleted_at,
+                       ag.name AS agent_name, st.name AS status_name
+                FROM accounts a
+                LEFT JOIN agents ag ON a.agent_id = ag.id
+                LEFT JOIN account_statuses st ON a.status_id = st.id
+                WHERE {where_sql}
+                ORDER BY a.deleted_at DESC LIMIT ? OFFSET ?""",
+            params + [size, (page - 1) * size]
+        ).fetchall()
+    finally:
+        db.close()
+
     accounts = []
     for r in rows:
         d = dict(r)
@@ -5078,7 +5110,8 @@ def accounts_deleted_list():
         if d.get("status_name"):
             d["status"] = d["status_name"]
         accounts.append(d)
-    return jsonify({"success": True, "accounts": accounts})
+    return jsonify({"success": True, "accounts": accounts,
+                    "total": total, "page": page, "size": size})
 
 
 @app.route("/api/accounts/batch-update", methods=["POST"])
