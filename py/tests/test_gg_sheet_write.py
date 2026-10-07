@@ -401,3 +401,182 @@ def test_batch_status_change_writes_operator_dashboard_not_owner(client, monkeyp
     names = {n for n, a in calls if a in ("gg_ident_b1", "gg_ident_b2")}
     assert "看板_OPERATOR" in names, f"批量改状态须写操作者的看板，实际 {names}"
     assert "看板_OWNER" not in names, f"批量改状态不得写账户 owner 的看板，实际 {names}"
+
+
+# ---------------------------------------------------------------------------
+# GG 充值表（target=gg_recharge）四个写表点
+#
+# ⚠️ 与上面几条不同：下面几条**不**在测试体内重新 `from time import sleep`
+# —— 本文件顶部已捕获真 sleep。其中一条会 monkeypatch 全局 `time.sleep`，若在
+# patch 之后再 import 一次，轮询拿到的就是被 patch 的桩，轮询自己会去填 `seen`
+# （断言恒真）且不让出 GIL（断言跑在后台线程之前）。
+# ---------------------------------------------------------------------------
+
+
+def test_recharge_submit_registers_and_settles(client, monkeypatch):
+    """单笔充值 ⇒ 登记 gg_recharge，business_key 是 recharge_records.id。"""
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "append_recharge", lambda *a, **k: None)
+
+    h, uid = _gg_user(client, "_gg_recharge")
+    db = database.get_db()
+    _setup_sheets(db)
+    _mk_account(db, uid, "gg_adv_r1", _status_id(db, "存活"))
+    db.close()
+
+    resp = client.post("/api/recharge/submit", headers=h,
+                       json={"account_id": "gg_adv_r1", "amount": 100, "agent": "代理A"})
+    assert resp.status_code == 200, resp.get_json()
+    rid = resp.get_json()["id"]
+
+    db = database.get_db()
+    for _ in range(200):
+        r = _row(db, uid, "gg_recharge", str(rid))
+        if r is not None and r["status"] in sheet_write.TERMINAL:
+            break
+        _poll_sleep(0.02)
+    r = _row(db, uid, "gg_recharge", str(rid))
+    db.close()
+    assert r is not None, "充值必须登记 gg_recharge"
+    assert r["status"] == "synced"
+
+
+def test_recharge_first_failure_is_intermediate_not_alerting(client, monkeypatch):
+    """首次失败 ⇒ status='failed'（中间态），**不在 ATTENTION 里** ——
+    修掉现值「首次失败就写 sheets_error 让前端立刻报警」与用户裁定的冲突。"""
+    import google_sheets_service as gs
+    import time as _time
+    seen = {}
+
+    def _capture(_s):
+        db = database.get_db()
+        rows = db.execute("SELECT status FROM sheet_write_log WHERE target='gg_recharge'").fetchall()
+        seen["statuses"] = [r["status"] for r in rows]
+        db.close()
+
+    monkeypatch.setattr(_time, "sleep", _capture)
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+
+    def _boom(*a, **k):
+        raise RuntimeError("Sheets 挂了")
+
+    monkeypatch.setattr(gs, "append_recharge", _boom)
+
+    h, uid = _gg_user(client, "_gg_firstfail")
+    db = database.get_db()
+    _setup_sheets(db)
+    _mk_account(db, uid, "gg_adv_r2", _status_id(db, "存活"))
+    db.close()
+
+    assert client.post("/api/recharge/submit", headers=h,
+                       json={"account_id": "gg_adv_r2", "amount": 50, "agent": "A"}
+                       ).status_code == 200
+
+    for _ in range(200):
+        if seen:
+            break
+        _poll_sleep(0.01)
+    assert seen.get("statuses") == ["failed"], \
+        f"首次失败应是中间态 failed，实际 {seen.get('statuses')}"
+    assert "failed" not in sheet_write.ATTENTION, "中间态不得触发提示"
+
+
+def test_recharge_retry_sheets_submits_to_unified_entry(client, monkeypatch):
+    """旧 `POST /api/recharge/<rid>/retry-sheets` 改为**薄转调**统一入口。
+
+    语义已变：200 只代表「已提交到后台」。本用例钉住「提交确实发生」——
+    旧形态是同步重放、根本不登记 sheet_write_log，于是查不到日志行 ⇒ 红。
+    同时守住既有的 404（记录不存在）不被转调改写掉。
+    """
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "append_recharge",
+                        lambda svc, sid, name, rows: written.extend(rows))
+
+    h, uid = _gg_user(client, "_gg_retry")
+    db = database.get_db()
+    _setup_sheets(db)
+    _mk_account(db, uid, "gg_adv_rt", _status_id(db, "存活"))
+    # 直接造一条充值记录：本用例测的是重试入口，不必先走 submit
+    db.execute("INSERT INTO recharge_records (account_id, amount, operator, created_by, "
+               "sheets_synced) VALUES ('gg_adv_rt', '77', '运营', ?, 0)", (uid,))
+    db.commit()
+    rid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.close()
+
+    assert client.post("/api/recharge/999999999/retry-sheets",
+                       headers=h).status_code == 404, "不存在的记录必须 404"
+
+    resp = client.post(f"/api/recharge/{rid}/retry-sheets", headers=h)
+    assert resp.status_code == 200, resp.get_json()
+
+    db = database.get_db()
+    for _ in range(200):
+        r = _row(db, uid, "gg_recharge", str(rid))
+        if r is not None and r["status"] in sheet_write.TERMINAL:
+            break
+        _poll_sleep(0.02)
+    r = _row(db, uid, "gg_recharge", str(rid))
+    db.close()
+
+    assert r is not None, "旧端点必须登记 gg_recharge（转调统一入口）"
+    assert r["status"] == "synced", r["error_msg"] if r else None
+    assert any(w["account_id"] == "gg_adv_rt" for w in written), \
+        f"重试必须真的把该行写进表，实际 {written}"
+
+
+def test_status_clear_off_registers_recharge_write(client, monkeypatch):
+    """清账追加的「清」记录必须登记 gg_recharge —— 单户（点位 A）与批量（点位 C）。
+
+    本用例是**批量清账点位**唯一的守卫：若点位 C 照单键工厂
+    `build_sync("gg_recharge", user_id, _keys[0], ...)` 构造，`run_write_many` 只执行
+    sync_fn 一次 ⇒ 只有第一条「清」被写进表，而两行日志全落 synced（静默漏写）。
+    断言「三户都被写表」即红 —— 正是 Task 2 在「我的看板」发现的同一类缺陷。
+    """
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "append_recharge",
+                        lambda svc, sid, name, rows: written.extend(rows))
+    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+
+    h, uid = _gg_user(client, "_gg_clear")
+    db = database.get_db()
+    _setup_sheets(db)
+    alive = _status_id(db, "存活")
+    dead = _status_id(db, "死亡")
+    ids = [_mk_account(db, uid, f"gg_adv_c{i}", alive) for i in (1, 2, 3)]
+    for aid in ids:
+        acc = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()["account_id"]
+        db.execute("INSERT INTO recharge_records (account_id, amount, operator, created_by) "
+                   "VALUES (?, '500', '运营', ?)", (acc, uid))
+    db.commit()
+    db.close()
+
+    # 点位 A：单户改状态 ⇒ 清账一条
+    assert client.put(f"/api/accounts/{ids[0]}", headers=h,
+                      json={"status_id": dead}).status_code == 200
+    # 点位 C：批量改状态 ⇒ 清账两条
+    assert client.post("/api/accounts/batch-update", headers=h,
+                       json={"ids": ids[1:], "field": "status_id", "value": dead}
+                       ).status_code == 200
+
+    db = database.get_db()
+    rids = [c["id"] for c in db.execute(
+        "SELECT id FROM recharge_records WHERE amount='清' ORDER BY id").fetchall()]
+    assert len(rids) == 3, f"三个账户都应追加清账记录，实际 {rids}"
+    for _ in range(300):
+        rows = [_row(db, uid, "gg_recharge", str(r)) for r in rids]
+        if all(x is not None and x["status"] in sheet_write.TERMINAL for x in rows):
+            break
+        _poll_sleep(0.02)
+    rows = [_row(db, uid, "gg_recharge", str(r)) for r in rids]
+    db.close()
+
+    assert all(x is not None for x in rows), f"每条清账都必须登记 gg_recharge，实际 {rows}"
+    assert [x["status"] for x in rows] == ["synced"] * 3, [x["error_msg"] for x in rows]
+    cleared = {w["account_id"] for w in written if w.get("amount") == "清"}
+    assert cleared == {"gg_adv_c1", "gg_adv_c2", "gg_adv_c3"}, \
+        f"三户都必须被写进充值表，实际 {written}"

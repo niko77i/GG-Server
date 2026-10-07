@@ -377,6 +377,7 @@ from routes.sheet_write_routes import sheet_write_bp
 app.register_blueprint(sheet_write_bp)
 import sheet_write
 import routes.gg_dashboard_sheet  # noqa: F401  —— 注册 gg_my_dashboard target
+import routes.gg_recharge_sheet  # noqa: F401  —— 注册 gg_recharge target
 
 try:
     auth.init_developer(APP_CONFIG)
@@ -4724,15 +4725,7 @@ def accounts_update(aid):
             if need_clear:
                 user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
                 operator_name = (user["display_name"] or "") if user else ""
-                clear_agent_name = data.get("agent_name", old_status["agent_name"] or "")
                 clear_agent_id = old_status["agent_id"]
-                clear_row = {
-                    "account_id": old_status["account_id"],
-                    "amount": "清",
-                    "agent": clear_agent_name,
-                    "operator": operator_name,
-                    "status": new_status,
-                }
                 # 先写 DB
                 db.execute(
                     "INSERT INTO recharge_records (account_id, amount, agent_id, operator, status, created_by, sheets_synced) "
@@ -4742,26 +4735,16 @@ def accounts_update(aid):
                 recharge_note = "已追加清账记录"
                 clear_record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-                # 后台同步 Sheets
+                # 后台同步 Sheets：登记进统一写表机制（待写行在后台线程内从 DB 重算）
                 sheet_id = _get_sync_spreadsheet_id(db)
-                recharge_sheet_name = _get_recharge_sheet_name(db)
                 if sheet_id and clear_record_id:
-                    _rid = clear_record_id
-                    _sheet_name = recharge_sheet_name
-                    def _do_sync():
-                        import google_sheets_service as gs
-                        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                        gs.append_recharge(service, sheet_id, _sheet_name, [clear_row])
-                    def _on_fail(status, err_msg):
-                        _db = database.get_db()
-                        if status == "synced":
-                            _db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?",
-                                        (_rid,))
-                        else:
-                            _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                        (err_msg, _rid))
-                        _db.commit(); _db.close()
-                    _sync_sheets_background(_do_sync, _on_fail)
+                    _payload = {"kind": "single"}
+                    sheet_write.run_write(
+                        db, user_id=user_id, platform="gg", target="gg_recharge",
+                        business_key=str(clear_record_id),
+                        sync_fn=sheet_write.build_sync(
+                            "gg_recharge", user_id, str(clear_record_id), _payload),
+                        payload=_payload)
 
         # 状态变更时写「我的看板」（独立于清账逻辑，所有状态变更都触发）
         if new_status and old_status and new_status != old_status["status_name"]:
@@ -5196,35 +5179,17 @@ def accounts_batch_update():
         # 后台同步 Google Sheets（仅写入新插入的记录）
         if field in ("status", "status_id") and value and new_clear_rows:
             sheet_id = _get_sync_spreadsheet_id(db)
-            recharge_sheet_name = _get_recharge_sheet_name(db)
             if sheet_id:
-                user = db.execute("SELECT display_name FROM users WHERE id=?", (user_id,)).fetchone()
-                op_name = (user["display_name"] or "") if user else ""
-                _sheet_data = [{
-                    "account_id": r["account_id"],
-                    "amount": "清",
-                    "agent": r["agent"],
-                    "operator": op_name,
-                    "status": status_value_effective,
-                } for r in new_clear_rows]
-                _rids = [r["rid"] for r in new_clear_rows]
-                _sname = recharge_sheet_name
-                def _do_sync():
-                    import google_sheets_service as gs
-                    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                    gs.append_recharge(service, sheet_id, _sname, _sheet_data)
-                def _on_fail(status, err_msg):
-                    _db = database.get_db()
-                    if status == "synced":
-                        for rid in _rids:
-                            _db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?",
-                                        (rid,))
-                    else:
-                        for rid in _rids:
-                            _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                        (err_msg, rid))
-                    _db.commit(); _db.close()
-                _sync_sheets_background(_do_sync, _on_fail)
+                _keys = [str(r["rid"]) for r in new_clear_rows]
+                _payload = {"kind": "batch"}
+                # sync_fn 用 build_many_sync（覆盖全部 N 条），不是单键 build_sync：
+                # run_write_many 只执行 sync_fn **一次**，拿单键工厂会让只有第一条
+                # 被写进表、N 行却全落 synced（静默漏写）。
+                sheet_write.run_write_many(
+                    db, user_id=user_id, platform="gg", target="gg_recharge",
+                    business_keys=_keys,
+                    sync_fn=routes.gg_recharge_sheet.build_many_sync(user_id, _keys, _payload),
+                    payload=_payload)
         # 批量状态变更时写「我的看板」（独立于清账逻辑）
         if field in ("status", "status_id") and value and dashboard_sync_rows:
             _keys = [r[0] for r in dashboard_sync_rows]
@@ -5643,36 +5608,18 @@ def recharge_submit():
         db.commit()
         record_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        # 2. 读配置，启动后台同步
+        # 2. 登记进统一写表机制（写表在后台线程内完成；待写行从 DB 重算）
+        # 配置闸门照旧：未配置表格时静默 no-op，不得登记日志行。
         sheet_id = _get_sync_spreadsheet_id(db)
-        recharge_sheet_name = _get_recharge_sheet_name(db)
-        db.close()
+        if sheet_id:
+            _payload = {"kind": "single"}
+            sheet_write.run_write(
+                db, user_id=user_id, platform="gg", target="gg_recharge",
+                business_key=str(record_id),
+                sync_fn=sheet_write.build_sync("gg_recharge", user_id, str(record_id), _payload),
+                payload=_payload)
         # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
         _app_cache.clear_prefix("accounts:agents:")
-
-        if sheet_id:
-            _sheet_name = recharge_sheet_name
-            def _do_sync():
-                import google_sheets_service as gs
-                service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                gs.append_recharge(service, sheet_id, _sheet_name, [{
-                    "account_id": account_id, "amount": amount,
-                    "agent": agent, "operator": operator,
-                }])
-
-            def _on_fail(status, err_msg):
-                if status == "synced":
-                    _db = database.get_db()
-                    _db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?",
-                                (record_id,))
-                    _db.commit(); _db.close()
-                else:
-                    _db = database.get_db()
-                    _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                (err_msg, record_id))
-                    _db.commit(); _db.close()
-
-            _sync_sheets_background(_do_sync, _on_fail)
 
         return jsonify({"success": True, "id": record_id})
     except Exception as e:
@@ -5744,34 +5691,21 @@ def recharge_batch_submit():
             inserted_ids.append(db.execute("SELECT last_insert_rowid()").fetchone()[0])
         db.commit()
 
-        # 2. 读配置，启动后台同步
+        # 2. 登记进统一写表机制（写表在后台线程内完成；待写行从 DB 重算）
+        # 配置闸门照旧：未配置表格时静默 no-op，不得登记日志行。
         sheet_id = _get_sync_spreadsheet_id(db)
-        recharge_sheet_name = _get_recharge_sheet_name(db)
+        if sheet_id:
+            _keys = [str(rid) for rid in inserted_ids]
+            _payload = {"kind": "batch"}
+            # sync_fn 用 build_many_sync（覆盖全部 N 条），理由同批量清账点位。
+            sheet_write.run_write_many(
+                db, user_id=user_id, platform="gg", target="gg_recharge",
+                business_keys=_keys,
+                sync_fn=routes.gg_recharge_sheet.build_many_sync(user_id, _keys, _payload),
+                payload=_payload)
         db.close()
         # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
         _app_cache.clear_prefix("accounts:agents:")
-
-        if sheet_id:
-            _ids = list(inserted_ids)
-            _sname = recharge_sheet_name
-            def _do_sync():
-                import google_sheets_service as gs
-                service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-                gs.append_recharge(service, sheet_id, _sname, valid_rows)
-
-            def _on_fail(status, err_msg):
-                _db = database.get_db()
-                if status == "synced":
-                    for rid in _ids:
-                        _db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?",
-                                    (rid,))
-                else:
-                    for rid in _ids:
-                        _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                    (err_msg, rid))
-                _db.commit(); _db.close()
-
-            _sync_sheets_background(_do_sync, _on_fail)
 
         return jsonify({"success": True, "count": len(valid_rows)})
     except Exception as e:
@@ -5861,47 +5795,43 @@ def recharge_delete(rid):
 @app.route("/api/recharge/<int:rid>/retry-sheets", methods=["POST"])
 @jwt_required()
 def recharge_retry_sheets(rid):
-    """手动重试单条充值记录的 Sheets 同步。"""
+    """旧入口，改为转调统一写表重试（规格 §5.3）。
+
+    **语义已变**：返回 200 只代表「已提交到后台」，不再代表写入成功 ——
+    旧语义（同步等 Sheets 再返回）正是会阻塞请求线程的那种形态。
+    保留本端点而非删除：让未刷新的旧前端页面继续可用（新前端走
+    `POST /api/sheet-write/retry`）。
+
+    守卫**逐字保留**：本端点现场就只有 `@jwt_required` + 404（记录不存在）+
+    400（未配置表格）三道闸门，**没有** created_by / CROSS_USER_ROLES 那道 ——
+    计划与设计文档 §5.3 引的 `test_recharge_retry_sheets_owner_guard` 是 **TT** 侧
+    用例（routes/tt_accounts_routes.py:999），不是本端点。此处刻意**不新增** owner
+    校验：账户 owner 与充值记录 created_by 可以不是同一个人，加了会把「owner 在充值
+    记录里点重试」这一既有流程 403 掉。
+    """
     db = _yt_db()
     try:
-        rec = db.execute(
-            "SELECT r.id, r.account_id, r.amount, COALESCE(ag.name, '') AS agent, r.operator "
-            "FROM recharge_records r "
-            "LEFT JOIN agents ag ON r.agent_id = ag.id "
-            "WHERE r.id=?",
-            (rid,)
-        ).fetchone()
+        rec = db.execute("SELECT id FROM recharge_records WHERE id=?", (rid,)).fetchone()
         if not rec:
             db.close()
             return jsonify({"success": False, "error": "记录不存在"}), 404
-
-        sheet_id = _get_sync_spreadsheet_id(db)
-        recharge_sheet_name = _get_recharge_sheet_name(db)
-        if not sheet_id:
+        # 配置闸门照旧：未配置表格时不得登记日志行，否则凭空多出一条必然失败的 ⚠️
+        if not _get_sync_spreadsheet_id(db):
             db.close()
             return jsonify({"success": False, "error": "请先在设置中配置充值表格"}), 400
 
-        import google_sheets_service as gs
-        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        gs.append_recharge(service, sheet_id, recharge_sheet_name, [{
-            "account_id": rec["account_id"],
-            "amount": rec["amount"],
-            "agent": rec["agent"] or "",
-            "operator": rec["operator"] or "",
-        }])
-
-        db.execute("UPDATE recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?", (rid,))
-        db.commit()
+        user_id = int(get_jwt_identity())
+        _payload = {"kind": "retry"}
+        sheet_write.run_write(
+            db, user_id=user_id, platform="gg", target="gg_recharge",
+            business_key=str(rid),
+            sync_fn=sheet_write.build_sync("gg_recharge", user_id, str(rid), _payload),
+            payload=_payload)
         db.close()
-        return jsonify({"success": True})
-    except Exception as e:
-        # 详情仍落库（sheets_error 是内部列，供排查）+ 落日志；客户端只收固定文案。
-        log.exception("充值记录 Sheets 重试失败 rid=%s", rid)
-        msg = str(e)
-        try:
-            db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?", (msg, rid))
-            db.commit()
-        except: pass
+        return jsonify({"success": True, "message": "已重新提交，请稍后查看结果"})
+    except Exception:
+        # 详情只落日志；客户端只收固定文案（不泄露内部原文）。
+        log.exception("充值记录 Sheets 重试提交失败 rid=%s", rid)
         try: db.close()
         except: pass
         return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
