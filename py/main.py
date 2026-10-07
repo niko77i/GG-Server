@@ -9447,6 +9447,10 @@ def admin_scheduler_config_put():
     body = request.get_json(silent=True) or {}
     if not body:
         return jsonify(success=False, error="请求体为空"), 400
+    # 非对象的 JSON（如标量 123、字符串）是 truthy，直接 set()/items() 会抛 TypeError → 500；
+    # 这里干净地拒成 400（与「不能对真值非 dict 的 body 直接 .get」同一思路）。
+    if not isinstance(body, dict):
+        return jsonify(success=False, error="请求体必须是 JSON 对象"), 400
 
     allowed = set()
     for t in _visible_scheduler_tasks(user):

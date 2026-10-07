@@ -571,10 +571,16 @@ class TestSchedulerConfigApi:
                           json={"gg_delist_minutse": 120}).status_code == 400
 
     def test_update_does_not_clobber_last_run(self, client, admin_gg_headers):
-        """⚠️ 配置与运行记录分表存的意义：改周期不得抹掉上次执行时间。"""
+        """⚠️ 配置与运行记录分表存的意义：改周期不得抹掉上次执行时间。
+
+        正向对照：先断言 PUT 确实生效（200 + 新值落库），再断言 last_run 仍在 ——
+        否则「PUT 根本没生效」（404/403/500/静默 no-op）也会让末尾断言通过，用例形同虚设。
+        """
         main._mark_task_run("gg_delist", ok=True)
-        client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
-                   json={"gg_delist_minutes": 120})
+        resp = client.put("/api/admin/scheduler/config", headers=admin_gg_headers,
+                          json={"gg_delist_minutes": 120})
+        assert resp.status_code == 200                                   # 对照：PUT 确实生效
+        assert main._get_scheduler_config()["gg_delist_minutes"] == 120  # 对照：新值已落库
         assert main._get_last_run()["gg_delist"]["ok"] is True
 
     def test_partial_update_keeps_other_fields(self, client, admin_gg_headers):
