@@ -29,6 +29,28 @@ def _is_unique_conflict(e):
     return isinstance(e, sqlite3.IntegrityError) and "unique" in str(e).lower()
 
 
+def _valid_pk_int64(raw):
+    """主键/外键候选值的闸门 —— 口径与 GG 的 `main._valid_pk_int64` 完全一致。
+
+    合法 = `str(raw).strip()` 后是纯 ASCII 十进制数字串（无正负号、无小数点 ⇒ 天然 ≥ 0），
+    且数值 ≤ 2**63-1（SQLite INTEGER 是 64 位有符号）。非法（含 bool）返回 None。
+
+    为什么必须有：这些值随后原样交给 sqlite3 参数绑定。超上界时 Python 的 int() 能解析，
+    但绑定处会抛 OverflowError（内建，非 sqlite3.OverflowError）⇒ 500 + 英文异常原文。
+    本文件不 import main（会循环），故自带一份。
+    """
+    s = str(raw).strip()
+    if not (s.isascii() and s.isdigit()):
+        return None
+    try:
+        v = int(s)
+    except (ValueError, OverflowError):
+        return None
+    if v > 2**63 - 1:
+        return None
+    return v
+
+
 # ==================== BM 管理 ====================
 
 @fb_bp.route('/api/fb/bms/list', methods=['GET'])
@@ -347,6 +369,60 @@ def list_accounts():
         result_items.append(item)
 
     return ok({'items': result_items, 'total': total, 'page': page, 'size': size})
+
+
+@fb_bp.route('/api/fb/accounts/batch-lookup', methods=['POST'])
+@jwt_required()
+@fb_required
+def batch_lookup_accounts():
+    """批量查询多个资产UID是否已存在（单次 SQL IN 查询）。
+
+    ⚠️ **归属隔离**：GG 的同名端点在 main.py 里没有 owner 条件（越权，见遗留清单 A8），
+    本端点**不复制该缺陷** —— 非跨用户角色只查得到自己的行。
+    """
+    db = get_db()
+    data = parse_body()
+    account_ids = data.get('account_ids') or []
+    if not account_ids or not isinstance(account_ids, list):
+        return err('请提供 account_ids 列表', 400)
+
+    clean_ids = [str(a).strip() for a in account_ids if str(a).strip()]
+    if not clean_ids:
+        return ok({'found': [], 'not_found': []})
+
+    uid = get_uid()
+    cross_user = _get_role(db, uid) in CROSS_USER_ROLES
+    placeholders = ",".join(["?"] * len(clean_ids))
+    where = [f"a.account_id IN ({placeholders})"]
+    params = list(clean_ids)
+    if not cross_user:
+        where.append("a.owner_id = ?")
+        params.append(uid)
+
+    rows = db.execute(
+        "SELECT a.account_id, a.name, a.owner_id, a.timezone, "
+        "       u.display_name AS owner_display, u.username AS owner_username, "
+        "       st.name AS status_name, b.name AS bm_name "
+        "FROM fb_accounts a "
+        "LEFT JOIN users u ON a.owner_id = u.id "
+        "LEFT JOIN account_statuses st ON a.status_id = st.id "
+        "LEFT JOIN fb_account_bm ab ON ab.account_id = a.id AND ab.is_primary = 1 "
+        "LEFT JOIN fb_bms b ON b.id = ab.bm_id "
+        "WHERE " + " AND ".join(where) + " AND a.deleted_at IS NULL",
+        params
+    ).fetchall()
+
+    found = [{
+        'account_id': r['account_id'],
+        'name': r['name'],
+        'owner_id': r['owner_id'],
+        'owner_name': r['owner_display'] or r['owner_username'] or '',
+        'status': r['status_name'] or '',
+        'timezone': r['timezone'] or '',
+        'bm_name': r['bm_name'] or '',
+    } for r in rows]
+    found_ids = {f['account_id'] for f in found}
+    return ok({'found': found, 'not_found': [a for a in clean_ids if a not in found_ids]})
 
 
 @fb_bp.route('/api/fb/accounts/create', methods=['POST'])

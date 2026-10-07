@@ -721,3 +721,120 @@ class TestE11FbSheetsSyncLogSink:
             f"后台写失败把异常原文落进了 error_msg：{st.get_json()['error_msg']!r}")
         _assert_no_fb_leak(st)
         assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
+
+
+# ==================== FB 账户面板批量能力（Task 1：批量查户） ====================
+#
+# 形状照 GG 的 `main.accounts_batch_lookup`，但**一律带 owner 过滤** ——
+# GG 那个端点没有 owner 条件（遗留清单 A8，已登记的越权），FB 版不复制该缺陷。
+
+
+def _mk_fb_bm(db, owner_id, bm_id, name="BM"):
+    """建一个 FB BM，返回其主键 id（fb_account_bm.bm_id 指的是这个）。"""
+    db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES(?,?,?)",
+               (name, bm_id, owner_id))
+    pk = db.execute("SELECT id FROM fb_bms WHERE bm_id=?", (bm_id,)).fetchone()["id"]
+    db.commit()
+    return pk
+
+
+def _mk_fb_account(db, owner_id, account_id, name="账户", bm_pk=None, is_primary=1):
+    """建一个 FB 账户；给了 bm_pk 则关联为（主）BM。返回账户主键 id。"""
+    db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES(?,?,?)",
+               (name, account_id, owner_id))
+    acc_pk = db.execute("SELECT id FROM fb_accounts WHERE account_id=?",
+                        (account_id,)).fetchone()["id"]
+    if bm_pk is not None:
+        db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,?)",
+                   (acc_pk, bm_pk, is_primary))
+    db.commit()
+    return acc_pk
+
+
+class TestValidPkInt64:
+    """`_valid_pk_int64` —— 主键闸门助手（Task 2 复用）。
+
+    这些值随后原样交给 sqlite3 参数绑定：超上界时 Python 的 int() 能解析，
+    绑定处却抛 OverflowError（内建，非 sqlite3 的）⇒ 500 + 英文异常原文。
+    """
+
+    def test_accepts_plain_ascii_digits(self):
+        from routes import fb_routes
+        assert fb_routes._valid_pk_int64("123") == 123
+        assert fb_routes._valid_pk_int64(" 42 ") == 42
+        assert fb_routes._valid_pk_int64(7) == 7
+
+    def test_accepts_int64_max_boundary(self):
+        from routes import fb_routes
+        assert fb_routes._valid_pk_int64(str(2 ** 63 - 1)) == 2 ** 63 - 1
+
+    def test_rejects_out_of_range_before_binding(self):
+        """超 int64 上界必须在闸门就返回 None，不能漏到绑定处变 500。"""
+        from routes import fb_routes
+        assert fb_routes._valid_pk_int64(str(2 ** 63)) is None
+        assert fb_routes._valid_pk_int64("9" * 40) is None
+
+    def test_rejects_non_decimal_forms(self):
+        from routes import fb_routes
+        for bad in (True, False, -1, "1.0", "1e3", "0x10", "１２３", "", "  ", None,
+                    "abc", "1; DROP TABLE fb_accounts"):
+            assert fb_routes._valid_pk_int64(bad) is None, f"未拦下：{bad!r}"
+
+
+class TestFbBatchLookup:
+    """POST /api/fb/accounts/batch-lookup —— 批量查户。
+
+    夹具用本文件既有的 `_fb_user(client, username, role, platform)` helper 现造
+    用户（本文件没有 fb_user_headers 之类的 fixture）。
+    """
+
+    def test_batch_lookup_finds_own_account_with_bm_name(self, client):
+        """自己的账户查得到，且带主 BM 名。"""
+        hdr, uid = _fb_user(client, "t_lk_own")
+        db = database.get_db()
+        bm = _mk_fb_bm(db, uid, "T-LK-BM", "测试BM")
+        _mk_fb_account(db, uid, "LOOKUP-1", "我的账户", bm_pk=bm)
+        db.close()
+
+        resp = client.post("/api/fb/accounts/batch-lookup",
+                           json={"account_ids": ["LOOKUP-1"]}, headers=hdr)
+        data = resp.get_json()
+        assert data["success"] is True
+        assert [f["account_id"] for f in data["found"]] == ["LOOKUP-1"]
+        assert data["not_found"] == []
+        assert data["found"][0]["bm_name"] == "测试BM"
+        assert data["found"][0]["owner_id"] == uid
+
+    def test_batch_lookup_does_not_leak_other_users_account(self, client):
+        """**归属隔离**：别人的账户查不到，且落在 not_found 里。"""
+        a_hdr, _ = _fb_user(client, "t_lk_a")
+        _, b_id = _fb_user(client, "t_lk_b")
+        db = database.get_db()
+        bm_b = _mk_fb_bm(db, b_id, "T-LK-B-BM", "B的BM")
+        _mk_fb_account(db, b_id, "OTHERS-1", "B的账户", bm_pk=bm_b)
+        db.close()
+
+        resp = client.post("/api/fb/accounts/batch-lookup",
+                           json={"account_ids": ["OTHERS-1"]}, headers=a_hdr)
+        data = resp.get_json()
+        assert data["found"] == []
+        assert data["not_found"] == ["OTHERS-1"]
+
+    def test_batch_lookup_cross_user_role_sees_all(self, client):
+        """**对照腿**：跨用户角色能查到别人的（防「一律看不见」的过度收口）。"""
+        _, b_id = _fb_user(client, "t_lk_c")
+        dev_hdr, _ = _fb_user(client, "t_lk_dev", role="developer", platform="fb")
+        db = database.get_db()
+        bm_b = _mk_fb_bm(db, b_id, "T-LK-C-BM", "C的BM")
+        _mk_fb_account(db, b_id, "OTHERS-1", "C的账户", bm_pk=bm_b)
+        db.close()
+
+        resp = client.post("/api/fb/accounts/batch-lookup",
+                           json={"account_ids": ["OTHERS-1"]}, headers=dev_hdr)
+        assert [f["account_id"] for f in resp.get_json()["found"]] == ["OTHERS-1"]
+
+    def test_batch_lookup_rejects_empty_and_non_list(self, client):
+        hdr, _ = _fb_user(client, "t_lk_bad")
+        for body in ({"account_ids": []}, {"account_ids": "x"}, {}):
+            resp = client.post("/api/fb/accounts/batch-lookup", json=body, headers=hdr)
+            assert resp.status_code == 400, f"未拦下：{body!r}"
