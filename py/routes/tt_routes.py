@@ -696,27 +696,43 @@ def check_delist(pid):
     results = delist_checker.check_product_packages(pid, pkg_list, _build_delist_proxy_pool())
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    dropped = []
+    newly_dropped = []
     for r in results:
         # 判定未知（非 200/404：403 反爬、410、429、任意 5xx、超时、代理失败…）：
         # 不写库，保留上一轮判定结果
         if r["is_delisted"] is None:
             continue
+        # ⚠️ 必须在 INSERT OR REPLACE **之前**读上一轮值 —— 写库会把旧判定覆盖掉。
+        prev = db.execute(
+            "SELECT is_delisted FROM tt_delist_checks WHERE package_id=?",
+            (r["package_id"],)).fetchone()
+        was_delisted = prev is not None and prev["is_delisted"] == 1
         db.execute(
             "INSERT OR REPLACE INTO tt_delist_checks(package_id, is_delisted, checked_at) "
             "VALUES(?, ?, ?)",
             (r["package_id"], 1 if r["is_delisted"] else 0, now))
+        # 仅「上一轮不是掉包、本轮是」才算新掉包（口径同 TT 定时检测）
+        if r["is_delisted"] and not was_delisted:
+            newly_dropped.append(r)
     db.commit()
 
-    # 检测到掉包 → TT 机器人群组通知（按产品聚合，@在跑人员）
-    if any(r["is_delisted"] for r in results):
+    # 仅「本轮新掉包」→ TT 机器人群组通知（按产品聚合，@在跑人员）
+    #
+    # ⚠️ 2026-10-07 裁定：手动检测与定时检测的口径必须一致 —— **只发新掉包**。
+    # 原口径是「手动检测全部按新掉包处理」（GG 侧当时有显式注释），
+    # 后果是每点一次「手动检测」，当前仍掉着的包就会在群里被重报一遍。
+    if newly_dropped:
         prod = db.execute(
             "SELECT product_name FROM tt_products WHERE id=?", (pid,)
         ).fetchone()
         pname = prod["product_name"] if prod else ""
+        # 按 package_id 查原始行取 series_name（不改用 zip —— 那依赖 results 与
+        # pkg_list 同序，是本文件既有注释点过的脆弱点）。
+        pkg_map = {p["id"]: p for p in pkg_list}
         dropped = [
-            {"product_id": pid, "product_name": pname, "series_name": p.get("series_name", "")}
-            for p, r in zip(pkg_list, results) if r["is_delisted"]
+            {"product_id": pid, "product_name": pname,
+             "series_name": pkg_map.get(r["package_id"], {}).get("series_name", "")}
+            for r in newly_dropped
         ]
         try:
             send_tt_delist_notifications(db, dropped)

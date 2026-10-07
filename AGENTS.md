@@ -26,7 +26,7 @@
 | 密码 | Werkzeug pbkdf2:sha256 | Flask 内置哈希 |
 | 前端 | Vue 3 + Vite + Element Plus + Pinia + Vue Router | Composition API |
 | HTTP | axios | 全局拦截器自动携带 JWT token |
-| 定时任务 | 后台 daemon 线程 | 掉包检测（每小时，走代理池）、每周清理 |
+| 定时任务 | 后台 daemon 线程 | 掉包检测（**GG 每小时 / TT 每 30 分钟**，走代理池）、每周清理 |
 | 跨标签同步 | BroadcastChannel | 多 Tab 任务状态和通知同步 |
 | 外部通知 | Telegram Bot + Email | 掉包通知推送到群组/邮件 |
 | 代理池 | proxy_pool.py | 掉包检测随机切换代理 IP，避免风控/限流 |
@@ -441,6 +441,8 @@ GG-Server/
 **核心逻辑**：
 - **定时检测**：后台 daemon 线程每小时自动检测所有正常状态产品的正常状态包
 - **手动检测**：产品名后"是否掉包"按钮，点击立即检测
+- **群通知口径（2026-10-07 裁定）**：定时与手动**统一为「只发新掉包」**（`is_delisted and not was_delisted`，比对 `delist_checks` 上一轮值）。
+  此前手动检测是「全部按新掉包处理」（该处注释原文），每点一次就把当前仍掉着的包在群里重报一遍，已作废；TT 侧同步改，口径见 TT 段落
 - **并发口径**：两处**定时检测**走 **10 并发**（main.py 内各自写 `min(len(pkgs), 10)`，
   即 `_run_delist_check_once` / `_run_tt_delist_check_once`）；
   **手动检测的并发按代理池容量自适应** —— `delist_checker._resolve_max_workers()`，
@@ -571,7 +573,7 @@ GG-Server/
 
 ### 定时任务系统
 
-- **掉包检测**：每小时自动执行，后台 daemon 线程
+- **掉包检测**：后台 daemon 线程自动执行 —— **GG 每 1 小时，TT 每 30 分钟**（2026-10-07 起两侧刻意不同频）
 - **每周清理**：清理过期爬取图片和生成视频
 - **手动触发**：SchedulerView 页面，仅 developer 角色可见，支持即时执行
 
@@ -716,8 +718,13 @@ YouTube 视频新增频道名（channel name）字段，导入时自动获取频
 TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_telegram` 机器人**；**不发邮件**。
 
 **核心逻辑**：
-- **定时检测**：后台 daemon 线程每小时检测正常状态 TT 产品的正常状态跑包
-- **手动检测**：`POST /api/tt/products/:pid/check-delist`，同样走代理池、并发同样**按代理池容量自适应**（口径见 GG 侧「并发口径」）；⚠️ 返回结果与入参同序，本路由用 `zip(pkg_list, results)` 配对，改并发实现时不得打乱顺序
+- **定时检测**：后台 daemon 线程**每 30 分钟**检测正常状态 TT 产品的正常状态跑包
+  （⚠️ **TT 30 分钟、GG 1 小时，两侧刻意不同频** —— 2026-10-07 用户裁定，别「顺手对齐」）
+- **手动检测**：`POST /api/tt/products/:pid/check-delist`，同样走代理池、并发同样**按代理池容量自适应**（口径见 GG 侧「并发口径」）；
+  ⚠️ 结果按 `package_id` 与原始包行建映射取 `series_name`（**2026-10-07 起不再用 `zip(pkg_list, results)`** —— 那依赖返回与入参同序，是脆弱点）
+- **群通知口径（2026-10-07 裁定，GG/TT 两侧一致）**：定时与手动**统一为「只发新掉包」**（`is_delisted and not was_delisted`，比对 `tt_delist_checks` 上一轮值）。
+  ⚠️ 此前**手动检测**是「全部按新掉包处理」—— 每点一次就把当前仍掉着的包在群里重报一遍，已作废。
+  判定「未知」的轮次不写库、不参与比对（故不会误报）。掉包 → 恢复 → 再掉包仍会再发（那是新的掉包事件）
 - **前端通知**：`GET /api/tt/delist/pending` 按产品聚合返回，首次弹窗 + 关闭后 3 分钟未处理再提醒
 - **可见性**：`delist/pending` 与 `delist-status` 均只按**产品归属人（`tt_products.owner_id`）或在跑人员（`tt_product_runners`）**过滤，
   **无 developer/admin 特权**（2026-09-26 按用户裁定移除该特权分支；起因：developer 账号既非归属人也非在跑人员，

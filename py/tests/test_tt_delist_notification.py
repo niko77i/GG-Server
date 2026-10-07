@@ -560,6 +560,63 @@ class TestTtManualCheckNotify:
         assert resp.status_code == 200
         assert sent == []
 
+    def test_manual_check_only_notifies_newly_delisted(self, client, tt_headers, monkeypatch):
+        """连续两次手动检测都判定掉包 → 群里只发一次（2026-10-07 裁定）。
+
+        原口径是「手动检测全部按新掉包处理」，后果是每点一次「手动检测」，
+        当前仍掉着的包就会在群里被重报一遍。现与定时检测同口径：只发新掉包。
+        """
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+        pid = _mk_product(db, uid, "产品Z")
+        _mk_package(db, pid, "系列Z")
+        db.close()
+
+        monkeypatch.setattr(delist_checker, "check_product_packages",
+                            lambda pid_, pkgs, pool: [
+                                {"package_id": p["id"], "product_id": pid_,
+                                 "is_delisted": True, "error": ""} for p in pkgs])
+        sent = []
+        monkeypatch.setattr(tt_routes, "send_tt_delist_notifications",
+                            lambda db_, pkgs, title="TT-Server": sent.append(pkgs) or 1)
+
+        # 首次：上一轮无记录 ⇒ 算新掉包 ⇒ 发
+        assert client.post(f"/api/tt/products/{pid}/check-delist",
+                           headers=tt_headers).status_code == 200
+        assert len(sent) == 1, "首次检测到掉包应发一次群通知"
+        assert sent[0][0]["series_name"] == "系列Z"   # series_name 仍取自原始包行
+
+        # 第二次：上一轮已是掉包 ⇒ 不算新掉包 ⇒ 不再发
+        assert client.post(f"/api/tt/products/{pid}/check-delist",
+                           headers=tt_headers).status_code == 200
+        assert len(sent) == 1, "持续掉包不得在群里重报"
+
+    def test_manual_check_renotifies_after_recovery(self, client, tt_headers, monkeypatch):
+        """掉包 → 恢复 → 再掉包 ⇒ 再发一次（那是**新的**一次掉包事件，不是重报）。"""
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+        pid = _mk_product(db, uid, "产品R")
+        _mk_package(db, pid, "系列R")
+        db.close()
+
+        state = {"delisted": True}
+        monkeypatch.setattr(delist_checker, "check_product_packages",
+                            lambda pid_, pkgs, pool: [
+                                {"package_id": p["id"], "product_id": pid_,
+                                 "is_delisted": state["delisted"], "error": ""} for p in pkgs])
+        sent = []
+        monkeypatch.setattr(tt_routes, "send_tt_delist_notifications",
+                            lambda db_, pkgs, title="TT-Server": sent.append(pkgs) or 1)
+
+        client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+        assert len(sent) == 1
+        state["delisted"] = False                      # 恢复正常
+        client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+        assert len(sent) == 1, "恢复正常不发通知"
+        state["delisted"] = True                       # 再次掉包
+        client.post(f"/api/tt/products/{pid}/check-delist", headers=tt_headers)
+        assert len(sent) == 2, "再次掉包属于新事件，应再发一次"
+
     def test_manual_check_skips_non_normal_packages(self, client, tt_headers, monkeypatch):
         """非正常状态（暂停/已掉包/拒登/没事件）的包不检测、不通知 —— 口径同 GG 手动检测。"""
         db = database.get_db()

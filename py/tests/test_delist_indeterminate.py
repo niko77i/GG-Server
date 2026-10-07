@@ -71,6 +71,38 @@ class TestGGManualCheckIndeterminate:
         assert "429" in row["error_msg"]            # 原因留痕
 
 
+class TestGGManualCheckOnlyNotifiesNewlyDelisted:
+    """GG 手动检测：群通知只发「新掉包」（2026-10-07 裁定）。
+
+    原口径是「手动检测全部按新掉包处理」（该处注释原文），后果是每点一次
+    「手动检测」，当前仍掉着的包就会在群里被重报一遍。现与定时检测同口径。
+    TT 侧同样改动，见 test_tt_delist_notification.py::TestTtManualCheckNotify。
+    """
+
+    def test_manual_check_notifies_only_once_for_persistent_delist(self, client, auth_headers, monkeypatch):
+        import main
+        pid, pkg_id = _mk_gg_product_and_package()
+
+        monkeypatch.setattr("delist_checker.check_product_packages",
+                            lambda pid_, pkgs, pool: [
+                                {"package_id": p["id"], "product_id": pid_,
+                                 "is_delisted": True, "error": ""} for p in pkgs])
+        monkeypatch.setattr(main, "_build_delist_proxy_pool", lambda: None)
+        sent = []
+        monkeypatch.setattr(main, "_send_telegram_notifications",
+                            lambda db_, pkgs: sent.append(pkgs))
+
+        # 首次：上一轮无记录 ⇒ 算新掉包 ⇒ 发
+        assert client.post(f"/api/products/{pid}/check-delist",
+                           headers=auth_headers).status_code == 200
+        assert len(sent) == 1, "首次检测到掉包应发一次群通知"
+
+        # 第二次：上一轮已是掉包 ⇒ 不算新掉包 ⇒ 不再发
+        assert client.post(f"/api/products/{pid}/check-delist",
+                           headers=auth_headers).status_code == 200
+        assert len(sent) == 1, "持续掉包不得在群里重报"
+
+
 class TestGGSchedulerIndeterminate:
     """GG 定时检测：未知态不覆盖既有判定。"""
 

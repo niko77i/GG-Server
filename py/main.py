@@ -3642,7 +3642,12 @@ def products_check_delist(pid):
     product_name = prod["product_name"] if prod else ""
     runner_ids_raw = prod["runner_ids"] if prod else "[]"
 
-    # 更新/插入 delist_checks 表，同时收集掉包（手动检测全部按新掉包处理）
+    # 更新/插入 delist_checks 表，同时收集**新**掉包
+    #
+    # ⚠️ 2026-10-07 裁定：原口径是「手动检测全部按新掉包处理」（本行注释原文），
+    # 后果是每点一次「手动检测」，当前仍掉着的包就会在群里被重报一遍。
+    # 现改为与**定时**检测同口径：只有「上一轮不是掉包、本轮是」才算新掉包。
+    # TT 侧（`routes/tt_routes.py` 的 `check_delist`）同步改成一样，两侧保持一致。
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     newly_delisted = []
     for r in results:
@@ -3652,12 +3657,18 @@ def products_check_delist(pid):
                        (r.get("error", ""), r["package_id"]))
             continue
 
+        # ⚠️ 必须在 INSERT OR REPLACE **之前**读上一轮值 —— 写库会把旧判定覆盖掉。
+        prev = db.execute(
+            "SELECT is_delisted FROM delist_checks WHERE package_id=?",
+            (r["package_id"],)).fetchone()
+        was_delisted = prev is not None and prev["is_delisted"] == 1
+
         db.execute(
             "INSERT OR REPLACE INTO delist_checks(package_id, product_id, is_delisted, checked_at, error_msg) "
             "VALUES(?, ?, ?, ?, ?)",
             (r["package_id"], pid, 1 if r["is_delisted"] else 0, now, r.get("error", ""))
         )
-        if r["is_delisted"]:
+        if r["is_delisted"] and not was_delisted:
             newly_delisted.append(r)
 
     db.commit()
@@ -9119,11 +9130,15 @@ def _run_tt_delist_check_once():
 
 
 def _start_tt_delist_scheduler():
-    """启动 TT 掉包检测定时任务：每小时执行一次，异常自动恢复。"""
+    """启动 TT 掉包检测定时任务：每 30 分钟执行一次，异常自动恢复。
+
+    ⚠️ TT 是 30 分钟、GG（`_start_delist_scheduler`）是 1 小时 —— 用户 2026-10-07 裁定。
+    两侧刻意不同频，别「顺手对齐」。
+    """
 
     def _loop():
         while True:
-            _time.sleep(3600)  # 1 小时
+            _time.sleep(1800)  # 30 分钟（TT 专用频率；GG 仍为 3600）
             try:
                 _run_tt_delist_check_once()
             except Exception as e:
