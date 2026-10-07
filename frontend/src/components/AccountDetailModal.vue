@@ -53,11 +53,19 @@
           </template>
         </el-table-column>
         <el-table-column prop="operator" label="运营" width="80" />
+        <!-- 写表状态。数据源为 /api/sheet-write/status（recharge_records.sheets_synced/sheets_error
+             已不再写入）。三态语汇复用一期 TT 账户表那套（@/utils/sheetWriteUi），只是换了数据源。
+             有 id 但接口没有该条日志（未配表 ⇒ 根本没排写表）= 无标记，不是失败。 -->
         <el-table-column label="表格" width="55" align="center">
           <template #default="{ row }">
-            <el-tooltip v-if="row.sheets_synced === 0" :content="row.sheets_error || '未同步到表格'" placement="top">
-              <el-button link size="small" type="warning" @click="retryRechargeSheets(row)" :loading="retryingId === row.id">⚠️</el-button>
-            </el-tooltip>
+            <template v-if="sheetWriteFailures[String(row.id)]">
+              <el-tooltip placement="top"
+                :content="sheetWriteHint(sheetWriteFailures[String(row.id)])">
+                <el-button link size="small"
+                  :type="sheetWriteTone(sheetWriteFailures[String(row.id)].status)"
+                  @click.stop="retrySheetWrite(row)">{{ sheetWriteMark(sheetWriteFailures[String(row.id)].status) }}</el-button>
+              </el-tooltip>
+            </template>
             <span v-else style="color:#16a34a;font-size:14px;">✅</span>
           </template>
         </el-table-column>
@@ -133,6 +141,8 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { accountsApi, rechargeApi } from '@/api/accounts'
+import { sheetWriteApi } from '@/api/sheetWrite'
+import { sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 import { useAccountStore } from '@/stores/accounts'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -147,6 +157,8 @@ const rechargeRecords = ref([])
 const deleting = ref(null)
 const editingId = ref(null)
 const editForm = reactive({ amount: '', agent: '' })
+// 写表失败治理：business_key（= recharge_records.id 的字符串）-> 该条的终态记录
+const sheetWriteFailures = ref({})
 
 function statusTagType(status) {
   const map = { '存活': 'success', '验证': 'warning', '死亡': 'danger' }
@@ -159,6 +171,8 @@ async function load() {
   rechargeRecords.value = []
   editingId.value = null
   if (!props.accountId) return
+  // 与充值记录请求分开：标记是「失败必须可见」的兜底，不能随列表请求的成败而丢
+  loadSheetWriteFailures()
   try {
     // 从 store 中查找账户基本信息
     const store = useAccountStore()
@@ -174,6 +188,35 @@ async function load() {
     rechargeRecords.value = rr.records || []
   } catch (e) {
     ElMessage.error('加载失败: ' + (e.response?.data?.error || e.message))
+  }
+}
+
+/**
+ * 拉本用户全部「需提示」的写表终态，按 business_key 索引。
+ *
+ * 只有终态才回（后端已滤 ATTENTION），中间态在这里天然不显示 —— 与「只在最终结果
+ * 提示」的裁定一致。**有 id 但这里没有对应项 = 不提示**：Task 4 的 clear_recharge_id /
+ * clear_recharge_ids / recharge_ids 三个字段只要记录落了库就返回，哪怕未配表格、
+ * 根本没排写表（只有 affected_account_ids 是按写表闸门给的），故不能把「有 id」当失败。
+ */
+async function loadSheetWriteFailures() {
+  try {
+    const res = await sheetWriteApi.status({ platform: 'gg' })
+    const map = {}
+    for (const it of res.items || []) map[it.business_key] = it
+    sheetWriteFailures.value = map
+  } catch { /* 标记拉不到不该打扰用户，保持上一次的结果 */ }
+}
+
+/** 重试按钮：异步提交到统一入口，立即返回，结果靠重开弹窗时的标记兜底 */
+async function retrySheetWrite(row) {
+  const f = sheetWriteFailures.value[String(row.id)]
+  if (!f) return
+  try {
+    await sheetWriteApi.retry({ platform: 'gg', target: f.target, businessKey: String(row.id) })
+    ElMessage.success('已重新提交，请稍后查看结果')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '重试失败')
   }
 }
 
@@ -234,21 +277,6 @@ async function deleteRecharge(rid) {
   }
 }
 
-const retryingId = ref(null)
-async function retryRechargeSheets(row) {
-  retryingId.value = row.id
-  try {
-    await rechargeApi.retrySheets(row.id)
-    row.sheets_synced = 1
-    row.sheets_error = ''
-    ElMessage.success('已同步到表格')
-  } catch (e) {
-    row.sheets_error = e.response?.data?.error || e.message || '同步失败'
-    ElMessage.error('同步失败: ' + row.sheets_error)
-  } finally {
-    retryingId.value = null
-  }
-}
 </script>
 
 <style scoped>
