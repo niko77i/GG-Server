@@ -587,8 +587,9 @@ FB 管理员 → 该平台无定时任务（页面显示空态）；户管 / 普
   FB 管理员为空态），developer 可见全部三项，支持即时执行
 - **周期可在页面配置**：存 `config.scheduler_config`（单键 JSON：`gg_delist_minutes` / `tt_delist_minutes` /
   `cleanup_weekday` / `cleanup_hour`），调度线程每 `_TICK_SECONDS = 30` 秒重读一次 ⇒ **改完 30 秒内生效、无需重启**
-- **上次执行另存 `config.scheduler_last_run`**：与配置分开存 —— 配置由管理员 PUT 写、上次执行由调度线程写，
-  混在一个键里会变成 read-modify-write 互相覆盖
+- **上次执行另存 `config.scheduler_last_run_{task_key}`（一个任务一个 key，无共享读改写）**：与配置分开存 ——
+  配置由管理员 PUT 写、上次执行由调度线程写，混在一个键里会变成 read-modify-write 互相覆盖；
+  而 last_run 自身也有 6 个写者，故再拆到每任务一个 key，写入是单条原子语句、无需加锁
 - **周期下限 10 分钟 / 上限 1440 分钟**：下限是后端硬闸（越界一律 400），因为掉包检测要经代理池访问 Google Play，
   而现行 `_TIMEOUT = 5`、代理池只有 2 个代理，再短会把它打爆
 

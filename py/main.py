@@ -9151,10 +9151,6 @@ _SCHEDULER_DEFAULTS = {
 # 与代理池打爆（现行 _TIMEOUT=5，代理池只有 2 个代理）。
 _SCHEDULER_LIMITS = {"min_minutes": 10, "max_minutes": 1440}
 
-# 保护 scheduler_last_run 的「读-改-写」：6 个写者（3 调度线程 + 3 个 trigger 接口）
-# 共享同一个 key，读写两步之间无事务，交错时会丢更新。
-_last_run_lock = threading.Lock()
-
 
 def _get_scheduler_config() -> dict:
     """读定时任务配置；任何字段缺失/非法/整键不存在都回落默认值。
@@ -9218,31 +9214,32 @@ def _interval_tick(elapsed: int, target_seconds: int) -> tuple:
 
 
 def _get_last_run() -> dict:
-    """读各任务上次执行记录：{task_key: {"ts": "...", "ok": bool}}。"""
-    try:
-        raw = database.config_get("scheduler_last_run", "") or ""
-        data = json.loads(raw) if raw else {}
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    """读各任务上次执行记录：{task_key: {"ts": "...", "ok": bool}}（一个任务一个 key）。"""
+    out = {}
+    for t in _SCHEDULER_TASKS:
+        key = t["key"]
+        try:
+            raw = database.config_get(f"scheduler_last_run_{key}", "") or ""
+            data = json.loads(raw) if raw else {}
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data:
+            out[key] = data
+    return out
 
 
 def _mark_task_run(task_key: str, ok: bool):
     """记一次执行（成功与否都记 —— 用户要看的是「上次跑没跑、成没成」）。
 
-    「读整个 dict → 改子键 → 写回整个 dict」三步必须整体持锁：并发写者各自
-    读到同一份旧值再写回，后写者会覆盖先写者、丢掉一次更新（见 §4.1 的竞态论证）。
+    一个任务一个 key：写入是单条 INSERT OR REPLACE，天然原子，
+    **不需要锁** —— 共享状态根本不存在（原「读整个 dict → 改子键 → 写回」的
+    多写者竞态由此根除）。
     """
-    with _last_run_lock:
-        last = _get_last_run()
-        last[task_key] = {
-            "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ok": bool(ok),
-        }
-        try:
-            database.config_set("scheduler_last_run", json.dumps(last, ensure_ascii=False))
-        except Exception as e:
-            log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
+    payload = {"ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ok": bool(ok)}
+    try:
+        database.config_set(f"scheduler_last_run_{task_key}", json.dumps(payload, ensure_ascii=False))
+    except Exception as e:
+        log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
 
 
 def _interval_loop(task_key, config_field, default_minutes, run_once, log_tag):

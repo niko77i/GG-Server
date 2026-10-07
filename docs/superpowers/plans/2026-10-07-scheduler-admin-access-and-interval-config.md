@@ -223,6 +223,15 @@ git commit -m "feat(scheduler): scheduler_required 装饰器 — admin 按平台
 
 ### Task 2: 配置读写 helper 与纯函数
 
+> **实施勘误（2026-10-07）**：`last_run` 的存储结构已由「单 key 存整个 dict」改为
+> **一个任务一个 key：`scheduler_last_run_{task_key}`**（如 `scheduler_last_run_gg_delist`）。
+> 原因：`last_run` 有 6 个写者（3 调度线程 + 3 trigger 接口），单 key 的「读整个 dict → 改子键 →
+> 写回」在交错时会丢更新；拆开后写入是单条 `INSERT OR REPLACE`，天然原子，**无需加锁**。
+> 下方 Step 1 代码块里 `_get_last_run` / `_mark_task_run` 的读写仍按单 key 书写，**以实际实现为准**
+> —— 现实现为：`_mark_task_run` 只写自己那一行、`_get_last_run` 遍历 `_SCHEDULER_TASKS` 逐 key 读回
+> （返回值形状不变，仍是 `{task_key: {"ts":..., "ok":...}}`）。详见
+> `docs/superpowers/specs/2026-10-07-scheduler-admin-access-and-interval-config-design.md` §4.1。
+
 **Files:**
 - Modify: `py/main.py`（新增 helper，放在 `_start_weekly_cleanup` 之前，约 8973 行前）
 - Modify: `py/tests/test_scheduler_config.py`（追加）
