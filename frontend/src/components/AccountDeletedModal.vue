@@ -70,6 +70,9 @@ async function load() {
     })
     rows.value = res.accounts || []
     total.value = res.total || 0
+    // 末页最后一行被恢复/删除后，当前页会返回空，total 也随之缩小到 size 以内，
+    // 分页控件因 v-if="total > size" 卸载，用户会被困在空页。这里回退一页重取。
+    if (!rows.value.length && page.value > 1) { page.value -= 1; return load() }
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '加载失败')
   }
