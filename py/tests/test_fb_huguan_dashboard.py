@@ -380,6 +380,175 @@ class TestFbBuildApplyIntegration:
         assert n_hist == 0, "坏 BM 名不得写历史"
 
 
+def _fb_bare_account(db, account_id: str, owner_id: int) -> int:
+    """建一条「文本列全空」的 FB 账户，返回行主键。
+
+    `acquired_date` 必须显式写空 —— 建表默认值是当天日期，不写就会与表里空着的 A 列
+    判成「变了」，让 `updated` 计数用例失去分辨力（`changed` 里混进无关列 ⇒ 走进
+    `sets` 分支 ⇒ 那行本来就该计数）。其余文本列建表默认值都是空串。
+    """
+    db.execute("INSERT INTO fb_accounts(name, account_id, owner_id, acquired_date) "
+               "VALUES('', ?, ?, '')", (account_id, owner_id))
+    return db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+class TestLeftoverMinorsFromSubproject2:
+    """子项目 ② 遗留的三条 Minor（③ 的计划第 1109 行点名「在 Task 4/5 碰到对应代码时一并修」）。
+
+    三条都在 `apply_diff` / `_same_as_existing` 里 —— Task 4/5 大幅改写了这两处却一处
+    都没修：建号分支 BM 名解析失败静默、`updated` 计数偏高、`_same_as_existing` 查主 BM
+    未过滤软删。全部走真实路径（parse_row → build_diff → apply_diff），不打 stub。
+    """
+
+    @pytest.fixture
+    def fb_user(self, client):
+        """一个 FB 平台的户管，返回其 id。"""
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('fb_a2', 'x', 'huguan', 'fb')")
+        uid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        db.close()
+        return uid
+
+    # ---------- 遗留 1：建号分支的 BM 名解析失败静默 ----------
+
+    def test_create_with_unknown_position_warns_like_update(self, client, fb_user):
+        """建号分支位置名解析不到 ⇒ 同口径 warning，且账户仍建成功。
+
+        改前这里无声跳过：户管看到的是「账户建好了、位置列空着」而没有任何提示，
+        同一个函数里的 update 分支却是会说的。文案必须与 update 分支逐字一致
+        （前端渲染无需为两处写分支）。
+        """
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row("A2-C1", "不存在的BM"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+
+        res = hd.apply_diff(db, diff, "fb", {"create": ["A2-C1"]}, fb_user)
+
+        row = db.execute("SELECT id FROM fb_accounts WHERE account_id='A2-C1'").fetchone()
+        db.close()
+        assert res["errors"] == [], res["errors"]
+        assert res["created"] == 1, "位置解析失败不得让整条建号失败"
+        assert row is not None, "账户必须真的落库"
+        assert res["warnings"] == [
+            {"row": 2, "message": "位置「不存在的BM」无法唯一匹配，已跳过"}]
+
+    # ---------- 遗留 2：updated 计数偏高 ----------
+
+    def test_no_write_is_not_counted_when_position_unresolvable(self, client, fb_user):
+        """位置名解析不到 ⇒ 整行只剩一条 warning、一个字节都没写 ⇒ 不计入 updated。"""
+        db = database.get_db()
+        acc = _fb_bare_account(db, "A2-N1", fb_user)
+        db.commit()
+        parsed = hd.parse_row(_fb_row("A2-N1", "不存在的BM"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        # 先钉住「这一行确实只剩位置一项进差异」：多一项就会走 sets 分支、
+        # 变成「有写入」的场景，本用例就失去分辨力了。
+        upd = [i for i in diff["to_update"] if i["account_id"] == "A2-N1"]
+        assert upd and set(upd[0]["fields"]) == {"_primary_bm_name"}, diff["to_update"]
+        # updated_at 换成哨兵值：真写了库它必然被刷新成当前时刻
+        db.execute("UPDATE fb_accounts SET updated_at='2000-01-01 00:00:00' WHERE id=?", (acc,))
+        db.commit()
+
+        res = hd.apply_diff(db, diff, "fb", {"update": ["A2-N1"]}, fb_user)
+
+        row = db.execute("SELECT updated_at FROM fb_accounts WHERE id=?", (acc,)).fetchone()
+        db.close()
+        assert res["errors"] == []
+        assert any("无法唯一匹配" in w["message"] for w in res["warnings"]), res["warnings"]
+        assert res["updated"] == 0
+        assert row["updated_at"] == "2000-01-01 00:00:00", "这一行根本没写库"
+
+    def test_no_write_is_not_counted_for_already_dead_fb_account(self, client, fb_user):
+        """FB 账户已是「死亡」且表里状态列仍写「死亡」⇒ 什么都没写，不该计入 updated。
+
+        FB 的生死由状态列承载（`_apply_death` 对 fb 直接返回），所以这一行的
+        status_id 与库里相等、不进 `changed`；而 `_is_dead` 因为在 fb_accounts 上
+        查不到 death_date（`_same_as_existing` 的 `cur_dead` 恒为 False）被判成「变了」，
+        于是整行**只剩它一项** —— 落库阶段 sets 为空、`_apply_death` 又是空操作，
+        一个字节都没写。这正是「计数偏高」最容易被漏掉的一档。
+        """
+        db = database.get_db()
+        acc = _fb_bare_account(db, "A2-D1", fb_user)
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) "
+                   "VALUES('死亡', ?, 'fb')", (fb_user,))
+        sid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("UPDATE fb_accounts SET status_id=? WHERE id=?", (sid, acc))
+        db.commit()
+        values = _fb_row("A2-D1")
+        values[hd.col_index("O")] = "死亡"
+        parsed = hd.parse_row(values, "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        upd = [i for i in diff["to_update"] if i["account_id"] == "A2-D1"]
+        assert upd and upd[0]["fields"] == {"_is_dead": True}, diff["to_update"]
+
+        res = hd.apply_diff(db, diff, "fb", {"update": ["A2-D1"]}, fb_user)
+
+        db.close()
+        assert res["errors"] == []
+        assert res["updated"] == 0
+
+    def test_primary_bm_only_write_is_still_counted(self, client, fb_user):
+        """只改主 BM 的行**仍要**计入 updated —— 防「矫枉过正」。
+
+        简化成 `if sets:` 计数会漏掉这一行：它的业务列一个都没变，写的是中间表
+        fb_account_bm 与历史表，于是制造出一个新的「计数偏低」。
+        """
+        db = database.get_db()
+        acc = _fb_bare_account(db, "A2-P1", fb_user)
+        db.execute("INSERT INTO fb_bms(name, bm_id, owner_id) VALUES('位置甲', 'a2-p1', ?)",
+                   (fb_user,))
+        bm = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit()
+        parsed = hd.parse_row(_fb_row("A2-P1", "位置甲"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        upd = [i for i in diff["to_update"] if i["account_id"] == "A2-P1"]
+        assert upd and set(upd[0]["fields"]) == {"_primary_bm_name"}, diff["to_update"]
+
+        res = hd.apply_diff(db, diff, "fb", {"update": ["A2-P1"]}, fb_user)
+
+        prim = db.execute("SELECT bm_id FROM fb_account_bm WHERE account_id=? AND is_primary=1",
+                          (acc,)).fetchone()
+        hist = db.execute("SELECT COUNT(*) AS n FROM fb_account_bm_history WHERE account_id=?",
+                          (acc,)).fetchone()["n"]
+        db.close()
+        assert res["errors"] == []
+        assert res["updated"] == 1, "只改主 BM 的行同样写了库，必须计入"
+        assert prim is not None and prim["bm_id"] == bm
+        assert hist == 1
+
+    # ---------- 遗留 3：软删的同名 BM 被当成「当前主 BM 名」 ----------
+
+    def test_soft_deleted_same_name_bm_does_not_hide_position_change(self, client, fb_user):
+        """软删的同名 BM 不得让「表里把位置改成这个名字」被判成「没变」。
+
+        改前 `_same_as_existing` 的 JOIN 没带 `b.deleted_at IS NULL`：那条已软删的
+        「位置甲」仍被读成当前主 BM 名 ⇒ 表里的这次修改进不了 to_update，永远写不进去、
+        且没有任何提示。带上过滤后它照常进差异，落库阶段由 `resolve_named_id` 拒绝
+        并出「无法唯一匹配」warning —— 户管看到的是显式拒绝，而不是静默丢弃。
+        """
+        db = database.get_db()
+        acc = _fb_bare_account(db, "A2-S1", fb_user)
+        db.execute("INSERT INTO fb_bms(name, bm_id, owner_id, deleted_at) "
+                   "VALUES('位置甲', 'a2-s1', ?, datetime('now','localtime'))", (fb_user,))
+        bm = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.execute("INSERT INTO fb_account_bm(account_id, bm_id, is_primary) VALUES(?,?,1)",
+                   (acc, bm))
+        db.commit()
+        parsed = hd.parse_row(_fb_row("A2-S1", "位置甲"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        db.close()
+        upd = [i for i in diff["to_update"] if i["account_id"] == "A2-S1"]
+        assert len(upd) == 1, "软删同名 BM 不得把这次改位置判成「没变」而滤掉"
+        assert upd[0]["fields"] == {"_primary_bm_name": "位置甲"}
+
+
 class TestFbAcceptor:
     def test_column_exists_and_defaults_empty(self, client):
         db = database.get_db()

@@ -706,9 +706,13 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
         # 合成键：当前主 BM 名不在业务表行上（挂在中间表 fb_account_bm），
         # existing 里取不到，必须现查 —— 否则「表里清空位置」会被误判成「没变」
         # 而被 build_diff 滤掉，主 BM 永远清不掉（设计 §6.3）。
+        # `b.deleted_at IS NULL` 不能省（本文件解析 BM 名的两处、以及仓库其它查
+        # fb_bms 的地方都带它）：少了它，一条**已软删**的同名 BM 会被读成「当前主 BM
+        # 名」，于是「表里把位置改成这个名字」被判成「没变」而滤掉 —— 永远写不进去。
         row = db.execute(
             "SELECT b.name AS n FROM fb_account_bm ab JOIN fb_bms b ON ab.bm_id=b.id "
-            "WHERE ab.account_id=? AND ab.is_primary=1", (existing["id"],)).fetchone()
+            "WHERE ab.account_id=? AND ab.is_primary=1 AND b.deleted_at IS NULL",
+            (existing["id"],)).fetchone()
         return (row["n"] if row else "") == (value if value is not None else "")
     cur = existing.get(key)
     if cur is None and value in (None, ""):
@@ -967,6 +971,13 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                 if bid:
                     _set_primary_bm(db, new_id, bid)
                     _record_bm_change(db, new_id, None, bid, user_id)
+                else:
+                    # 解析不到就跳过这一列（账户照建），但必须让户管看见 —— 否则他看到的
+                    # 是「账户建好了、位置列空着」而没有任何原因说明。文案与 update 分支
+                    # 逐字一致（同一个 `位置「X」无法唯一匹配，已跳过` 口径），前端渲染
+                    # 无需为两处写分支。
+                    warnings.append({"row": item["row"],
+                                     "message": f"位置「{fb_bm_name}」无法唯一匹配，已跳过"})
             _apply_death(db, platform, new_id, want_dead)
             created += 1
             if collect_undo:
@@ -980,6 +991,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             continue
         hit["update"].add(item["account_id"])
         try:
+            # 本行是否真的写了库（计数规则见下方 `if wrote: updated += 1`）
+            wrote = False
             fields = dict(item.get("fields") or {})
             is_dead_val = fields.pop("_is_dead", None)
             # 「位置」列是合成键（主 BM 挂在中间表上，不是 fb_accounts 的列）：
@@ -1030,6 +1043,7 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                                    (item["existing_id"],))
                     _record_bm_change(db, item["existing_id"],
                                       old["bm_id"] if old else None, bid, user_id)
+                    wrote = True
             # 撤回快照：列级旧值必须在 UPDATE **之前**读 —— 写完就读不到了
             # （与上面 _record_channel_change / 主 BM 两处同一条纪律）。
             # 新值（fields[k]）一并记下：Task 5 的 CAS 要拿它与库里的当前值比，
@@ -1045,6 +1059,7 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                 db.execute(f"UPDATE {table} SET {', '.join(sets)}, "
                            "updated_at=datetime('now','localtime') WHERE id=?",
                            tuple(fields.values()) + (item["existing_id"],))
+                wrote = True
             # 记在写**成功之后**：UPDATE 抛异常的行不该进快照（那些新值根本没落库，
             # Task 5 的 CAS 拿它去比只会误报冲突）。
             if old_cols:
@@ -1054,7 +1069,18 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                              for k, v in old_cols.items()}})
             if is_dead_val is not None:
                 _apply_death(db, platform, item["existing_id"], bool(is_dead_val))
-            updated += 1
+                # FB 没有 death_date 列，`_apply_death` 对 fb 直接返回 —— 生死由
+                # status_id 承载（真变了会走上面的 sets 分支）。把这一路也算成
+                # 「写了库」会让「已死亡账户、表里状态列仍写死亡」这种一行 sets 为空
+                # 的行虚报成已更新。
+                if platform != "fb":
+                    wrote = True
+            # 「updated」只统计**确实写了库**的行：业务行 UPDATE（sets）、
+            # `_apply_death` 写 death_date（GG/TT）、FB 主 BM 的换 / 清 —— 三条写入
+            # 路径任一发生才计数。三者皆无的行（如「位置」名解析不到、只剩一条 warning）
+            # 一个字节都没写，计进「已更新」会让户管看到的条数虚高。
+            if wrote:
+                updated += 1
         except Exception as e:
             errors.append({"row": item["row"], "error": str(e)})
 
