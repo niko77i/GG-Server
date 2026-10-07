@@ -1135,6 +1135,52 @@ class TestFbAccountOwnershipClosure:
                           headers=hdr).get_json()["data"] == []
 
 
+class TestFbPermanentDeleteFkHistory:
+    """永久删除必须一并清 `fb_account_bm_history`。
+
+    `fb_account_bm_history.account_id` 的外键**没有** ON DELETE CASCADE
+    （`account_mcc_history` / `tt_account_bc_history` 有），而连接开着
+    `PRAGMA foreign_keys=ON` ⇒ 删「有过 BM 变更史」的账户会 FK 报错。
+
+    判别力：去掉 `permanent_delete_account` 里新加的
+    `DELETE FROM fb_account_bm_history WHERE account_id=?` 一行，请求会在
+    `DELETE FROM fb_accounts` 处抛 FOREIGN KEY constraint failed（异常冒泡 / 500），
+    本用例立刻变红。
+
+    既有 `test_permanent_delete_account_ownership` 用 `history=False` 绕开了这条路径，
+    故另立一条**必带历史行**的用例补上缺口。
+    """
+
+    def test_permanent_delete_with_bm_history_is_200_and_purges_all(self, client):
+        """有 BM 变更史的账户 ⇒ 永久删除 200（不是 500），且账户 / 关联 / 历史行全清。"""
+        hdr, uid = _fb_user(client, "t_permhist")
+        db = database.get_db()
+        bm = _mk_fb_bm(db, uid, "t_permhist-BM", "BM")
+        acc = _mk_fb_account(db, uid, "t_permhist-ACC", "带历史的账户", bm_pk=bm)
+        db.execute("INSERT INTO fb_account_bm_history "
+                   "(account_id, old_bm_id, new_bm_id, changed_by) VALUES (?,?,?,?)",
+                   (acc, None, bm, uid))
+        db.commit()
+        db.close()
+
+        resp = client.delete(f"/api/fb/accounts/{acc}/permanent", headers=hdr)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+
+        db = database.get_db()
+        try:
+            n_acc = db.execute("SELECT COUNT(*) FROM fb_accounts WHERE id=?",
+                               (acc,)).fetchone()[0]
+            n_bm = db.execute("SELECT COUNT(*) FROM fb_account_bm WHERE account_id=?",
+                              (acc,)).fetchone()[0]
+            n_hist = db.execute("SELECT COUNT(*) FROM fb_account_bm_history WHERE account_id=?",
+                                (acc,)).fetchone()[0]
+        finally:
+            db.close()
+        assert n_acc == 0, "账户未删"
+        assert n_bm == 0, "BM 关联未删"
+        assert n_hist == 0, "BM 变更史未删"
+
+
 def _mk_fb_report(db, user_id, account_id, cost=1.0, report_date="2026-02-02",
                   product_name="P", line_name="L", account_name="户"):
     """插一行 fb_ad_reports（做表数据），返回主键 id。隔离轴是 `user_id`。"""

@@ -886,10 +886,15 @@ def permanent_delete_account(aid):
     db = get_db()
     uid = get_uid()
     # 归属校验：非跨用户角色只能永久删自己的账户（否则按 id 可**不可逆**删他人账户）。
-    # 校验放在两条 DELETE 之前，别让他人的关联行先被清掉。行不存在时不拦，保持既有 200。
+    # 校验放在三条 DELETE 之前，别让他人的关联行先被清掉。行不存在时不拦，保持既有 200。
     existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
     if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
         return err("无权限", 403)
+    # 先删 BM 变更史：`fb_account_bm_history.account_id` 的外键**没有** ON DELETE
+    # CASCADE（`account_mcc_history` / `tt_account_bc_history` 有），而连接开着
+    # `PRAGMA foreign_keys=ON` ⇒ 不显式清掉，最后删账户那步会被外键挡下（500）。
+    # 口径同 `huguan_dashboard.undo_sync` 删新建 FB 账户处。顺序：历史 → 关联 → 账户。
+    db.execute("DELETE FROM fb_account_bm_history WHERE account_id=?", (aid,))
     db.execute("DELETE FROM fb_account_bm WHERE account_id=?", (aid,))
     db.execute("DELETE FROM fb_accounts WHERE id=?", (aid,))
     db.commit()
