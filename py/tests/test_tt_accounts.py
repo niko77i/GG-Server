@@ -110,6 +110,44 @@ def test_account_create_and_list(client, tt_headers):
     assert "status_counts" in data
 
 
+def test_list_status_filter_alive_includes_null_status(client, tt_headers):
+    """筛选「存活」应包含 status_id IS NULL 的户（与统计/显示保持同一并集口径）。
+
+    根因：`status_id` 为 NULL 的户在列表里被渲染成「存活」
+    （`it['status'] = it.get('status_name') or '存活'`），统计里也归到
+    「存活」这一个 key（`COALESCE(st.name, '存活')`）；但筛选原先只按 id 等值，
+    这批 NULL 户恒筛不出来 —— 表现为「按钮上写着 N、点下去 0 条」。
+    判别力在「NULL 那条在不在」：把修法改回 `a.status_id = ?` 本用例即变红。
+    """
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    # 真「存活」状态行（TT 平台）；不存在则建一条
+    row = db.execute(
+        "SELECT id FROM account_statuses WHERE name='存活' AND platform='tt'"
+    ).fetchone()
+    if row is None:
+        db.execute("INSERT INTO account_statuses(name, platform) VALUES('存活', 'tt')")
+        db.commit()
+        alive_id = db.execute(
+            "SELECT id FROM account_statuses WHERE name='存活' AND platform='tt'"
+        ).fetchone()["id"]
+    else:
+        alive_id = row["id"]
+    # 两条户：一条 status_id=存活，一条 status_id IS NULL（渲染成「存活」）
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+               ("真存活户", "1111111111111", alive_id, uid))
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+               ("空状态户", "2222222222222", None, uid))
+    db.commit()
+    db.close()
+
+    resp = client.get(f"/api/tt/accounts/list?status_id={alive_id}", headers=tt_headers)
+    assert resp.status_code == 200
+    adv_ids = {it["advertiser_id"] for it in resp.get_json()["items"]}
+    assert "1111111111111" in adv_ids, "真「存活」户应返回"
+    assert "2222222222222" in adv_ids, "status_id 为 NULL 的户（渲染成「存活」）也应返回"
+
+
 def test_update_account_clear_agent(client, tt_headers):
     """update_account 应支持 agent_id=null 显式清空代理（对齐 GG）。"""
     resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")

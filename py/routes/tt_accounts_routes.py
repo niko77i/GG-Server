@@ -232,7 +232,19 @@ def list_accounts():
     if agent_id:
         where.append("a.agent_id = ?"); params.append(agent_id)
     if status_id:
-        where.append("a.status_id = ?"); params.append(status_id)
+        # 「存活」在 TT 是**并集口径**：status_id 为 NULL 的户在列表里渲染成「存活」
+        # （`it['status'] = ... or '存活'`），统计也归到「存活」那一个 key。
+        # 若筛选只按 id 等值，那批 NULL 户恒筛不出来 —— 与统计口径分裂，
+        # 表现为「按钮上写着 N、点下去 0 条」。GG 侧同型先例见 accounts_list 的
+        # `status == "未知"` 分支；此处判据对着 TT 的别名（存活）写。
+        # 判据用**名字**而非硬编码 id：id 会因状态表重建而变（2026-10-06 曾删过
+        # TT 状态行），名字才是稳定契约。
+        _st = db.execute("SELECT name FROM account_statuses WHERE id=?", (status_id,)).fetchone()
+        if _st and (_st["name"] or "").strip() == "存活":
+            where.append("(a.status_id IS NULL OR a.status_id = ?)")
+        else:
+            where.append("a.status_id = ?")
+        params.append(status_id)
     if timezone:
         where.append("a.timezone = ?"); params.append(timezone)
 
