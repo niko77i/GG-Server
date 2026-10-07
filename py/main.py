@@ -8970,6 +8970,111 @@ def _run_delist_check_once():
         db.close()
 
 
+# ============================================================
+#  定时任务：周期配置与运行记录
+# ============================================================
+
+# 配置变更的生效粒度（秒）：调度循环每睡这么久就醒一次重算目标。
+# 调小 = 改配置生效更快、数据库读取更频繁；30 秒是两头都合适的折中。
+_TICK_SECONDS = 30
+
+# 各任务的周期默认值 —— 与硬编码时代保持一致（GG 1 小时 / TT 30 分钟 / 周日 0 点）。
+_SCHEDULER_DEFAULTS = {
+    "gg_delist_minutes": 60,
+    "tt_delist_minutes": 30,
+    "cleanup_weekday": 6,     # 0=周一 … 6=周日（Python datetime.weekday() 约定）
+    "cleanup_hour": 0,
+}
+
+# 掉包周期上下限（分钟）。下限 10 由用户 2026-10-07 裁定：更短会把 Google Play
+# 与代理池打爆（现行 _TIMEOUT=5，代理池只有 2 个代理）。
+_SCHEDULER_LIMITS = {"min_minutes": 10, "max_minutes": 1440}
+
+
+def _get_scheduler_config() -> dict:
+    """读定时任务配置；任何字段缺失/非法/整键不存在都回落默认值。
+
+    调度线程每 30 秒调一次，必须永不抛异常 —— 它崩了等于定时任务全停。
+    """
+    try:
+        raw = database.config_get("scheduler_config", "") or ""
+        data = json.loads(raw) if raw else {}
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+
+    cfg = dict(_SCHEDULER_DEFAULTS)
+    lo, hi = _SCHEDULER_LIMITS["min_minutes"], _SCHEDULER_LIMITS["max_minutes"]
+
+    for key in ("gg_delist_minutes", "tt_delist_minutes"):
+        val = data.get(key)
+        if isinstance(val, int) and not isinstance(val, bool) and lo <= val <= hi:
+            cfg[key] = val
+
+    val = data.get("cleanup_weekday")
+    if isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 6:
+        cfg["cleanup_weekday"] = val
+
+    val = data.get("cleanup_hour")
+    if isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 23:
+        cfg["cleanup_hour"] = val
+
+    return cfg
+
+
+def _get_scheduler_int(field: str, default: int) -> int:
+    """取单个整数配置项（带默认值兜底）。"""
+    return int(_get_scheduler_config().get(field, default))
+
+
+def _next_cleanup_at(now, weekday: int, hour: int):
+    """算下一个清理时刻。
+
+    等价于原实现 `timedelta(days=(days_until_sunday or 7))` —— 即「本周该时刻
+    已过（含正好等于）就顺延一周」，不会同一天重复触发。
+    """
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0) \
+        + datetime.timedelta(days=(weekday - now.weekday()) % 7)
+    if target <= now:
+        target += datetime.timedelta(days=7)
+    return target
+
+
+def _interval_tick(elapsed: int, target_seconds: int) -> tuple:
+    """推进一步 tick，返回 (是否该执行, 新的 elapsed)。
+
+    抽成纯函数是为了可测 —— 循环本体（while True + sleep）没法在测试里跑。
+    """
+    elapsed += _TICK_SECONDS
+    if target_seconds > 0 and elapsed >= target_seconds:
+        return True, 0
+    return False, elapsed
+
+
+def _get_last_run() -> dict:
+    """读各任务上次执行记录：{task_key: {"ts": "...", "ok": bool}}。"""
+    try:
+        raw = database.config_get("scheduler_last_run", "") or ""
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _mark_task_run(task_key: str, ok: bool):
+    """记一次执行（成功与否都记 —— 用户要看的是「上次跑没跑、成没成」）。"""
+    last = _get_last_run()
+    last[task_key] = {
+        "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "ok": bool(ok),
+    }
+    try:
+        database.config_set("scheduler_last_run", json.dumps(last, ensure_ascii=False))
+    except Exception as e:
+        log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
+
+
 def _start_weekly_cleanup():
     """每周日 24:00 清理爬取图片和生成视频（音乐库保留）。"""
     import datetime as _dt
