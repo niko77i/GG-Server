@@ -51,15 +51,26 @@
 
 ## 4. 架构
 
-### 4.1 五个 target
+### 4.1 四个 target（**不是五个** —— 实施前勘察后合并）
 
-| target token | business_key | 表主人如何取得 |
-|---|---|---|
-| `huguan_dashboard` | `account_id` | 调用方传入的 `user_id`（= 表主人，因只有户管会触发） |
-| `operator_dashboard_remark` | `account_id` | **入参 `owner_id`**（账户 owner = 投手）—— 本期唯一真正的第三方 |
-| `huguan_owner_channel` | `account_id` | 操作者（= 户管自己） |
-| `huguan_fb_acceptor` | `account_id` | 操作者（= 户管自己） |
-| `huguan_dashboard_sync` | `account_id` | 户管（端点专属） |
+勘察发现 **#1（`push_rows`）与 #5（`_write_background`）写的是同一张表的同一批列** ——
+都是「把该账户的整行刷新到该户管的看板」。故合并为一个 target，全期 4 个：
+
+| target token | business_key | 表主人如何取得 | 覆盖点位 |
+|---|---|---|---|
+| `huguan_dashboard` | `account_id` | 调用方传入的 `user_id`（= 表主人，因只有户管会触发） | **#1** + **#5 的 :159/:171/:180** |
+| `huguan_owner_channel` | `account_id` | 同上传入的 `user_id` | **#3** + **#5 的 :165**（写值或清空，同一列） |
+| `operator_dashboard_remark` | `account_id` | **入参 `owner_id`**（账户 owner = 投手）—— 本期唯一真正的第三方 | **#2** |
+| `huguan_fb_acceptor` | `account_id` | 调用方传入的 `user_id` | **#4** |
+
+> **#1 与 #5 合并的代价（须知）**：#5 原本每个点位只写**一列**，而合并后重建走
+> `collect_rows_for_push` ⇒ **重试会写该账户的全部可写列**（即整行刷新）。
+> 这是**有意的**：重试的语义就是「把这行刷到与系统一致」，且 `cells_for_row` 只产出
+> 系统拥有的可写列（**刻意不含**归属变更通道列，规格 §7.2 规则 2），故不会碰到
+> 户管自己用公式维护的列。
+>
+> ⚠️ **通道列被 `cells_for_row` 排除**，所以它必须单列一个 target（`huguan_owner_channel`），
+> 否则 #5 的 :165（清空通道列）与 #3（写通道列）都无法重建。
 
 ### 4.2 rebuild 一律从 DB 重算
 
@@ -87,7 +98,7 @@
 
 **复用而非新设计**：行内标记沿用二期已确认的视觉方案（位置、宽度、三态、文案单源 `frontend/src/utils/sheetWriteUi.js`）。
 
-**⚠️ 二期的一条已知限制在这里会放大**：`/api/sheet-write/status?platform=` **不带 `target`**，同一 `business_key` 跨 target 时只回最新一行。三期的 target 数是 5，而键都是 `account_id` —— **碰撞概率比二期高得多**（同一账户可能同时有 `huguan_dashboard` 与 `operator_dashboard_remark` 两条）。**本期必须给该端点加 `target` 参数**，否则会出现「一个 target 的行遮住另一个」的静默漏报。这是本期**必须做**的后端改动（二期记录为「今日不可达」，三期不再成立）。
+**⚠️ 二期的一条已知限制在这里会放大**：`/api/sheet-write/status?platform=`（位于 `py/routes/sheet_write_routes.py:26-60`，**不在** `huguan_dashboard_routes.py` —— 初稿写错了位置）**不带 `target`**，同一 `business_key` 跨 target 时只回最新一行。三期的 target 数是 4，而键都是 `account_id` —— **碰撞概率比二期高得多**（同一账户可能同时有 `huguan_dashboard` 与 `operator_dashboard_remark` 两条）。**本期必须给该端点加 `target` 参数**，否则会出现「一个 target 的行遮住另一个」的静默漏报。这是本期**必须做**的后端改动（二期记录为「今日不可达」，三期不再成立）。
 
 ---
 
