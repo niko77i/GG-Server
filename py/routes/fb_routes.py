@@ -51,6 +51,16 @@ def _valid_pk_int64(raw):
     return v
 
 
+def _fb_text(value) -> str:
+    """请求体里的文本字段一律归一为去空白的字符串。
+
+    不能写 `(value or '').strip()` —— 请求体是用户可控的 JSON，字段可能是**真值非 str**
+    （数字 / 列表 / 对象），`.strip()` 会直接 `AttributeError` 炸成 500。
+    同类兜底先例见 `huguan_dashboard._conf_text`（同一形状）。
+    """
+    return '' if value is None else str(value).strip()
+
+
 # ==================== BM 管理 ====================
 
 @fb_bp.route('/api/fb/bms/list', methods=['GET'])
@@ -500,11 +510,11 @@ def batch_create_accounts():
         return err('请提供 account_ids 列表', 400)
 
     common = {
-        'name_prefix': (data.get('name_prefix') or '').strip(),
-        'timezone': (data.get('timezone') or ''),
+        'name_prefix': _fb_text(data.get('name_prefix')),
+        'timezone': _fb_text(data.get('timezone')),
         'status_id': _valid_pk_int64(data['status_id']) if data.get('status_id') is not None else None,
         'primary_bm_id': _valid_pk_int64(data['primary_bm_id']) if data.get('primary_bm_id') is not None else None,
-        'acquired_date': data.get('acquired_date', ''),
+        'acquired_date': _fb_text(data.get('acquired_date')),
     }
     overrides = data.get('overrides') or {}
     if not isinstance(overrides, dict):
@@ -521,17 +531,24 @@ def batch_create_accounts():
         if not aid:
             skipped.append(aid)
             continue
-        ov = overrides.get(aid) or {}
+        ov = overrides.get(aid)
+        if ov is None:
+            ov = {}
+        elif not isinstance(ov, dict):
+            # 一条坏的 override 若被静默忽略，会让用户以为「设置生效了」、实际是默认值 ——
+            # 建出一行属性不对的数据，比不建并明确报错更糟。故落进本端点已有的 per-row errors。
+            errors.append({'account_id': aid, 'error': 'override 格式错误，应为对象'})
+            continue
         # 名称：overrides.name 直接用作完整名称；否则 name_prefix + ID
-        name = (ov.get('name') or '').strip() or \
+        name = _fb_text(ov.get('name')) or \
                ((common['name_prefix'] + ' ' + aid).strip() if common['name_prefix'] else aid)
-        timezone = ov['timezone'] if 'timezone' in ov else common['timezone']
+        timezone = _fb_text(ov['timezone']) if 'timezone' in ov else common['timezone']
         status_id = (_valid_pk_int64(ov['status_id'])
                      if 'status_id' in ov and ov['status_id'] is not None else common['status_id'])
         primary_bm_id = (_valid_pk_int64(ov['primary_bm_id'])
                          if 'primary_bm_id' in ov and ov['primary_bm_id'] is not None
                          else common['primary_bm_id'])
-        acquired_date = ov['acquired_date'] if 'acquired_date' in ov else common['acquired_date']
+        acquired_date = _fb_text(ov['acquired_date']) if 'acquired_date' in ov else common['acquired_date']
 
         if not aid.isdigit():
             errors.append({'account_id': aid, 'error': '账户ID必须是纯数字'})

@@ -1126,3 +1126,90 @@ class TestFbBatchCreate:
         assert data["errors"] == []
         rows = _fb_accounts_by_ids(["9100013"])
         assert rows[0]["status_id"] is None, "非法 status_id 没有静默变 None"
+
+    # ---------------- 正常主 BM 路径（此前只覆盖了 FK 失败那条） ----------------
+
+    def test_bm_normal_path_sets_primary_bm(self, client):
+        """合法 `primary_bm_id` ⇒ 建成的账户在 `fb_account_bm` 里有一行 is_primary=1。
+
+        此前唯一涉及 BM 的用例只走 **FK 失败**路径（不存在的 BM ⇒ errors），
+        「正常挂上主 BM」这条路无覆盖。
+        """
+        hdr, uid = _fb_user(client, "t_bc_bm_ok")
+        db = database.get_db()
+        bm_pk = _mk_fb_bm(db, uid, "BC-BM-1", "主BM")
+        db.close()
+        data = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100014"], "primary_bm_id": bm_pk,
+        }, headers=hdr).get_json()
+        assert data["created"] == 1
+        assert data["errors"] == []
+        # 查库断言：中间表确实有一行主 BM 关联（只看响应体测不出这个）
+        db = database.get_db()
+        row = db.execute(
+            "SELECT ab.bm_id, ab.is_primary FROM fb_account_bm ab "
+            "JOIN fb_accounts a ON a.id = ab.account_id WHERE a.account_id = ?",
+            ("9100014",)).fetchone()
+        db.close()
+        assert row is not None, "账户建成了却没有 BM 关联行"
+        assert row["bm_id"] == bm_pk
+        assert row["is_primary"] == 1
+
+    # ---------------- 畸形输入 ⇒ 不是 500（同族三条） ----------------
+
+    def test_overrides_top_level_non_dict_is_400(self, client):
+        """`overrides` 顶层非 dict ⇒ 400。守卫已存在（`isinstance(overrides, dict)`）但此前无测试。"""
+        hdr, _ = _fb_user(client, "t_bc_ov400")
+        resp = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100015"], "overrides": ["x"],
+        }, headers=hdr)
+        assert resp.status_code == 400, resp.get_data(as_text=True)
+
+    def test_override_value_not_object_goes_to_errors_not_500(self, client):
+        """`overrides[<id>]` 的值不是对象 ⇒ 该行进 errors、**不建这一行**，不是 500、也不整批 400。
+
+        一条坏的 override 若被静默忽略，会让用户以为「设置生效了」而实际是默认值 ——
+        建出一行属性不对的数据，比不建并明确报错更糟。故走本端点已有的 per-row errors 通道。
+        去掉 `isinstance(ov, dict)` 守卫：`ov.get(...)` 会 AttributeError ⇒ 500，本用例变红。
+        """
+        hdr, _ = _fb_user(client, "t_bc_ovval")
+        resp = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100016"], "overrides": {"9100016": "x"},
+        }, headers=hdr)
+        assert resp.status_code == 200, resp.get_data(as_text=True)   # 不是 500
+        data = resp.get_json()
+        assert data["created"] == 0
+        assert [e["account_id"] for e in data["errors"]] == ["9100016"]
+        assert "override" in data["errors"][0]["error"].lower()
+        assert _fb_accounts_by_ids(["9100016"]) == [], "override 坏了却建出了行"
+
+    def test_override_name_numeric_is_normalized_not_500(self, client):
+        """`overrides[<id>].name` 是数字（真值非 str）⇒ 归一为字符串后正常建成，不是 500。
+
+        不能写 `(ov.get('name') or '').strip()` —— 数字执行 `.strip()` 会 AttributeError ⇒ 500。
+        去掉 `_fb_text` 归一（退回旧写法）本用例变红。
+        """
+        hdr, _ = _fb_user(client, "t_bc_nameint")
+        resp = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100017"], "overrides": {"9100017": {"name": 123}},
+        }, headers=hdr)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        data = resp.get_json()
+        assert data["created"] == 1
+        assert data["errors"] == []
+        assert _fb_accounts_by_ids(["9100017"])[0]["name"] == "123"
+
+    def test_name_prefix_numeric_is_normalized_not_500(self, client):
+        """顶层 `name_prefix` 是数字 ⇒ 归一为字符串后正常拼接（`123 9100018`），不是 500。
+
+        去掉 `_fb_text` 归一（退回 `(data.get('name_prefix') or '').strip()`）本用例变红。
+        """
+        hdr, _ = _fb_user(client, "t_bc_pfxint")
+        resp = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100018"], "name_prefix": 123,
+        }, headers=hdr)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        data = resp.get_json()
+        assert data["created"] == 1
+        assert data["errors"] == []
+        assert _fb_accounts_by_ids(["9100018"])[0]["name"] == "123 9100018"
