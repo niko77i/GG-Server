@@ -1604,8 +1604,16 @@ class TestE11RechargeSheetsErrorSink:
       - 充值提交 / 批量提交的后台 `_on_fail` 回调。
     """
 
-    def test_retry_sheets_writes_fixed_text_not_raw_exception(self, client, monkeypatch, caplog):
+    def test_retry_sheets_writes_fixed_text_not_raw_exception(self, client, monkeypatch, caplog, inline_bg):
+        """item-3 在新架构下的等价守卫。
+
+        二期把 `POST /api/recharge/<rid>/retry-sheets` 改成**转调统一写表入口**
+        （设计 §5.3：同步重放 → 提交后立即返回，是有意的语义变更）；
+        失败不再写 `recharge_records.sheets_error`，改由 `sheet_write_log` 承担。
+        安全属性不变：**异常原文不得经任何回给客户端的字段外泄**。
+        """
         import main as main_mod
+        import sheet_write
         import google_sheets_service as gs
 
         hdr, aid, acc = _gg_account(client, "_e11_retry", "GG-E11-RETRY")
@@ -1622,22 +1630,34 @@ class TestE11RechargeSheetsErrorSink:
 
         with caplog.at_level(logging.ERROR, logger="gg-server"):
             resp = client.post(f"/api/recharge/{rid}/retry-sheets", headers=hdr)
-        assert resp.status_code == 500
-        assert resp.get_json()["error"] == SANITIZED_500
+        # 新语义：提交后立即返回，不再同步重放、不再 500
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
         _assert_no_e11_leak(resp)
 
-        # 落库值必须固定文案 —— 读取端点会把它原样回给客户端
+        # 安全属性①：已退场的列不得被写入任何东西（更不得含异常原文）
         recs = client.get(f"/api/accounts/{aid}/recharge-records", headers=hdr).get_json()["records"]
         row = next(r for r in recs if r["id"] == rid)
         _assert_no_e11_leak(json.dumps(recs, ensure_ascii=False))
-        assert row["sheets_error"] == main_mod._SHEETS_SYNC_FAILED_MSG, (
-            f"sheets_error 落进了异常原文：{row['sheets_error']!r}")
-        # 详情不得被一并砍掉
+        assert row["sheets_error"] in ("", None), (
+            f"sheets_error 已退场、不得被写：{row['sheets_error']!r}")
+
+        # 安全属性②：失败改由统一机制承担，且落库的是固定文案
+        db = database.get_db()
+        log_row = db.execute("SELECT * FROM sheet_write_log WHERE target='gg_recharge' "
+                             "AND business_key=?", (str(rid),)).fetchone()
+        db.close()
+        assert log_row is not None, "重试必须登记进统一写表机制"
+        assert log_row["status"] == "retry_failed"
+        assert log_row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+            f"落库文案应为固定文案，实际 {log_row['error_msg']!r}")
+        _assert_no_e11_leak(log_row["error_msg"] or "")
+        # 异常详情不得被一并砍掉
         assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
 
     def test_submit_background_on_fail_writes_fixed_text(self, client, monkeypatch, caplog, inline_bg):
-        """充值提交的后台 `_on_fail` 回调（item-3 的写点）走真实 `_sync_sheets_background`。"""
+        """充值提交的后台失败在新架构下的等价守卫（同上：原文不外泄）。"""
         import main as main_mod
+        import sheet_write
         import google_sheets_service as gs
 
         hdr, aid, acc = _gg_account(client, "_e11_submit", "GG-E11-SUBMIT")
@@ -1651,11 +1671,24 @@ class TestE11RechargeSheetsErrorSink:
                                json={"account_id": acc, "amount": "100"}, headers=hdr)
         assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
 
+        # 安全属性①：退场的列不得被写
         recs = client.get(f"/api/accounts/{aid}/recharge-records", headers=hdr).get_json()["records"]
-        assert recs, "未落充值记录，断言无判别力"
+        assert recs, "充值记录应出现在列表里"
         _assert_no_e11_leak(json.dumps(recs, ensure_ascii=False))
-        assert recs[0]["sheets_error"] == main_mod._SHEETS_SYNC_FAILED_MSG, (
-            f"后台回调把异常原文落进了 sheets_error：{[r['sheets_error'] for r in recs]!r}")
+        assert recs[0]["sheets_error"] in ("", None), (
+            f"sheets_error 已退场、不得被写：{[r['sheets_error'] for r in recs]!r}")
+
+        # 安全属性②：失败落统一机制，文案固定
+        rid = recs[0]["id"]
+        db = database.get_db()
+        log_row = db.execute("SELECT * FROM sheet_write_log WHERE target='gg_recharge' "
+                             "AND business_key=?", (str(rid),)).fetchone()
+        db.close()
+        assert log_row is not None, "后台写表失败必须登记"
+        assert log_row["status"] == "retry_failed"
+        assert log_row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+            f"落库文案应为固定文案，实际 {log_row['error_msg']!r}")
+        _assert_no_e11_leak(log_row["error_msg"] or "")
         assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
 
 

@@ -284,6 +284,11 @@ def run_write_many(db, *, user_id, platform, target, business_keys,
         import database
         _db = None
         try:
+            # 同 run_write：回调收到的 err_msg 是**异常原文**，而 sheet_write_log.error_msg
+            # 会被 GET /api/sheet-write/status 原样回给客户端 ⇒ 落库前统一换成固定文案。
+            # （本函数是 run_write 落状态逻辑的复制品，安全修复必须两处一起改 ——
+            #   合并时 git 不会为这种「新增的复制品」报冲突。）
+            _msg = _WRITE_FAILED_MSG if err_msg else ""
             _db = database.get_db()
             for bk in keys:
                 row = _db.execute(
@@ -297,9 +302,9 @@ def run_write_many(db, *, user_id, platform, target, business_keys,
                            status="synced", error_msg="")
                 elif status == "failed":
                     settle(_db, user_id=user_id, target=target, business_key=bk,
-                           status="failed", error_msg=(err_msg or "")[:500])
+                           status="failed", error_msg=_msg)
                 else:
-                    _apply_final(_db, row, (err_msg or "")[:500])
+                    _apply_final(_db, row, _msg)
         except Exception as e:
             log.error("写表状态落库失败 target=%s: %s", target, e)
         finally:

@@ -196,7 +196,10 @@ def test_dashboard_final_failure_lands_retry_failed_not_rolled_back(client, monk
 
     assert r is not None, "改状态必须登记一条 gg_my_dashboard"
     assert r["status"] == "retry_failed", f"应落 retry_failed，实际 {r['status']}"
-    assert "Sheets 配额超限" in r["error_msg"]
+    # 落库文案是**固定文案**（安全修复：error_msg 会经 /status 原样回客户端），
+    # 异常原文只进日志 —— 不再是 "Sheets 配额超限"。
+    assert r["error_msg"] == sheet_write._WRITE_FAILED_MSG, \
+        f"落库文案应为固定文案，实际 {r['error_msg']!r}"
     assert cur == dead, "GG 侧是镜像类，**不得**回滚业务数据"
 
 
