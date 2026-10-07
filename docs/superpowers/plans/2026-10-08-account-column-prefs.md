@@ -966,7 +966,7 @@ export function isOnlyVisible(panelPref, registry, isAvailable, key) {
 cd frontend && node --test tests/
 ```
 
-预期：全部 PASS（19 个用例）
+预期：全部 PASS（20 个用例）
 
 - [ ] **Step 5: 加 npm script**
 
