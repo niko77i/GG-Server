@@ -9,6 +9,7 @@
 拿到的是被 patch 的桩函数，主线程不让出 GIL、后台守护线程永远跑不到，
 断言就会在任务真正落终态之前提前开火。
 """
+import json
 from time import sleep as _poll_sleep
 
 import database
@@ -260,3 +261,143 @@ def test_dashboard_write_rebuilds_from_accounts(client, monkeypatch):
     sync_fn()          # 直接执行（不在后台线程里，测试内联跑）
 
     assert ("gg_adv_4", "解绑", 7) in writes, f"H 列应写「解绑」，实际 {writes}"
+
+
+# ---------------------------------------------------------------------------
+# 身份维度：五个点位各自「写谁的看板」
+#
+# 上面六条用例里 owner 恒等于操作者，而无私有配置时 _get_my_dashboard_name 一律
+# 回落内置「我的看板」—— 于是把删户/恢复的 ac["owner_id"] 改成 user_id（或反向）
+# 后六条全绿。该维度此前**零覆盖**。
+#
+# 它失败时是静默的：跨用户操作（管理员删他人账户）会写错看板名，
+# update_cell_by_account_id 在该表里查不到对应行，只返回 {"not_found": True}
+# **不抛异常** ⇒ 日志照样落 synced，正是本功能要消灭的「写丢了还不知道」。
+#
+# 故下面每条都造 owner ≠ 操作者、两人各配**不同的私有看板名**，直接断言传入
+# update_cell_by_account_id 的看板名是哪一份，并反向断言不是另一份。
+# ---------------------------------------------------------------------------
+
+
+def _record_sheet_writes(monkeypatch):
+    """把看板写表换成记录器，返回 [(dashboard_name, account_id)]。
+
+    参数序与 google_sheets_service.update_cell_by_account_id 逐位对齐：
+    (service, spreadsheet_id, sheet_name, account_id, value, col_index=5)。
+    """
+    import google_sheets_service as gs
+    calls = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(
+        gs, "update_cell_by_account_id",
+        lambda svc, sid, name, aid, val, col_index=5: calls.append((name, aid)))
+    return calls
+
+
+def _set_private_dashboard(db, uid, name):
+    """给某用户盖一层**私有**看板名（config 表 key=sheet_mappings_<uid>）。
+
+    私有层优先级最高（_get_my_dashboard_name：私有 config > 全局 tags > 内置默认，
+    见 main.py），故两人各配不同名后，「写谁的看板」在写表实参里直接可读。
+    """
+    db.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+               (f"sheet_mappings_{uid}", json.dumps({"my_dashboard": name}, ensure_ascii=False)))
+    db.commit()
+
+
+def _ident_setup(client):
+    """建 owner（账户归属者）与 operator（操作者），各配不同的私有看板名。
+
+    返回 (op_headers, owner_uid, op_uid)。
+
+    operator 用 role='admin'：删户 / 恢复 / 改状态 / 批量改状态四个端点都只在
+    `_cross_user_actor(user_id)` 为真时才放行「动别人的账户」，而
+    CROSS_USER_ROLES = ("developer", "admin", "huguan")。取 admin 而非 developer，
+    是因为 developer 同在 PLATFORM_SWITCH_ROLES（可切平台）里，admin 语义更贴近
+    「管理员代管他人账户」这一被测场景。
+    """
+    _h_owner, owner_uid = _gg_user(client, "_gg_ident_owner")
+    h_op, op_uid = _gg_user(client, "_gg_ident_op", role="admin")
+    db = database.get_db()
+    _setup_sheets(db)
+    _set_private_dashboard(db, owner_uid, "看板_OWNER")
+    _set_private_dashboard(db, op_uid, "看板_OPERATOR")
+    db.close()
+    return h_op, owner_uid, op_uid
+
+
+def test_delete_writes_owner_dashboard_not_operator(client, monkeypatch):
+    """删户点位写的是**账户归属者**的看板名，不是操作者的。"""
+    calls = _record_sheet_writes(monkeypatch)
+    h_op, owner_uid, _op_uid = _ident_setup(client)
+    db = database.get_db()
+    aid = _mk_account(db, owner_uid, "gg_ident_del", _status_id(db, "存活"))
+    db.close()
+
+    assert client.delete(f"/api/accounts/{aid}", headers=h_op).status_code == 200
+    _wait_until(lambda: any(a == "gg_ident_del" for _n, a in calls),
+                f"删户必须触发写表，实际 {calls}")
+
+    names = {n for n, a in calls if a == "gg_ident_del"}
+    assert "看板_OWNER" in names, f"删户须写账户 owner 的看板，实际 {names}"
+    assert "看板_OPERATOR" not in names, f"删户不得写操作者的看板，实际 {names}"
+
+
+def test_restore_writes_owner_dashboard_not_operator(client, monkeypatch):
+    """恢复点位写的也是**账户归属者**的看板名，不是操作者的。"""
+    calls = _record_sheet_writes(monkeypatch)
+    h_op, owner_uid, _op_uid = _ident_setup(client)
+    db = database.get_db()
+    aid = _mk_account(db, owner_uid, "gg_ident_res", _status_id(db, "存活"))
+    db.execute("UPDATE accounts SET deleted_at=datetime('now','localtime') WHERE id=?", (aid,))
+    db.commit()
+    db.close()
+
+    assert client.post(f"/api/accounts/{aid}/restore", headers=h_op).status_code == 200
+    _wait_until(lambda: any(a == "gg_ident_res" for _n, a in calls),
+                f"恢复必须触发写表，实际 {calls}")
+
+    names = {n for n, a in calls if a == "gg_ident_res"}
+    assert "看板_OWNER" in names, f"恢复须写账户 owner 的看板，实际 {names}"
+    assert "看板_OPERATOR" not in names, f"恢复不得写操作者的看板，实际 {names}"
+
+
+def test_status_change_writes_operator_dashboard_not_owner(client, monkeypatch):
+    """单户改状态点位写的是**操作者**的看板名（与删户/恢复刻意不一致）。"""
+    calls = _record_sheet_writes(monkeypatch)
+    h_op, owner_uid, _op_uid = _ident_setup(client)
+    db = database.get_db()
+    aid = _mk_account(db, owner_uid, "gg_ident_st", _status_id(db, "存活"))
+    dead = _status_id(db, "死亡")
+    db.close()
+
+    resp = client.put(f"/api/accounts/{aid}", headers=h_op, json={"status_id": dead})
+    assert resp.status_code == 200, resp.get_json()
+    _wait_until(lambda: any(a == "gg_ident_st" for _n, a in calls),
+                f"改状态必须触发写表，实际 {calls}")
+
+    names = {n for n, a in calls if a == "gg_ident_st"}
+    assert "看板_OPERATOR" in names, f"改状态须写操作者的看板，实际 {names}"
+    assert "看板_OWNER" not in names, f"改状态不得写账户 owner 的看板，实际 {names}"
+
+
+def test_batch_status_change_writes_operator_dashboard_not_owner(client, monkeypatch):
+    """批量改状态点位（run_write_many 路径）写的也是**操作者**的看板名。"""
+    calls = _record_sheet_writes(monkeypatch)
+    h_op, owner_uid, _op_uid = _ident_setup(client)
+    db = database.get_db()
+    alive = _status_id(db, "存活")
+    dead = _status_id(db, "死亡")
+    a1 = _mk_account(db, owner_uid, "gg_ident_b1", alive)
+    a2 = _mk_account(db, owner_uid, "gg_ident_b2", alive)
+    db.close()
+
+    resp = client.post("/api/accounts/batch-update", headers=h_op,
+                       json={"ids": [a1, a2], "field": "status_id", "value": dead})
+    assert resp.status_code == 200, resp.get_json()
+    _wait_until(lambda: {a for _n, a in calls} >= {"gg_ident_b1", "gg_ident_b2"},
+                f"批量改状态必须写全两户，实际 {calls}")
+
+    names = {n for n, a in calls if a in ("gg_ident_b1", "gg_ident_b2")}
+    assert "看板_OPERATOR" in names, f"批量改状态须写操作者的看板，实际 {names}"
+    assert "看板_OWNER" not in names, f"批量改状态不得写账户 owner 的看板，实际 {names}"
