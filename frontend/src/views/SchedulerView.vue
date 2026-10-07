@@ -111,7 +111,8 @@ const TASK_META = {
   gg_delist: {
     icon: '🔍',
     desc: '检测所有正常产品的 Google Play 链接是否掉包，并发送邮件通知在跑人员',
-    tags: [{ text: '启动时立即执行一次', type: 'warning' }],
+    // 「启动时立即执行一次」的代码本就注释掉了，首次执行在启动后一整个周期 ⇒ 不挂 tag
+    tags: [],
     resultType: 'delist',
     busyText: '检测中...',
   },

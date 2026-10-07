@@ -9133,6 +9133,10 @@ _SCHEDULER_DEFAULTS = {
 # 与代理池打爆（现行 _TIMEOUT=5，代理池只有 2 个代理）。
 _SCHEDULER_LIMITS = {"min_minutes": 10, "max_minutes": 1440}
 
+# 保护 scheduler_last_run 的「读-改-写」：6 个写者（3 调度线程 + 3 个 trigger 接口）
+# 共享同一个 key，读写两步之间无事务，交错时会丢更新。
+_last_run_lock = threading.Lock()
+
 
 def _get_scheduler_config() -> dict:
     """读定时任务配置；任何字段缺失/非法/整键不存在都回落默认值。
@@ -9206,16 +9210,21 @@ def _get_last_run() -> dict:
 
 
 def _mark_task_run(task_key: str, ok: bool):
-    """记一次执行（成功与否都记 —— 用户要看的是「上次跑没跑、成没成」）。"""
-    last = _get_last_run()
-    last[task_key] = {
-        "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "ok": bool(ok),
-    }
-    try:
-        database.config_set("scheduler_last_run", json.dumps(last, ensure_ascii=False))
-    except Exception as e:
-        log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
+    """记一次执行（成功与否都记 —— 用户要看的是「上次跑没跑、成没成」）。
+
+    「读整个 dict → 改子键 → 写回整个 dict」三步必须整体持锁：并发写者各自
+    读到同一份旧值再写回，后写者会覆盖先写者、丢掉一次更新（见 §4.1 的竞态论证）。
+    """
+    with _last_run_lock:
+        last = _get_last_run()
+        last[task_key] = {
+            "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ok": bool(ok),
+        }
+        try:
+            database.config_set("scheduler_last_run", json.dumps(last, ensure_ascii=False))
+        except Exception as e:
+            log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
 
 
 def _interval_loop(task_key, config_field, default_minutes, run_once, log_tag):
@@ -9225,9 +9234,9 @@ def _interval_loop(task_key, config_field, default_minutes, run_once, log_tag):
     首次执行仍在启动后一整个周期（原实现「启动时立即执行一次」的代码本就是
     注释掉的，此处保持同一语义）。
 
-    ⚠️ 周期变更**只在两次执行之间被采纳** —— 目标值是在 run_once() **之前**算的，
-    正在跑的那一轮不会被打断（这是刻意设计：不想中途掐掉掉包检测）。别为了
-    「让新周期立刻生效」把重算挪到执行中间或加中断。
+    目标值**每 tick 重算**，故改配置最多 `_TICK_SECONDS` 秒生效、无需重启；
+    正在跑的那一轮不被打断（本轮跑完才按新周期算下一轮）。别把这次每 tick 的重读
+    挪走或缓存起来 —— 那正是「免重启生效」的实现依据。
     """
     elapsed = 0
     while True:
