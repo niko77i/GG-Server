@@ -90,6 +90,7 @@
     </el-card>
 
     <!-- 弹窗 -->
+    <FbAccountBatchImportModal v-model:visible="batchImportVisible" @imported="loadData" />
     <FbAccountBatchLookupModal v-model:visible="lookupVisible" />
 
     <el-dialog v-model="dialogVisible" :title="editingId?'编辑账户':'新增账户'" width="520px" class="account-dialog">
@@ -170,6 +171,7 @@ import { fbApi } from '../../api/fb'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import client from '../../api/client'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
+import FbAccountBatchImportModal from '@/components/fb/FbAccountBatchImportModal.vue'
 import FbAccountBatchLookupModal from '@/components/fb/FbAccountBatchLookupModal.vue'
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
