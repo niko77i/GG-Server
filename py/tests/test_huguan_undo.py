@@ -131,3 +131,63 @@ class TestUndoPrimitives:
         hd.delete_undo(db, fb_user, "fb", "push")
         assert db.in_transaction is True, "delete_undo 不得 commit"
         db.close()
+
+
+class FakeService:
+    """假 Sheets 服务：只记下写入了什么，不打网络。"""
+    def __init__(self):
+        self.writes = []
+
+
+class TestPushSnapshot:
+    def test_snapshot_only_covers_rows_present_in_sheet(self, client, fb_user, monkeypatch):
+        """表里没有的账户本来就不会被写，不进快照。"""
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','U1',?)",
+                   (fb_user,))
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户2','U2',?)",
+                   (fb_user,))
+        db.commit()
+        rows = hd.collect_rows_for_push(db, "fb")
+        db.close()
+
+        # 假表：只有 U1 在表里
+        grid = [[""] * 17, [""] * 17]
+        grid[1][hd.col_index("D")] = "U1"
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda svc, sid, name, rng: grid)
+
+        payload = hd.snapshot_push_targets(
+            FakeService(), {"spreadsheet_id": "S", "sheet_name": "N"}, "fb", rows)
+        ids = [c["account_id"] for c in payload["cells"]]
+        assert ids == ["U1"]
+
+    def test_snapshot_records_only_columns_that_will_be_written(self, client, fb_user, monkeypatch):
+        db = database.get_db()
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','U3',?)",
+                   (fb_user,))
+        db.commit()
+        rows = hd.collect_rows_for_push(db, "fb")
+        db.close()
+
+        grid = [[""] * 17, [""] * 17]
+        grid[1][hd.col_index("D")] = "U3"
+        grid[1][hd.col_index("C")] = "表里的旧名"
+        grid[1][hd.col_index("I")] = "不该被记"
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda svc, sid, name, rng: grid)
+
+        payload = hd.snapshot_push_targets(
+            FakeService(), {"spreadsheet_id": "S", "sheet_name": "N"}, "fb", rows)
+        cells = payload["cells"][0]["cells"]
+        # C 列会被批量写（writable=True）⇒ 必须记
+        assert cells.get("C") == "表里的旧名"
+        # I 列 writable=False ⇒ 批量根本不写它，不该进快照
+        assert "I" not in cells
+
+    def test_undo_cells_are_writable_input(self, client, fb_user, monkeypatch):
+        payload = {"spreadsheet_id": "S", "sheet_name": "N",
+                   "cells": [{"account_id": "U1", "cells": {"C": "旧", "G": "9"}}]}
+        out = hd.push_undo_cells(payload)
+        assert out[0]["account_id"] == "U1"
+        assert out[0]["cells"] == {"C": "旧", "G": "9"}

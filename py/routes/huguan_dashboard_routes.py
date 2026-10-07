@@ -4,6 +4,8 @@
 本文件只做取参/鉴权/调逻辑层，双向同步的实际判断都在 huguan_dashboard.py，
 Sheets I/O 在 google_sheets_service.py。
 """
+import logging
+
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 
@@ -15,6 +17,8 @@ from .helpers import ok, err, get_uid, PLATFORM_SWITCH_ROLES
 from .decorators import huguan_required
 
 huguan_dashboard_bp = Blueprint("huguan_dashboard", __name__)
+
+log = logging.getLogger("gg-server")
 
 
 @huguan_dashboard_bp.route("/api/huguan/dashboard", methods=["GET"])
@@ -189,10 +193,62 @@ def dashboard_push():
     import google_sheets_service as gs
     from main import _GOOGLE_SHEETS_CONFIG
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-    res = gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                       conf["sheet_name"], rows)
+
+    # 撤回快照（子项目 ③，规格 §6.1）：**写表之前**先把「本次将写到的每个格」的原值
+    # 读下来存好 —— 写完原值就没了。上面那条连接已在 finally 里关闭，不可复用；写表是
+    # 网络调用，快照事务不能挂在它上面等（会长时间持写锁），故单独开一条短连接。
+    undo_db = database.get_db()
+    try:
+        try:
+            snapshot = hd.snapshot_push_targets(service, conf, platform, rows)
+        except gs.GoogleSheetsServiceError as e:
+            # 表此刻读不到 ⇒ 记不下新的基线，**必须把上一份快照作废**：写表一旦成功，
+            # 表里就是新值，旧快照记的是更早一版的相邻状态，写回去只会把表改成从未
+            # 存在过的样子 —— 宁可撤回不可用，也不能让它写错值。
+            # 不在此处提前返回：写表那一步自己还要读一次表，真读不到时它会以同样的
+            # 错误冒泡（仍是 500，与改动前一致）。只吞 GoogleSheetsServiceError，
+            # 快照代码自身的缺陷仍要炸出来，不能被吞成「这次没有快照」。
+            log.warning("push 快照读取失败，本次不记录快照: %s", e)
+            hd.delete_undo(undo_db, uid, platform, "push")
+        else:
+            hd.save_undo(undo_db, uid, platform, "push", snapshot)
+        undo_db.commit()
+    finally:
+        undo_db.close()
+
+    try:
+        res = gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
+                                           conf["sheet_name"], rows)
+    except Exception:
+        # 写表抛异常 ⇒ 整批一个字都没写（update_rows_by_account_id 的单次
+        # batchUpdate 是原子的）⇒ 本次同步不算成功，快照没有撤回资格。作废后原样
+        # 抛出，维持既有的 500 行为。
+        _discard_push_undo(uid, platform)
+        raise
+
+    if not res["updated"] and not res["not_found"]:
+        # 一个字都没写 ⇒ 没有可撤回的东西，作废快照
+        _discard_push_undo(uid, platform)
+
     return ok({"result": {"rows": len(rows), "updated": res["updated"],
                           "not_found": res["not_found"]}})
+
+
+def _discard_push_undo(uid: int, platform: str) -> None:
+    """作废某户管某平台的 push 快照（空写 / 写表失败时调用）。
+
+    自己开连接：调用点的 `db` 要么已经关闭，要么正处在异常处理里，都不能复用。
+    **绝不抛异常** —— 它在 except 分支里也会被调用，抛出去会顶掉原始的写表错误。
+    """
+    try:
+        db = database.get_db()
+        try:
+            hd.delete_undo(db, uid, platform, "push")
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        log.warning("作废 push 撤回快照失败: %s", e)
 
 
 def _owner_option_platform():

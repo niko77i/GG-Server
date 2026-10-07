@@ -9,7 +9,7 @@ routes/huguan_dashboard_routes.py。
 import json
 import logging
 
-from google_sheets_service import col_index
+from google_sheets_service import col_index, read_sheet_values
 
 log = logging.getLogger("gg-server")
 
@@ -1237,6 +1237,52 @@ def read_operator_remark_map(db, owner_id: int) -> dict:
     except Exception as e:
         log.warning("读投手看板备注失败（按户管赢降级）: %s", e)
         return {}
+
+
+def snapshot_push_targets(service, conf: dict, platform: str, rows: list) -> dict:
+    """读整片表，记下「本次刷新将会写到的每个格子」的当前值。
+
+    只覆盖**真正会被写**的行与列：
+      - 行：`rows` 里在表中命中定位键的那些（表里没有的账户 update_rows_by_account_id
+        会进 not_found、一个字都不写）
+      - 列：该行 `cells_for_row` 会产出的列（即 COLUMN_SPEC 里 writable=True 的）
+
+    ⚠️ 必须在**写表之前**调用 —— 写完之后原值就没了。
+    """
+    sheet_name = conf["sheet_name"]
+    grid = read_sheet_values(service, conf["spreadsheet_id"], sheet_name, READ_RANGE[platform])
+    key_i = col_index(KEY_COL[platform])
+
+    where = {}
+    for i, values in enumerate(grid[1:], start=2):
+        if len(values) <= key_i:
+            continue
+        raw = ("" if values[key_i] is None else str(values[key_i])).strip().lstrip("'").strip()
+        if raw and raw not in where:
+            where[raw] = values
+
+    out = []
+    for r in rows:
+        aid = r["account_id"]
+        values = where.get(aid)
+        if values is None:
+            continue
+        cells = {}
+        for col in r["cells"]:
+            i = col_index(col)
+            cells[col] = ("" if len(values) <= i or values[i] is None
+                          else str(values[i])).strip()
+        if cells:
+            out.append({"account_id": aid, "cells": cells})
+    return {"spreadsheet_id": conf["spreadsheet_id"],
+            "sheet_name": sheet_name,
+            "cells": out}
+
+
+def push_undo_cells(payload: dict) -> list:
+    """把 push 快照转成 `update_rows_by_account_id` 的入参形状。"""
+    return [{"account_id": c["account_id"], "cells": dict(c["cells"])}
+            for c in (payload or {}).get("cells", [])]
 
 
 def push_rows(user_id: int, platform: str, account_ids=None) -> None:
