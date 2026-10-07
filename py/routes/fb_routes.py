@@ -308,15 +308,25 @@ def list_accounts():
     ).fetchall()
 
     # 批量获取关联的 BM 名称，并标出主 BM（即看板「位置」列，规格 4.3）
+    # 一次查回本页所有账户的 BM，再在内存里按 account_id 分组。
+    # 原来是**每行一次查询**（N+1）：页尺寸上限提到 500 后最坏 500 次往返。
+    bms_by_account = {}
+    row_ids = [r['id'] for r in rows]
+    if row_ids:
+        marks = ",".join("?" for _ in row_ids)
+        for b in db.execute(
+            f"SELECT ab.account_id, b.name, b.id, b.bm_id, ab.is_primary "
+            f"FROM fb_bms b JOIN fb_account_bm ab ON ab.bm_id = b.id "
+            f"WHERE ab.account_id IN ({marks})", row_ids
+        ).fetchall():
+            bms_by_account.setdefault(b['account_id'], []).append(
+                {'name': b['name'], 'id': b['id'], 'bm_id': b['bm_id'],
+                 'is_primary': b['is_primary']})
+
     result_items = []
     for r in rows:
         item = dict(r)
-        bms = db.execute(
-            "SELECT b.name, b.id, b.bm_id, ab.is_primary FROM fb_bms b "
-            "JOIN fb_account_bm ab ON ab.bm_id = b.id "
-            "WHERE ab.account_id = ?", (r['id'],)
-        ).fetchall()
-        item['bms'] = [dict(b) for b in bms]
+        item['bms'] = bms_by_account.get(r['id'], [])
         item['primary_bm_name'] = next((b['name'] for b in item['bms'] if b['is_primary']), '')
         result_items.append(item)
 
@@ -483,15 +493,24 @@ def list_deleted_accounts():
         params + [size, offset]
     ).fetchall()
 
+    # 一次查回本页所有账户的 BM，再在内存里按 account_id 分组（消除每行一次的 N+1）。
+    # 此处响应不含 is_primary，保持逐字节兼容。
+    bms_by_account = {}
+    row_ids = [r['id'] for r in rows]
+    if row_ids:
+        marks = ",".join("?" for _ in row_ids)
+        for b in db.execute(
+            f"SELECT ab.account_id, b.name, b.id, b.bm_id "
+            f"FROM fb_bms b JOIN fb_account_bm ab ON ab.bm_id = b.id "
+            f"WHERE ab.account_id IN ({marks})", row_ids
+        ).fetchall():
+            bms_by_account.setdefault(b['account_id'], []).append(
+                {'name': b['name'], 'id': b['id'], 'bm_id': b['bm_id']})
+
     result_items = []
     for r in rows:
         item = dict(r)
-        bms = db.execute(
-            "SELECT b.name, b.id, b.bm_id FROM fb_bms b "
-            "JOIN fb_account_bm ab ON ab.bm_id = b.id "
-            "WHERE ab.account_id = ?", (r['id'],)
-        ).fetchall()
-        item['bms'] = [dict(b) for b in bms]
+        item['bms'] = bms_by_account.get(r['id'], [])
         result_items.append(item)
 
     return ok({'items': result_items, 'total': total, 'page': page, 'size': size})
