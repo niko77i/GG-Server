@@ -1545,3 +1545,132 @@ class TestDeleteUserCleanup:
         assert "huguan_sync_undo" in src, \
             "admin_delete_user 未清理 huguan_sync_undo —— 删任何用过看板的户管都会 FOREIGN KEY 500"
 
+
+# ========== 规格 §十「回归保障」补齐：push 快照的作废与 not_found 透传 ==========
+#
+# 规格 §十 第 1 条「表写下失败则不留快照」与第 2 条「表里已删的行进 not_found」
+# 此前无测试覆盖（生产代码已实现，只是没被测试打过 —— 这正是最危险的形态）。
+# 三条都**驱动真实入口**：前两条走真实端点 `POST /api/huguan/dashboard/push`，
+# 第三条调真实 `hd.undo_push`。
+
+
+def _push_env(client, monkeypatch, username, platform="gg", account_id="WF1", write=None):
+    """把一个户管的 `/push` 端点环境整好，返回 (headers, uid)。
+
+    - 已配好看板 + 一个会进 `collect_rows_for_push` 的账户；
+    - `read_sheet_values`（快照读表）返回一张能命中该账户的表 ⇒ 本次 push 会先写下
+      一份**非空**快照（这样「被作废」与「本来就没有」不再同形，见各用例）；
+    - `update_rows_by_account_id` 换成 `write`（不传则不打桩，由用例自己打）。
+    """
+    import google_sheets_service as gs
+    hg, uid = _huguan_headers(client, username, platform=platform)
+    db = database.get_db()
+    hd.save_config(db, uid, platform, "SS", "Sheet1")
+    if platform == "fb":
+        _seed_fb_account(db, account_id, uid)
+        grid = [[""] * 17, _fb_row(account_id, owner_name="运营")]
+    else:
+        _seed_gg_account(db, account_id, uid)
+        grid = [[""] * 14, _gg_row(account_id, "运营", "")]
+    db.commit()
+    db.close()
+
+    monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: grid)
+    monkeypatch.setattr(gs, "build_service", lambda path: object())
+    if write is not None:
+        monkeypatch.setattr(gs, "update_rows_by_account_id", write)
+    return hg, uid
+
+
+def _seed_stale_push_snapshot(uid, platform="gg"):
+    """预置一份「上一次成功同步」留下的快照（哨兵值）。"""
+    db = database.get_db()
+    hd.save_undo(db, uid, platform, "push",
+                 {"spreadsheet_id": "SS", "sheet_name": "Sheet1",
+                  "cells": [{"account_id": "STALE", "cells": {"C": "上次的原值"}}]})
+    db.commit()
+    db.close()
+
+
+class TestPushRouteSnapshotLifecycle:
+    """规格 §5.3 / §十 第 1 条：`/push` 写表失败或空写 ⇒ 快照必须被作废。
+
+    驱动真实端点 —— 不作废时 `load_undo` 会读到本次 push 写下的新快照，故断言
+    「读不到快照了」对两条路径都有判别力（不是「本来就没有」）。
+    """
+
+    def test_write_failure_discards_snapshot(self, client, monkeypatch):
+        """写表**抛异常**（不是读表）⇒ 端点失败，且快照被作废。
+
+        判别力：注释掉 `dashboard_push` except 分支里的 `_discard_push_undo(...)`，
+        快照留存（`load_undo` 读到新一份快照），本用例即红。
+
+        异常如何露出：conftest 以 TESTING=True 起 app，未捕获异常**直接抛给
+        `client.post` 调用者**（与既有 `TestPushSnapshotReadFailure` 同口径），
+        生产环境里则是 Flask 的泛化 500。
+        """
+        def _boom(svc, sid, name, rows, key_col="C"):
+            raise RuntimeError("写表炸了")
+
+        hg, uid = _push_env(client, monkeypatch, "_push_wfail", write=_boom)
+        _seed_stale_push_snapshot(uid)
+
+        with pytest.raises(RuntimeError, match="写表炸了"):
+            client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "gg"})
+
+        db = database.get_db()
+        got = hd.load_undo(db, uid, "gg", "push")
+        db.close()
+        assert got is None, "写表失败 ⇒ 快照必须被作废（表没变，撤回没有意义）"
+
+    def test_empty_write_discards_snapshot(self, client, monkeypatch):
+        """一个字都没写（`updated==0` 且 `not_found` 为空）⇒ 快照作废。
+
+        判别力：注释掉 `dashboard_push` 里
+        `if not res["updated"] and not res["not_found"]:` 那段作废，本用例即红。
+        """
+        wrote = []
+
+        def _empty(svc, sid, name, rows, key_col="C"):
+            wrote.append(rows)
+            return {"updated": 0, "not_found": []}
+
+        hg, uid = _push_env(client, monkeypatch, "_push_empty", write=_empty)
+        _seed_stale_push_snapshot(uid)
+
+        resp = client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "gg"})
+        assert resp.status_code == 200
+        assert wrote, "对照：写入器必须被调用过，否则下面的断言是空集上的恒真式"
+        result = resp.get_json()["result"]
+        assert result["updated"] == 0
+        assert result["not_found"] == []
+
+        db = database.get_db()
+        got = hd.load_undo(db, uid, "gg", "push")
+        db.close()
+        assert got is None, "空写 ⇒ 没有可撤回的东西，快照必须被作废"
+
+
+class TestPushUndoNotFoundPassthrough:
+    """规格 §6.1 / §十 第 2 条：push 撤回时写入器报告的「表里找不到的行」原样透传。"""
+
+    def test_undo_push_passes_not_found_through(self, client, fb_user, monkeypatch):
+        """表里已删的行进 `not_found` 报告，不报错、也不许被吞成空列表。"""
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push",
+                     {"spreadsheet_id": "S", "sheet_name": "N",
+                      "cells": [{"account_id": "GONE", "cells": {"C": "旧名"}}]})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, uid, p: {"spreadsheet_id": "S", "sheet_name": "N"})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: {"updated": 0, "not_found": ["X1"]})
+
+        out = hd.undo_push(fb_user, "fb")
+        assert out["not_found"] == ["X1"]
+        assert out["updated"] == 0
+
