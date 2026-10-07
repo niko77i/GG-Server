@@ -138,13 +138,14 @@ def dashboard_sync():
             rows = [{"account_id": item["account_id"],
                      "cells": {hd.OWNER_COL[platform]: item["to"]}}
                     for item in applied]
-            _write_background(conf, rows)
+            _write_background(conf, rows, platform)
             # 规则 3② 只对 GG 生效（2026-10-06 规格）：TT 的 L 列已是换绑记录，
             # 同步时清空会抹掉记录，且因读回按表覆盖会连带清掉系统里的值。
             # FB 同理、且更彻底：它根本没有通道列（OWNER_CHANNEL_COL 无 fb 键），
             # 对 fb 硬调 owner_channel_cells 会 KeyError —— 换成下面的 I 列定向写。
             if platform not in ("tt", "fb"):
-                _write_background(conf, hd.owner_channel_cells(applied, platform, ""))
+                _write_background(conf, hd.owner_channel_cells(applied, platform, ""),
+                                  platform)
             if platform == "fb":
                 # FB 没有通道列可清；改为把换绑记录定向写进 I 列。
                 # 注意 _fb_acceptor_cells 的签名是 (rows, value)，value 是**同一个串**
@@ -152,14 +153,15 @@ def dashboard_sync():
                 _write_background(conf, [
                     {"account_id": r["account_id"],
                      "cells": {"I": hd._fb_owner_transition(r.get("from", ""), r["to"])}}
-                    for r in applied])
+                    for r in applied], platform)
 
         # TT 备注首次对齐的两个写回（2026-10-06 规格）。与 applied_owner_rows 同法：
         # 先从 result 摘掉，再发起后台写回 —— 只写单列，绝不整行推送。
         m_writeback = result.pop("remark_m_writeback", [])
         if m_writeback:
             _write_background(conf, [{"account_id": r["account_id"],
-                                      "cells": {"M": r["value"]}} for r in m_writeback])
+                                      "cells": {"M": r["value"]}} for r in m_writeback],
+                              platform)
         for r in result.pop("remark_operator_push", []):
             hd.push_remark_to_operator_dashboard(r["owner_id"], r["account_id"], r["value"])
     finally:
@@ -318,8 +320,13 @@ def dashboard_owner_options():
     return ok({"users": [dict(r) for r in rows]})
 
 
-def _write_background(conf, rows):
+def _write_background(conf, rows, platform):
     """后台写表；失败只记日志，不影响同步接口的返回（对照 main.py:5006 的做法）。
+
+    `platform` 只用来取 `hd.KEY_COL[platform]` 当定位列：写入器的默认值是 "C"
+    （GG/TT 的账户ID列），而 **FB 的账户ID在 D 列**（C 是「账户名称」），不显式传
+    就会按错误的列定位、整批静默写空。gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒
+    对它们显式传参是无操作（逐字节不变）。
 
     **service 必须在 _do() 里 build**，不能由调用方传进来：本函数经
     `_sync_sheets_background` 起**后台线程**执行，失败还会在 30s 后重试一次，
@@ -336,7 +343,8 @@ def _write_background(conf, rows):
         from main import _GOOGLE_SHEETS_CONFIG
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
         gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                     conf["sheet_name"], rows)
+                                     conf["sheet_name"], rows,
+                                     key_col=hd.KEY_COL[platform])
 
     from main import _sync_sheets_background
     _sync_sheets_background(_do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)

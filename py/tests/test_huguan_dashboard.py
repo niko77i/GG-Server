@@ -2430,6 +2430,81 @@ class TestPushKeyColumn:
         assert captured[0]["key_col"] == "D"
 
 
+class TestSyncWritebackKeyColumn:
+    """修复轮 3 · 同族：`/sync` 的回写（`_write_background`）也要按平台的定位列。
+
+    `_write_background` 此前调 `gs.update_rows_by_account_id(...)` 不传 key_col，
+    于是 fb 路径按 C 列（账户名称）找资产UID → 整批落进 not_found、静默写空。
+    gg/tt 的 KEY_COL 恰是 "C"，与写入器默认值相同 ⇒ 对它们显式传参是无操作。
+    """
+
+    def test_fb_sync_writeback_passes_key_col_D(self, client, monkeypatch):
+        """FB 路径必须传 "D"。
+
+        判别力：去掉 `_write_background` 里的 `key_col=hd.KEY_COL[platform]`，
+        本用例立刻变红（实得默认值 "C"）。
+        """
+        from google_sheets_service import col_index
+        from huguan_dashboard import KEY_COL
+        assert KEY_COL["fb"] == "D", "前提：FB 的资产UID在 D 列；列规格变了本用例要重写"
+
+        hg, uid = _create_user(client, "_syn_kc_fb", role="huguan", platform="fb")
+        db = database.get_db()
+        _seed(db, "_syn_kc_fb_target", "甲丁", platform="fb")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', ?, ?)",
+                   ("KC-FB-1", uid))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        row = [""] * 17
+        row[col_index("D")] = "KC-FB-1"
+        row[col_index("J")] = "甲丁"        # 在用运营 → 触发归属变更（fb 无通道列）
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [["表头"], row])
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "fb", "dry_run": False,
+                                 "confirmed": {"owner": ["KC-FB-1"]}})
+        assert resp.status_code == 200, resp.get_json()
+        assert captured, "对照：写入器必须被调用过，否则下面断言是空集上的恒真式"
+        assert all(c["key_col"] == "D" for c in captured), [c["key_col"] for c in captured]
+
+    def test_gg_sync_writeback_passes_key_col_C(self, client, monkeypatch):
+        """对照组：GG 的 KEY_COL 是 "C"，与写入器默认值相同 ⇒ 显式传参必须是无操作。
+
+        这条同时挡住「不看平台、一律硬传 D」的变异体（那样 GG 会红）。
+        """
+        hg, uid = _create_user(client, "_syn_kc_gg", role="huguan")
+        db = database.get_db()
+        _seed(db, "_syn_kc_gg_target", "阡陌")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.execute("INSERT INTO accounts(account_id, name, owner_id) VALUES('KC-GG-1','KC-GG-1',?)",
+                   (uid,))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        # C=账户ID（定位键）、H=重新分配（归属变更通道）
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["表头"], ["", "", "KC-GG-1", "", "", "", "", "阡陌"]])
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "gg", "dry_run": False,
+                                 "confirmed": {"owner": ["KC-GG-1"]}})
+        assert resp.status_code == 200, resp.get_json()
+        assert captured, "对照：写入器必须被调用过，否则下面断言无判别力"
+        assert all(c["key_col"] == "C" for c in captured), [c["key_col"] for c in captured]
+
+
 class TestPushSnapshotReadFailure:
     """修复轮 2 · Important：读快照失败必须冒泡 + 上一份快照原封不动。
 

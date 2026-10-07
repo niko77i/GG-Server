@@ -1435,8 +1435,11 @@ def writeback_fb_acceptor(user_id, platform, account_id, note):
             import google_sheets_service as gs
             from main import _GOOGLE_SHEETS_CONFIG
             service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+            # 定位列必须按平台取：写入器默认 "C"（GG/TT 的账户ID列），而 FB 的
+            # 账户ID在 **D** 列（C 是「账户名称」）—— 不传就按错误的列定位、写空。
             gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                         conf["sheet_name"], rows)
+                                         conf["sheet_name"], rows,
+                                         key_col=KEY_COL[platform])
 
         from main import _sync_sheets_background
         _sync_sheets_background(

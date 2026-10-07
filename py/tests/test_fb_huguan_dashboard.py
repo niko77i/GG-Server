@@ -3,6 +3,8 @@
 设计见 docs/superpowers/specs/2026-10-06-fb-huguan-dashboard-design.md。
 本文件不打真实 Google API。
 """
+import json
+
 import pytest
 
 import database
@@ -524,6 +526,50 @@ def _fb_loginable_user(client, username, role="huguan", platform="fb"):
                         json={"username": username, "password": "test123"}
                         ).get_json()["access_token"]
     return {"Authorization": f"Bearer {token}"}, row["id"]
+
+
+class TestFbAcceptorWritebackKeyCol:
+    """修复轮 3 · 同族：定向写 I 列的定位列必须按平台取（FB 是 D，不是默认的 C）。
+
+    `writeback_fb_acceptor` 此前调 `gs.update_rows_by_account_id(...)` 不传 key_col，
+    于是按 C 列（账户名称）找资产UID → 整批落进 not_found、I 列静默写空。
+    """
+
+    def test_fb_acceptor_writeback_passes_key_col_D(self, client, monkeypatch):
+        """走到真实 `writeback_fb_acceptor`（不桩它），只桩 Sheets I/O 与后台线程。
+
+        判别力：去掉函数里的 `key_col=KEY_COL[platform]`，本用例立刻变红（实得 "C"）。
+        """
+        from huguan_dashboard import KEY_COL
+        assert KEY_COL["fb"] == "D", "前提：FB 的资产UID在 D 列；列规格变了本用例要重写"
+
+        _h, uid = _fb_loginable_user(client, "fb_kc", role="huguan", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        import main as m
+        captured = []
+
+        def _fake(service, spreadsheet_id, sheet_name, rows, key_col="C"):
+            captured.append({"rows": rows, "key_col": key_col})
+            return {"updated": len(rows), "not_found": []}
+
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        # 回写经 main._sync_sheets_background 起后台线程；换成同步执行，断言不抢时间。
+        monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+
+        hd.writeback_fb_acceptor(uid, "fb", "A1", "张三转李四")
+
+        assert captured, "对照：写入器必须被调用过，否则下面断言是空集上的恒真式"
+        assert captured[0]["key_col"] == "D"
+        # 顺带钉住写的确实是 I 列（本函数存在的唯一理由）
+        assert captured[0]["rows"] == [{"account_id": "A1", "cells": {"I": "张三转李四"}}]
 
 
 class TestFbWritebackTriggers:
