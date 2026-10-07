@@ -259,7 +259,7 @@ GG-Server/
 │   │   ├── decorators.py          # 权限装饰器（_reject_viewer、_require_developer 等）
 │   │   ├── helpers.py             # 公共工具函数（scope_where、can_modify 等）
 │   │   ├── auth_routes.py         # 认证相关 Blueprint（已激活，12 路由）
-│   │   ├── fb_routes.py           # FB 平台 Blueprint（已激活，49 路由）
+│   │   ├── fb_routes.py           # FB 平台 Blueprint（已激活，53 路由）
 │   │   └── tt_routes.py           # TT 平台 Blueprint（已激活，30 路由）
 │   └── tests/                     # 测试文件
 ├── config/
@@ -372,11 +372,14 @@ FB 管理员 → 该平台无定时任务（页面显示空态）；户管 / 普
 | GET | /api/ad-reports/multi-analysis | 多维自由分析（散点图/相关性） |
 | POST | /api/ad-reports/analyze | AI 智能解读 |
 
-### FB 平台（fb_routes.py，49 路由）
+### FB 平台（fb_routes.py，53 路由）
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET/POST/PUT/DELETE | /api/fb/bms/... | 账户 BM 管理（含 ban-and-migrate） |
 | GET/POST/PUT/DELETE | /api/fb/accounts/... | FB 账户管理（软删除/恢复/BM 历史） |
+| POST | /api/fb/accounts/batch-lookup | 批量查户（归属隔离，字段含主 BM 名） |
+| POST | /api/fb/accounts/batch-create | 批量建户（共用默认值 + 逐行 overrides） |
+| POST | /api/fb/accounts/batch-delete | 批量软删（归属隔离，删不到的进 not_found） |
 | GET/POST/PUT/DELETE | /api/fb/products/... | FB 产品管理（线名、在跑 BM） |
 | GET/POST/PUT/DELETE | /api/fb/pixel-bms/... | 像素 BM 管理 |
 | GET/POST/PUT/DELETE | /api/fb/pixels/... | 像素管理 |
@@ -618,7 +621,7 @@ GG-Server 在 GG（Google Ads）基础上新增 FB（Facebook）广告管理能�
 - **用户平台划分**：users 表新增 `platform` 字段（'gg'/'fb'），仅 developer 可访问双平台
 - **FB 独立页面**：不复用 GG 页面，新建 8 个视图（产品/账户/账户BM/像素BM/像素/数据提取/数据管理/设置）
 - **结构差异**：FB 用 BM（Business Manager）而非 MCC，分**账户BM**和**像素BM**两种；产品可有多条"线"，一条线对应一个像素
-- **后端独立**：`routes/fb_routes.py`（49 路由）+ `database.py` 新增 11 张 fb_* 表
+- **后端独立**：`routes/fb_routes.py`（53 路由）+ `database.py` 新增 11 张 fb_* 表
 - **共享层**：users/platform、侧边栏切换、路由守卫、数据分析、选项表（地区/商务/状态等）GG/FB 共用
 
 **FB 数据提取**（FbDataExtract.vue）：
