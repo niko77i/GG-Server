@@ -84,7 +84,8 @@ async function submit() {
     if (res.warning) ElMessage.warning(res.warning)
     else ElMessage.success('充值记录已提交')
     emit('update:visible', false)
-    emit('saved')
+    // 带上响应：父组件靠 res.id（充值记录主键）对 gg_recharge 轮询写表结果
+    emit('saved', res)
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '充值失败')
   }

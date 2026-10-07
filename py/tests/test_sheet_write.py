@@ -813,3 +813,169 @@ def test_error_msg_returned_to_client_has_no_exception_text(client, monkeypatch,
     # 异常详情不得被一并砍掉
     assert "回滚器炸了" in caplog.text, "回滚器异常详情没进日志"
     assert "Sheets 挂了" in caplog.text, "写表异常详情没进日志"
+def test_run_write_many_registers_one_row_per_key(client):
+    """N 个 business_key ⇒ N 行日志，且都从 pending 起。（此时还没起线程，故仍为 pending）"""
+    import sheet_write
+    db = database.get_db()
+    sheet_write.run_write_many(
+        db, user_id=1, platform="gg", target="_t_many",
+        business_keys=["a1", "a2", "a3"], sync_fn=lambda: None)
+    # 立即读：登记是同步的，线程结果尚未落
+    rows = db.execute(
+        "SELECT business_key, status FROM sheet_write_log "
+        "WHERE user_id=1 AND target='_t_many' ORDER BY business_key").fetchall()
+    db.close()
+    assert [r["business_key"] for r in rows] == ["a1", "a2", "a3"]
+    assert all(r["status"] in ("pending", "synced") for r in rows), \
+        "登记后应至少是 pending（线程可能已抢先落 synced，但绝不该是别的）"
+
+
+def test_run_write_many_settles_all_keys_on_success(client):
+    """一次后台写表成功后，N 行**全部**落 synced。"""
+    import sheet_write
+    calls = []
+    db = database.get_db()
+    sheet_write.run_write_many(
+        db, user_id=2, platform="gg", target="_t_many_ok",
+        business_keys=["b1", "b2"], sync_fn=lambda: calls.append(1))
+
+    for _ in range(200):
+        rows = db.execute(
+            "SELECT status FROM sheet_write_log WHERE user_id=2 AND target='_t_many_ok'").fetchall()
+        if len(rows) == 2 and all(r["status"] == "synced" for r in rows):
+            break
+        _poll_sleep(0.02)
+    db.close()
+    assert len(calls) == 1, "sync_fn 只应执行一次（一个后台线程），不是每 key 一次"
+    assert [r["status"] for r in rows] == ["synced", "synced"]
+
+
+def test_run_write_many_settles_all_keys_on_final_failure(client, monkeypatch):
+    """最终失败时 N 行全部落 retry_failed，且都带原因。"""
+    import sheet_write
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)      # 跳过 30s
+
+    def _boom():
+        raise RuntimeError("Sheets 挂了")
+
+    db = database.get_db()
+    sheet_write.run_write_many(
+        db, user_id=3, platform="gg", target="_t_many_fail",
+        business_keys=["c1", "c2", "c3"], sync_fn=_boom)
+
+    for _ in range(300):
+        rows = db.execute(
+            "SELECT status, error_msg FROM sheet_write_log "
+            "WHERE user_id=3 AND target='_t_many_fail'").fetchall()
+        if len(rows) == 3 and all(r["status"] == "retry_failed" for r in rows):
+            break
+        _poll_sleep(0.02)
+    db.close()
+    assert len(rows) == 3
+    assert {r["status"] for r in rows} == {"retry_failed"}, \
+        f"应全部终态失败，实际 {[r['status'] for r in rows]}"
+    # 落库文案是**固定文案**（安全修复：error_msg 会经 /status 原样回客户端，
+    # 异常原文只进日志）—— 不是 "Sheets 挂了"。
+    assert all((r["error_msg"] or "") == sheet_write._WRITE_FAILED_MSG for r in rows),         f"落库文案应为固定文案，实际 {[r['error_msg'] for r in rows]}"
+
+
+def test_run_write_many_marks_all_keys_inflight(client, monkeypatch):
+    """N 个 key 都要进 _inflight —— 否则 sweep_stale 会把在途的行误收敛，
+    重试闸门放行后起第二个写手（一期修复轮 2 的教训）。"""
+    import sheet_write
+    import time as _time
+    seen = {}
+
+    def _capture(_s):
+        with sheet_write._inflight_lock:
+            seen["keys"] = set(sheet_write._inflight)
+
+    monkeypatch.setattr(_time, "sleep", _capture)   # 30s 重试前会被调用
+
+    def _boom():
+        raise RuntimeError("挂")
+
+    sheet_write.run_write_many(
+        database.get_db(), user_id=4, platform="gg", target="_t_many_inflight",
+        business_keys=["d1", "d2"], sync_fn=_boom)
+
+    for _ in range(200):
+        if seen:
+            break
+        _poll_sleep(0.01)
+    assert seen.get("keys", set()) >= {(4, "_t_many_inflight", "d1"),
+                                       (4, "_t_many_inflight", "d2")}
+
+
+def test_run_write_many_empty_keys_is_noop(client):
+    """空列表不登记、不起线程。"""
+    import sheet_write
+    calls = []
+    sheet_write.run_write_many(
+        database.get_db(), user_id=5, platform="gg", target="_t_many_empty",
+        business_keys=[], sync_fn=lambda: calls.append(1))
+    db = database.get_db()
+    n = db.execute("SELECT COUNT(*) FROM sheet_write_log WHERE user_id=5").fetchone()[0]
+    db.close()
+    assert n == 0
+    assert calls == []
+
+
+def test_run_write_many_error_msg_has_no_exception_text(client, monkeypatch, caplog):
+    """E-11 的兄弟用例：`run_write_many` 这条路径同样不得把异常原文入库。
+
+    为什么必须单独一条：`run_write_many` 是 `run_write` 落状态逻辑的**复制品**
+    （一期审查就记过「近乎复制 ⇒ 落库语义今后要双改」）。master 的 E-11 安全修复
+    只改了 `run_write`；而二期的 `run_write_many` 是**新增**的复制品 —— 合并时
+    git 不会为它报冲突，于是「run_write 已脱敏 / run_write_many 仍泄露原文」这种
+    半脱敏状态能静默合入。本用例把这条路径钉死。
+
+    去掉 `run_write_many` 里的 `_msg = _WRITE_FAILED_MSG if err_msg else ""` ⇒ 本用例红。
+    """
+    import logging
+    import sheet_write
+
+    client.post("/api/auth/register", json={"username": "e11_many", "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role='user', platform='tt' WHERE username='e11_many'")
+    db.commit()
+    uid = db.execute("SELECT id FROM users WHERE username='e11_many'").fetchone()["id"]
+    db.close()
+    hdr = {"Authorization": "Bearer " + client.post(
+        "/api/auth/login", json={"username": "e11_many", "password": "test123"}
+    ).get_json()["access_token"]}
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    sheet_write.register_target("_e11_many",
+                                rebuild=lambda _uid, _key, _payload: (lambda: None))
+
+    def _boom():
+        raise RuntimeError(
+            "写表炸了 <HttpError 503> https://sheets.googleapis.com/v4/spreadsheets/X")
+
+    with caplog.at_level(logging.ERROR, logger="gg-server"):
+        db = database.get_db()
+        sheet_write.run_write_many(
+            db, user_id=uid, platform="tt", target="_e11_many",
+            business_keys=["m1", "m2"], sync_fn=_boom)
+        for _ in range(150):
+            rows = [_row(db, uid, "_e11_many", k) for k in ("m1", "m2")]
+            if all(r is not None and r["status"] == "retry_failed" for r in rows):
+                break
+            _poll_sleep(0.02)
+        db.close()
+
+    resp = client.get("/api/sheet-write/status?platform=tt&business_key=m1", headers=hdr)
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+    item = resp.get_json()["item"]
+    assert item is not None, "终态行必须可见（否则本用例的断言无判别力）"
+
+    raw = resp.get_data(as_text=True)
+    for marker in ("写表炸了", "sheets.googleapis.com", "HttpError"):
+        assert marker not in raw, f"GET status 经 run_write_many 泄露内部细节 {marker!r}: {raw[:300]!r}"
+    assert item["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+        f"落库文案应为固定文案，实际 {item['error_msg']!r}")
+    # 异常详情不得被一并砍掉
+    assert "写表炸了" in caplog.text, "写表异常详情没进日志（脱敏不该连日志一起砍）"

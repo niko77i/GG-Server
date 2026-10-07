@@ -141,7 +141,8 @@ async function doSync() {
       const r = res.result
       ElMessage.success(`同步完成：新增 ${r.created} 个账户，更新 ${r.updated} 个状态`)
       emit('update:visible', false)
-      emit('synced')
+      // 带上回写腿涉及的账户：父组件靠它们对 gg_my_dashboard 轮询写表结果
+      emit('synced', res.affected_account_ids || [])
     } else {
       ElMessage.error(res.error || '同步失败')
     }

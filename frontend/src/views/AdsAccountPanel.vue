@@ -60,6 +60,22 @@
           </template>
         </el-table-column>
         <el-table-column prop="account_id" label="账号 ID" min-width="140" show-overflow-tooltip />
+        <!-- 写表状态。语汇 / 位置 / 宽度逐字沿用一期 TT 账户表：⚠️ 点它即重试、✅ 已同步，
+             两张表并列出现时跨平台一致。紧跟「账号 ID」—— 本表列多，横向必滚，
+             埋到表尾在左滚状态下会被漏看，那就等于没做。 -->
+        <el-table-column label="写表" width="54" align="center">
+          <template #default="{ row }">
+            <template v-if="sheetWriteFailures[row.account_id]">
+              <el-tooltip placement="top"
+                :content="sheetWriteHint(sheetWriteFailures[row.account_id])">
+                <el-button link size="small"
+                  :type="sheetWriteTone(sheetWriteFailures[row.account_id].status)"
+                  @click.stop="retrySheetWrite(row)">{{ sheetWriteMark(sheetWriteFailures[row.account_id].status) }}</el-button>
+              </el-tooltip>
+            </template>
+            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
+          </template>
+        </el-table-column>
         <el-table-column label="所属 MCC" min-width="140">
           <template #default="{ row }">
             <div class="inline-edit-cell" v-if="editingMccId === row.id">
@@ -200,7 +216,7 @@
             <el-button link type="primary" size="small" @click="showModal(row.id)">✏️</el-button>
             <el-button link type="success" size="small" @click="showDetail(row.id)">📋</el-button>
             <el-button link type="warning" size="small" @click="openRecharge(row)">💰</el-button>
-            <el-button link type="danger" size="small" @click="del(row.id)"><el-icon :size="14"><Delete /></el-icon></el-button>
+            <el-button link type="danger" size="small" @click="del(row)"><el-icon :size="14"><Delete /></el-icon></el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -219,16 +235,18 @@
     <AccountBatchImportModal v-model:visible="batchVisible" @saved="load" />
     <AccountBatchLookupModal v-model:visible="lookupVisible" />
     <AccountDetailModal v-model:visible="detailVisible" :account-id="detailAccountId" />
-    <RechargeModal v-model:visible="rechargeVisible" :default-account-id="rechargeAccountId" @saved="load" />
+    <RechargeModal v-model:visible="rechargeVisible" :default-account-id="rechargeAccountId" @saved="onRecharged" />
     <RechargeBatchModal v-model:visible="batchRechargeVisible" :accounts="selected" @saved="onBatchRecharged" />
-    <AccountSyncModal v-model:visible="syncVisible" @synced="load" />
-    <AccountDeletedModal v-model:visible="deletedVisible" @restored="load" />
+    <AccountSyncModal v-model:visible="syncVisible" @synced="onSynced" />
+    <AccountDeletedModal v-model:visible="deletedVisible" @restored="onRestored" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useAccountStore } from '@/stores/accounts'
+import { sheetWriteApi } from '@/api/sheetWrite'
+import { SHEET_WRITE_TOAST, sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 import AccountModal from '@/components/AccountModal.vue'
 import AccountBatchImportModal from '@/components/AccountBatchImportModal.vue'
 import AccountBatchLookupModal from '@/components/AccountBatchLookupModal.vue'
@@ -269,6 +287,21 @@ const mccOptions = ref([])
 const agentOptions = ref([])
 const timezoneOptions = ref([])
 const statusCounts = ref({})
+
+// ---------- 写表失败治理（GG 的 9 个写表点位） ----------
+const SHEET_WRITE_POLL_MS = 3000
+const SHEET_WRITE_POLL_MAX = 14          // ~42s，覆盖 30s 重试窗口
+// GG 下两个 target 共用一个 business_key 命名空间：gg_my_dashboard 的键是
+// accounts.account_id（带连字符的 Ads ID），gg_recharge 的键是充值记录主键（裸整数）。
+// 两种格式今天不相交，但没有任何东西保证它俩永远不相交 —— 不按 target 过滤的后果是
+// 把充值失败标到账户行上、并用错的 target 去重试。故本表这一列只认 gg_my_dashboard。
+const DASH_TARGET = 'gg_my_dashboard'    // 「我的看板」：本表列与改状态/删户/恢复/批量/从表同步
+const RECHARGE_TARGET = 'gg_recharge'    // 充值记录：改状态清账腿、单笔/批量充值
+// 每个 (target, business_key) 一个轮询定时器。批量操作在 for 里逐键调度，共用一个变量
+// 会让每次调用把上一个键的定时器 clear 掉 —— 批量 N 个只有最后 1 个会弹提示。
+const sheetWriteTimers = new Map()       // `${target}|${business_key}` -> timerId
+const sheetWriteFailures = ref({})       // account_id -> {target, status, error_msg}
+
 // 内联编辑状态
 const editingNameId = ref(null)
 const editingMccId = ref(null)
@@ -292,6 +325,14 @@ onMounted(() => {
   store.loadAgents()
   store.loadStatuses()
   load()
+  // 初始拉一次写表标记。load() 成功分支里也会拉，但 load() 请求失败时会跳过那次，
+  // 所以这里再保证一次：标记是「失败必须可见」的兜底，不能随列表请求的成败而丢。
+  loadSheetWriteFailures()
+})
+
+onUnmounted(() => {
+  for (const t of sheetWriteTimers.values()) clearTimeout(t)
+  sheetWriteTimers.clear()
 })
 
 async function load() {
@@ -302,6 +343,8 @@ async function load() {
   agentOptions.value = res.agents || []
   timezoneOptions.value = res.timezone_options || []
   if (res.status_counts) statusCounts.value = res.status_counts
+  // 列表每次刷新都重拉标记：轮询到终态后也靠它把行标记补上（即时提示 + 持久标记要同时到位）
+  loadSheetWriteFailures()
 }
 
 function filterByTimezone() { store.acPage = 1; load() }
@@ -346,20 +389,44 @@ function openRecharge(row) {
   rechargeVisible.value = true
 }
 
-function onBatchRecharged() {
-  selected.value = []
+// 单笔充值的触发点 ⑥：id 是充值记录主键（gg_recharge 的 business_key）。
+// 有 id 也可能没有写表（未配表格）—— 那是「无记录 = 不提示」，由 pollSheetWrite 兜。
+function onRecharged(res) {
   load()
+  if (res?.id != null) pollSheetWrite(RECHARGE_TARGET, String(res.id))
 }
 
-async function del(id) {
+function onBatchRecharged(res) {
+  selected.value = []
+  load()
+  // 触发点 ⑥（批量）：一记录一个键，逐键独立计时
+  for (const id of res?.recharge_ids || []) pollSheetWrite(RECHARGE_TARGET, String(id))
+}
+
+async function del(row) {
   await ElMessageBox.confirm('确定删除此账户？', '确认', { type: 'warning' })
-  await store.deleteAccount(id)
+  await store.deleteAccount(row.id)
+  // 触发点 ②：删户会写「我的看板」H 列（解绑）。行数据里就有 account_id。
+  pollSheetWrite(DASH_TARGET, row.account_id)
 }
 
 async function batchDelete() {
   if (!selected.value.length) return
   await ElMessageBox.confirm(`确定删除选中的 ${selected.value.length} 个账户？`, '确认', { type: 'warning' })
   await store.batchDeleteAccounts(selected.value.map(s => s.id))
+}
+
+// 触发点 ③：恢复账户会写「我的看板」H 列（清空解绑）。被删的户已不在本列表里，
+// 快照不到行数据，故由 AccountDeletedModal 把 account_id 带出来。
+function onRestored(accountId) {
+  load()
+  if (accountId) pollSheetWrite(DASH_TARGET, accountId)
+}
+
+// 触发点 ⑤：从表同步的回写腿涉及的账户，由响应带出（未配表格时后端回空表 ⇒ 不轮询）
+function onSynced(accountIds) {
+  load()
+  for (const id of accountIds || []) pollSheetWrite(DASH_TARGET, id)
 }
 
 // ===== 名称内联编辑 =====
@@ -510,13 +577,16 @@ async function saveStatus(row) {
   if (v === currentStatusId) { cancelStatusEdit(); return }
   statusPending = true
   try {
-    await store.updateAccount(row.id, { status_id: v })
+    const res = await store.updateAccount(row.id, { status_id: v })
     const s = store.options.statuses.find(x => x.id === v)
     row.status = s ? s.name : null
     row.status_name = s ? s.name : null
     // 后端会自动处理 status_changed_date，这里先乐观更新
     row.status_changed_date = new Date().toISOString().slice(0, 10)
     ElMessage.success('状态已更新')
+    // 触发点 ①：改状态同时打两条写表腿 —— 本户的「我的看板」+ 可能的清账记录
+    pollSheetWrite(DASH_TARGET, row.account_id)
+    if (res?.clear_recharge_id != null) pollSheetWrite(RECHARGE_TARGET, String(res.clear_recharge_id))
   } catch (e) {
     ElMessage.error('更新状态失败')
   }
@@ -538,14 +608,88 @@ async function doBatchStatus(val) {
       '批量修改状态', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }
     )
   } catch { batchStatus.value = ''; return }
-  await store.batchUpdateAccounts({ ids: selected.value.map(s => s.id), field: 'status_id', value: val })
-  ElMessage.success(`已将 ${selected.value.length} 个账户状态改为「${stName}」`)
+  // 快照本批账户与数量：batchUpdateAccounts 会重载列表，selected 随之清空
+  const acctIds = selected.value.map(s => s.account_id)
+  const count = selected.value.length
+  const res = await store.batchUpdateAccounts({ ids: selected.value.map(s => s.id), field: 'status_id', value: val })
+  ElMessage.success(`已将 ${count} 个账户状态改为「${stName}」`)
   batchStatus.value = ''
+  // 触发点 ④：本批每户各一条「我的看板」写表腿，外加每笔清账记录
+  for (const id of acctIds) pollSheetWrite(DASH_TARGET, id)
+  for (const rid of res?.clear_recharge_ids || []) pollSheetWrite(RECHARGE_TARGET, String(rid))
 }
 async function doBatchMcc(val) {
   if (!val) return
   await store.batchUpdateAccounts({ ids: selected.value.map(s => s.id), field: 'mcc_id', value: val })
   batchMcc.value = ''
+}
+
+// ===== 写表失败治理：轮询 / 行标记 / 重试 =====
+/** 列表标记用：拉本用户全部「需要提示」的写表终态。静默失败（不打扰用户）。 */
+async function loadSheetWriteFailures() {
+  try {
+    const res = await sheetWriteApi.status({ platform: 'gg' })
+    const map = {}
+    for (const it of res.items || []) {
+      if (it.target !== DASH_TARGET) continue   // 见 DASH_TARGET 处的说明：两个 target 共用键空间
+      map[it.business_key] = it
+    }
+    sheetWriteFailures.value = map
+  } catch { /* 标记拉不到不该打扰用户，保持上一次的结果 */ }
+}
+
+/**
+ * 轮询单条直到终态。中间态（pending/failed）继续等，不提示。
+ *
+ * target 是本函数的第一参数（TT 那份不需要，TT 只有一个 target）：它既决定
+ * 「这次查的是哪条写表腿」，也用来挡住同 business_key、不同 target 的记录。
+ */
+function pollSheetWrite(target, businessKey) {
+  const timerKey = target + '|' + businessKey
+  let attempts = 0
+  // 本键轮询停止（终态 / 无记录 / synced / 超限 / 异常）时统一摘掉自己的表项，
+  // 避免 Map 无界增长。每个 return 路径都要走到这里。
+  const stop = () => { sheetWriteTimers.delete(timerKey) }
+  const tick = async () => {
+    if (attempts >= SHEET_WRITE_POLL_MAX) { stop(); return }
+    attempts++
+    try {
+      const res = await sheetWriteApi.status({ platform: 'gg', businessKey })
+      const it = res.item
+      // 无记录 = 这条路径没触发写表，**不是失败**。Task 4 的 clear_recharge_id /
+      // clear_recharge_ids / recharge_ids / id 只要 DB 行插进去了就回，未配表格时
+      // 根本没登记 sheet_write_log ⇒ 这里 !it ⇒ 不提示。把「有 id」当失败
+      // 正是 Task 2 修过的镜像 bug（没配表却冒 ⚠️），不能走回去。
+      if (!it || it.target !== target) { stop(); return }
+      if (it.status === 'synced') { loadSheetWriteFailures(); stop(); return }
+      if (it.status === 'pending' || it.status === 'failed') {
+        sheetWriteTimers.set(timerKey, setTimeout(tick, SHEET_WRITE_POLL_MS))
+        return
+      }
+      // 三种需提示的终态 —— 文案与行内 tooltip 同源（sheetWriteHint），避免两处各写一份
+      const hint = sheetWriteHint(it)
+      SHEET_WRITE_TOAST[sheetWriteTone(it.status)](hint)
+      loadSheetWriteFailures()
+      stop()
+    } catch { stop() /* 轮询失败静默，靠列表标记兜底 */ }
+  }
+  // 同键重入（例如重试按钮）时先清掉旧链，保证一个键只有一条在跑
+  const prev = sheetWriteTimers.get(timerKey)
+  if (prev) clearTimeout(prev)
+  sheetWriteTimers.set(timerKey, setTimeout(tick, SHEET_WRITE_POLL_MS))
+}
+
+/** 重试按钮。target 取自日志行本身（本表列 = gg_my_dashboard），不硬编码。 */
+async function retrySheetWrite(row) {
+  const f = sheetWriteFailures.value[row.account_id]
+  if (!f) return
+  try {
+    await sheetWriteApi.retry({ platform: 'gg', target: f.target, businessKey: row.account_id })
+    ElMessage.success('已重新提交，请稍后查看结果')
+    pollSheetWrite(f.target, row.account_id)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '重试失败')
+  }
 }
 
 // ===== 「户归属」列（仅户管可见可编辑）=====

@@ -39,7 +39,13 @@ export const useAccountStore = defineStore('accounts', {
     async updateAccount(id, body) { return accountsApi.update(id, body) },
     async deleteAccount(id) { await accountsApi.delete(id); return this.loadAccounts() },
     async batchDeleteAccounts(ids) { await accountsApi.batchDelete(ids); return this.loadAccounts() },
-    async batchUpdateAccounts(body) { await accountsApi.batchUpdate(body); return this.loadAccounts() },
+    // 返回后端响应（含 clear_recharge_ids —— 前端靠它对清账记录轮询 gg_recharge），
+    // 不止是重载后的列表。重载照旧，调用方多拿到一个响应体。
+    async batchUpdateAccounts(body) {
+      const res = await accountsApi.batchUpdate(body)
+      await this.loadAccounts()
+      return res
+    },
 
     async loadMccList() {
       return dedupLoader(this, 'mccList', () => {
