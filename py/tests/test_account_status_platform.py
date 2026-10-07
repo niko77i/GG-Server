@@ -390,3 +390,84 @@ class TestDanglingStatusCountsAsUnknown:
             assert resp.get_json()["total"] == cnt, (
                 f"「{name}」计数 {cnt}，按它筛选却得到 {resp.get_json()['total']} 条"
             )
+
+
+# ---------- 跨平台同名引用（status_id 指向他平台同名行）的统计口径 ----------
+
+class TestCrossPlatformSameNameReference:
+    """`accounts.status_id` 指向**他平台**（tt/fb）同名（「未知」）字典行时，按名字筛
+    「未知」必须把它捞出来 —— 统计按 `st.name` 把它算进「未知」，筛选必须同口径。
+
+    根因（与 NULL 桶、悬挂桶同族、本次修的**第三条腿**）：旧筛选写成
+    `a.status_id IN (SELECT id FROM account_statuses WHERE name=? AND platform='gg')`
+    —— 子查询带 `platform='gg'`，账户若指向**他平台**同名行，其 id 不在集合里 ⇒ 筛不到；
+    而统计/显示按 **名字** 判定 ⇒ 又是「按钮上写着 N、点下去 0 条」。
+    本提交去掉子查询的 platform 条件、按名字判定，自然覆盖跨平台同名引用。
+
+    ⚠️ 构造要点：账户指向 `platform='tt'`、`name='未知'` 的字典行，**且该行的 owner_id
+    悬挂**（指向不存在的用户）。为什么非得让 owner 悬挂：`_migrate_account_status_platform`
+    每次 get_db() 都会把挂在非 gg 行上的账户**搬回 gg 同名行**（见本文件
+    TestAccountStatusPlatformMigration）。若该行 owner 有效，迁移会补建 gg「未知」行并把
+    账户搬过去 —— 跨平台引用当场自愈，用例退化成「迁移后的 gg 同名行」，钉不住第三条腿。
+    owner 悬挂时迁移补建 gg 行的 INSERT 撞外键、整段回滚（同
+    test_does_not_kill_get_db_when_owner_fk_dangles 的既有构造），账户才得以保留对
+    **他平台行**的引用。
+
+    判别力在「跨平台那条在不在」：把筛选改回旧写法（`IN (SELECT id ... platform='gg')`）
+    或 `a.status_id = ?`，本用例即变红。
+    另加**负对照**（异状态户必须不在）：否则「退化成返回全部」的错误实现也会绿。
+    """
+
+    def test_tt_row_referenced_by_gg_account_is_found_by_name(self, client):
+        import sqlite3
+
+        h, uid = _register(client, "xplatuser")
+        db = database.get_db()
+        alive_id = _mk_status(db, "存活", "gg", owner_id=1)
+        _mk_account(db, "401-000-0001", uid, alive_id)   # 负对照（异状态）
+        # 前置：gg 分区不得已有「未知」行，否则迁移会经它把账户搬走，掩盖本场景
+        assert db.execute(
+            "SELECT COUNT(*) FROM account_statuses WHERE name='未知' AND platform='gg'"
+        ).fetchone()[0] == 0, "前置条件：gg 不得已有「未知」行，否则迁移会自愈本场景"
+        db.close()
+
+        # 造他平台同名行（tt「未知」，owner 悬挂）+ 让账户指向它。绕过 get_db()（FK=ON），
+        # 用独立 raw 连接先关 FK 再插 —— 同本文件悬挂/悬挂外键用例的既有做法。
+        raw = sqlite3.connect(database._db_path())
+        raw.execute("PRAGMA foreign_keys=OFF")
+        raw.execute(
+            "INSERT INTO account_statuses(name, owner_id, platform) VALUES('未知', 999999, 'tt')")
+        ref_id = raw.execute(
+            "SELECT id FROM account_statuses WHERE name='未知' AND platform='tt'").fetchone()[0]
+        raw.execute(
+            "INSERT INTO accounts(name, account_id, owner_id, status_id) VALUES(?,?,?,?)",
+            ("跨平台户", "401-000-0002", uid, ref_id))
+        raw.commit()
+        raw.close()
+
+        # 前置断言：账户确实指向那条**他平台**同名行（迁移被悬挂外键挡住，引用得以存活）
+        chk = database.get_db()
+        row = chk.execute(
+            "SELECT s.name AS name, s.platform AS platform FROM accounts a "
+            "JOIN account_statuses s ON a.status_id=s.id WHERE a.account_id='401-000-0002'"
+        ).fetchone()
+        assert row is not None, "前置条件：账户必须仍指向他平台同名行"
+        assert row["name"] == "未知" and row["platform"] == "tt", (
+            f"前置条件：引用应为他平台(tt)「未知」行，实际 {dict(row)}"
+        )
+        chk.close()
+
+        resp = client.get("/api/accounts/list?status=未知", headers=h)
+        assert resp.status_code == 200
+        body = resp.get_json()
+        ids = {a["account_id"] for a in body["accounts"]}
+        # 正腿：跨平台同名引用的账户必须被「未知」筛选捞出
+        assert "401-000-0002" in ids, (
+            "他平台同名行被引用时，按名字筛选必须仍能捞到该账户"
+        )
+        # 负对照：异状态（存活）户不得混入
+        assert "401-000-0001" not in ids, "异状态（存活）户不应被「未知」筛选返回（负对照）"
+        # 计数同口径：total 必须等于 status_counts 该 key（被修的分裂本身）
+        assert body["total"] == body["status_counts"].get("未知"), (
+            "统计里「未知」有几条，按它筛选就该有几条 —— 跨平台那条漏了就是死链"
+        )

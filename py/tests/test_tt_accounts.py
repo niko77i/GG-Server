@@ -236,6 +236,71 @@ def test_list_status_filter_alive_includes_dangling_status(client, tt_headers):
     )
 
 
+def test_list_status_filter_alive_includes_cross_platform_same_name(client, tt_headers):
+    """**跨平台同名引用**：tt_accounts.status_id 指向**他平台**（gg/fb）的「存活」行时，
+    按「存活」筛选也必须把它捞出来 —— 计数按 st.name 把它算进「存活」，筛选须同口径。
+
+    根因（与本文件另外两条同族、本次修的**第三条腿**）：旧筛选是
+    `a.status_id IN (SELECT id FROM account_statuses WHERE name='存活' AND platform='tt')`
+    —— 子查询带 `platform='tt'`，他平台那条同名行的 id 不在集合里 ⇒ 筛不到；而计数/显示
+    按 **名字** 判定 ⇒ 又是一次「按钮上写着 N、点下去 0 条」。本提交把子查询的 platform
+    条件去掉、按名字判定，自然覆盖跨平台同名引用。
+
+    判别力在「跨平台那条在不在」：把筛选改回 `a.status_id = ?`（等值）或把 platform
+    条件加回子查询，本用例即变红。
+    另加**负对照**（异状态户必须不在）：否则「筛选退化成返回全部」的错误实现也会绿。
+    """
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    alive_id = _ensure_tt_status(db, "存活")   # 正常的 tt「存活」户
+    dead_id = _ensure_tt_status(db, "死亡")     # 负对照（异状态）
+
+    # 他平台的同名「存活」行：先查再插（account_statuses 按 (name, platform) 唯一，
+    # 迁移会从 gg 播种各平台同名行 —— 已存在就复用，别撞唯一约束）。
+    row = db.execute(
+        "SELECT id, platform FROM account_statuses WHERE name='存活' AND platform!='tt'"
+    ).fetchone()
+    if row is None:
+        db.execute("INSERT INTO account_statuses(name, owner_id, platform) VALUES('存活', 1, 'fb')")
+        db.commit()
+        row = db.execute(
+            "SELECT id, platform FROM account_statuses WHERE name='存活' AND platform!='tt'"
+        ).fetchone()
+    foreign_id = row["id"]
+    assert row["platform"] != "tt", "前置条件：引用的行必须来自他平台"
+
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+               ("同存活户", "5550000001111", alive_id, uid))
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+               ("跨平台存活户", "5550000002222", foreign_id, uid))
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, status_id, owner_id) VALUES(?,?,?,?)",
+               ("死亡户", "5550000003333", dead_id, uid))
+    db.commit()
+    # 前置断言：跨平台那条的 status_id 确实指向**他平台**「存活」行（未被改动）
+    chk = db.execute(
+        "SELECT s.name AS name, s.platform AS platform FROM tt_accounts a "
+        "JOIN account_statuses s ON a.status_id=s.id WHERE a.advertiser_id='5550000002222'"
+    ).fetchone()
+    assert chk["name"] == "存活" and chk["platform"] != "tt", (
+        f"前置条件：跨平台户应指向他平台「存活」行，实际 {dict(chk)}"
+    )
+    db.close()
+
+    # 客户端传的正是那条**他平台**行的 id
+    resp = client.get(f"/api/tt/accounts/list?status_id={foreign_id}", headers=tt_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    adv_ids = {it["advertiser_id"] for it in body["items"]}
+    assert "5550000002222" in adv_ids, (
+        "他平台同名「存活」行被引用时，按「存活」筛选必须仍能捞到该户"
+    )
+    assert "5550000001111" in adv_ids, "真「存活」户应返回"
+    assert "5550000003333" not in adv_ids, "异状态（死亡）户不应被存活筛选返回（负对照）"
+    assert body["total"] == body["status_counts"].get("存活"), (
+        "统计里「存活」有几条，按它筛选就该有几条 —— 跨平台那条漏了就是死链"
+    )
+
+
 def test_update_account_clear_agent(client, tt_headers):
     """update_account 应支持 agent_id=null 显式清空代理（对齐 GG）。"""
     resp = _mk_account(client, tt_headers, advertiser_id="1234567890123")
