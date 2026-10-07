@@ -405,6 +405,48 @@ class TestAdReportsAnalyze:
         assert data["success"] is True
         assert data["enabled"] is False
 
+    def test_analyze_enabled_does_not_500_on_closed_db(
+            self, client, auth_headers, monkeypatch):
+        """AI 启用后本端点不得因「请求级共享连接被提前 close」而 500。
+
+        根因（2026-10-07 修）：本函数读完 ai 配置就 `db.close()`，而 `_yt_db()` 返回的是
+        `flask.g` 里的**请求级共享连接**；函数下面又调 `_yt_db()` 取回**同一个已关闭的连接**
+        ⇒ `ProgrammingError: Cannot operate on a closed database`。
+
+        **只有「AI 已启用且提了问题」的请求才会走到第二段**，所以上面那条
+        `test_analyze_disabled_by_default` 一直没能暴露它 —— 这条用例补的就是那个缺口。
+        把那句 `db.close()` 加回去，本用例即变红（500）。
+        """
+        import database
+        import main
+
+        db = database.get_db()
+        uid = db.execute("SELECT id FROM users WHERE username=?",
+                         ("testuser",)).fetchone()["id"]
+        db.execute("INSERT OR REPLACE INTO config(key, value) VALUES (?, ?)",
+                   (f"ai_analysis_{uid}", json.dumps({
+                       "enabled": True, "provider": "volcano", "model": "m",
+                       "api_key": "k", "endpoint": "https://provider.invalid/v1/chat",
+                   })))
+        db.commit()
+        db.close()
+
+        # 打桩：既拦住真实外呼，也让断言落在「有没有走到 AI 那一步」上
+        class _FakeResp:
+            status_code = 500
+            text = "upstream boom"
+
+        monkeypatch.setattr(main.requests, "post", lambda *a, **k: _FakeResp())
+
+        resp = client.post("/api/ad-reports/analyze",
+                           json={"question": "花费如何？"}, headers=auth_headers)
+        raw = resp.get_data(as_text=True)
+        assert resp.status_code == 200, raw[:300]
+        assert "closed database" not in raw
+        assert "Cannot operate" not in raw
+        # 走到了 AI 那一步（打桩返回非 200 ⇒ 固定文案），而不是在取配置处就炸
+        assert resp.get_json()["enabled"] is True
+
 
 class TestAdReportsMultiAnalysis:
     """GET /api/ad-reports/multi-analysis — 多维自由分析。"""

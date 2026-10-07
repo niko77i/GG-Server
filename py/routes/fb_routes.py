@@ -4,10 +4,29 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES, parse_pagination
 from .decorators import fb_required, no_huguan
 import huguan_dashboard as hd
+import logging
 import re
+import sqlite3
 import threading
 
 fb_bp = Blueprint('fb', __name__)
+
+log = logging.getLogger("gg-server")
+
+# 落库 / 回响应体共用的固定文案。这些 `except Exception` 捕到的多是 sqlite 的
+# IntegrityError（UNIQUE / NOT NULL / FOREIGN KEY），原文含 schema 列名与英文约束名。
+_FB_DB_FAILED_MSG = "操作失败，详情见服务端日志"
+_FB_SHEETS_FAILED_MSG = "表格同步失败，详情见服务端日志"
+
+
+def _is_unique_conflict(e):
+    """是否为 UNIQUE 约束冲突 —— 与 FOREIGN KEY / NOT NULL 等其它完整性错误区分开。
+
+    口径照 GG 侧 `main.py`（`except _sqlite3.IntegrityError` + `"unique" in str(e).lower()`）：
+    只有 UNIQUE 冲突才是「重复键」这个用户可操作的信号，回「已存在」；
+    其余完整性错误（尤其 FK）仍走固定文案，不得被误导成「已存在」。
+    """
+    return isinstance(e, sqlite3.IntegrityError) and "unique" in str(e).lower()
 
 
 # ==================== BM 管理 ====================
@@ -144,7 +163,10 @@ def create_bm():
         db.commit()
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
-        return err(str(e))
+        log.exception("FB 创建BM失败 bm_id=%s", bm_id)
+        if _is_unique_conflict(e):
+            return err(f"BM ID「{bm_id}」已存在")
+        return err(_FB_DB_FAILED_MSG)
 
 
 @fb_bp.route('/api/fb/bms/<int:bid>', methods=['PUT'])
@@ -254,7 +276,8 @@ def ban_and_migrate(bid):
         })
     except Exception as e:
         db.rollback()
-        return err(f'封禁迁移失败: {str(e)}', 500)
+        log.exception("FB 封禁迁移失败 bid=%s", bid)
+        return err('封禁迁移失败，详情见服务端日志', 500)
 
 
 # ==================== 账户管理 ====================
@@ -390,7 +413,10 @@ def create_account():
             hd.writeback_fb_acceptor(uid, "fb", account_id, acceptor)
         return ok({'id': acc_pk})
     except Exception as e:
-        return err(str(e))
+        log.exception("FB 创建账户失败 account_id=%s", account_id)
+        if _is_unique_conflict(e):
+            return err(f"账户 ID「{account_id}」已存在")
+        return err(_FB_DB_FAILED_MSG)
 
 
 @fb_bp.route('/api/fb/accounts/<int:aid>', methods=['PUT'])
@@ -779,7 +805,10 @@ def create_product():
         db.commit()
         return ok({'id': pid})
     except Exception as e:
-        return err(str(e))
+        log.exception("FB 创建产品失败 product_name=%s", product_name)
+        if _is_unique_conflict(e):
+            return err(f"产品「{product_name}」已存在")
+        return err(_FB_DB_FAILED_MSG)
 
 
 @fb_bp.route('/api/fb/products/<int:pid>', methods=['PUT'])
@@ -891,7 +920,8 @@ def add_line(pid):
         db.commit()
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
-        return err(str(e))
+        log.exception("FB 新增线名失败 product_id=%s", pid)
+        return err(_FB_DB_FAILED_MSG)
 
 
 @fb_bp.route('/api/fb/lines/<int:lid>', methods=['PUT'])
@@ -983,7 +1013,8 @@ def create_pixel_bm():
         db.commit()
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
-        return err(str(e))
+        log.exception("FB 创建像素BM失败 bm_id=%s", bm_id)
+        return err(_FB_DB_FAILED_MSG)
 
 
 @fb_bp.route('/api/fb/pixel-bms/<int:bid>', methods=['PUT'])
@@ -1105,7 +1136,10 @@ def create_pixel(bid):
         db.commit()
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
-        return err(str(e))
+        log.exception("FB 创建像素失败 pixel_bm_id=%s", bid)
+        if _is_unique_conflict(e):
+            return err(f"像素 ID「{pixel_id}」已存在")
+        return err(_FB_DB_FAILED_MSG)
 
 
 @fb_bp.route('/api/fb/pixels/<int:pxid>', methods=['PUT'])
@@ -1400,7 +1434,8 @@ def extract_save():
         return ok({'saved': len(records), 'sync_log_id': log_id})
     except Exception as e:
         db.rollback()
-        return err(f'保存数据失败: {str(e)}', 500)
+        log.exception("FB 保存提取数据失败 product_name=%s", product_name)
+        return err('保存数据失败，详情见服务端日志', 500)
 
 
 def _check_fb_sheet_exists(user_id, report_date):
@@ -1429,8 +1464,10 @@ def _check_fb_sheet_exists(user_id, report_date):
         if not found:
             return f"未找到 {month_key} 月份的表格「{expected_name}」，请先在个人信息页添加"
         return None
-    except Exception as e:
-        return f"配置检查失败: {str(e)[:100]}"
+    except Exception:
+        # 目前无调用点（死代码），但返回值若被接进响应体就是同族泄露 ⇒ 一并收口。
+        log.exception("FB 表格配置检查失败 user_id=%s", user_id)
+        return "配置检查失败，详情见服务端日志"
 
 
 def _get_sheet_config_key(db, user_id):
@@ -1443,31 +1480,31 @@ def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, rec
     """后台线程写 Google Sheets，并更新对应的 sheets_sync_log 状态（synced/failed）。"""
     def _do_write():
         import database as _db
-        import traceback
         import json
         db = _db.get_db()
         try:
             import google_sheets_service as gs
             result = gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
-            print(f"[FB-Sheets] 写入成功: {result}")
+            log.info("[FB-Sheets] 写入成功: %s", result)
             # 更新本次同步日志为 synced
             db.execute(
                 "UPDATE sheets_sync_log SET status='synced', error_msg='', rows_json=?, "
                 "updated_at=datetime('now','localtime') WHERE id=?",
                 (json.dumps(records, ensure_ascii=False)[:10000], log_id))
             db.commit()
-        except Exception as e:
-            err_msg = str(e)[:500]
-            traceback.print_exc()
+        except Exception:
+            # `error_msg` 会被 GET /api/fb/reports/sync-status/<id> 与 last-sync
+            # 原样回给客户端 ⇒ 只落固定文案；原文进日志。
+            log.exception("[FB-Sheets] 写入失败 log_id=%s", log_id)
             try:
                 db.execute(
                     "UPDATE sheets_sync_log SET status='failed', error_msg=?, rows_json=?, "
                     "updated_at=datetime('now','localtime') WHERE id=?",
-                    (err_msg, json.dumps(records, ensure_ascii=False)[:10000], log_id))
+                    (_FB_SHEETS_FAILED_MSG,
+                     json.dumps(records, ensure_ascii=False)[:10000], log_id))
                 db.commit()
-                print(f"[FB-Sheets] 写入失败已记录: {err_msg}")
             except Exception as ex2:
-                print(f"[FB-Sheets] 日志更新也失败: {ex2}")
+                log.exception("[FB-Sheets] 日志更新也失败: %s", ex2)
         finally:
             try:
                 db.close()
@@ -1615,13 +1652,16 @@ def fb_retry_sheets_sync():
             db.execute("DELETE FROM sheets_sync_log WHERE id=?", (log_id,))
             db.commit()
             return ok({'retried': 1})
-        except Exception as e:
+        except Exception:
+            # 同一处既是落库点（error_msg 会被 sync-status 读回）又是直出点（response.error）
+            # ⇒ 两处都用固定文案，原文进日志。
+            log.exception("FB 重试写表失败 log_id=%s", log_id)
             db.execute(
                 "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
                 "updated_at=datetime('now','localtime') WHERE id=?",
-                (str(e)[:500], log_id))
+                (_FB_SHEETS_FAILED_MSG, log_id))
             db.commit()
-            return err(f'重试失败: {str(e)}', 500)
+            return err('重试失败，详情见服务端日志', 500)
 
     # 批量重试
     rows = db.execute(
@@ -1644,12 +1684,15 @@ def fb_retry_sheets_sync():
                                  (r['report_date'] or '').strip(), records)
             db.execute("DELETE FROM sheets_sync_log WHERE id=?", (r['id'],))
             retried += 1
-        except Exception as e:
-            err_msg = str(e)[:500]
+        except Exception:
+            # `failed[].error` 直接进响应体、同一文案也落进 error_msg ⇒ 固定文案 + 日志。
+            log.exception("FB 批量重试写表失败 log_id=%s", r['id'])
             db.execute(
                 "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
-                "updated_at=datetime('now','localtime') WHERE id=?", (err_msg, r['id']))
-            failed.append({'id': r['id'], 'product_name': r['product_name'], 'error': err_msg})
+                "updated_at=datetime('now','localtime') WHERE id=?",
+                (_FB_SHEETS_FAILED_MSG, r['id']))
+            failed.append({'id': r['id'], 'product_name': r['product_name'],
+                           'error': _FB_SHEETS_FAILED_MSG})
     db.commit()
     return ok({'retried': retried, 'failed': failed})
 

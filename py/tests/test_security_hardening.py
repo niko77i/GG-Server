@@ -1,4 +1,5 @@
 """安全加固测试 — A/B/C/D 类缺陷收口。"""
+import json
 import logging
 import os
 import shutil
@@ -6,6 +7,10 @@ import shutil
 import pytest
 
 import database
+
+# 与 test_fb_platform.py 同因同解：conftest 的 15 字节 JWT 密钥会让 PyJWT 每次编解码
+# 都抛 InsecureKeyLengthWarning，属夹具既有产物。按类精确静音，保持测试输出干净。
+pytestmark = pytest.mark.filterwarnings("ignore::jwt.warnings.InsecureKeyLengthWarning")
 
 
 def _create_user(client, username, role="user", platform="gg", created_by=None):
@@ -1277,3 +1282,830 @@ class TestE8CreatePkFieldGate:
             assert resp.status_code == 200, (
                 f"mcc_id={ok!r} 应沿用既有『清空』走 200，实得 {resp.status_code}"
             )
+
+
+# ---------------------------------------------------------------------------
+# E 组续：直接内插异常原文的 f-string 站点（上一轮 grep `str(e)` 漏掉的形态）
+#   `f"…: {e}"` —— 异常原文经 f-string 直接拼进响应体
+# ---------------------------------------------------------------------------
+# 固定脱敏文案（与前面 SANITIZED_500 同族措辞：原文换成固定中文，详情进日志）
+SANITIZED_INTEGRITY = "数据完整性错误，详情见服务端日志"
+SANITIZED_CREATE_DIR = "无法创建目录，详情见服务端日志"
+SANITIZED_OUT_DIR = "无法创建输出目录，详情见服务端日志"
+SANITIZED_READ_SHEET = "无法读取表格，详情见服务端日志"
+SANITIZED_UNKNOWN = "未知错误，详情见服务端日志"
+SANITIZED_ACCESS_SHEET = "无法访问表格，详情见服务端日志"
+SANITIZED_TT_IMPORT = "导入失败，请查看服务端日志"
+
+# 这些站点泄露的「内部细节」形态：schema/列名、文件系统路径、英文库异常。
+# 比 LEAK_MARKERS 更贴本组（列名与 constraint 原文不在 LEAK_MARKERS 里）。
+SCHEMA_LEAK_MARKERS = ("constraint failed", "NOT NULL", "UNIQUE", "accounts.",
+                       "account_statuses", "Permission denied", "Errno", "has no attribute")
+
+
+def _assert_no_schema_leak(resp):
+    raw = resp.get_data(as_text=True)
+    for marker in SCHEMA_LEAK_MARKERS:
+        assert marker not in raw, f"响应体泄露内部细节 {marker!r}: {raw[:200]!r}"
+
+
+class TestE9InterpolatedExceptionIsSanitized:
+    """`f"…: {e}"` 直接内插异常原文的响应站点全部换固定文案，详情进日志。
+
+    上一轮的 grep 串是 `str(e)`，看不见这种内插形态。每处都用一个**真实的异常**
+    （真 sqlite3.IntegrityError / 真 OSError / 真实抛出的通用异常）驱动对应分支：
+    去掉本批修复，响应体即回显 schema 列名 / 绝对路径 / 英文库异常 ⇒ 断言转红。
+    """
+
+    # ---- :4518 accounts_create 的通用 IntegrityError 分支（非 FK / 非 UNIQUE）----
+    def test_accounts_create_generic_integrity_error_is_sanitized(self, client, monkeypatch, caplog):
+        import sqlite3
+        import main as main_mod
+
+        def _boom(*_a, **_k):
+            # 真 sqlite3.IntegrityError，文案取 SQLite 对 NOT NULL 违规的**真实措辞**
+            raise sqlite3.IntegrityError(
+                "NOT NULL constraint failed: account_statuses.owner_id")
+
+        monkeypatch.setattr(main_mod, "_gg_status_id", _boom)
+        hdr, _ = _create_user(client, "_e9_crt", role="user")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/accounts/create",
+                               json={"name": "E9建", "account_id": "GG-E9-CRT", "status": "存活"},
+                               headers=hdr)
+        assert resp.status_code == 409
+        body = resp.get_json()
+        assert body["error"] == SANITIZED_INTEGRITY, (
+            f"create 的通用分支仍回显异常原文：{body['error']!r}")
+        _assert_no_schema_leak(resp)
+        _assert_no_internal_leak(resp)
+        assert "NOT NULL constraint failed: account_statuses.owner_id" in caplog.text, (
+            "异常详情没进日志 —— 排查线索被脱敏一并砍掉了")
+
+    # ---- :4798 accounts_update 的通用 IntegrityError 分支（真实 HTTP 可达）----
+    def test_accounts_update_notnull_violation_is_sanitized(self, client, caplog):
+        """真实路径：PUT /api/accounts/{id} body `{"name": null}`。
+
+        `name` 列是 NOT NULL，且 `name` 不在 update 的 pk 闸门白名单里 ⇒ 原样
+        绑进 UPDATE ⇒ SQLite 抛 IntegrityError("NOT NULL constraint failed:
+        accounts.name")，且不含 foreign key ⇒ 落到 :4798 的通用分支。
+        """
+        hdr, uid = _create_user(client, "_e9_upd", role="user")
+        db = database.get_db()
+        _mk_account(db, uid, "GG-E9-UPD")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-E9-UPD'").fetchone()["id"]
+        db.close()
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.put(f"/api/accounts/{aid}", json={"name": None}, headers=hdr)
+        assert resp.status_code == 409, (
+            f"NOT NULL 违规应落 IntegrityError 分支回 409，实得 {resp.status_code}")
+        body = resp.get_json()
+        assert body["error"] == SANITIZED_INTEGRITY, (
+            f"update 的通用分支仍回显 schema 列名：{body['error']!r}")
+        _assert_no_schema_leak(resp)
+        _assert_no_internal_leak(resp)
+        assert "NOT NULL constraint failed: accounts.name" in caplog.text, (
+            "异常详情没进日志")
+
+    # ---- :689 scrape 建目录失败 ----
+    def test_scrape_makedirs_failure_is_sanitized(self, client, monkeypatch, caplog):
+        import os as _os
+        import main as main_mod
+
+        _real_makedirs = _os.makedirs
+
+        def _boom(path, *a, **k):
+            if str(path).endswith("com.e9.app"):
+                raise OSError(13, "Permission denied", str(path))
+            return _real_makedirs(path, *a, **k)
+
+        monkeypatch.setattr(main_mod.os, "makedirs", _boom)
+        hdr, _ = _create_user(client, "_e9_scr", role="user")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post(
+                "/api/scrape",
+                json={"url": "https://play.google.com/store/apps/details?id=com.e9.app"},
+                headers=hdr)
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == SANITIZED_CREATE_DIR, (
+            f"scrape 建目录失败仍回显路径：{resp.get_json()['error']!r}")
+        assert "Permission denied" not in resp.get_data(as_text=True)
+        assert "com.e9.app" not in resp.get_data(as_text=True), "响应体泄露了服务端绝对路径"
+        assert "Permission denied" in caplog.text, "OSError 详情没进日志"
+
+    # ---- :1064 video_generate 建输出目录失败 ----
+    def test_video_generate_makedirs_failure_is_sanitized(self, client, monkeypatch, caplog):
+        import os as _os
+        import main as main_mod
+
+        _real_makedirs = _os.makedirs
+
+        def _boom(path, *a, **k):
+            if str(path).replace("/", "\\").rstrip("\\").endswith("e9out"):
+                raise OSError(13, "Permission denied", str(path))
+            return _real_makedirs(path, *a, **k)
+
+        monkeypatch.setattr(main_mod.os, "makedirs", _boom)
+        hdr, _ = _create_user(client, "_e9_vid", role="user")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/video/generate",
+                               json={"images": ["a.png"],
+                                     "settings": {"output_path": r"D:\e9out\v.mp4"}},
+                               headers=hdr)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == SANITIZED_OUT_DIR, (
+            f"video 建输出目录失败仍回显路径：{resp.get_json()['error']!r}")
+        assert "Permission denied" not in resp.get_data(as_text=True)
+        assert "e9out" not in resp.get_data(as_text=True), "响应体泄露了落盘绝对路径"
+        assert "Permission denied" in caplog.text, "OSError 详情没进日志"
+
+    # ---- :5302 sync-from-sheet 读表失败 ----
+    def test_sync_from_sheet_generic_error_is_sanitized(self, client, monkeypatch, caplog, tmp_path):
+        import main as main_mod
+        import google_sheets_service as gs
+
+        creds = tmp_path / "creds.json"
+        creds.write_text("{}")
+        monkeypatch.setattr(main_mod, "_GOOGLE_SHEETS_CONFIG",
+                            {"credentials_path": str(creds)})
+        monkeypatch.setattr(main_mod, "_get_sync_spreadsheet_id", lambda db: "FAKE_SHEET")
+        monkeypatch.setattr(main_mod, "_get_my_dashboard_name", lambda db, uid: "看板")
+
+        def _boom(*_a, **_k):
+            raise ValueError("内部炸了 D:\\server\\cc\\GG-Server\\py\\x.py:1")
+
+        monkeypatch.setattr(gs, "build_service", _boom)
+        hdr, _ = _create_user(client, "_e9_sync", role="user")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/accounts/sync-from-sheet", json={}, headers=hdr)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == SANITIZED_READ_SHEET, (
+            f"读表失败仍回显原文：{resp.get_json()['error']!r}")
+        assert "内部炸了" not in resp.get_data(as_text=True)
+        _assert_no_internal_leak(resp)
+        assert "内部炸了" in caplog.text, "异常详情没进日志"
+
+    # ---- :8022 google-ads 账户列表未知错误 ----
+    def test_google_ads_accounts_unknown_error_is_sanitized(self, client, monkeypatch, caplog):
+        import google_ads_service as gas
+        hdr, _ = _create_user(client, "_e9_ads1", role="user")
+
+        def _boom(*_a, **_k):
+            raise ValueError("内部炸了 D:\\server\\cc\\GG-Server\\py\\x.py:2")
+
+        monkeypatch.setattr(gas, "list_accounts", _boom)
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/google-ads/accounts", json={}, headers=hdr)
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == SANITIZED_UNKNOWN, (
+            f"google-ads/accounts 仍回显原文：{resp.get_json()['error']!r}")
+        assert "内部炸了" not in resp.get_data(as_text=True)
+        _assert_no_internal_leak(resp)
+        assert "内部炸了" in caplog.text, "异常详情没进日志"
+
+    # ---- :8052 google-ads 报告未知错误 ----
+    def test_google_ads_report_unknown_error_is_sanitized(self, client, monkeypatch, caplog):
+        import google_ads_service as gas
+        hdr, _ = _create_user(client, "_e9_ads2", role="user")
+
+        def _boom(*_a, **_k):
+            raise ValueError("内部炸了 D:\\server\\cc\\GG-Server\\py\\x.py:3")
+
+        monkeypatch.setattr(gas, "fetch_campaign_report", _boom)
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/google-ads/report",
+                               json={"account_id": "1", "start_date": "2026-01-01",
+                                     "end_date": "2026-01-31"}, headers=hdr)
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == SANITIZED_UNKNOWN, (
+            f"google-ads/report 仍回显原文：{resp.get_json()['error']!r}")
+        assert "内部炸了" not in resp.get_data(as_text=True)
+        assert "内部炸了" in caplog.text, "异常详情没进日志"
+
+    # ---- :8168 google-sheets 列表读取失败（同形态站点，任务表未列）----
+    def test_google_sheets_list_sheets_unknown_error_is_sanitized(self, client, monkeypatch, caplog, tmp_path):
+        import main as main_mod
+        import google_sheets_service as gs
+
+        creds = tmp_path / "creds.json"
+        creds.write_text("{}")
+        monkeypatch.setattr(main_mod, "_GOOGLE_SHEETS_CONFIG",
+                            {"credentials_path": str(creds)})
+
+        def _boom(*_a, **_k):
+            raise ValueError("内部炸了 D:\\server\\cc\\GG-Server\\py\\x.py:4")
+
+        monkeypatch.setattr(gs, "build_service", _boom)
+        hdr, _ = _create_user(client, "_e9_sht", role="user")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.get("/api/google-sheets/sheets?spreadsheet_id=abc", headers=hdr)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == SANITIZED_ACCESS_SHEET, (
+            f"sheets 列表仍回显原文：{resp.get_json()['error']!r}")
+        assert "内部炸了" not in resp.get_data(as_text=True)
+        assert "内部炸了" in caplog.text, "异常详情没进日志"
+
+    # ---- routes/tt_routes.py TT 数据导入失败（同形态，单引号 f-string）----
+    def test_tt_data_import_error_is_sanitized(self, client, caplog):
+        import io
+        import json as _json
+
+        hdr, _ = _create_user(client, "_e9_tt", role="user", platform="tt")
+        # 结构合法但类型畸形：bc_id 是 list ⇒ (bc.get('bc_id') or '').strip() 抛
+        # AttributeError（英文库异常），被迫落到本端点的通用 except。
+        payload = {"data": {"bcs": [{"id": 1, "bc_id": ["not-a-string"]}]}}
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post(
+                "/api/tt/data/import",
+                data={"file": (io.BytesIO(_json.dumps(payload).encode()), "x.json")},
+                content_type="multipart/form-data", headers=hdr)
+        body = resp.get_json()
+        assert body.get("success") is False, f"导入畸形载荷应回业务失败：{body!r}"
+        assert body.get("error") == SANITIZED_TT_IMPORT, (
+            f"TT 导入失败仍回显异常原文：{body.get('error')!r}")
+        assert "has no attribute" not in resp.get_data(as_text=True)
+        assert "has no attribute" in caplog.text, "异常详情没进日志"
+
+
+# ---------------------------------------------------------------------------
+# E-11：异常文本「落库 / 落任务状态 → 读取端点回出」的数据流收口
+#
+# 前三轮失败的原因是每轮只 grep 一个字符串字面量（`str(e)` → `{e}` → 单引号变体），
+# 只能修到上一轮那个 grep 串命中的站点。本组改按**数据流**收口：
+#     异常 → 落 DB 列 / 任务 message → 读取端点回进响应体
+# 逐站点点名，每个站点都用**真实异常**驱动，去掉修复即红。
+# ---------------------------------------------------------------------------
+
+# 本组泄露的「内部细节」形态：英文库异常名、上游 URL、服务端绝对路径、schema 约束。
+E11_LEAK_MARKERS = (
+    "HttpError", "googleapis.com", "HTTPSConnectionPool", "Max retries exceeded",
+    "Expecting value", "Permission denied", "Errno", "constraint failed",
+    "UNIQUE", "Traceback", "No such file", "english boom",
+)
+
+
+def _assert_no_e11_leak(target):
+    raw = target if isinstance(target, str) else target.get_data(as_text=True)
+    for marker in E11_LEAK_MARKERS:
+        assert marker not in raw, f"响应体泄露内部细节 {marker!r}: {raw[:300]!r}"
+
+
+class _InlineThread:
+    """把 `threading.Thread(target=...).start()` 就地同步跑完。
+
+    后台写表线程在测试里同步执行 ⇒ 断言不必靠轮询撞时序（`_sync_sheets_background`
+    起的就是这种 daemon 线程）。`daemon` / 其余 kwargs 一律忽略。
+    """
+
+    def __init__(self, target=None, daemon=None, args=(), kwargs=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout=None):
+        pass
+
+
+@pytest.fixture
+def inline_bg(monkeypatch):
+    """让 main 的后台 Sheets 线程同步执行，并跳过 30s 重试睡眠。"""
+    import main as main_mod
+    monkeypatch.setattr(main_mod.threading, "Thread", _InlineThread)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+
+def _gg_account(client, username, account_id):
+    """建一个普通 GG 用户 + 归其名下的账户，返回 (认证头, 账户主键 aid, 账户ID)。"""
+    hdr, uid = _create_user(client, username, role="user")
+    db = database.get_db()
+    _mk_account(db, uid, account_id)
+    aid = db.execute("SELECT id FROM accounts WHERE account_id=?", (account_id,)).fetchone()["id"]
+    db.close()
+    return hdr, aid, account_id
+
+
+def _boom_sheets(*_a, **_k):
+    """模拟 Google Sheets 上游失败：异常原文含上游 URL（英文库异常）。"""
+    import google_sheets_service as gs
+    raise gs.GoogleSheetsServiceError(
+        "读取工作表失败: <HttpError 404 returned \"Not Found\". Details: "
+        "\"Requested entity was not found.\"> https://sheets.googleapis.com/v4/spreadsheets/SHEET-E11")
+
+
+class TestE11RechargeSheetsErrorSink:
+    """item-3：`recharge_records.sheets_error` 由后台回调写入、被 GET recharge-records 回出。
+
+    两个写入点都点名：
+      - `recharge_retry_sheets`（同步 try/except，直写该列）；
+      - 充值提交 / 批量提交的后台 `_on_fail` 回调。
+    """
+
+    def test_retry_sheets_writes_fixed_text_not_raw_exception(self, client, monkeypatch, caplog):
+        import main as main_mod
+        import google_sheets_service as gs
+
+        hdr, aid, acc = _gg_account(client, "_e11_retry", "GG-E11-RETRY")
+        db = database.get_db()
+        db.execute("INSERT INTO recharge_records (account_id, amount, operator, created_by) "
+                   "VALUES (?, '100', 'x', 1)", (acc,))
+        rid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit(); db.close()
+
+        monkeypatch.setattr(main_mod, "_get_sync_spreadsheet_id", lambda db: "SHEET-E11")
+        monkeypatch.setattr(main_mod, "_get_recharge_sheet_name", lambda db: "充值表")
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "append_recharge", _boom_sheets)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post(f"/api/recharge/{rid}/retry-sheets", headers=hdr)
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == SANITIZED_500
+        _assert_no_e11_leak(resp)
+
+        # 落库值必须固定文案 —— 读取端点会把它原样回给客户端
+        recs = client.get(f"/api/accounts/{aid}/recharge-records", headers=hdr).get_json()["records"]
+        row = next(r for r in recs if r["id"] == rid)
+        _assert_no_e11_leak(json.dumps(recs, ensure_ascii=False))
+        assert row["sheets_error"] == main_mod._SHEETS_SYNC_FAILED_MSG, (
+            f"sheets_error 落进了异常原文：{row['sheets_error']!r}")
+        # 详情不得被一并砍掉
+        assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
+
+    def test_submit_background_on_fail_writes_fixed_text(self, client, monkeypatch, caplog, inline_bg):
+        """充值提交的后台 `_on_fail` 回调（item-3 的写点）走真实 `_sync_sheets_background`。"""
+        import main as main_mod
+        import google_sheets_service as gs
+
+        hdr, aid, acc = _gg_account(client, "_e11_submit", "GG-E11-SUBMIT")
+        monkeypatch.setattr(main_mod, "_get_sync_spreadsheet_id", lambda db: "SHEET-E11")
+        monkeypatch.setattr(main_mod, "_get_recharge_sheet_name", lambda db: "充值表")
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "append_recharge", _boom_sheets)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/recharge/submit",
+                               json={"account_id": acc, "amount": "100"}, headers=hdr)
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+
+        recs = client.get(f"/api/accounts/{aid}/recharge-records", headers=hdr).get_json()["records"]
+        assert recs, "未落充值记录，断言无判别力"
+        _assert_no_e11_leak(json.dumps(recs, ensure_ascii=False))
+        assert recs[0]["sheets_error"] == main_mod._SHEETS_SYNC_FAILED_MSG, (
+            f"后台回调把异常原文落进了 sheets_error：{[r['sheets_error'] for r in recs]!r}")
+        assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
+
+
+class TestE11TtRechargeSheetsErrorSink:
+    """同族站点（结论文件未列）：TT 侧 `tt_recharge_records.sheets_error` 同形状同链路。
+
+    写点 `routes/tt_accounts_routes.py` 的 `_on_fail`，读点
+    `GET /api/tt/accounts/<aid>/recharge-records`（`SELECT r.*` + `dict(r)`）。
+    """
+
+    def test_tt_background_on_fail_writes_fixed_text(self, client, monkeypatch, caplog, inline_bg):
+        import main as main_mod
+        import google_sheets_service as gs
+        from routes import tt_accounts_routes as ttr
+
+        hdr, uid = _create_user(client, "_e11_tt", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts (advertiser_id, owner_id, name) VALUES (?,?,?)",
+                   ("TT-E11-ACC", uid, "TT账户"))
+        aid = db.execute("SELECT id FROM tt_accounts WHERE advertiser_id='TT-E11-ACC'").fetchone()["id"]
+        db.execute("INSERT INTO tt_recharge_records (account_id, amount, operator, created_by) "
+                   "VALUES ('TT-E11-ACC', '100', 'x', ?)", (uid,))
+        rid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit(); db.close()
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "append_recharge_tt", _boom_sheets)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            ttr._append_recharge_background(db=None, uid=uid, sheet_id="SHEET-E11",
+                                            sheet_name="TT充值表", rows=[{"a": 1}], rids=[rid])
+
+        resp = client.get(f"/api/tt/accounts/{aid}/recharge-records", headers=hdr)
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+        items = resp.get_json()["items"]
+        row = next(r for r in items if r["id"] == rid)
+        _assert_no_e11_leak(resp)
+        assert row["sheets_error"] == main_mod._SHEETS_SYNC_FAILED_MSG, (
+            f"TT sheets_error 落进了异常原文：{row['sheets_error']!r}")
+        assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
+
+
+class TestE11SheetsSyncLogErrorMsgSink:
+    """item-4：`sheets_sync_log.error_msg` 由 retry-sync 写入、被 GET sync-status 回出。"""
+
+    def test_retry_sync_sanitizes_db_error_msg(self, client, monkeypatch, caplog):
+        import main as main_mod
+        import google_sheets_service as gs
+
+        hdr, uid = _create_user(client, "_e11_rs", role="user")
+        db = database.get_db()
+        db.execute("INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, status, rows_json) "
+                   "VALUES (?, 'P-E11', 'SHEET-E11', 'failed', '[]')", (uid,))
+        db.execute("INSERT INTO ad_reports (user_id, product_name, region, report_date, account, "
+                   "customer_id, campaign, cost) VALUES (?, 'P-E11', 'US', '2026-01-01', 'acc', '1', 'c', 1)",
+                   (uid,))
+        db.commit(); db.close()
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "upsert_zuobiao", _boom_sheets)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/google-sheets/retry-sync",
+                               json={"product_name": "P-E11"}, headers=hdr)
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == SANITIZED_500
+        _assert_no_e11_leak(resp)
+
+        log_resp = client.get("/api/google-sheets/sync-status?product_name=P-E11", headers=hdr)
+        entry = log_resp.get_json()["log"]
+        _assert_no_e11_leak(log_resp)
+        assert entry["error_msg"] == main_mod._SHEETS_SYNC_FAILED_MSG, (
+            f"error_msg 落进了异常原文：{entry['error_msg']!r}")
+        assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
+
+
+class TestE11FfmpegStderrHidden:
+    """item-7：`/api/audio-replace` 的 FFmpeg stderr 会回显**服务端绝对路径**。"""
+
+    def test_audio_replace_ffmpeg_failure_hides_stderr(self, client, monkeypatch, caplog):
+        import io
+        import main as main_mod
+
+        class _Result:
+            returncode = 1
+            stderr = (r"D:\server\cc\GG-Server\temp\audio_replace\_upload_video_1.mp4: "
+                      "No such file or directory")
+
+        monkeypatch.setattr(main_mod.subprocess, "run", lambda *a, **k: _Result())
+        hdr, _ = _create_user(client, "_e11_ffm", role="user")
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post(
+                "/api/audio-replace",
+                data={"video": (io.BytesIO(b"v"), "v.mp4"), "audio": (io.BytesIO(b"a"), "a.mp3")},
+                content_type="multipart/form-data", headers=hdr)
+
+        assert resp.status_code == 500, resp.get_data(as_text=True)[:200]
+        assert resp.get_json()["error"] == "FFmpeg 执行失败，详情见服务端日志", (
+            f"FFmpeg stderr 仍直出：{resp.get_json()['error']!r}")
+        _assert_no_e11_leak(resp)
+        assert "audio_replace" not in resp.get_data(as_text=True), "响应体泄露了服务端落盘路径"
+        assert "No such file" in caplog.text, "stderr 详情没进日志"
+
+
+class TestE11VideoProgressHidden:
+    """同族站点（结论文件未列）：`VideoTask.message` 经 /api/video/progress 回出。
+
+    `video_processor.VideoTask.run` 把 FFmpeg 命令串（含服务端绝对路径）与 stderr
+    拼进 message；`/api/video/progress` 的 `message` 与 `error` 两个字段都原样回给前端。
+    """
+
+    def _run_task(self, client, monkeypatch, caplog, tmp_path, patch_target):
+        import main as main_mod
+        import video_processor as vp
+
+        monkeypatch.setattr(main_mod.threading, "Thread", _InlineThread)
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        patch_target(monkeypatch, vp)
+
+        hdr, _ = _create_user(client, "_e11_vid", role="user")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/video/generate",
+                               json={"images": [str(tmp_path / "a.png")],
+                                     "settings": {"output_path": str(tmp_path / "v.mp4")}},
+                               headers=hdr)
+        assert resp.status_code == 202, resp.get_data(as_text=True)[:200]
+        tid = resp.get_json()["task_id"]
+        return client.get(f"/api/video/progress?task_id={tid}", headers=hdr)
+
+    def test_generic_exception_message_hides_path(self, client, monkeypatch, caplog, tmp_path):
+        def _patch(monkeypatch, vp):
+            def _boom(self):
+                raise OSError(13, "Permission denied",
+                              r"D:\server\cc\GG-Server\temp\ai_videos\x.mp4")
+            monkeypatch.setattr(vp.VideoTask, "build_command", _boom)
+
+        pr = self._run_task(client, monkeypatch, caplog, tmp_path, _patch)
+        body = pr.get_json()
+        assert body["error"] == "视频生成异常，详情见服务端日志", (
+            f"视频任务失败文案仍回显路径：{body['error']!r}")
+        _assert_no_e11_leak(pr)
+        assert "Permission denied" in caplog.text, "异常详情没进日志"
+
+    def test_ffmpeg_returncode_message_hides_cmd_and_stderr(self, client, monkeypatch, caplog, tmp_path):
+        def _patch(monkeypatch, vp):
+            class _Proc:
+                returncode = 1
+                stderr = [r"D:\server\cc\GG-Server\temp\ai_videos\x.mp4: No such file or directory"]
+
+                def wait(self):
+                    return 1
+
+            monkeypatch.setattr(vp.VideoTask, "build_command", lambda self: ["ffmpeg"])
+            monkeypatch.setattr(vp.subprocess, "Popen", lambda *a, **k: _Proc())
+
+        pr = self._run_task(client, monkeypatch, caplog, tmp_path, _patch)
+        body = pr.get_json()
+        assert "FFmpeg 返回错误码 1" in body["error"]
+        assert "详情见服务端日志" in body["error"], (
+            f"FFmpeg 命令串 / stderr 仍直出：{body['error']!r}")
+        _assert_no_e11_leak(pr)
+        assert "No such file" in caplog.text, "stderr 详情没进日志"
+
+
+class TestE11SheetsServiceSourceSanitized:
+    """item-6：`google_sheets_service` 的 `{e}` 内插把上游库原文带进面向用户的异常文案。"""
+
+    def test_invalid_credentials_json_not_leaked(self, client, tmp_path, monkeypatch):
+        """/api/google-sheets/status 会把这句 message 原样回给客户端（真实路径，不打桩）。"""
+        import main as main_mod
+
+        creds = tmp_path / "bad.json"
+        creds.write_text("{ this is not valid json")
+        monkeypatch.setattr(main_mod, "_GOOGLE_SHEETS_CONFIG", {"credentials_path": str(creds)})
+        hdr, _ = _create_user(client, "_e11_creds", role="user")
+
+        resp = client.get("/api/google-sheets/status", headers=hdr)
+        body = resp.get_data(as_text=True)
+        msg = resp.get_json()["message"]
+        assert "Expecting" not in body, f"凭据文件解析错误原文回给客户端：{body[:300]!r}"
+        assert str(creds) not in body, "响应体泄露了服务端密钥文件绝对路径"
+        assert msg == "凭据文件格式无效，请确认为服务账号 JSON 密钥文件", (
+            f"可操作的中文说明被一并砍掉了：{msg!r}")
+
+    def test_read_sheet_values_message_hides_upstream_error(self, caplog):
+        """`read_sheet_values` 的 `{e}` 内插：上游 HttpError/URL 不得出现在异常文案里。"""
+        import google_sheets_service as gs
+
+        class _Exec:
+            def execute(self):
+                raise RuntimeError(
+                    "<HttpError 404> https://sheets.googleapis.com/v4/spreadsheets/SID")
+
+        class _Values:
+            def get(self, **_kw):
+                return _Exec()
+
+        class _Sheets:
+            def values(self):
+                return _Values()
+
+        class _Svc:
+            def spreadsheets(self):
+                return _Sheets()
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            with pytest.raises(gs.GoogleSheetsServiceError) as ei:
+                gs.read_sheet_values(_Svc(), "SID", "看板", "A:H")
+
+        assert "读取工作表失败" in str(ei.value)
+        assert "sheets.googleapis.com" not in str(ei.value)
+        assert "HttpError" not in str(ei.value)
+        assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
+
+    def test_update_rows_message_keeps_actionable_ids_but_drops_library_text(self, caplog):
+        """批量失败文案：account_id 与「已写入 0 行」是用户可操作信息 ⇒ 保留；
+        `{e}` 上游原文 ⇒ 换成固定尾句。"""
+        import google_sheets_service as gs
+
+        class _Exec:
+            def __init__(self, result=None, boom=False):
+                self._result = result
+                self._boom = boom
+
+            def execute(self):
+                if self._boom:
+                    raise RuntimeError("quota exceeded https://sheets.googleapis.com/v4/spreadsheets")
+                return self._result
+
+        class _Values:
+            def get(self, **_kw):
+                # 首次读取（定位 account_id 行）必须成功返回网格，才走得到 batchUpdate
+                return _Exec({"values": [["", "", "A1"], ["", "", "A2"]]})
+
+            def batchUpdate(self, **_kw):
+                return _Exec(boom=True)
+
+        class _Sheets:
+            def values(self):
+                return _Values()
+
+        class _Svc:
+            def spreadsheets(self):
+                return _Sheets()
+
+        rows = [{"account_id": "A1", "cells": {"A": "1"}},
+                {"account_id": "A2", "cells": {"A": "2"}}]
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            with pytest.raises(gs.GoogleSheetsServiceError) as ei:
+                gs.update_rows_by_account_id(_Svc(), "SID", "看板", rows)
+
+        msg = str(ei.value)
+        assert "A1" in msg and "A2" in msg, "用户可定位的 account_id 被误杀"
+        assert "本次已写入 0 行" in msg
+        assert "quota exceeded" not in msg
+        assert "sheets.googleapis.com" not in msg
+        assert "quota exceeded" in caplog.text, "异常详情没进日志"
+
+
+class TestE11AdsServiceSourceSanitized:
+    """item-6（Ads 侧）：`e.error.message` 内插把上游 API 英文原文带给客户端。"""
+
+    def test_list_accounts_message_hides_upstream_text(self, monkeypatch, caplog):
+        import google_ads_service as gas
+
+        class _Err:
+            message = ("RequestError.INVALID_ARGUMENT https://googleads.googleapis.com/"
+                       "v24/customers/123")
+
+        class _Exc(Exception):
+            error = _Err()
+
+            def __str__(self):
+                return self.error.message
+
+        class _Svc:
+            def list_accessible_customers(self):
+                raise _Exc()
+
+        class _Client:
+            def get_service(self, _name):
+                return _Svc()
+
+        monkeypatch.setattr(gas, "GoogleAdsException", _Exc)
+        monkeypatch.setattr(gas, "_build_client", lambda *a, **k: _Client())
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            with pytest.raises(gas.GoogleAdsServiceError) as ei:
+                gas.list_accounts("a", "b", "c", "d", "e")
+
+        assert "获取账户列表失败" in str(ei.value)
+        assert "googleads.googleapis.com" not in str(ei.value)
+        assert "googleads.googleapis.com" in caplog.text, "异常详情没进日志"
+
+    def test_endpoint_response_hides_upstream_text(self, client, monkeypatch, caplog):
+        import google_ads_service as gas
+
+        class _Err:
+            message = "RequestError.PERMISSION_DENIED https://googleads.googleapis.com/v24"
+
+        class _Exc(Exception):
+            error = _Err()
+
+            def __str__(self):
+                return self.error.message
+
+        class _Svc:
+            def list_accessible_customers(self):
+                raise _Exc()
+
+        class _Client:
+            def get_service(self, _name):
+                return _Svc()
+
+        monkeypatch.setattr(gas, "GoogleAdsException", _Exc)
+        monkeypatch.setattr(gas, "_build_client", lambda *a, **k: _Client())
+        hdr, _ = _create_user(client, "_e11_ads", role="user")
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.post("/api/google-ads/accounts", json={}, headers=hdr)
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == "获取账户列表失败，请检查 Google Ads 凭据与权限"
+        _assert_no_e11_leak(resp)
+        assert "googleads.googleapis.com" in caplog.text, "异常详情没进日志"
+
+
+class TestE11ScraperDelistSourceSanitized:
+    """同族站点（结论文件未列）：`scraper` / `delist_checker` 把库异常原文拼进文案。
+
+    两者的文案都经响应体回给客户端（/api/scrape 的 500 与 /api/products/delist-status）。
+    """
+
+    def test_scrape_error_hides_requests_library_text(self, monkeypatch, caplog):
+        import requests
+        import scraper
+
+        def _boom(*_a, **_k):
+            raise requests.ConnectionError(
+                "HTTPSConnectionPool(host='play.google.com', port=443): "
+                "Max retries exceeded with url: /store/apps/details?id=a.b")
+
+        monkeypatch.setattr(scraper.requests, "get", _boom)
+        with caplog.at_level(logging.WARNING, logger="gg-server"):
+            with pytest.raises(scraper.ScrapeError) as ei:
+                scraper.scrape_images("https://play.google.com/store/apps/details?id=a.b")
+
+        assert "无法访问页面" in str(ei.value)
+        assert "HTTPSConnectionPool" not in str(ei.value)
+        assert "Max retries" not in str(ei.value)
+        assert "HTTPSConnectionPool" in caplog.text, "异常详情没进日志"
+
+    def test_direct_request_exception_text_not_returned(self, monkeypatch, caplog):
+        import delist_checker as dc
+
+        def _boom(*_a, **_k):
+            raise ValueError("english boom from some library")
+
+        monkeypatch.setattr(dc.requests, "get", _boom)
+        with caplog.at_level(logging.WARNING, logger="gg-server"):
+            is_delisted, err = dc.check_url_delisted(
+                "https://play.google.com/store/apps/details?id=a.b")
+        assert is_delisted is None
+        assert "无法判定" in err
+        assert "english boom" not in err
+        assert "english boom" in caplog.text, "异常详情没进日志"
+
+    def test_proxy_exception_text_not_returned(self, monkeypatch, caplog):
+        import delist_checker as dc
+
+        class _Pool:
+            count = 1
+            max_retries = 1
+
+            def next(self, exclude=None):
+                return {"ip": "1.2.3.4", "port": 8080}
+
+            def to_requests(self, _proxy):
+                return {"http": "http://1.2.3.4:8080"}
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("english boom from proxy stack")
+
+        monkeypatch.setattr(dc.requests, "get", _boom)
+        with caplog.at_level(logging.WARNING, logger="gg-server"):
+            is_delisted, err = dc.check_url_delisted(
+                "https://play.google.com/store/apps/details?id=a.b", _Pool())
+        assert is_delisted is None
+        assert "无法判定" in err
+        assert "english boom" not in err
+        assert "english boom" in caplog.text, "异常详情没进日志"
+
+
+class TestE11AiUpstreamBodySanitized:
+    """上游 AI provider 的响应体（`resp.text`）是外部数据，不得回进客户端。
+
+    `/api/ad-reports/multi-ai-chat` 与 `/api/ad-reports/analyze` 的非 200 分支一度把
+    `resp.text[:300]` 拼进 `answer` 直出 —— 那是**上游 provider 的响应体**（多为英文
+    错误 JSON），不是本地异常变量，所以前几轮 grep `str(e)` / `{e}` 一律命中不了。
+    修复后：客户端只收固定中文文案（保留 HTTP 状态码），原文落 `log.warning`。
+    """
+
+    _SENTINEL = "UPSTREAM-PROVIDER-RAW-BODY-9x7"
+
+    @staticmethod
+    def _enable_ai(client, uid):
+        db = database.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO config(key, value) VALUES (?, ?)",
+            (f"ai_analysis_{uid}", json.dumps({
+                "enabled": True, "provider": "volcano", "model": "m",
+                "api_key": "k", "endpoint": "https://provider.invalid/v1/chat",
+            })))
+        db.commit()
+        db.close()
+
+    @pytest.mark.parametrize("path,uname", [
+        ("/api/ad-reports/multi-ai-chat", "ai_body_mac"),
+        ("/api/ad-reports/analyze", "ai_body_ana"),
+    ])
+    def test_upstream_error_body_not_echoed_but_logged(self, client, caplog, monkeypatch, path, uname):
+        import main
+        hdr, uid = _create_user(client, uname)
+        self._enable_ai(client, uid)
+
+        # （2026-10-07）此处原有 `monkeypatch.setattr(main, "_yt_db", database.get_db)` 的绕行：
+        # 当时 `analyze` 会提前 `close()` 请求级共享连接，那是**另一个独立缺陷**，
+        # 为隔离它才把 `_yt_db` 换成每次新开连接。那句 `close()` 现已修
+        # （回归守卫见 `test_ad_reports.TestAdReportsAnalyze
+        # ::test_analyze_enabled_does_not_500_on_closed_db`），故**撤除绕行** ——
+        # 留着它，本用例就不再覆盖真实的共享连接路径了。
+
+        class _FakeResp:
+            status_code = 503
+            text = ('{"error":{"type":"upstream_failure","message":"'
+                    + TestE11AiUpstreamBodySanitized._SENTINEL + '"}}')
+
+        def _fake_post(url, *a, **k):
+            return _FakeResp()
+
+        monkeypatch.setattr(main.requests, "post", _fake_post)
+
+        with caplog.at_level(logging.WARNING, logger="gg-server"):
+            resp = client.post(path, json={"question": "花费如何？"}, headers=hdr)
+
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+        body = resp.get_json()
+        assert body.get("answer"), "应仍给出 answer"
+        raw = resp.get_data(as_text=True)
+        assert self._SENTINEL not in raw, f"上游响应体被回显：{raw[:300]!r}"
+        assert "503" in body["answer"], "对用户有用的 HTTP 状态码应保留"
+        assert self._SENTINEL in caplog.text, "上游原文没进日志"
+

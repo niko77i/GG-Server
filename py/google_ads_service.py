@@ -3,8 +3,12 @@
 独立于主项目，通过 Flask API 路由调用。
 """
 
+import logging
+
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
+
+log = logging.getLogger("gg-server")
 
 # v24 可用字段：https://developers.google.com/google-ads/api/fields/v24/overview
 _GAQL_CAMPAIGN_REPORT = """
@@ -52,8 +56,10 @@ def list_accounts(client_id: str, client_secret: str, refresh_token: str,
     try:
         customers = service.list_accessible_customers()
     except GoogleAdsException as e:
-        raise GoogleAdsServiceError(
-            f"获取账户列表失败: {e.error.message if e.error else e}") from e
+        # `e.error.message` 是上游 API 的英文原文（含请求 URL / 请求 ID）⇒ 固定文案，
+        # 详情进日志。本消息会经 /api/google-ads/accounts 原样回给客户端。
+        log.exception("Google Ads：获取账户列表失败")
+        raise GoogleAdsServiceError("获取账户列表失败，请检查 Google Ads 凭据与权限") from e
     return [c.split("/")[-1] for c in customers.resource_names]
 
 
@@ -79,8 +85,8 @@ def fetch_campaign_report(client_id: str, client_secret: str, refresh_token: str
     try:
         response = ga_service.search(customer_id=account_id.replace("-", ""), query=query)
     except GoogleAdsException as e:
-        raise GoogleAdsServiceError(
-            f"拉取报告失败: {e.error.message if e.error else e}") from e
+        log.exception("Google Ads：拉取报告失败 account_id=%s", account_id)
+        raise GoogleAdsServiceError("拉取报告失败，请检查账户 ID 与查询日期范围") from e
 
     results = []
     for row in response:

@@ -347,13 +347,14 @@ GG-Server/
 | POST | /api/admin/trigger-delist-check | 手动触发掉包检测 |
 | POST | /api/admin/trigger-tt-delist-check | 手动触发 TT 掉包检测 |
 | POST | /api/admin/trigger-weekly-cleanup | 手动触发每周清理 |
-| GET | /api/admin/scheduler/config | 读取本平台定时任务配置 + 上次执行时间 |
-| PUT | /api/admin/scheduler/config | 修改本平台定时任务周期（越权字段 403） |
+| GET | /api/admin/scheduler/config | 读取定时任务配置 + 上次执行时间（admin 限本平台；developer 全部三项） |
+| PUT | /api/admin/scheduler/config | 修改定时任务周期（admin 限本平台字段；developer 全部字段；越权字段 403） |
 
 **权限归属**：GG 管理员 → `trigger-delist-check` + `trigger-weekly-cleanup`；TT 管理员 → `trigger-tt-delist-check`；
 FB 管理员 → 该平台无定时任务（页面显示空态）；户管 / 普通用户 → 一律 403（首页菜单里本就没有入口）。
-⚠️ **这层限制勿用 `require_platform`** —— `PLATFORM_SWITCH_ROLES` 含户管，用了等于给户管开后门；
-定时任务走专用装饰器 `scheduler_required(platform)`（developer 跨平台放行，admin 须平台匹配）。
+⚠️ **这层限制勿用 `require_platform`** —— `PLATFORM_SWITCH_ROLES` 含户管，用了等于给户管开后门。
+三个 trigger 的 POST 与 PUT 走专用装饰器 `scheduler_required(platform)`（developer 跨平台放行，admin 须平台匹配）；
+**GET 刻意不套它** —— 仅要求 admin/developer，好让无任务的 FB 管理员拿到**空数组**而非 403（空数组 ≠ 无权限），前端据此渲染空态。
 
 ### 做表数据 / Google Sheets
 | 方法 | 路径 | 说明 |
@@ -587,8 +588,9 @@ FB 管理员 → 该平台无定时任务（页面显示空态）；户管 / 普
   FB 管理员为空态），developer 可见全部三项，支持即时执行
 - **周期可在页面配置**：存 `config.scheduler_config`（单键 JSON：`gg_delist_minutes` / `tt_delist_minutes` /
   `cleanup_weekday` / `cleanup_hour`），调度线程每 `_TICK_SECONDS = 30` 秒重读一次 ⇒ **改完 30 秒内生效、无需重启**
-- **上次执行另存 `config.scheduler_last_run`**：与配置分开存 —— 配置由管理员 PUT 写、上次执行由调度线程写，
-  混在一个键里会变成 read-modify-write 互相覆盖
+- **上次执行另存 `config.scheduler_last_run_{task_key}`（一个任务一个 key，无共享读改写）**：与配置分开存 ——
+  配置由管理员 PUT 写、上次执行由调度线程写，混在一个键里会变成 read-modify-write 互相覆盖；
+  而 last_run 自身也有 6 个写者，故再拆到每任务一个 key，写入是单条原子语句、无需加锁
 - **周期下限 10 分钟 / 上限 1440 分钟**：下限是后端硬闸（越界一律 400），因为掉包检测要经代理池访问 Google Play，
   而现行 `_TIMEOUT = 5`、代理池只有 2 个代理，再短会把它打爆
 
@@ -944,6 +946,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [TT 备注（remark）跨看板同步优先级](docs/superpowers/specs/2026-10-06-tt-remark-sync-precedence-design.md)（方案 A：首次入库户管触发以投手为准、此后投手权威永久；新建「系统 → 投手看板」推送通路）
 - [定时任务：权限下放到管理员 + 周期可配置](docs/superpowers/specs/2026-10-07-scheduler-admin-access-and-interval-config-design.md)（admin 按平台隔离；周期可配置存 `config.scheduler_config`，上次执行存 `scheduler_last_run`）
 - [定时任务管理页：周期编辑视觉设计](docs/superpowers/specs/2026-10-07-scheduler-frontend-visual-design.md)（卡片内划「调度条」：左周期右上次执行；顺带修 TT 卡片写错的频率文案）
+- [定时任务功能：审查发现清单（**已全部处理**）](docs/superpowers/specs/2026-10-07-scheduler-open-findings.md)（23 条：19 条可修的已修完并附提交号、4 条经判定不是问题；含一处对初版技术论断的勘误）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览

@@ -6,6 +6,10 @@ import pytest
 
 import database
 
+# 与 test_fb_platform.py 同因同解：conftest 的 15 字节 JWT 密钥会让 PyJWT 每次编解码
+# 都抛 InsecureKeyLengthWarning，属夹具既有产物。按类精确静音，保持测试输出干净。
+pytestmark = pytest.mark.filterwarnings("ignore::jwt.warnings.InsecureKeyLengthWarning")
+
 # 真 sleep，供「轮询后台线程」的循环使用。
 # 本文件多处测试要 monkeypatch 掉**全局** time.sleep 来跳过后台重试的 30s ——
 # 那会连测试自己的轮询 sleep 一起打成空转：主线程不再让出 GIL，daemon 线程跑不
@@ -251,7 +255,10 @@ def test_run_write_rolls_back_on_final_failure(client, monkeypatch):
     db.close()
     assert r["status"] == "rolled_back"
     assert calls == [{"x": 9}]
-    assert "Sheets 挂了" in r["error_msg"]
+    # error_msg 会被 GET /api/sheet-write/status 原样回给客户端 ⇒ 只落固定文案，
+    # 异常原文（"Sheets 挂了"）不得入库（详情改走日志，见 test_sheet_write 安全组）。
+    assert r["error_msg"] == sheet_write._WRITE_FAILED_MSG
+    assert "Sheets 挂了" not in r["error_msg"]
 
 
 def test_run_write_abandons_rollback_when_guard_fails(client, monkeypatch):
@@ -312,7 +319,9 @@ def test_run_write_reports_rollback_crash_as_such(client, monkeypatch):
     db.close()
     assert r["status"] == "rollback_abandoned"
     assert "回滚过程出错" in r["error_msg"]
-    assert "回滚器炸了" in r["error_msg"]
+    # 回滚器的异常原文只进日志：error_msg 会被 GET /api/sheet-write/status 原样
+    # 回给客户端 ⇒ 不得内插 "回滚器炸了"（原文由 test_sheet_write 安全组的 caplog 钉住）。
+    assert "回滚器炸了" not in r["error_msg"]
     assert "被再次修改" not in r["error_msg"], \
         f"回滚器崩溃却断言账户被再次修改: {r['error_msg']}"
 
@@ -491,6 +500,32 @@ def test_retry_missing_record_returns_404(client):
     resp = client.post("/api/sheet-write/retry", headers=h,
                        json={"platform": "tt", "target": "tt_recycle", "business_key": "nope"})
     assert resp.status_code == 404
+
+
+def test_retry_build_keyerror_not_echoed_but_logged(client, caplog):
+    """未注册 target 的 400 文案必须是**固定文案**，不得直出 `str(KeyError)`。
+
+    `sheet_write.build_sync` 抛的是 `KeyError("未注册的写表目标: <target>")`，
+    原实现 `err(str(e), 400)` 把它整条（含客户端入参 target）回给客户端 ——
+    反模式：将来 rebuild 工厂改抛别的 KeyError 就变成真泄露。改为固定文案 + e 落日志。
+    去掉修复（回退成 `str(e)`）时，响应体会带上 target ⇒ 本用例变红。
+    """
+    import logging
+    h, uid = _tt_user(client, "_sw_retry_raw")
+    db = database.get_db()
+    _mk_log(db, uid, "no_such_target", "acc_raw", status="retry_failed")
+    db.close()
+
+    with caplog.at_level(logging.WARNING, logger="gg-server"):
+        resp = client.post("/api/sheet-write/retry", headers=h,
+                           json={"platform": "tt", "target": "no_such_target",
+                                 "business_key": "acc_raw"})
+
+    assert resp.status_code == 400
+    err = resp.get_json()["error"]
+    assert "no_such_target" not in err, f"回显了 KeyError 原文（含入参）：{err!r}"
+    assert err == "未注册的写表目标，详情见服务端日志"
+    assert "no_such_target" in caplog.text, "KeyError 详情没进日志"
 
 
 def test_retry_gate_is_atomic_against_concurrent_submit(client, monkeypatch):
@@ -720,3 +755,61 @@ def test_final_failure_with_incomplete_snapshot_does_not_claim_re_edit(client, m
     assert "被再次修改" not in r["error_msg"], \
         f"快照不完整却断言账户被再次修改: {r['error_msg']}"
     assert "回滚过程出错" in r["error_msg"], f"未点明回滚出错: {r['error_msg']}"
+
+
+def test_error_msg_returned_to_client_has_no_exception_text(client, monkeypatch, caplog):
+    """E-11：`sheet_write_log.error_msg` 会经 `GET /api/sheet-write/status` 原样回出。
+
+    回滚器崩溃 + 写表失败这条最坏路径上，error_msg 必须只含固定文案与中文操作提示；
+    异常原文（"Sheets 挂了" / "回滚器炸了" / 上游 URL）只进日志。
+    去掉本组修复（`_on_result` 直接落 err_msg、`_apply_final` 内插 rb_error）⇒ 本用例红。
+    """
+    import logging
+    import sheet_write
+
+    client.post("/api/auth/register", json={"username": "e11_sw", "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role='user', platform='tt' WHERE username='e11_sw'")
+    db.commit()
+    uid = db.execute("SELECT id FROM users WHERE username='e11_sw'").fetchone()["id"]
+    db.close()
+    hdr = {"Authorization": "Bearer " + client.post(
+        "/api/auth/login", json={"username": "e11_sw", "password": "test123"}
+    ).get_json()["access_token"]}
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    def _rb_boom(_db, _snap):
+        raise RuntimeError("回滚器炸了 https://sheets.googleapis.com/v4/spreadsheets/X")
+
+    sheet_write.register_target("_e11_rb",
+                                rebuild=lambda _uid, _key, _payload: (lambda: None),
+                                rollback=_rb_boom)
+
+    def _boom():
+        raise RuntimeError(
+            "Sheets 挂了 <HttpError 503> https://sheets.googleapis.com/v4/spreadsheets/X")
+
+    with caplog.at_level(logging.ERROR, logger="gg-server"):
+        db = database.get_db()
+        sheet_write.run_write(db, user_id=uid, platform="tt", target="_e11_rb",
+                              business_key="e11k", sync_fn=_boom, snapshot={"x": 1})
+        for _ in range(150):
+            if _row(db, uid, "_e11_rb", "e11k")["status"] == "rollback_abandoned":
+                break
+            _poll_sleep(0.02)
+        db.close()
+
+    resp = client.get("/api/sheet-write/status?platform=tt&business_key=e11k", headers=hdr)
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+    item = resp.get_json()["item"]
+    assert item is not None, "终态行必须可见（否则本用例的断言无判别力）"
+
+    raw = resp.get_data(as_text=True)
+    for marker in ("Sheets 挂了", "回滚器炸了", "sheets.googleapis.com", "HttpError"):
+        assert marker not in raw, f"GET status 泄露内部细节 {marker!r}: {raw[:300]!r}"
+    assert "回滚过程出错" in item["error_msg"], (
+        f"用户可操作的中文提示被一并砍掉：{item['error_msg']!r}")
+    # 异常详情不得被一并砍掉
+    assert "回滚器炸了" in caplog.text, "回滚器异常详情没进日志"
+    assert "Sheets 挂了" in caplog.text, "写表异常详情没进日志"

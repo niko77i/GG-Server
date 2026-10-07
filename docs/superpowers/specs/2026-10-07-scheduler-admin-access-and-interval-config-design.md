@@ -136,19 +136,31 @@ def scheduler_required(platform):
 
 ### 4.1 上次执行时间（用户 2026-10-07 确认要做）
 
-**另存一个 key**：`scheduler_last_run`，与配置**分开**。
+**一个任务一个 key**：`scheduler_last_run_{task_key}`（如 `scheduler_last_run_gg_delist` /
+`scheduler_last_run_tt_delist` / `scheduler_last_run_cleanup`），与配置**分开**。
+
+每个 key 只存**单个任务**的记录，不再是一个 dict 装全部任务：
 
 ```json
-{ "gg_delist": {"ts": "2026-10-07 12:00:03", "ok": true},
-  "tt_delist": {"ts": "2026-10-07 12:30:01", "ok": false},
-  "cleanup":   {"ts": "2026-10-05 00:00:02", "ok": true} }
+"scheduler_last_run_gg_delist" = {"ts": "2026-10-07 12:00:03", "ok": true}
+"scheduler_last_run_tt_delist" = {"ts": "2026-10-07 12:30:01", "ok": false}
+"scheduler_last_run_cleanup"   = {"ts": "2026-10-05 00:00:02", "ok": true}
 ```
+
+写入端把每个任务收敛成自己那一行；读取端（`_get_last_run`）遍历任务清单逐 key 读回，
+仍**拼成同一形状**的 `{task_key: {"ts":..., "ok":...}}` 返回，故接口与既有测试不受影响。
 
 **为什么另起一个 key 而不是塞进 `scheduler_config`**：
 
 1. **写侧不同**：config 只有管理员 PUT 时写；last_run 只有调度线程写。混在一起，两个写侧就变成 read-modify-write 竞争 —— 管理员保存周期的同时任务跑完，后写的一方会把另一方抹掉。
 2. **权限不同**：config 是「有权限才能改」，last_run 是「人人可读」的运行时状态。分开后 PUT 接口不必费心保护哪些字段不许覆盖。
 3. `scheduler_config` 是**用户意图**，`scheduler_last_run` 是**运行事实**，出问题时能各自回滚。
+
+**为什么还要再拆到每任务一个 key**：`last_run` 自己也有 **6 个写者**（3 个调度线程 + 3 个
+trigger 接口）。单个 key 存整个 dict 时，写入路径是「读整个 dict → 改子键 → 写回整个 dict」，
+读写之间无事务，两个写者交错就会丢更新（后写者拿旧快照覆盖先写者）。拆成每任务一个 key 后，
+每个写者只写**自己那一个** key，写入退化为单条 `INSERT OR REPLACE`，天然原子，**无需任何锁**
+—— 共享状态根本不存在。这是「与 `scheduler_config` 分开」之上再加的一层。
 
 **写入时机**：**任何一次执行完成都记**（定时调度与管理员点「立即执行」都算），`ok` 记本轮成功与否。
 
@@ -250,7 +262,7 @@ GET /api/admin/scheduler/config
 
 - **只返回该用户有权管理的任务**（FB 管理员拿到空数组 → 前端渲染空态）。**不能只靠前端过滤**，否则 F12 就能看到越权任务。
 - `last_run` 为 `null` 表示**从未执行过**（不是「执行失败」）—— 前端要能区分这两种情况。
-- `last_run` 从 `scheduler_last_run` 读，与本接口的写入路径**互不相干**（见 §4.1）。
+- `last_run` 从 `scheduler_last_run_{task_key}` 逐 key 读回（一个任务一个 key，见 §4.1），与本接口的写入路径**互不相干**。
 
 ### 6.2 新增：修改配置
 

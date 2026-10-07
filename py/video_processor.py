@@ -1,10 +1,13 @@
 """视频处理模块 — FFmpeg 滤镜链构建与子进程执行。"""
+import logging
 import os
 import random
 import re
 import subprocess
 import time
 import uuid
+
+log = logging.getLogger("gg-server")
 
 
 class VideoError(Exception):
@@ -496,19 +499,21 @@ class VideoTask:
                 cmd_str = " ".join(getattr(self, '_cmd', []))
                 self.status = "error"
                 self._completed_at = time.time()
-                self.message = (
-                    f"FFmpeg 返回错误码 {self._proc.returncode}。\n"
-                    f"命令: {cmd_str[:300]}...\n"
-                    f"stderr: {stderr_tail}"
-                )
+                # `self.message` 会被 /api/video/progress 原样回给客户端（`message`
+                # 与 `error` 两个字段）。命令串与 stderr 里是**服务端绝对路径**
+                # ⇒ 只落日志，客户端收固定文案（与 main.py 的 /api/audio-replace 同口径）。
+                log.error("视频生成 FFmpeg 返回错误码 %s\n命令: %s\nstderr: %s",
+                          self._proc.returncode, cmd_str[:2000], stderr_tail)
+                self.message = f"FFmpeg 返回错误码 {self._proc.returncode}，详情见服务端日志"
         except FileNotFoundError:
             self.status = "error"
             self._completed_at = time.time()
             self.message = "未找到 FFmpeg，请确认 ffmpeg.exe 在系统 PATH 中或与程序在同一目录"
         except Exception as e:
+            log.exception("视频生成异常")
             self.status = "error"
             self._completed_at = time.time()
-            self.message = f"视频生成异常: {e}"
+            self.message = "视频生成异常，详情见服务端日志"
 
     def result(self):
         """获取生成结果（仅在 completed 状态下有效）。"""

@@ -985,8 +985,15 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             if collect_undo:
                 # 只在建号成功之后记（上面任一步抛异常都跳到 except，不记）
                 undo_created.append(item["account_id"])
-        except Exception as e:
-            errors.append({"row": item["row"], "error": str(e)})
+        except Exception:
+            # 逐行错误只回固定中文文案：本函数的返回 result 会被路由整体塞进
+            # POST /api/huguan/dashboard/sync 的响应体（`errors` 不被 pop），
+            # str(e) 会把英文 errno / sqlite 消息 / 源码绝对路径直接泄给客户端
+            # （CWE-209，同族口径见 main.py 的「创建失败，详情见服务端日志」）。
+            # 异常详情照旧进日志，排查线索不因脱敏而降级。
+            log.exception("户管同步：新建账户落库失败 platform=%s row=%s",
+                          platform, item["row"])
+            errors.append({"row": item["row"], "error": "创建失败，详情见服务端日志"})
 
     for item in diff.get("to_update", []):
         if item["account_id"] not in conf.get("update", []):
@@ -1083,8 +1090,12 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 一个字节都没写，计进「已更新」会让户管看到的条数虚高。
             if wrote:
                 updated += 1
-        except Exception as e:
-            errors.append({"row": item["row"], "error": str(e)})
+        except Exception:
+            # 同 to_create 分支：固定文案回响应体，异常详情进日志（本函数返回
+            # result 会被路由整体回出，str(e) 即 CWE-209 泄露）。
+            log.exception("户管同步：更新账户落库失败 platform=%s row=%s",
+                          platform, item["row"])
+            errors.append({"row": item["row"], "error": "更新失败，详情见服务端日志"})
 
     for item in diff.get("owner_changes", []):
         if item["account_id"] not in conf.get("owner", []):
@@ -1132,8 +1143,11 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             applied_owner_rows.append({"account_id": item["account_id"],
                                        "to": item["to"],
                                        "from": item.get("from", "")})
-        except Exception as e:
-            errors.append({"row": item["row"], "error": str(e)})
+        except Exception:
+            # 同前两处：固定文案回响应体，异常详情进日志（路由整体回出 result）。
+            log.exception("户管同步：归属变更落库失败 platform=%s row=%s",
+                          platform, item["row"])
+            errors.append({"row": item["row"], "error": "归属变更失败，详情见服务端日志"})
 
     # 「勾了却没作用上」是独立信号，不进 errors —— 差异报告变了不是出错，
     # 但户管必须知道自己的勾选没生效。

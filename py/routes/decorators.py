@@ -157,6 +157,14 @@ def scheduler_required(platform):
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
+            # 下面两个 401（「未认证」/「用户不存在」）是**外层 @jwt_required() 之外的兜底**：
+            # 真实路由一律写成 @jwt_required() 在**外**、本装饰器在**内**，未认证的请求在
+            # @jwt_required() 那一层就被拦下（返回它自己的 401），根本进不到这里 —— 故经
+            # 路由探针**不可达**（见 docs/superpowers/specs/2026-10-07-scheduler-open-findings.md #4）。
+            # 保留的理由：本装饰器是可独立复用的单元，万一哪天上层漏挂 / 摘下 @jwt_required()，
+            # 这两道分支仍能挡住「无身份 / 身份已失效」的调用，而不是让请求一路穿到业务逻辑。
+            # 覆盖情况：「未认证」分支由 test_unauthenticated_fallback_direct_call 直接调用
+            # 本函数（绕过 Flask 栈）钉住；「用户不存在」分支需伪造 JWT 身份才可造，成本高于价值，不测。
             try:
                 uid = int(get_jwt_identity())
             except Exception:

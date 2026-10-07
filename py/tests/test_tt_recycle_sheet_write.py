@@ -232,7 +232,11 @@ def test_rollback_restores_status_on_final_failure(client, monkeypatch):
 
     assert r["status"] == "rolled_back", r["error_msg"]
     assert cur_status == alive, "状态应被改回改之前的值"
-    assert "Sheets 配额超限" in r["error_msg"]
+    # error_msg 会被 GET /api/sheet-write/status 原样回给客户端 ⇒ 只落固定文案，
+    # 异常原文（"Sheets 配额超限"）不得入库（详情走日志，见 test_sheet_write 的 E-11 用例）。
+    import sheet_write as _sw
+    assert r["error_msg"] == _sw._WRITE_FAILED_MSG, r["error_msg"]
+    assert "Sheets 配额超限" not in r["error_msg"]
 
 
 def test_rollback_abandoned_when_status_changed_again(client, monkeypatch):

@@ -1,7 +1,10 @@
+import logging
 import re
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+
+log = logging.getLogger("gg-server")
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -45,7 +48,10 @@ def scrape_images(url: str) -> list[str]:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
     except requests.RequestException as e:
-        raise ScrapeError(f"无法访问页面: {e}")
+        # requests 异常的 str() 是英文库原文（含 host/url 与 "Max retries exceeded"）
+        # ⇒ 只留中文可操作说明，详情进日志。异常文案会经 /api/scrape 回给客户端。
+        log.warning("爬取页面失败 url=%s: %s", url, e)
+        raise ScrapeError("无法访问页面，请确认链接可访问后重试")
 
     soup = BeautifulSoup(resp.text, "html.parser")
     c_wiz = soup.find("c-wiz", {"jsrenderer": "UZStuc"})

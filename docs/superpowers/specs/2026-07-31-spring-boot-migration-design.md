@@ -1,10 +1,11 @@
 # GG-Server Spring Boot 迁移设计文档
 
-> **文档版本**: v1.34  
-> **日期**: 2026-07-31（v1.34 更新于 2026-10-07）  
+> **文档版本**: v1.35  
+> **日期**: 2026-07-31（v1.35 更新于 2026-10-07）  
 > **目的**: 将现有 Python Flask 后端完整迁移至 Java Spring Boot + MySQL  
 > **新项目名称**: **LM-Server**（`D:\server\cc\LM-Server`，包名 `com.lmserver`）  
 > **前置条件**: 前端 Vite/Vue3 不变，仅替换后端 API 层  
+> **v1.35 变更**: **定时任务：权限下放到管理员 + 周期可配置**（对应 `py/routes/decorators.py`、`py/main.py`、`frontend/src/{views/SchedulerView.vue,components/AppSidebar.vue,router/index.js,api/admin.js}`，详见**附录 K**）——四件事：① **补文档缺口**：本文档接口表漏了 `POST /api/admin/trigger-tt-delist-check`；② **定时界面权限从「仅 developer」下放到各平台 admin**（新增 `scheduler_required(platform)` 装饰器，⚠️ **刻意不复用 `require_platform`** —— 它的 `PLATFORM_SWITCH_ROLES` 含 `HUGUAN_ROLE`，会把户管无条件放行）；③ **按平台隔离**：GG admin 见「掉包检测 + 每周清理」、TT admin 见「TT 掉包检测」、**FB admin 无任务（页面空态，`tasks: []` ≠ 403）**、户管/普通用户一律 403；④ **新增「手动修改定时周期」的接口与界面**（管理员可改，改完 **30 秒内生效、无需重启**）。⚠️ **本版把 §8.5 的 Java 骨架实质推翻**：原骨架用 `@Scheduled(cron=...)` **固定 cron**，表达不了「运行时可配置的周期」—— 正解是**每 30 秒醒一次的 tick 循环 + 每 tick 重读配置**（见 §8.5 与附录 K）。⚠️ 新增两个 `config` key：`scheduler_config`（管理员意图）与 **`scheduler_last_run_{task_key}`（一个任务一个 key，运行事实）**，两者分开是为了避开读改写竞争
 > **v1.34 变更**: **TT 备注（`remark`）跨看板同步优先级**（对应 `py/huguan_dashboard.py`、`py/routes/huguan_dashboard_routes.py`、`py/routes/tt_accounts_routes.py`、`frontend/src/views/tt/TtAccountPanel.vue`，详见**附录 J**）——`tt_accounts.remark` 被**两张 Google 表同时读写**（投手「我的看板」`J` 列 / 户管看板 `M` 列），两边都 `writable=True`+`readable=True`，谁后同步谁赢；叠加「文本列空值照常落库」的口径 ⇒ **户管 `M` 列空着就会把投手填的备注清掉**。本次定下优先级：**首次入库**（户管触发）时投手 `J` 列**有值则投手赢**（覆盖系统 + 回写户管 `M`）、空则户管赢（推给投手 `J`）；**此后投手权威永久**，户管改 `M` 列**不再进系统**；投手在系统内联编辑备注则推**两张表**。实现上**零新增状态**——权威判定天然映射到 `build_diff` 的 `to_create`/`to_update` 两个分支，只需给 `to_update` 的字段过滤追加 `and not (platform == "tt" and k == "remark")`；⚠️ **不得**把 `remark` 从 `_PLAIN_TEXT_FIELDS["tt"]` 删掉（该清单被 `to_create` 与 `to_update` **共用**，删掉会让「首次入库读户管 `M` 列」失效）。**附带发现并补建了一条此前根本不存在的通路**：所有推送都走 `push_rows(user_id,...)`（取 `huguan_dashboard_{uid}` 配置），而投手没有该键 ⇒ `sync_from_sheet` 结尾的 `hd.writeback_rows(uid,...)` **对投手一直是静默空转**；本次新建 `push_remark_to_operator_dashboard(owner_id, account_id, value)` 面向投手看板，⚠️ **投手看板的账户ID在 `D` 列**（户管在 `C` 列），调 `update_rows_by_account_id` **必须显式传 `key_col="D"`**，漏传会默认 `"C"` 并**静默定位到错误的行**。**只改 `remark` 一个字段；仅 TT；不新增表、不新增数据库列**。前端在「消耗情况」列后加**可内联编辑**的「备注」列（复用既有 `.inline-*` 惯例，失败不回写 `row.remark` 即天然回滚）。⚠️ **本版一并补录了 TT「我的看板」（10 列）的完整列模型与同步契约**（此前只在 6.3 一句带过，且极易与 GG 的同名 8 列表混同）—— 见 **§8.1「我的看板是两张不同的表」**
 > **v1.33 变更**: **TT「换绑情况」列改造：归属变更通道 → 换绑记录字段**（对应 `py/database.py`、`py/huguan_dashboard.py`、`py/routes/huguan_dashboard_routes.py`、`py/routes/tt_accounts_routes.py`、`frontend/src/views/tt/TtAccountPanel.vue`，详见**附录 I**）——**这是改需求、不是 bug 修复**：v1.31 定下的「变更通道列（TT「换绑情况」）非空则压过运营列」（用户当时的原话，见 `2026-09-23-huguan-sheet-design.md:35`）**被用户 2026-10-06 裁定取消**。新语义：① TT 归属**恒取**「接户运营」`G` 列，`effective_owner_name(parsed, platform)` 按平台分叉，⚠️ **`platform` 必须是必填位置参数、不得给默认值**（默认值会让漏传的 TT 调用方静默拿到 GG 语义）；② `L` 列由合成字段 `_owner_channel` 改为**真实列** `owner_change_note`（普通文本、`writable=False`/`readable=True`），**DDL 新增一列**（已在 §5.2 同步，**无数据迁移动作**）；⚠️ `tt_accounts` 此前**没有任何** `_add_column_if_missing` 迁移记录，而生产库已存在 ⇒ `CREATE TABLE IF NOT EXISTS` **不生效**，**建表语句与迁移条目两处都要加**；③ 系统 UI 改归属时写 `旧归属人转新归属人+月.日`（如 `阿轩转黎明10.7`，**月日不补零**、旧归属解析不到写 `未分配`，⚠️ **不得**用 `strftime("%-m")`——Windows 不支持；⚠️ `display_name` 仅含空白时是 truthy 会顶掉 `or` 兜底 ⇒ 必须**先 strip 再 or**），且**同时落库** `owner_change_note`，两处同一份文本；④ **同步后的「清空变更通道列」（§7.9 规则 3②）改为 GG-only** —— 对 TT 执行会抹掉记录，且因读回按表覆盖会**连带清掉系统值**（双重抹除）；⑤ 前端加**只读**「换绑情况」列（仅户管可见）。**仅 TT**：GG 的「重新分配」（`H` 列）与 §7.9 的四条规则**逐字不变**（§7.9 已就地标注 TT 侧的作废范围）
 > **v1.32 变更**: **TT 广告账户列表不再展示「账户名称」列**（纯前端 `frontend/src/views/tt/TtAccountPanel.vue`，后端与数据库**零改动**，详见附录 H）——该列此前是 TT 账户名**唯一的内联编辑入口**（hover ✏️ → `<el-input>` → `ttAccountsApi.update(row.id, { name })`）。用户 2026-10-06 裁定 TT 列表无需展示账户名，本次删除该列，并同步清掉**专为该列存在**的状态与函数（`editingNameId` / `editNameValue` / `nameInputRef` 与 `startEditName` / `cancelNameEdit` / `saveName`，已核零残留引用；`nextTick`、`.inline-name-input`、`.inline-edit-btn` 仍被国家/消耗等其他内联编辑使用，**未删**）。**改名能力未丢失**：行尾 ✏️ 打开的 `TtAccountModal` 中「账户名称」仍是必填字段（新增与编辑共用该弹窗）。**仅 TT 改动**：GG（`AdsAccountPanel.vue`，见附录 E.1）与 FB（`FbAccountPanel.vue` 的「账户名」列）**保持原样**。**搜索框存在一处刻意的不一致，交接/迁移时勿「顺手修正」**：placeholder 由「🔍 搜索名称/广告账户 ID...」改为「🔍 搜索广告账户 ID...」，但后端 `GET /api/tt/accounts/list` 内**两处** search 条件 `(a.name LIKE ? OR a.advertiser_id LIKE ?)`（主列表 `tt_accounts_routes.py:224`、各状态计数 `:269`）**一律未改**——账户名只是不在列表里显示，按名搜索的通道仍然保留（用户明确选择「只改 placeholder 文案」）。`tt_accounts.name` 字段、DDL、接口契约均未动，**不存在数据迁移动作**。**Spring 侧无需任何改动**（本文档前提是前端不变、仅替换后端 API 层）
@@ -99,7 +100,7 @@
 | 图片抓取 | 5 | Google Play 截图抓取、上传 |
 | 字体管理 | 7 | 字体导入/预览/上传 |
 | 数据导入导出 | 3 | 用户级导入导出、历史 |
-| 管理员 | 11 | 用户管理、数据导入、定时任务触发 |
+| 管理员 | 11 | 用户管理、数据导入、**定时任务触发（v1.35 起按平台隔离，见附录 K）** |
 | 系统配置 | 9 | AI 配置、Sheets 配置、账户设置 |
 | 选项数据 | 20 | 代理/状态/MCC等级/商务/地区 CRUD |
 | 审计/掉包 | 4 | 审计日志、掉包通知 |
@@ -167,7 +168,7 @@
 | 数据库 | SQLite (WAL) | MySQL 8.0 (HikariCP 连接池) |
 | 认证 | flask-jwt-extended | Spring Security + jjwt |
 | 异步 | threading.Thread | @Async + CompletableFuture |
-| 定时任务 | threading.Timer | @Scheduled |
+| 定时任务 | daemon Thread + 每 30 秒 tick 重算目标 | `@Scheduled(fixedDelay=30s)` 驱动 tick，**不用 cron**（v1.35） |
 | 缓存 | 内存 dict + TTL | Caffeine / Redis |
 | 类型安全 | 动态类型 | 编译期检查 |
 | 部署 | pyinstaller EXE | java -jar fat JAR |
@@ -1942,7 +1943,8 @@ private String validateProductMatches(String productName, List<ZuobiaoRow> rows)
 | `CopywritingController` | `/api/copywriting/*` | 5 | JWT |
 | `AdminUserController` | `/api/admin/users/*` | 8 | JWT + Admin |
 | `AdminDataController` | `/api/admin/data/*` | 2 | Admin |
-| `AdminTriggerController` | `/api/admin/trigger-*` | 2 | Developer |
+| `AdminTriggerController` | `/api/admin/trigger-*` | **3**（v1.35 更正：此前漏记 `trigger-tt-delist-check`） | **按平台 admin / developer（v1.35）** |
+| `AdminSchedulerController` | `GET/PUT /api/admin/scheduler/config` | 2（v1.35 新增） | **按平台 admin / developer（v1.35）** |
 | `ConfigController` | `/api/config/*` | 6 | JWT |
 | `SettingsController` | `/api/settings/*` | 2 | JWT |
 | `OptionController` | `/api/{agents\|statuses\|mcc-levels\|sales-persons\|regions}/*` | 20 | JWT |
@@ -3336,29 +3338,64 @@ AND NOT EXISTS (
 
 ### 8.5 定时任务
 
+> ⚠️ **v1.35 起，本节的 Java 骨架已被实质推翻。** 原骨架用 `@Scheduled(cron = "...")` **固定 cron** ——
+> 它**表达不了**「周期由管理员在页面上配置、改完 30 秒内生效、无需重启」这个要求
+> （cron 是启动期固定的，改它得改 yml 再重启）。
+> **正解是「每 30 秒醒一次的 tick 循环 + 每 tick 重读配置」**，见下方新骨架与**附录 K**。
+> 原骨架的 `scheduler.weekly-cleanup` / `scheduler.delist-check` 两个 yml cron **已作废**（见 §10.1 的 `scheduler` 段）。
+
+**三个任务与其平台归属**（v1.35）：
+
+| task key | 名称 | 平台 | 可配置项 | 默认值 |
+|---|---|---|---|---|
+| `gg_delist` | 掉包检测 | gg | 间隔（分钟） | **60** |
+| `tt_delist` | TT 掉包检测 | tt | 间隔（分钟） | **30** |
+| `cleanup` | 每周清理 | gg | 星期几 + 小时 | **周日(6) + 0 点** |
+
+**周期下限 10 分钟、上限 1440 分钟**（用户裁定）。下限是**硬闸**：下方 10 分钟的理由是
+`delist_checker._TIMEOUT = 5` + 代理池只有 2 个代理，更短的周期 Google Play 与代理池承受不住 ——
+**读侧与写侧都要校验**（Java 侧同样：读配置时非法值回落默认、写接口越界返回 400）。
+
 ```java
 @Component
 @Slf4j
-public class ScheduledTasks {
+public class SchedulerTicker {
 
-    private final DelistChecker delistChecker;
-    private final DataImportExportService dataService;
+    /** 配置变更的生效粒度：每 30 秒醒一次，醒来时重算目标。 */
+    private static final long TICK_SECONDS = 30;
 
-    // 每周清理（对应 Python _start_weekly_cleanup）
-    @Scheduled(cron = "${scheduler.weekly-cleanup:0 0 2 * * SUN}")
-    public void weeklyCleanup() {
-        log.info("执行每周清理...");
-        // 清理过期软删除记录等
-    }
+    /** 每任务已累积的秒数（进程内状态；重启后归零 ⇒ 首次执行仍在启动后一整个周期）。
+     *  ⚠️ 「启动时立即执行一次」的语义 Python 侧本就不存在（那段代码是注释掉的），此处不要新增。 */
+    private final Map<String, Long> elapsed = new ConcurrentHashMap<>();
 
-    // 掉包检测（可配置间隔）
-    @Scheduled(cron = "${scheduler.delist-check:0 0 9 * * *}")
-    public void checkDelist() {
-        log.info("执行掉包检测...");
-        delistChecker.checkAllActiveProducts();
+    /** 单一 tick 驱动三个任务 —— 不要用 cron，也不要每任务各起一个 Timer。 */
+    @Scheduled(fixedDelay = TICK_SECONDS * 1000)
+    public void tick() {
+        for (TaskSpec t : TaskSpec.ALL) {                    // 见上表
+            long prev = elapsed.merge(t.key(), TICK_SECONDS, Long::sum) - TICK_SECONDS;
+            long target = schedulerConfig.intervalMinutes(t) * 60L;   // 每 tick 重读配置
+            if (prev + TICK_SECONDS >= target) {             // 命中 ⇒ 执行并把累积清零
+                elapsed.put(t.key(), 0L);
+                runOne(t);                                   // GG/TT 掉包 或 每周清理
+            }
+        }
     }
 }
 ```
+
+**必须原样重建的语义**（细节与「为什么」见**附录 K**）：
+
+1. **每 tick 重读配置** —— 这是「免重启生效」的**实现依据**，别把它「优化」成启动时读一次。
+2. **只改「什么时候调」**：三个任务本体（`_run_delist_check_once` / `_run_tt_delist_check_once` /
+   `_run_weekly_cleanup_once` 对应物）**逻辑一行不动**。
+3. **每周清理不能退化成「同一天重复触发」**：原语义是「今天是周日但 00:00 已过 ⇒ 顺延一周」
+   （`if target <= now: target += 7 days`）。⚠️ 原 Python 实现的 `_run_weekly_cleanup_once()` 是**裸调无 try/except**
+   —— 异常会杀死该线程、**每周清理从此永久静默失效且无人知晓**；v1.35 补了保护，这是**唯一的行为变更**。
+   周期改成「星期几 + 小时」后，它是**日历语义**，与两个间隔型任务不同。
+4. **每次执行都要记账**（成功与失败都记）：写 `scheduler_last_run_{task_key}`，`ok` 记本轮成败。
+   ⚠️ **一个任务一个 key** —— 单一 key 存整个 map 会让 6 个写者（3 个调度 + 3 个触发接口）
+   互相覆盖，那是本版刻意根除的读改写竞态。
+5. **权限**：三个 `POST /api/admin/trigger-*` 用 `scheduler_required(platform)`（**不是** `require_platform`）。
 
 ### 8.5.1 掉包检测代理池（v1.19）
 
@@ -3841,10 +3878,12 @@ notification:
     bot-token: ${TELEGRAM_BOT_TOKEN:}
     chat-id: ${TELEGRAM_CHAT_ID:}
 
-# 定时任务
+# 定时任务（⚠️ v1.35 起：周期不再来自 yml，而是 admin 在页面上配置、存 config 表的
+#            scheduler_config key。此处只留 tick 粒度与校验区间，cron 已作废）
 scheduler:
-  weekly-cleanup: "0 0 2 * * SUN"
-  delist-check: "0 0 9 * * *"
+  tick-seconds: 30              # 配置变更生效粒度
+  min-minutes: 10               # 周期下限（硬闸，读写两侧都要校验）
+  max-minutes: 1440             # 周期上限
 
 # 掉包检测代理（v1.19，enabled=false 时直连）
 delist-proxy:
@@ -4149,7 +4188,7 @@ public class AuthService {
 | 缓存 | Caffeine | 单机部署，无需 Redis |
 | 异步 | @Async + CompletableFuture | Sheets/邮件/Telegram 不阻塞 |
 | 认证 | Spring Security + jjwt | 业界标准 |
-| 定时任务 | @Scheduled | 替代 threading.Timer |
+| 定时任务 | `@Scheduled(fixedDelay)` + 每 tick 重读配置 | **不能用 cron**：周期须**运行时**可配（v1.35，见附录 K） |
 | FFmpeg | ProcessBuilder | 保持子进程调用方式 |
 | HTML 解析 | Jsoup | 完美替代 BeautifulSoup |
 | 图片处理 | Thumbnailator | 替代 Pillow 基础操作 |
@@ -4599,3 +4638,181 @@ owner_change_note TEXT DEFAULT '' COMMENT '换绑记录（旧归属人转新归�
 3. 投手看板读不到时**静默降级为「户管赢」**并记日志 —— 读不到投手看板不得阻断户管同步。
 4. 投手看板里**没有该账户行**时，`update_rows_by_account_id` 返回 `not_found` 且**不建行**
    （既有契约：系统只改单元格、不建行）。
+
+---
+
+## 附录 K: v1.35 定时任务权限下放 + 周期可配置
+
+> **日期**: 2026-10-07
+> **性质**: 新增权限模型 + 新增配置接口与界面 + **实质推翻 §8.5 原 Java 骨架**
+> **权威设计**: `2026-10-07-scheduler-admin-access-and-interval-config-design.md`（设计）、
+> `2026-10-07-scheduler-frontend-visual-design.md`（视觉）、`2026-10-07-scheduler-open-findings.md`（审查发现结项记录）
+> **影响文件**: `py/routes/decorators.py`、`py/main.py`、`frontend/src/{views/SchedulerView.vue, components/AppSidebar.vue, router/index.js, api/admin.js}`
+
+### K.1 用户口述的四件事
+
+1. **补文档缺口**：本文档接口表漏了 `POST /api/admin/trigger-tt-delist-check`（已在 §6.3 更正为 3 个）。
+2. **定时界面权限下放到所有管理员**（不再仅 developer）。
+3. **管理员按平台看到对应任务**，后端也按平台限制调用。
+4. **新增「手动修改定时周期」的接口与界面**。
+
+| 用户裁定 | 结论 |
+|---|---|
+| FB 管理员（平台无任务）看到什么 | **显示空态提示**，保留菜单入口（`tasks: []`，**不是** 403） |
+| 每周清理怎么配 | **星期几 + 时刻**（保留日历语义），默认仍周日 00:00 |
+| 掉包周期下限 | **10 分钟** |
+| 间隔上限 | **1440 分钟（24 小时）** |
+| 是否显示「上次执行时间」 | **要显示** |
+
+### K.2 权限模型
+
+**新增装饰器** `scheduler_required(platform)`（`py/routes/decorators.py`）：
+developer **跨平台放行**；admin 须 `user.platform == platform`；其余（含**户管**）一律 **403**。
+
+> ⚠️ **绝不复用 `require_platform()`** —— 它的 `PLATFORM_SWITCH_ROLES = ("developer", HUGUAN_ROLE)`
+> **含户管**，会把户管无条件放行，等于给户管开定时任务的后门。这是本版最容易踩的坑，
+> `py/tests/test_scheduler_config.py::TestSchedulerRequired::test_huguan_rejected` 就是它的对照腿。
+
+| 角色 | 可见 | 可「立即执行」 | 可改周期 |
+|---|---|---|---|
+| developer | 全部三项 | 全部 | 全部 |
+| admin (platform=gg) | `gg_delist` + `cleanup` | 同左 | 同左 |
+| admin (platform=tt) | `tt_delist` | 同左 | 同左 |
+| admin (platform=fb) | **无 → 空态** | — | — |
+| huguan / user / viewer | 无（入口不可见） | 403 | 403 |
+
+**前端隔离是三重自洽的**（不需要新标记）：
+侧边栏三份 nav（gg/fb/tt）里定时任务项的父级本是 `admin: true`；户管用**独立的**三份 nav
+（`huguanNavItems` / `huguanFbNavItems` / `huguanTtNavItems`）**本就没有定时任务项**；
+路由 `meta.developer` → `meta.admin`，而户管白名单 `HUGUAN_ROUTES` **不含** `/admin/scheduler`。
+
+### K.3 周期配置的数据结构（两个 key）
+
+```
+config.scheduler_config           ← 管理员意图（只有管理员 PUT 时写）
+  {"gg_delist_minutes": 60, "tt_delist_minutes": 30,
+   "cleanup_weekday": 6, "cleanup_hour": 0}
+
+config.scheduler_last_run_{task_key}   ← 运行事实（只有调度/触发路径写），如
+config.scheduler_last_run_gg_delist = {"ts": "2026-10-07 12:00:03", "ok": true}
+```
+
+**为什么是两个 key 而不是一个**：
+
+1. **写侧不同** —— config 只有管理员 PUT 时写；last_run 只有任务跑完时写。混在一起，
+   两个写侧就变成 read-modify-write 竞争：管理员保存周期的同时任务跑完，后写的一方抹掉另一方。
+2. **权限不同** —— config 是「有权限才能改」，last_run 是「人人可读」的运行时状态。
+
+**为什么 `last_run` 还要再拆到每任务一个 key**（v1.35 审查后追加）：
+
+`last_run` 自己就有 **6 个写者**（3 个调度 + 3 个触发接口）。单 key 存整个 map 时，
+「读整个 dict → 改子键 → 写回整个 dict」两个写者交错会**丢更新**，把另一任务的时间戳退回旧值。
+拆到每任务一个 key 后，写入是**单条 `INSERT OR REPLACE`**，天然原子 ——
+**共享状态根本不存在，因此不需要锁**。（初版曾用一把 `threading.Lock` 兜住；拆 key 后已删掉锁。）
+
+> **迁移红线**：Java 侧**不要**把两者并进同一个 key，也**不要**把 last_run 收回单 key 再靠锁兜 ——
+> 拆开是刻意的，注释在 `py/main.py` 的 `_mark_task_run` 上方。
+
+**校验规则**（写侧违反一律 400；**读侧非法值一律回落默认，不得抛异常** ——
+`_get_scheduler_config` 被调度线程每 30 秒调一次，它崩了等于定时任务全停）：
+
+| 字段 | 规则 |
+|---|---|
+| `gg_delist_minutes` / `tt_delist_minutes` | 整数，**10 ≤ v ≤ 1440** |
+| `cleanup_weekday` | 整数 0–6（**0=周一 … 6=周日**，Python 约定） |
+| `cleanup_hour` | 整数 0–23 |
+
+> ⚠️ **布尔是 Python 的陷阱**：`True == 1`，故 `isinstance(v, int)` 会放行 `true`。
+> 对 `cleanup_weekday` / `cleanup_hour`（区间含 1）必须额外 `not isinstance(v, bool)`，
+> 否则 `{"cleanup_weekday": true}` 会**静默变成「周一」**。
+> （`gg_delist_minutes` 靠下限 10 就拦住了 `true`，不需要这条 —— 但也无妨。）
+
+### K.4 调度改造：tick 循环取代固定睡眠
+
+原实现是「睡死一整个周期再执行」（`while True: sleep(3600)`），周期写死、改一次要改代码重启。
+v1.35 改为**每 `_TICK_SECONDS = 30` 秒醒一次、醒来时重算目标**，故配置改动最多 30 秒生效。
+
+**行为边界**（Java 侧必须保住）：
+
+| 情形 | 行为 |
+|---|---|
+| 首次执行 | 仍在**启动后一整个周期**（Python 侧「启动时立即执行一次」的代码**本就是注释掉的**，不要新增该语义） |
+| 周期改**小** | `elapsed` 可能已超新目标 ⇒ **下一 tick 即触发**（用户想要更快，符合预期） |
+| 周期改**大** | `elapsed` 保留 ⇒ 按新周期等，**不会因为改大就立刻跑** |
+| 正在跑的那一轮 | **不被打断**：本轮跑完才按新周期算下一轮 |
+| 出错 | 保留既有语义：**sleep 60 秒重试一次**，再失败才记 `ok=false` |
+
+**每周清理**是**日历语义**（星期几 + 小时），与两个间隔型任务不同：
+
+```
+target = 本周的（weekday, hour:00）；若 target <= now ⇒ +7 天
+```
+等价于原实现 `days_until_sunday or 7`（「今天是周日但 00:00 已过 ⇒ 顺延一周」）。
+**不得退化成同一天重复触发，也不得跳过一周。**
+
+> ⚠️ **本版唯一的行为变更（有意为之，勿当回归）**：原 `_start_weekly_cleanup` 里
+> `_run_weekly_cleanup_once()` 是**裸调、无 try/except** —— 一旦抛异常，这个 daemon 线程直接死掉，
+> **每周清理从此永久失效且无人知晓**（另两个调度循环都有保护，唯独它没有）。
+> 本版补上 try/except + `ok=false` 记账：失败不再杀线程，且界面上能看到失败。
+> **除此之外清理逻辑一行不动。**
+
+**每次执行都要记账**（成功与失败都记 —— 用户要看的是「上次跑没跑、成没成」，
+不是「上次成功是什么时候」）。三个触发接口同样记。
+
+### K.5 两个新接口
+
+```
+GET /api/admin/scheduler/config
+→ { "success": true, "tasks": [
+     {"key":"gg_delist", "name":"掉包检测", "platform":"gg", "kind":"interval",
+      "value":60, "min":10, "max":1440, "last_run":{"ts":"...","ok":true}},
+     {"key":"tt_delist", ..., "kind":"interval", "value":30, ...},
+     {"key":"cleanup", "name":"每周清理", "platform":"gg", "kind":"weekly",
+      "weekday":6, "hour":0, "last_run":null} ] }
+
+PUT /api/admin/scheduler/config
+body: {"gg_delist_minutes": 120}   或   {"cleanup_weekday": 3, "cleanup_hour": 8}
+→ { "success": true, "config": {...更新后的全量...} }
+```
+
+**GET 的三条硬约束**：
+
+- **只返回该用户有权管理的任务** —— **必须在后端过滤**，不能只靠前端，否则 F12 就能看到越权任务。
+- `last_run` 为 `null` 表示**从未执行**，与「执行失败」（`ok === false`）是**两回事**，前端要能区分。
+- ⚠️ **GET 刻意不用 `scheduler_required(platform)`**（只用「developer 或 admin」判定）——
+  这样 **FB 管理员拿到 `200 + []` 空列表**（→ 前端渲染空态），而不是 403。
+  **空数组 ≠ 无权限**：空态是「本平台没有任务」，403 才是「你没权限」。这条设计意图别读成漏洞。
+
+**PUT 的两条硬约束**：
+
+- **越权字段 → 403，不做「静默忽略」**（TT 管理员传 `gg_delist_minutes` 必须被明确拒绝）。
+- 未知字段 → 400（防「字段名拼错却提示保存成功」）；校验失败 → 400 且 error **指明字段与合法区间**。
+- 返回**全量配置**（前端直接回填）。
+
+### K.6 前端（`SchedulerView.vue`）
+
+- **由接口 `tasks` 驱动渲染**（不再硬编码三张卡），按 `kind` 分派频率控件：
+  `interval` → 数字输入 + 「分钟」；`weekly` → 星期几下拉 + 小时下拉。
+  `min`/`max` **取自接口返回值，不得写死**。
+- **「保存」按钮仅在有改动时可点**（这本身就是「有未保存改动」的提示）。
+- **「上次执行」五态**：今天 / 昨天 / `MM-DD` / 失败（括号内带时刻）/ 从未执行。
+  ⚠️ **「尚未执行」与「执行失败」必须分开** —— 合成一句会让用户分不清是没跑过还是跑挂了。
+- **FB 管理员空态** + **加载失败的错误态**（两者**不是**一回事：空态是 `tasks.length === 0`，
+  错误态是接口失败；错误态要有「重试」入口，别让页面除标题外空白）。
+- 视觉上**沿用本页既有卡片语言**（`el-card shadow="never"`、48×48 emoji 块、既有灰阶、
+  唯一强调色 `#0891b2` 只用于「运行中」光环）；周期与「上次执行」放在卡片内一条
+  **浅分隔线（`1px solid #f3f4f6`）之下**的「调度条」里（左周期右上次执行）。
+  **不引入新字体、不换主色、不加装饰性动效**；数字用 `tabular-nums`。
+
+### K.7 迁移红线（逐条）
+
+1. **不要复用 `require_platform`** 做定时任务权限 —— 它会放行户管。
+2. **不要用 `@Scheduled(cron=...)`** —— 周期须运行时可配，cron 是启动期固定的。
+   用 `@Scheduled(fixedDelay=30s)` 驱动 tick，tick 内重读配置。
+3. **`scheduler_config` 与 `scheduler_last_run_{task_key}` 必须分开存**，且后者**一任务一 key**。
+4. **读配置永不抛异常**（非法值回落默认）；**写接口越界 400**。10 分钟下限是硬闸，两侧都要校验。
+5. **布尔陷阱**：`cleanup_weekday` / `cleanup_hour` 必须显式排除 `bool`。
+6. **GET 对 FB 管理员返回空列表而非 403**；**PUT 越权字段 403 而非静默忽略**。
+7. **每周清理**：日历语义不得退化为同天重复触发；且**必须补 try/except**（原实现裸调会永久静默失效 —— 这是本版唯一的行为变更）。
+8. **`last_run === null`（从未执行）与 `ok === false`（失败）在前端必须可区分**。
+9. 三个 `_run_*_once` **本体逻辑一行不改** —— 只改「什么时候调它」。

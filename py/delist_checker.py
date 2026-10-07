@@ -4,8 +4,11 @@
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 
 import requests
+
+log = logging.getLogger("gg-server")
 
 # 移动端 User-Agent（Google Play 与 App Store 通用）
 _USER_AGENT = (
@@ -109,7 +112,10 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool | None, str]:
         except requests.ConnectionError:
             return None, "网络连接失败，无法判定"
         except Exception as e:
-            return None, f"{e}，无法判定"
+            # `{e}` 是任意异常的英文原文（requests / 解析库 / …）。该文案经
+            # `delist_checks.error_msg` 回进 /api/products/delist-status 响应体 ⇒ 不内插。
+            log.warning("掉包检测直连异常 url=%s: %s", url, e)
+            return None, "请求异常，无法判定"
 
     # 有代理池：失败换下一个代理重试，绝不因代理失败误判为掉包
     if proxy_pool.count == 0:
@@ -132,7 +138,8 @@ def check_url_delisted(url: str, proxy_pool=None) -> tuple[bool | None, str]:
         except requests.ConnectionError:
             last_error = f"代理连接失败 {proxy['ip']}:{proxy['port']}"
         except Exception as e:
-            last_error = f"代理异常 {proxy['ip']}:{proxy['port']}: {e}"
+            log.warning("掉包检测代理异常 %s:%s: %s", proxy['ip'], proxy['port'], e)
+            last_error = f"代理异常 {proxy['ip']}:{proxy['port']}"
 
     # 出现过「拿不到判定」的响应 → 整体判为未知（保守：既不算掉包也不算正常）。
     # 文案不再写死「限流/服务端」：新口径下非 200/404 一律未知，走这条最多的是

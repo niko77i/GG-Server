@@ -685,8 +685,10 @@ def scrape():
 
     try:
         os.makedirs(pkg_dir, exist_ok=True)
-    except OSError as e:
-        return jsonify({"success": False, "error": f"无法创建目录: {e}"}), 500
+    except OSError:
+        # OSError 原文含服务端绝对路径与英文 errno ⇒ 只留固定文案，详情进日志
+        log.exception("爬取：创建包目录失败 pkg_dir=%s", pkg_dir)
+        return jsonify({"success": False, "error": "无法创建目录，详情见服务端日志"}), 500
 
     response = {
         "success": True,
@@ -1060,8 +1062,10 @@ def video_generate():
     if out_dir:
         try:
             os.makedirs(out_dir, exist_ok=True)
-        except OSError as e:
-            return jsonify({"success": False, "error": f"无法创建输出目录: {e}"}), 400
+        except OSError:
+            # OSError 原文含落盘绝对路径与英文 errno ⇒ 只留固定文案，详情进日志
+            log.exception("视频生成：创建输出目录失败 out_dir=%s", out_dir)
+            return jsonify({"success": False, "error": "无法创建输出目录，详情见服务端日志"}), 400
 
     # 创建任务
     task = VideoTask(data)
@@ -1088,6 +1092,9 @@ def video_generate():
             try:
                 ai_provider = get_provider(ai.get("service", "doubao"))
             except AIServiceError as e:
+                # 刻意保留原文：task.message 会经 /api/video/progress 原样回给前端，
+                # 但 get_provider 抛的 AIServiceError 文案是**自造中文**（"不支持的 AI 服务: X。可用: [...]"），
+                # 不含 schema / 服务端路径 / 英文库异常 —— 属「用户可据以行动」的信息，脱敏反而使其无用。
                 task.message = f"AI 服务初始化失败: {e}"
 
             if ai_provider:
@@ -1420,8 +1427,12 @@ def audio_replace():
             _env["FONTCONFIG_PATH"] = _fc_dir
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=_env)
         if result.returncode != 0:
+            # FFmpeg 的 stderr 会把**服务端绝对路径**（输入/输出文件）回显出来 ⇒ 只落日志。
+            # 与 :689 / :1064 的 OSError 同口径：客户端只收固定文案。
             err_tail = result.stderr[-300:] if result.stderr else "(无输出)"
-            return jsonify({"success": False, "error": f"FFmpeg 执行失败: {err_tail}"}), 500
+            log.error("音轨替换 FFmpeg 执行失败 returncode=%s stderr=%s",
+                      result.returncode, err_tail)
+            return jsonify({"success": False, "error": "FFmpeg 执行失败，详情见服务端日志"}), 500
 
         # 清理上传的临时文件
         for p in (video_tmp, audio_tmp):
@@ -4515,8 +4526,9 @@ def accounts_create():
                     }
                 }), 409
             return jsonify({"success": False, "error": f"账户 ID '{account_id}' 已存在"}), 409
+        log.exception("创建账户：数据完整性错误 account_id=%s", account_id)
         db.close()
-        return jsonify({"success": False, "error": f"数据完整性错误: {e}"}), 409
+        return jsonify({"success": False, "error": "数据完整性错误，详情见服务端日志"}), 409
 
 
 @app.route("/api/accounts/batch-create", methods=["POST"])
@@ -4758,7 +4770,7 @@ def accounts_update(aid):
                                         (_rid,))
                         else:
                             _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                        (err_msg, _rid))
+                                        (_SHEETS_SYNC_FAILED_MSG, _rid))
                         _db.commit(); _db.close()
                     _sync_sheets_background(_do_sync, _on_fail)
 
@@ -4796,7 +4808,9 @@ def accounts_update(aid):
         err_msg = str(e).lower()
         if "foreign key" in err_msg:
             return jsonify({"success": False, "error": "所属 MCC 不存在，请先选择有效的 MCC"}), 409
-        return jsonify({"success": False, "error": f"数据完整性错误: {e}"}), 409
+        # IntegrityError 原文含 schema/列名细节（如 NOT NULL constraint failed: accounts.name）⇒ 固定文案
+        log.exception("账户更新：数据完整性错误 aid=%s", aid)
+        return jsonify({"success": False, "error": "数据完整性错误，详情见服务端日志"}), 409
     except Exception as e:
         # 同 reassign：自带终末 except ⇒ 绕过模块级 500 兜底，须自行为客户端脱敏。
         log.exception("账户更新失败")
@@ -5272,7 +5286,7 @@ def accounts_batch_update():
                     else:
                         for rid in _rids:
                             _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                        (err_msg, rid))
+                                        (_SHEETS_SYNC_FAILED_MSG, rid))
                     _db.commit(); _db.close()
                 _sync_sheets_background(_do_sync, _on_fail)
         # 新增：批量状态变更时同步「我的看板」（独立于清账逻辑）
@@ -5341,9 +5355,11 @@ def accounts_sync_from_sheet():
     except gs.GoogleSheetsServiceError as e:
         db.close()
         return jsonify({"success": False, "error": str(e)}), 400
-    except Exception as e:
+    except Exception:
+        # 通用异常原文可能带服务端路径 / 英文库异常 ⇒ 固定文案，详情进日志
+        log.exception("同步账户：读取表格失败")
         db.close()
-        return jsonify({"success": False, "error": f"无法读取表格: {e}"}), 400
+        return jsonify({"success": False, "error": "无法读取表格，详情见服务端日志"}), 400
 
     if not rows or len(rows) < 2:
         db.close()
@@ -5741,7 +5757,7 @@ def recharge_submit():
                 else:
                     _db = database.get_db()
                     _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                (err_msg, record_id))
+                                (_SHEETS_SYNC_FAILED_MSG, record_id))
                     _db.commit(); _db.close()
 
             _sync_sheets_background(_do_sync, _on_fail)
@@ -5840,7 +5856,7 @@ def recharge_batch_submit():
                 else:
                     for rid in _ids:
                         _db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
-                                    (err_msg, rid))
+                                    (_SHEETS_SYNC_FAILED_MSG, rid))
                 _db.commit(); _db.close()
 
             _sync_sheets_background(_do_sync, _on_fail)
@@ -5967,11 +5983,12 @@ def recharge_retry_sheets(rid):
         db.close()
         return jsonify({"success": True})
     except Exception as e:
-        # 详情仍落库（sheets_error 是内部列，供排查）+ 落日志；客户端只收固定文案。
+        # 详情只落日志；`sheets_error` 会经 /api/accounts/<aid>/recharge-records 原样
+        # 回给客户端，故写固定文案而非异常原文（客户端本就只收固定文案）。
         log.exception("充值记录 Sheets 重试失败 rid=%s", rid)
-        msg = str(e)
         try:
-            db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?", (msg, rid))
+            db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?",
+                       (_SHEETS_SYNC_FAILED_MSG, rid))
             db.commit()
         except: pass
         try: db.close()
@@ -7587,7 +7604,8 @@ def google_sheets_update_zuobiao():
                 """INSERT OR REPLACE INTO sheets_sync_log
                    (user_id, product_name, spreadsheet_id, sheet_gid, status, error_msg, rows_json, retry_count, updated_at)
                    VALUES (?, ?, ?, '', ?, ?, ?, ?, datetime('now','localtime'))""",
-                (_user_id, _product_name, _spreadsheet_id, status, err_msg,
+                (_user_id, _product_name, _spreadsheet_id, status,
+                 _SHEETS_SYNC_FAILED_MSG,
                  json.dumps(formatted, ensure_ascii=False),
                  1 if status == "retry_failed" else 0)
             )
@@ -7724,12 +7742,11 @@ def google_sheets_retry_sync():
             "inserted": result["inserted"],
         })
     except Exception as e:
-        msg = str(e)
         db2 = database.get_db()
         db2.execute(
             "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
             "updated_at=datetime('now','localtime') WHERE id=?",
-            (msg, log_row["id"])
+            (_SHEETS_SYNC_FAILED_MSG, log_row["id"])
         )
         db2.commit(); db2.close()
         log.exception("投手看板表格写入失败")
@@ -8067,8 +8084,10 @@ def google_ads_accounts():
         return jsonify({"success": True, "accounts": accounts})
     except GoogleAdsServiceError as e:
         return jsonify({"success": False, "error": str(e)}), 500
-    except Exception as e:
-        return jsonify({"success": False, "error": f"未知错误: {e}"}), 500
+    except Exception:
+        # 通用异常原文可能带服务端路径 / 英文库异常 ⇒ 固定文案，详情进日志
+        log.exception("Google Ads：拉取账户列表失败")
+        return jsonify({"success": False, "error": "未知错误，详情见服务端日志"}), 500
 
 
 @app.route("/api/google-ads/report", methods=["POST"])
@@ -8097,8 +8116,10 @@ def google_ads_report():
         return jsonify({"success": True, "rows": results, "count": len(results)})
     except GoogleAdsServiceError as e:
         return jsonify({"success": False, "error": str(e)}), 500
-    except Exception as e:
-        return jsonify({"success": False, "error": f"未知错误: {e}"}), 500
+    except Exception:
+        # 通用异常原文可能带服务端路径 / 英文库异常 ⇒ 固定文案，详情进日志
+        log.exception("Google Ads：拉取报告失败")
+        return jsonify({"success": False, "error": "未知错误，详情见服务端日志"}), 500
 
 
 # ---------- Google Sheets API ----------
@@ -8111,6 +8132,13 @@ _GOOGLE_SHEETS_CONFIG = {
                      "config", "fit-boulevard-503111-u4-812bc02c2000.json")
     ),
 }
+
+
+# 落库的 Sheets 同步失败文案 —— `sheets_error` / `sheets_sync_log.error_msg` 会被
+# 读取端点原样回进响应体（`/api/accounts/<aid>/recharge-records`、
+# `/api/google-sheets/sync-status`），故**不得**写异常原文；详情由
+# `_sync_sheets_background` 的 log.warning/log.error 承担。
+_SHEETS_SYNC_FAILED_MSG = "表格同步失败，详情见服务端日志"
 
 
 def _sync_sheets_background(sync_fn, on_result_fn):
@@ -8213,8 +8241,10 @@ def google_sheets_list_sheets():
         return jsonify({"success": True, "sheets": info.get("sheets", [])})
     except gs.GoogleSheetsServiceError as e:
         return jsonify({"success": False, "error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"success": False, "error": f"无法访问表格: {e}"}), 400
+    except Exception:
+        # 通用异常原文可能带服务端路径 / 英文库异常 ⇒ 固定文案，详情进日志
+        log.exception("读取表格信息失败")
+        return jsonify({"success": False, "error": "无法访问表格，详情见服务端日志"}), 400
 
 
 # ---------- 文案管理 API ----------
@@ -9181,10 +9211,6 @@ _SCHEDULER_DEFAULTS = {
 # 与代理池打爆（现行 _TIMEOUT=5，代理池只有 2 个代理）。
 _SCHEDULER_LIMITS = {"min_minutes": 10, "max_minutes": 1440}
 
-# 保护 scheduler_last_run 的「读-改-写」：6 个写者（3 调度线程 + 3 个 trigger 接口）
-# 共享同一个 key，读写两步之间无事务，交错时会丢更新。
-_last_run_lock = threading.Lock()
-
 
 def _get_scheduler_config() -> dict:
     """读定时任务配置；任何字段缺失/非法/整键不存在都回落默认值。
@@ -9202,25 +9228,41 @@ def _get_scheduler_config() -> dict:
     cfg = dict(_SCHEDULER_DEFAULTS)
     lo, hi = _SCHEDULER_LIMITS["min_minutes"], _SCHEDULER_LIMITS["max_minutes"]
 
+    # 存量值非法（越界 / 类型错）→ 回落默认值。此处必须留一条 warning：
+    # 有人手工改库写了越界值时会静默不生效，没有日志就查无实据。
+    # ⚠️ 只在「值存在但非法」时记 —— 字段缺失是正常情形（首次运行 / 只配了部分字段），
+    #    本函数每 30 秒被调度线程调一次，对缺失也打日志会刷屏。
     for key in ("gg_delist_minutes", "tt_delist_minutes"):
         val = data.get(key)
         if isinstance(val, int) and not isinstance(val, bool) and lo <= val <= hi:
             cfg[key] = val
+        elif val is not None:
+            log.warning(f"定时任务配置 {key}={val!r} 非法（需 {lo}~{hi} 的整数），已回落默认值 {cfg[key]}")
 
     val = data.get("cleanup_weekday")
     if isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 6:
         cfg["cleanup_weekday"] = val
+    elif val is not None:
+        log.warning(f"定时任务配置 cleanup_weekday={val!r} 非法（需 0~6 的整数，0=周一），已回落默认值 {cfg['cleanup_weekday']}")
 
     val = data.get("cleanup_hour")
     if isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 23:
         cfg["cleanup_hour"] = val
+    elif val is not None:
+        log.warning(f"定时任务配置 cleanup_hour={val!r} 非法（需 0~23 的整数），已回落默认值 {cfg['cleanup_hour']}")
 
     return cfg
 
 
-def _get_scheduler_int(field: str, default: int) -> int:
-    """取单个整数配置项（带默认值兜底）。"""
-    return int(_get_scheduler_config().get(field, default))
+def _get_scheduler_int(field: str) -> int:
+    """取单个整数配置项；缺省值唯一来源是 `_SCHEDULER_DEFAULTS`。
+
+    ⚠️ 刻意不收调用方的 default 形参：`_get_scheduler_config()` 恒以
+    `_SCHEDULER_DEFAULTS` 播种每一个键，故缺省值永远取自那张表。多传一份默认值
+    只会造成「两处默认值」，日后分叉时静默以表为准（旧的 `default_minutes` 正是
+    这样一个永不生效的死参）。要改默认值就去改 `_SCHEDULER_DEFAULTS`。
+    """
+    return int(_get_scheduler_config()[field])
 
 
 def _next_cleanup_at(now, weekday: int, hour: int):
@@ -9248,34 +9290,35 @@ def _interval_tick(elapsed: int, target_seconds: int) -> tuple:
 
 
 def _get_last_run() -> dict:
-    """读各任务上次执行记录：{task_key: {"ts": "...", "ok": bool}}。"""
-    try:
-        raw = database.config_get("scheduler_last_run", "") or ""
-        data = json.loads(raw) if raw else {}
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    """读各任务上次执行记录：{task_key: {"ts": "...", "ok": bool}}（一个任务一个 key）。"""
+    out = {}
+    for t in _SCHEDULER_TASKS:
+        key = t["key"]
+        try:
+            raw = database.config_get(f"scheduler_last_run_{key}", "") or ""
+            data = json.loads(raw) if raw else {}
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data:
+            out[key] = data
+    return out
 
 
 def _mark_task_run(task_key: str, ok: bool):
     """记一次执行（成功与否都记 —— 用户要看的是「上次跑没跑、成没成」）。
 
-    「读整个 dict → 改子键 → 写回整个 dict」三步必须整体持锁：并发写者各自
-    读到同一份旧值再写回，后写者会覆盖先写者、丢掉一次更新（见 §4.1 的竞态论证）。
+    一个任务一个 key：写入是单条 INSERT OR REPLACE，天然原子，
+    **不需要锁** —— 共享状态根本不存在（原「读整个 dict → 改子键 → 写回」的
+    多写者竞态由此根除）。
     """
-    with _last_run_lock:
-        last = _get_last_run()
-        last[task_key] = {
-            "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ok": bool(ok),
-        }
-        try:
-            database.config_set("scheduler_last_run", json.dumps(last, ensure_ascii=False))
-        except Exception as e:
-            log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
+    payload = {"ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ok": bool(ok)}
+    try:
+        database.config_set(f"scheduler_last_run_{task_key}", json.dumps(payload, ensure_ascii=False))
+    except Exception as e:
+        log.warning(f"记录任务执行时间失败（不影响任务本身）: {e}")
 
 
-def _interval_loop(task_key, config_field, default_minutes, run_once, log_tag):
+def _interval_loop(task_key, config_field, run_once, log_tag):
     """固定间隔任务的通用循环：每 _TICK_SECONDS 醒一次，重算目标周期。
 
     改配置最多 _TICK_SECONDS 秒生效，**不需要重启服务**。
@@ -9289,7 +9332,7 @@ def _interval_loop(task_key, config_field, default_minutes, run_once, log_tag):
     elapsed = 0
     while True:
         _time.sleep(_TICK_SECONDS)
-        target = _get_scheduler_int(config_field, default_minutes) * 60
+        target = _get_scheduler_int(config_field) * 60
         due, elapsed = _interval_tick(elapsed, target)
         if not due:
             continue
@@ -9338,7 +9381,7 @@ def _start_delist_scheduler():
     """启动 GG 掉包检测定时任务（周期可配置，默认 1 小时）。"""
     t = threading.Thread(
         target=_interval_loop,
-        args=("gg_delist", "gg_delist_minutes", 60, _run_delist_check_once, "掉包定时检测"),
+        args=("gg_delist", "gg_delist_minutes", _run_delist_check_once, "掉包定时检测"),
         daemon=True,
     )
     t.start()
@@ -9464,7 +9507,7 @@ def _start_tt_delist_scheduler():
     """
     t = threading.Thread(
         target=_interval_loop,
-        args=("tt_delist", "tt_delist_minutes", 30, _run_tt_delist_check_once, "TT 掉包定时检测"),
+        args=("tt_delist", "tt_delist_minutes", _run_tt_delist_check_once, "TT 掉包定时检测"),
         daemon=True,
     )
     t.start()
@@ -9578,11 +9621,16 @@ def admin_scheduler_config_put():
     if not user or user.get("role") not in ("developer", "admin"):
         return jsonify(success=False, error="权限不足，仅管理员可操作"), 403
 
-    body = request.get_json(silent=True) or {}
-    if not body:
+    body = request.get_json(silent=True)
+    # 分两种 400，按**真实原因**给文案：
+    #   - 空体（无 body / JSON null / 空对象 {}）→「请求体为空」（无字段可改）；
+    #   - 其余非对象 JSON（0 / false / "" / [] 这类 falsy 标量，以及 123 / "abc" / [1]
+    #     这类 truthy 标量）→「请求体必须是 JSON 对象」。
+    # ⚠️ 勿改回 `request.get_json(...) or {}` —— 那个 `or {}` 会把 falsy 非对象一并吞成
+    #    `{}`，让 0/false/""/[] 借「空体」分支蒙混（findings #12）；非对象直接 set()/items()
+    #    又会抛 TypeError → 500，故必须显式挡住。
+    if body is None or (isinstance(body, dict) and not body):
         return jsonify(success=False, error="请求体为空"), 400
-    # 非对象的 JSON（如标量 123、字符串）是 truthy，直接 set()/items() 会抛 TypeError → 500；
-    # 这里干净地拒成 400（与「不能对真值非 dict 的 body 直接 .get」同一思路）。
     if not isinstance(body, dict):
         return jsonify(success=False, error="请求体必须是 JSON 对象"), 400
 
@@ -11239,7 +11287,10 @@ def ad_reports_multi_ai_chat():
             body = resp.json()
             answer = body.get("choices", [{}])[0].get("message", {}).get("content", "AI 未返回有效回复")
         else:
-            answer = f"AI 服务返回错误({resp.status_code}): {resp.text[:300]}"
+            # resp.text 是**上游 provider 的响应体**（多为英文错误 JSON，含其内部细节），
+            # 不能进响应体。只留 HTTP 状态码这个对用户有用的信息，原文落日志。
+            log.warning("AI 服务返回非 200：status=%s body=%s", resp.status_code, resp.text[:300])
+            answer = f"AI 服务返回错误({resp.status_code})"
     except Exception as e:
         log.exception("AI 服务调用失败")
         answer = "AI 服务调用失败，请查看控制台日志"
@@ -11286,7 +11337,10 @@ def ad_reports_analyze():
     ai_config_row = db.execute(
         f"SELECT value FROM config WHERE key='ai_analysis_{user_id}'"
     ).fetchone()
-    db.close()
+    # **不在这里 close**：`_yt_db()` 返回的是 flask.g 里的请求级共享连接，
+    # 关掉之后本函数下面再调 `_yt_db()` 会取回**同一个已关闭的连接** ⇒ 必炸
+    # （`Cannot operate on a closed database`）。本函数是少数**两次**取共享连接的地方，
+    # 所以它是唯一踩到这个坑的（同口径见 google_sheets_update_zuobiao 里那条注释）。
 
     ai_enabled = False
     ai_provider = "atlas"
@@ -11362,7 +11416,9 @@ def ad_reports_analyze():
             body_resp = resp.json()
             answer = body_resp.get("choices", [{}])[0].get("message", {}).get("content", "AI 未返回有效回复")
         else:
-            answer = f"AI 服务返回错误({resp.status_code}): {resp.text[:300]}"
+            # 同 multi-ai-chat：resp.text 是上游 provider 响应体，只落日志、不进响应。
+            log.warning("AI 服务返回非 200：status=%s body=%s", resp.status_code, resp.text[:300])
+            answer = f"AI 服务返回错误({resp.status_code})"
     except Exception as e:
         log.exception("AI 服务调用失败")
         answer = "AI 服务调用失败，请查看控制台日志"

@@ -75,7 +75,7 @@
               </el-select>
             </template>
             <el-button size="small" type="primary" plain :disabled="!dirty(task)"
-                       :loading="saving" @click="saveTask(task)">保存</el-button>
+                       :loading="savingKey === task.key" @click="saveTask(task)">保存</el-button>
           </div>
           <div class="schedule-last" :class="{ failed: task.last_run && !task.last_run.ok }">
             {{ lastRunText(task.last_run) }}
@@ -83,11 +83,19 @@
         </div>
       </el-card>
 
-      <!-- 空态：FB 管理员有权进入但本平台无任务（空数组 ≠ 接口 403 无权限，故失败时不渲染） -->
+      <!-- 空态 / 错误态：同一套结构（图标 + 标题 + 说明）的两个分支，复用 .scheduler-empty。
+           空态 = FB 管理员有权进入但本平台无任务（空数组 ≠ 接口 403 无权限，故失败时不渲染空态）；
+           错误态 = 读取失败（含无权限），多一个「重试」按钮，给用户一个下一步。 -->
       <div v-if="!loading && !loadError && tasks.length === 0" class="scheduler-empty">
         <div class="empty-icon">🗓️</div>
         <div class="empty-title">当前平台暂无可管理的定时任务</div>
         <div class="empty-desc">定时任务按平台划分：Google Ads 掉包检测与每周清理归 GG，TikTok 掉包检测归 TT。</div>
+      </div>
+      <div v-else-if="!loading && loadError" class="scheduler-empty">
+        <div class="empty-icon">⚠️</div>
+        <div class="empty-title">定时任务配置加载失败</div>
+        <div class="empty-desc">{{ loadErrorMsg || '请稍后重试；若持续失败，请联系管理员。' }}</div>
+        <el-button size="small" type="primary" plain style="margin-top:16px;" @click="loadConfig">重试</el-button>
       </div>
     </div>
   </div>
@@ -107,6 +115,11 @@ const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '�
 
 // 后端 tasks 只回传调度字段（key / name / kind / value / min / max / weekday / hour / field / last_run），
 // 图标、说明、非频率标签属展示层，留在前端按 key 映射；后端新增任务时补一条即可。
+//
+// 保存 / 回填用到的「配置字段名」也集中在此，不散在业务逻辑里：
+//   - interval 类：后端 GET 已回传 task.field（如 gg_delist_minutes），直接用它；
+//   - weekly 类：后端 GET **不回传** field，故在此表登记 weekdayField / hourField，
+//     保存与回填两处共用同一来源，避免在逻辑里硬编码字段名。
 const TASK_META = {
   gg_delist: {
     icon: '🔍',
@@ -129,6 +142,9 @@ const TASK_META = {
     tags: [],
     resultType: 'cleanup',
     busyText: '清理中...',
+    // weekly 的 payload / config 字段名（后端 scheduler_config 的键）
+    weekdayField: 'cleanup_weekday',
+    hourField: 'cleanup_hour',
   },
 }
 
@@ -140,16 +156,20 @@ function meta(task) {
 
 const tasks = ref([])
 const loading = ref(true)
-const saving = ref(false)
+// 按任务 key 记录「正在保存的是哪张卡」——只点亮该卡的保存按钮
+// （单例 ref 会让任一卡保存时所有卡的按钮一起转圈，见 findings #14）
+const savingKey = ref(null)
 const draft = ref({})          // { gg_delist: 60, tt_delist: 30 }  —— interval 类
 const draftWeekday = ref(6)
 const draftHour = ref(0)
 // 读取失败（含 403 无权限）与「本平台确实没有任务」是两回事，空态只在后者出现
 const loadError = ref(false)
+const loadErrorMsg = ref('')   // 失败原因（后端 error 原文），供错误态持久展示
 
 async function loadConfig() {
   loading.value = true
   loadError.value = false
+  loadErrorMsg.value = ''
   try {
     const res = await adminApi.getSchedulerConfig()
     tasks.value = res.tasks || []
@@ -159,9 +179,25 @@ async function loadConfig() {
     }
   } catch (e) {
     loadError.value = true
-    ElMessage.error('读取定时任务配置失败：' + (e?.response?.data?.error || e.message))
+    loadErrorMsg.value = e?.response?.data?.error || e.message || ''
+    ElMessage.error('读取定时任务配置失败：' + (loadErrorMsg.value || '未知错误'))
   } finally {
     loading.value = false
+  }
+}
+
+// 用 PUT 响应里的全量配置就地回填（设计 §5）——省去保存后重拉一次的往返。
+// 字段名与 saveTask 同源：interval 用 task.field，weekly 用 TASK_META 的 weekday/hourField。
+function applyConfig(config) {
+  if (!config) return
+  for (const t of tasks.value) {
+    if (t.kind === 'interval') {
+      if (t.field in config) { t.value = config[t.field]; draft.value[t.key] = config[t.field] }
+    } else {
+      const m = meta(t)
+      if (m.weekdayField in config) { t.weekday = config[m.weekdayField]; draftWeekday.value = config[m.weekdayField] }
+      if (m.hourField in config) { t.hour = config[m.hourField]; draftHour.value = config[m.hourField] }
+    }
   }
 }
 
@@ -171,19 +207,25 @@ function dirty(task) {
 }
 
 async function saveTask(task) {
-  // interval 类用后端回传的 task.field，不在这里硬编码字段名（防前后端漂移）
+  // 字段名不散在逻辑里：interval 用后端回传的 task.field，weekly 用 TASK_META 登记的字段名
+  const m = meta(task)
   const payload = task.kind === 'interval'
     ? { [task.field]: draft.value[task.key] }
-    : { cleanup_weekday: draftWeekday.value, cleanup_hour: draftHour.value }
-  saving.value = true
+    : { [m.weekdayField]: draftWeekday.value, [m.hourField]: draftHour.value }
+  savingKey.value = task.key
   try {
-    await adminApi.updateSchedulerConfig(payload)
+    const res = await adminApi.updateSchedulerConfig(payload)
     ElMessage.success('已保存，将在 30 秒内生效')
-    await loadConfig()
+    // 就地回填接口返回的全量配置（设计 §5）——不再为配置多拉一次 GET。
+    // 「上次执行」不必随之刷新：改周期只改「下次何时跑」，不触发任何执行
+    //（_interval_loop 每 tick 重算目标 / 周清分段等待，均不会立即 run；last_run 只在
+    // 真跑完后由 _mark_task_run 写入），故 task.last_run 保持原值即是最新、不陈旧。
+    // 真正会推进 last_run 的是「立即执行」，那三处成功后仍各自调用 loadConfig()。
+    applyConfig(res.config)
   } catch (e) {
     ElMessage.error('保存失败：' + (e?.response?.data?.error || e.message))
   } finally {
-    saving.value = false
+    savingKey.value = null
   }
 }
 
