@@ -1825,9 +1825,13 @@ git commit -m "feat(frontend): TT 已删除账户弹窗改分页渲染 + 服务�
 cd py && python -m pytest tests/ -q
 ```
 
-Expected: 与**本计划开始前的基线**逐条一致（新增测试全部通过）。
-若 `test_fb_asset_model.py` 的 24 条是红的，**那是既有缺陷**（4 位密码 `t123` vs 注册端点要求
-≥6 位，`main.py:8212`），与本计划无关，不得计入本计划失败，也不在本计划里修。
+Expected: 与基线一致 —— **基线实测 1443 passed, 0 failed**（2026-10-07 在
+`.claude/worktrees/sheet-sync-pagination` 上跑出，耗时约 8.5 分钟）。
+
+> 早先本计划与规格 §9.3 都记着「`test_fb_asset_model.py` 的 24 条是红的」——**该记录已过时**，
+> 实测该文件现在 32 passed / 0 failed（4 位密码那条既有缺陷已被其它会话修掉）。
+> 也就是说**全量回归必须是全绿**，不存在任何可以豁免的既有红测试。
+> 如果改完出现红测试，**一律是本计划引入的**，必须查到底，不得当作既有问题跳过。
 
 - [ ] **Step 2: 前端构建**
 

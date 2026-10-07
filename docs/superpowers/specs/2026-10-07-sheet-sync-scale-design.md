@@ -478,8 +478,10 @@ cd frontend && npm run build
 ```
 
 基线以执行时的实际为准（注册表改动面大，须先跑一次拿到干净基线）。
-> 注意：既有 `test_fb_asset_model.py` 的 24 个测试是红的（4 位密码 `t123` vs 注册端点要求 ≥6 位，
-> `main.py:8212`），与本设计无关，但会让全量回归不干净。修复应作为独立 bug 修复进行。
+
+> **基线实测（2026-10-07，worktree `sheet-sync-pagination`）**：`1443 passed, 0 failed`，约 8.5 分钟。
+> 早先此处记的「`test_fb_asset_model.py` 24 个测试是红的」**已过时** —— 实测该文件
+> 32 passed / 0 failed。故**全量回归必须全绿**，没有可豁免的既有红测试。
 
 ### 9.4 交付前置
 
