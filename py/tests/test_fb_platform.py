@@ -959,6 +959,278 @@ class TestFbBatchDelete:
             assert resp.status_code == 400, bad
 
 
+# ==================== FB accounts / reports 族归属收口（IDOR） ====================
+#
+# 两组端点都只卡平台（`fb_required`）不卡归属 ⇒ 任意已登录 FB 用户按内部 id 即可
+# 改 / 删 / 恢复 / 永久删**他人**账户、读他人 BM 变更史，以及改 / 删他人做表数据。
+#
+# **隔离轴两族不同**（别照抄）：
+#   - `fb_accounts`（账户）→ `owner_id`
+#   - `fb_ad_reports`（做表数据）→ `user_id`（AGENTS.md「个人数据按 user_id 隔离」明列）
+# 判据形状照同文件 pixel-bms 族（`update_pixel_bm` / `delete_pixel_bm`）与
+# `reassign_account`：`role not in CROSS_USER_ROLES and row[<轴>] != uid ⇒ 403`；
+# **行不存在时不拦**（保持既有 200 / 空列表，不新增 404）。
+# `batch_delete_reports` 是批删：非跨用户角色只删**自己 user_id**的行，别人的行留下
+# （不整批 403 —— 保持「尽量多删自己的」语义）。
+#
+# 每个端点三条腿，缺一条都不算完整：
+#   ① 拒绝腿：A 操作 B 的对象 ⇒ 403，**且查库确认 B 的数据未被改动**；
+#   ② 放行腿：A 操作**自己**的对象 ⇒ 仍成功（防「一律 403」的过度收口变异体）；
+#   ③ 跨角色腿：developer 操作 B 的对象 ⇒ 仍成功（CROSS_USER_ROLES 不得被误收口）。
+
+
+def _seed_two_accounts(client, tag, history=True):
+    """造 A、B 两个 FB 普通用户，各带一个账户；B 的账户（可选）另挂一条 BM 变更史。
+
+    返回 pk_a / pk_b（内部主键）与各自身份头。夹具用本文件既有的
+    `_fb_user` / `_mk_fb_account` / `_mk_fb_bm` helper 现造（不臆造新夹具名）。
+
+    `history=False`：permanent-delete 用例不能用带历史的账户 ——
+    `fb_account_bm_history.account_id` 的外键**没有** ON DELETE CASCADE，
+    `permanent_delete_account` 又只删 fb_account_bm（不删历史）⇒ 删带历史的账户会
+    FK 报错。那是该端点**既有**的缺陷（非本轮引入，已在报告登记），不该混进本组用例。
+    """
+    a_hdr, a_id = _fb_user(client, f"{tag}_a")
+    b_hdr, b_id = _fb_user(client, f"{tag}_b")
+    db = database.get_db()
+    pk_a = _mk_fb_account(db, a_id, f"{tag}-A-ACC", "A的账户")
+    bm_b = _mk_fb_bm(db, b_id, f"{tag}-B-BM", "B的BM")
+    pk_b = _mk_fb_account(db, b_id, f"{tag}-B-ACC", "B的账户", bm_pk=bm_b)
+    if history:
+        db.execute("INSERT INTO fb_account_bm_history "
+                   "(account_id, old_bm_id, new_bm_id, changed_by) VALUES (?,?,?,?)",
+                   (pk_b, None, bm_b, b_id))
+    db.commit()
+    db.close()
+    return dict(a_hdr=a_hdr, a_id=a_id, pk_a=pk_a,
+                b_hdr=b_hdr, b_id=b_id, pk_b=pk_b)
+
+
+def _acc_val(aid, column):
+    """读 fb_accounts 某列；行不存在返回 None（供 `_acc_exists` 区分「没了」与「有值」）。"""
+    db = database.get_db()
+    try:
+        r = db.execute(f"SELECT {column} FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+        return None if r is None else r[column]
+    finally:
+        db.close()
+
+
+def _acc_exists(aid):
+    return _acc_val(aid, "id") is not None
+
+
+def _dev_headers(client, tag):
+    """developer ∈ CROSS_USER_ROLES，platform='fb' 以过 `fb_required`。"""
+    hdr, _ = _fb_user(client, f"{tag}_dev", role="developer", platform="fb")
+    return hdr
+
+
+class TestFbAccountOwnershipClosure:
+    """accounts 族五个端点补齐归属校验（`owner_id` 轴）。"""
+
+    def test_update_account_ownership(self, client):
+        """PUT /api/fb/accounts/<aid> —— 缺校验时可改他人账户任意字段。"""
+        s = _seed_two_accounts(client, "t_accupd")
+        dev = _dev_headers(client, "t_accupd")
+        # ① 拒绝腿：改 B 的账户 ⇒ 403，且 B 的名字/备注一字未动
+        resp = client.put(f"/api/fb/accounts/{s['pk_b']}",
+                          json={"name": "被改名", "remark": "被改备注"}, headers=s["a_hdr"])
+        assert resp.status_code == 403
+        assert _acc_val(s["pk_b"], "name") == "B的账户"    # 去掉校验 ⇒ 200 且真改了
+        assert _acc_val(s["pk_b"], "remark") == ""
+        # ② 放行腿：改自己的 ⇒ 200 且真改到
+        assert client.put(f"/api/fb/accounts/{s['pk_a']}",
+                          json={"name": "我改了"}, headers=s["a_hdr"]).status_code == 200
+        assert _acc_val(s["pk_a"], "name") == "我改了"     # 防「一律 403」
+        # ③ 跨角色腿：developer 改 B 的 ⇒ 仍成功
+        assert client.put(f"/api/fb/accounts/{s['pk_b']}",
+                          json={"name": "dev改的"}, headers=dev).status_code == 200
+        assert _acc_val(s["pk_b"], "name") == "dev改的"
+
+    def test_delete_account_ownership(self, client):
+        """DELETE /api/fb/accounts/<aid> —— 缺校验时可软删他人账户。"""
+        s = _seed_two_accounts(client, "t_accdel")
+        dev = _dev_headers(client, "t_accdel")
+        assert client.delete(f"/api/fb/accounts/{s['pk_b']}",
+                             headers=s["a_hdr"]).status_code == 403
+        assert _acc_val(s["pk_b"], "deleted_at") is None   # 未被越权软删
+        assert client.delete(f"/api/fb/accounts/{s['pk_a']}",
+                             headers=s["a_hdr"]).status_code == 200
+        assert _acc_val(s["pk_a"], "deleted_at") is not None
+        assert client.delete(f"/api/fb/accounts/{s['pk_b']}",
+                             headers=dev).status_code == 200
+        assert _acc_val(s["pk_b"], "deleted_at") is not None
+
+    def test_restore_account_ownership(self, client):
+        """POST /api/fb/accounts/<aid>/restore —— 缺校验时可恢复他人账户。"""
+        s = _seed_two_accounts(client, "t_accrst")
+        dev = _dev_headers(client, "t_accrst")
+        db = database.get_db()
+        db.execute("UPDATE fb_accounts SET deleted_at=datetime('now','localtime') "
+                   "WHERE id IN (?,?)", (s["pk_a"], s["pk_b"]))
+        db.commit()
+        db.close()
+        assert client.post(f"/api/fb/accounts/{s['pk_b']}/restore",
+                           headers=s["a_hdr"]).status_code == 403
+        assert _acc_val(s["pk_b"], "deleted_at") is not None   # 仍是删状态
+        assert client.post(f"/api/fb/accounts/{s['pk_a']}/restore",
+                           headers=s["a_hdr"]).status_code == 200
+        assert _acc_val(s["pk_a"], "deleted_at") is None
+        assert client.post(f"/api/fb/accounts/{s['pk_b']}/restore",
+                           headers=dev).status_code == 200
+        assert _acc_val(s["pk_b"], "deleted_at") is None
+
+    def test_permanent_delete_account_ownership(self, client):
+        """DELETE /api/fb/accounts/<aid>/permanent —— 缺校验时可永久删他人账户（不可逆）。"""
+        s = _seed_two_accounts(client, "t_accperm", history=False)
+        dev = _dev_headers(client, "t_accperm")
+
+        def _links(aid):
+            db = database.get_db()
+            try:
+                return db.execute("SELECT COUNT(*) FROM fb_account_bm WHERE account_id=?",
+                                  (aid,)).fetchone()[0]
+            finally:
+                db.close()
+
+        assert _links(s["pk_b"]) == 1
+        assert client.delete(f"/api/fb/accounts/{s['pk_b']}/permanent",
+                             headers=s["a_hdr"]).status_code == 403
+        assert _acc_exists(s["pk_b"])            # 账户还在
+        assert _links(s["pk_b"]) == 1            # 关联也没被删
+        assert client.delete(f"/api/fb/accounts/{s['pk_a']}/permanent",
+                             headers=s["a_hdr"]).status_code == 200
+        assert not _acc_exists(s["pk_a"])
+        assert client.delete(f"/api/fb/accounts/{s['pk_b']}/permanent",
+                             headers=dev).status_code == 200
+        assert not _acc_exists(s["pk_b"])
+
+    def test_bm_history_ownership(self, client):
+        """GET /api/fb/accounts/<aid>/bm-history —— 缺校验时可读他人 BM 变更史。"""
+        s = _seed_two_accounts(client, "t_acchist")
+        dev = _dev_headers(client, "t_acchist")
+        assert client.get(f"/api/fb/accounts/{s['pk_b']}/bm-history",
+                          headers=s["a_hdr"]).status_code == 403
+        # ② 自己的（无历史）⇒ 200 空列表，不是 403
+        mine = client.get(f"/api/fb/accounts/{s['pk_a']}/bm-history", headers=s["a_hdr"])
+        assert mine.status_code == 200 and mine.get_json()["data"] == []
+        # ③ developer 读 B 的 ⇒ 200 且看得到那一条历史
+        cross = client.get(f"/api/fb/accounts/{s['pk_b']}/bm-history", headers=dev)
+        assert cross.status_code == 200 and len(cross.get_json()["data"]) == 1
+
+    def test_missing_accounts_keep_existing_contract(self, client):
+        """行不存在时的既有语义必须保留（本改动只新增 403 一条路径）。
+
+        `existing` 为 None 时不拦，落回既有行为 —— UPDATE/DELETE 0 行仍 200、
+        bm-history 仍回空列表。谁把校验前移成「先查行、无行即 404」，这几条立刻变红。
+        """
+        hdr, _ = _fb_user(client, "t_accmissing")
+        assert client.put("/api/fb/accounts/999999", json={"name": "x"},
+                          headers=hdr).status_code == 200
+        assert client.delete("/api/fb/accounts/999999", headers=hdr).status_code == 200
+        assert client.post("/api/fb/accounts/999999/restore", headers=hdr).status_code == 200
+        assert client.delete("/api/fb/accounts/999999/permanent", headers=hdr).status_code == 200
+        assert client.get("/api/fb/accounts/999999/bm-history",
+                          headers=hdr).get_json()["data"] == []
+
+
+def _mk_fb_report(db, user_id, account_id, cost=1.0, report_date="2026-02-02",
+                  product_name="P", line_name="L", account_name="户"):
+    """插一行 fb_ad_reports（做表数据），返回主键 id。隔离轴是 `user_id`。"""
+    db.execute("INSERT INTO fb_ad_reports (user_id, product_name, line_name, report_date, "
+               "account_name, account_id, cost) VALUES (?,?,?,?,?,?,?)",
+               (user_id, product_name, line_name, report_date, account_name, account_id, cost))
+    rid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.commit()
+    return rid
+
+
+def _seed_two_reports(client, tag):
+    """造 A、B 两个 FB 普通用户，各带一行做表数据。"""
+    a_hdr, a_id = _fb_user(client, f"{tag}_a")
+    b_hdr, b_id = _fb_user(client, f"{tag}_b")
+    db = database.get_db()
+    rid_a = _mk_fb_report(db, a_id, f"{tag}-A-ACC", cost=1.0)
+    rid_b = _mk_fb_report(db, b_id, f"{tag}-B-ACC", cost=2.0)
+    db.close()
+    return dict(a_hdr=a_hdr, a_id=a_id, rid_a=rid_a,
+                b_hdr=b_hdr, b_id=b_id, rid_b=rid_b)
+
+
+def _report_col(rid, column):
+    db = database.get_db()
+    try:
+        r = db.execute(f"SELECT {column} FROM fb_ad_reports WHERE id=?", (rid,)).fetchone()
+        return None if r is None else r[column]
+    finally:
+        db.close()
+
+
+class TestFbReportOwnershipClosure:
+    """reports 族三个写端点补齐归属校验（`user_id` 轴）。"""
+
+    def test_update_report_ownership(self, client):
+        """PUT /api/fb/reports/<rid> —— 缺校验时可改他人做表数据。"""
+        s = _seed_two_reports(client, "t_rupd")
+        dev = _dev_headers(client, "t_rupd")
+        assert client.put(f"/api/fb/reports/{s['rid_b']}",
+                          json={"cost": 999.0, "account_name": "被改"},
+                          headers=s["a_hdr"]).status_code == 403
+        assert _report_col(s["rid_b"], "cost") == 2.0          # 去掉校验 ⇒ 200 且真改了
+        assert _report_col(s["rid_b"], "account_name") == "户"
+        assert client.put(f"/api/fb/reports/{s['rid_a']}", json={"cost": 5.0},
+                          headers=s["a_hdr"]).status_code == 200
+        assert _report_col(s["rid_a"], "cost") == 5.0
+        assert client.put(f"/api/fb/reports/{s['rid_b']}", json={"cost": 7.0},
+                          headers=dev).status_code == 200
+        assert _report_col(s["rid_b"], "cost") == 7.0
+
+    def test_delete_report_ownership(self, client):
+        """DELETE /api/fb/reports/<rid> —— 缺校验时可删他人做表数据。"""
+        s = _seed_two_reports(client, "t_rdel")
+        dev = _dev_headers(client, "t_rdel")
+        assert client.delete(f"/api/fb/reports/{s['rid_b']}",
+                             headers=s["a_hdr"]).status_code == 403
+        assert _report_col(s["rid_b"], "id") == s["rid_b"]     # 还在
+        assert client.delete(f"/api/fb/reports/{s['rid_a']}",
+                             headers=s["a_hdr"]).status_code == 200
+        assert _report_col(s["rid_a"], "id") is None
+        assert client.delete(f"/api/fb/reports/{s['rid_b']}",
+                             headers=dev).status_code == 200
+        assert _report_col(s["rid_b"], "id") is None
+
+    def test_batch_delete_reports_only_deletes_own(self, client):
+        """POST /api/fb/reports/batch-delete —— 混批时只删自己 user_id 的行。
+
+        语义是「尽量多删自己的」，**不整批 403**：别人的行必须原封不动留下。
+        """
+        s = _seed_two_reports(client, "t_rbd")
+        resp = client.post("/api/fb/reports/batch-delete",
+                           json={"ids": [s["rid_a"], s["rid_b"]]}, headers=s["a_hdr"])
+        assert resp.status_code == 200
+        assert _report_col(s["rid_a"], "id") is None           # 自己的删掉了
+        assert _report_col(s["rid_b"], "id") == s["rid_b"]     # 别人的留下了（未被越权删）
+
+    def test_batch_delete_reports_cross_user_role_deletes_others(self, client):
+        """跨角色腿：developer 批删他人的 ⇒ 仍删得掉（CROSS_USER_ROLES 不放 403）。"""
+        s = _seed_two_reports(client, "t_rbd_cross")
+        dev = _dev_headers(client, "t_rbd_cross")
+        resp = client.post("/api/fb/reports/batch-delete",
+                           json={"ids": [s["rid_b"]]}, headers=dev)
+        assert resp.status_code == 200
+        assert _report_col(s["rid_b"], "id") is None
+
+    def test_missing_reports_keep_existing_contract(self, client):
+        """行不存在时保持既有 200（不新增 404）。"""
+        hdr, _ = _fb_user(client, "t_rmissing")
+        assert client.put("/api/fb/reports/999999", json={"cost": 1.0},
+                          headers=hdr).status_code == 200
+        assert client.delete("/api/fb/reports/999999", headers=hdr).status_code == 200
+        assert client.post("/api/fb/reports/batch-delete", json={"ids": [999999]},
+                           headers=hdr).status_code == 200
+
+
 # ==================== FB 账户面板批量能力（Task 3：批量建户） ====================
 #
 # 形状照本文件既有的 `create_account`（FB 没有 MCC / 代理；`operator` 是**冻结字段**，

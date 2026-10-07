@@ -652,6 +652,12 @@ def create_account():
 def update_account(aid):
     db = get_db()
     uid = get_uid()
+    # 归属校验（口径同同文件 pixel-bms 族 / reassign_account）：非跨用户角色只能改
+    # **自己名下**的账户。少了这道闸，任何 FB 用户按内部 id 就能改别人账户的任意字段。
+    # 行不存在时不拦（existing 为 None）—— 保持既有「UPDATE 0 行仍返回 200」的行为。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     data = parse_body()
     name = data.get('name', '').strip()
     timezone = data.get('timezone', '')
@@ -709,6 +715,12 @@ def update_account(aid):
 @fb_required
 def delete_account(aid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验：非跨用户角色只能软删自己的账户（否则按 id 可软删他人账户）。
+    # 行不存在时不拦，保持既有 200。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     db.execute("UPDATE fb_accounts SET deleted_at=datetime('now','localtime') WHERE id=?", (aid,))
     db.commit()
     return ok()
@@ -856,6 +868,12 @@ def reassign_account(aid):
 @fb_required
 def restore_account(aid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验：非跨用户角色只能恢复自己的账户（否则按 id 可恢复他人账户）。
+    # 行不存在时不拦，保持既有 200。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     db.execute("UPDATE fb_accounts SET deleted_at=NULL WHERE id=?", (aid,))
     db.commit()
     return ok()
@@ -866,6 +884,12 @@ def restore_account(aid):
 @fb_required
 def permanent_delete_account(aid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验：非跨用户角色只能永久删自己的账户（否则按 id 可**不可逆**删他人账户）。
+    # 校验放在两条 DELETE 之前，别让他人的关联行先被清掉。行不存在时不拦，保持既有 200。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     db.execute("DELETE FROM fb_account_bm WHERE account_id=?", (aid,))
     db.execute("DELETE FROM fb_accounts WHERE id=?", (aid,))
     db.commit()
@@ -877,6 +901,12 @@ def permanent_delete_account(aid):
 @fb_required
 def account_bm_history(aid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验：非跨用户角色只能读自己账户的 BM 变更史（否则按 id 可读他人历史）。
+    # 账户不存在时不拦，落回既有空列表（不是 403）。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     rows = db.execute(
         "SELECT h.*, ob.name as old_bm_name, nb.name as new_bm_name "
         "FROM fb_account_bm_history h "
@@ -1965,6 +1995,13 @@ def list_reports():
 @fb_required
 def update_report(rid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验（隔离轴是 `user_id`，非 owner_id —— 口径同 list_reports / reports_stats
+    # 的 `WHERE user_id = ?`）：非跨用户角色只能改**自己**的做表数据。
+    # 行不存在时不拦，保持既有「UPDATE 0 行仍返回 200」的行为。
+    row = db.execute("SELECT user_id FROM fb_ad_reports WHERE id=?", (rid,)).fetchone()
+    if row and _get_role(db, uid) not in CROSS_USER_ROLES and row["user_id"] != uid:
+        return err("无权限", 403)
     data = parse_body()
     updates = []
     params = []
@@ -1986,6 +2023,12 @@ def update_report(rid):
 @fb_required
 def delete_report(rid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验（`user_id` 轴，同 update_report）：非跨用户角色只能删自己的做表数据。
+    # 行不存在时不拦，保持既有 200。
+    row = db.execute("SELECT user_id FROM fb_ad_reports WHERE id=?", (rid,)).fetchone()
+    if row and _get_role(db, uid) not in CROSS_USER_ROLES and row["user_id"] != uid:
+        return err("无权限", 403)
     db.execute("DELETE FROM fb_ad_reports WHERE id=?", (rid,))
     db.commit()
     return ok()
@@ -1996,11 +2039,19 @@ def delete_report(rid):
 @fb_required
 def batch_delete_reports():
     db = get_db()
+    uid = get_uid()
     data = parse_body()
     ids = data.get('ids', [])
     if ids:
         placeholders = ','.join(['?'] * len(ids))
-        db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders})", ids)
+        # 归属过滤（`user_id` 轴，同 list_reports）：非跨用户角色只删**属于自己**的行，
+        # 别人的行留下 —— 保持「尽量多删自己的」语义，**不整批 403**。跨用户角色不限
+        # （既有行为：可删全部）。返回体形状不变（deleted 仍是请求条数，未改动既有语义）。
+        if _get_role(db, uid) in CROSS_USER_ROLES:
+            db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders})", ids)
+        else:
+            db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders}) "
+                       f"AND user_id = ?", list(ids) + [uid])
         db.commit()
     return ok({'deleted': len(ids)})
 
