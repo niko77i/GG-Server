@@ -44,8 +44,49 @@ def _insert_tt_products(db, owner_id, n):
     db.commit()
 
 
+def _insert_mcc(db, owner_id, n):
+    """插入 n 个 MCC。
+
+    非跨用户角色访问 /api/mcc/list 时 WHERE 收窄为
+    `(m.owner_id = ? OR m.shared_user_ids = ? OR ...)`，shared_user_ids 走
+    表默认 '[]' 不匹配任何 uid，因此必须把 owner_id 设成**调用者自己**的 uid，
+    否则播种出来的行对被测端点不可见，断言又退化成空转。
+    """
+    for i in range(n):
+        db.execute(
+            "INSERT INTO mcc(name, mcc_id, owner_id) VALUES(?,?,?)",
+            (f"mcc{i}", f"mcc-{i:06d}", owner_id),
+        )
+    db.commit()
+
+
+def _insert_tt_accounts(db, owner_id, n):
+    """插入 n 个 TT 账户（advertiser_id 非空且有 UNIQUE 约束，必须给出；未软删）。"""
+    for i in range(n):
+        db.execute(
+            "INSERT INTO tt_accounts(name, advertiser_id, owner_id) VALUES(?,?,?)",
+            (f"ttacc{i}", f"adv-{i:08d}", owner_id),
+        )
+    db.commit()
+
+
+def _insert_fb_accounts(db, owner_id, n):
+    """插入 n 个 FB 账户（account_id 非空且有 UNIQUE 约束；deleted_at 留 NULL 走存活分支）。"""
+    for i in range(n):
+        db.execute(
+            "INSERT INTO fb_accounts(name, account_id, owner_id) VALUES(?,?,?)",
+            (f"fbacc{i}", f"act-{i:08d}", owner_id),
+        )
+    db.commit()
+
+
 def test_gg_accounts_list_clamps_oversized_size(app, client, auth_headers):
-    """/api/accounts/list —— 传 size=999999 必须被压到 500 以内。"""
+    """/api/accounts/list —— 传 size=999999 必须被压到 500 条。
+
+    断言 `== MAX_PAGE_SIZE` 而非 `<= MAX_PAGE_SIZE`：只有播够 600 行、
+    且闸门恰好钳到 500 时才成立。`<= 500` 会被「钳到 100 的假闸门」和
+    「播了 0 行」同时满足，等于没验。
+    """
     import database
     db = database.get_db()
     uid = db.execute("SELECT id FROM users WHERE username='testuser'").fetchone()["id"]
@@ -54,7 +95,7 @@ def test_gg_accounts_list_clamps_oversized_size(app, client, auth_headers):
 
     resp = client.get("/api/accounts/list?size=999999", headers=auth_headers)
     assert resp.status_code == 200
-    assert len(resp.get_json()["accounts"]) <= MAX_PAGE_SIZE
+    assert len(resp.get_json()["accounts"]) == MAX_PAGE_SIZE
 
 
 def test_gg_accounts_list_non_numeric_size_does_not_500(app, client, auth_headers):
@@ -64,20 +105,55 @@ def test_gg_accounts_list_non_numeric_size_does_not_500(app, client, auth_header
 
 
 def test_mcc_list_clamps_oversized_size(app, client, auth_headers):
+    """/api/mcc/list —— 传 size=999999 必须被压到 500 条。
+
+    testuser 是默认 role='user'（非跨用户角色），端点把可见性收窄为
+    `owner_id = uid OR shared_user_ids 命中 uid`，因此 600 行必须挂在
+    调用者自己的 uid 上，否则一行都看不见、断言空转。
+    """
+    import database
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='testuser'").fetchone()["id"]
+    _insert_mcc(db, uid, 600)
+    db.close()
+
     resp = client.get("/api/mcc/list?size=999999", headers=auth_headers)
     assert resp.status_code == 200
+    assert len(resp.get_json()["mcc_list"]) == MAX_PAGE_SIZE
 
 
 def test_tt_accounts_list_clamps_oversized_size(app, client, tt_headers):
+    """/api/tt/accounts/list —— 传 size=999999 必须被压到 500 条。
+
+    ttuser 是默认 role='user'，端点收窄为 `a.owner_id = uid`，
+    600 行挂在 ttuser 自己的 uid 上才可见。
+    """
+    import database
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='ttuser'").fetchone()["id"]
+    _insert_tt_accounts(db, uid, 600)
+    db.close()
+
     resp = client.get("/api/tt/accounts/list?size=999999", headers=tt_headers)
     assert resp.status_code == 200
-    assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE
+    assert len(resp.get_json()["items"]) == MAX_PAGE_SIZE
 
 
 def test_fb_accounts_list_clamps_oversized_size(app, client, admin_fb_headers):
+    """/api/fb/accounts/list —— 传 size=999999 必须被压到 500 条。
+
+    adminfb 是 admin（跨用户角色），本来看得见所有人的行；仍然把 600 行
+    播在自己名下，免得断言依赖「别的行恰好存在」。
+    """
+    import database
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='adminfb'").fetchone()["id"]
+    _insert_fb_accounts(db, uid, 600)
+    db.close()
+
     resp = client.get("/api/fb/accounts/list?size=999999", headers=admin_fb_headers)
     assert resp.status_code == 200
-    assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE
+    assert len(resp.get_json()["items"]) == MAX_PAGE_SIZE
 
 
 def test_tt_bcs_list_clamps_oversized_size(app, client, tt_headers):
@@ -90,7 +166,7 @@ def test_tt_bcs_list_clamps_oversized_size(app, client, tt_headers):
 
     resp = client.get("/api/tt/bcs/list?size=999999", headers=tt_headers)
     assert resp.status_code == 200
-    assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE
+    assert len(resp.get_json()["items"]) == MAX_PAGE_SIZE
 
 
 def test_tt_products_list_clamps_oversized_size(app, client, tt_headers):
@@ -103,4 +179,4 @@ def test_tt_products_list_clamps_oversized_size(app, client, tt_headers):
 
     resp = client.get("/api/tt/products/list?size=999999", headers=tt_headers)
     assert resp.status_code == 200
-    assert len(resp.get_json()["items"]) <= MAX_PAGE_SIZE
+    assert len(resp.get_json()["items"]) == MAX_PAGE_SIZE
