@@ -4710,6 +4710,9 @@ def accounts_update(aid):
 
         # 状态清账：存活切到非存活时，检查有无未清的充值记录
         recharge_note = None
+        # 清账记录的 id（仅在 need_clear 分支产生）。先置 None：响应在分支之外构造，
+        # 前端靠这个 key 对 gg_recharge 轮询 —— 缺了它写表失败就只有标记、没有即时提示。
+        clear_record_id = None
         if new_status and new_status != "存活" and old_status and old_status["status_name"] == "存活":
             # 兜底策略：直接查是否存在未清充值（有金额记录但之后无"清"记录），
             # 不依赖 status_changed_date，避免创建时未设置该字段导致的漏清
@@ -4767,6 +4770,8 @@ def accounts_update(aid):
         resp = {"success": True}
         if recharge_note:
             resp["recharge_note"] = recharge_note
+        # 前端靠它对 gg_recharge 轮询（无清账时为 None）
+        resp["clear_recharge_id"] = clear_record_id
         return jsonify(resp)
     except _sqlite3.IntegrityError as e:
         err_msg = str(e).lower()
@@ -5206,7 +5211,9 @@ def accounts_batch_update():
                     business_keys=_keys,
                     sync_fn=routes.gg_dashboard_sheet.build_many_sync(user_id, _keys, _payload),
                     payload=_payload)
-        return jsonify({"success": True, "updated": len(ids)})
+        return jsonify({"success": True, "updated": len(ids),
+                        # 前端靠它对本批清账记录轮询 gg_recharge（无清账时为空表）
+                        "clear_recharge_ids": [r["rid"] for r in new_clear_rows]})
     finally:
         db.close()
 
@@ -5443,6 +5450,9 @@ def accounts_sync_from_sheet():
         hd.writeback_rows(user_id, "gg", sheet_ids)
 
         # 10c. 系统 → Sheet：将系统当前状态同步回「我的看板」备注列
+        # 回写腿涉及的账户（响应要带出去，供前端轮询 gg_my_dashboard）。
+        # 先置空表：响应在 `if` 之外构造，不置会 NameError。
+        _sync_back_keys = []
         if sheet_id and dashboard_name:
             # 重新查询所有 sheet 中账户的最新状态（10b 可能已更新 status_id）
             # 同时查询 deleted_at，用于写 H 列"解绑"
@@ -5465,6 +5475,7 @@ def accounts_sync_from_sheet():
 
             if _sync_back_rows:
                 _keys = [r[0] for r in _sync_back_rows]
+                _sync_back_keys = list(_keys)
                 _payload = {"dash_uid": user_id}
                 # 闸门已在外层（`if sheet_id and dashboard_name:`，见 10c 之前的解析）——
                 # 此处不再重复判配置。
@@ -5482,7 +5493,9 @@ def accounts_sync_from_sheet():
             "created": created_count,
             "updated": updated_count,
             "errors": errors,
-        }
+        },
+        # 回写腿涉及的账户（前端靠它们轮询 gg_my_dashboard 的写表结果）
+        "affected_account_ids": _sync_back_keys,
     })
 
 
@@ -5707,7 +5720,9 @@ def recharge_batch_submit():
         # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
         _app_cache.clear_prefix("accounts:agents:")
 
-        return jsonify({"success": True, "count": len(valid_rows)})
+        return jsonify({"success": True, "count": len(valid_rows),
+                        # 前端靠它对本批充值记录轮询 gg_recharge
+                        "recharge_ids": list(inserted_ids)})
     except Exception as e:
         log.exception("批量提交充值失败")
         try: db.close()

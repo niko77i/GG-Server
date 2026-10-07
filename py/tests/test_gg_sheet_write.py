@@ -580,3 +580,153 @@ def test_status_clear_off_registers_recharge_write(client, monkeypatch):
     cleared = {w["account_id"] for w in written if w.get("amount") == "清"}
     assert cleared == {"gg_adv_c1", "gg_adv_c2", "gg_adv_c3"}, \
         f"三户都必须被写进充值表，实际 {written}"
+
+
+# ==================== Task 4：接口回传「轮询所需的 key」 ====================
+# 前端在每次触发写表的操作之后要主动轮询，才能给出「即时提示」；而轮询需要知道
+# 本次产生了哪些 business_key。这四个接口过去不回传，故这几条用例钉住它们。
+
+
+def test_accounts_update_returns_clear_recharge_id(client, monkeypatch):
+    """改状态触发自动清账时，响应必须带上该 recharge_records.id。"""
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "append_recharge", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+
+    h, uid = _gg_user(client, "_gg_key1")
+    db = database.get_db()
+    _setup_sheets(db)
+    alive = _status_id(db, "存活")
+    dead = _status_id(db, "死亡")
+    aid = _mk_account(db, uid, "gg_adv_k1", alive)
+    # 清账只在「该户有未清充值」时触发
+    db.execute("INSERT INTO recharge_records (account_id, amount, operator, created_by) "
+               "VALUES ('gg_adv_k1', '100', '运营', ?)", (uid,))
+    db.commit()
+    db.close()
+
+    resp = client.put(f"/api/accounts/{aid}", headers=h, json={"status_id": dead})
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body.get("clear_recharge_id"), \
+        f"响应缺 clear_recharge_id（前端无从对 gg_recharge 轮询）：{body}"
+
+    db = database.get_db()
+    cleared = db.execute("SELECT id FROM recharge_records WHERE account_id='gg_adv_k1' "
+                         "AND amount='清'").fetchone()
+    db.close()
+    assert cleared is not None, "应已追加清账记录"
+    assert body["clear_recharge_id"] == cleared["id"], \
+        "回传的 id 必须是本次清账记录的主键"
+
+
+def test_accounts_update_without_clear_returns_null_key(client, monkeypatch):
+    """未触发清账时仍须有该 key（值为 None）—— 前端按键取值，缺 key 会 undefined。"""
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+
+    h, uid = _gg_user(client, "_gg_key0")
+    db = database.get_db()
+    _setup_sheets(db)
+    alive = _status_id(db, "存活")
+    dead = _status_id(db, "死亡")
+    aid = _mk_account(db, uid, "gg_adv_k0", alive)   # 无任何充值记录 ⇒ 不触发清账
+    db.close()
+
+    resp = client.put(f"/api/accounts/{aid}", headers=h, json={"status_id": dead})
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert "clear_recharge_id" in body, f"key 必须存在（可为 None）：{body}"
+    assert body["clear_recharge_id"] is None
+
+
+def test_batch_update_returns_clear_recharge_ids(client, monkeypatch):
+    """批量改状态的响应必须带上本批全部清账记录 id。"""
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "append_recharge", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+
+    h, uid = _gg_user(client, "_gg_key2")
+    db = database.get_db()
+    _setup_sheets(db)
+    alive = _status_id(db, "存活")
+    dead = _status_id(db, "死亡")
+    ids = [_mk_account(db, uid, f"gg_adv_b{i}", alive) for i in (1, 2)]
+    for aid in ids:
+        acc = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()["account_id"]
+        db.execute("INSERT INTO recharge_records (account_id, amount, operator, created_by) "
+                   "VALUES (?, '100', '运营', ?)", (acc, uid))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/accounts/batch-update", headers=h,
+                       json={"ids": ids, "field": "status_id", "value": dead})
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert isinstance(body.get("clear_recharge_ids"), list), f"缺 clear_recharge_ids：{body}"
+    assert len(body["clear_recharge_ids"]) == 2, f"两户都清账、应回传两个 id：{body}"
+
+
+def test_recharge_batch_submit_returns_ids(client, monkeypatch):
+    """批量充值必须回传本次产生的全部 id。"""
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "append_recharge", lambda *a, **k: None)
+
+    h, uid = _gg_user(client, "_gg_key3")
+    db = database.get_db()
+    _setup_sheets(db)
+    _mk_account(db, uid, "gg_adv_k3", _status_id(db, "存活"))
+    db.close()
+
+    resp = client.post("/api/recharge/batch-submit", headers=h, json={"records": [
+        {"account_id": "gg_adv_k3", "amount": 10, "agent": "A"},
+        {"account_id": "gg_adv_k3", "amount": 20, "agent": "A"},
+    ]})
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert isinstance(body.get("recharge_ids"), list), f"缺 recharge_ids：{body}"
+    assert len(body["recharge_ids"]) == 2, f"两条充值、应回传两个 id：{body}"
+
+    db = database.get_db()
+    real = [r["id"] for r in db.execute(
+        "SELECT id FROM recharge_records WHERE account_id='gg_adv_k3' ORDER BY id").fetchall()]
+    db.close()
+    assert body["recharge_ids"] == real, "回传的必须是真实落库的主键"
+
+
+def test_sync_from_sheet_returns_affected_account_ids(client, monkeypatch):
+    """从表同步的回写腿涉及哪些账户，必须回传（前端靠它轮询看板写表）。
+
+    假表格的列布局按现场解析器写死：row[0]=运营（须匹配当前用户 display_name）、
+    row[1]=账户ID、row[7]=是否解绑。表头行被跳过。
+    """
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+    # 端点前置校验 credentials_path 必须是真实存在的文件（main.py:5246），
+    # 否则在读到表格之前就 400 —— 与既有一期用例同样用 __file__ 顶上。
+    import main
+    monkeypatch.setitem(main._GOOGLE_SHEETS_CONFIG, "credentials_path", __file__)
+    monkeypatch.setattr(gs, "read_sheet_values", lambda svc, sid, name, rng: [
+        ["运营", "账户ID", "所属渠道", "国家", "时区", "备注", "是否封户", "是否解绑"],
+        ["_gg_sync", "gg_adv_s1", "", "", "", "", "", ""],
+    ])
+
+    h, uid = _gg_user(client, "_gg_sync")
+    db = database.get_db()
+    _setup_sheets(db)
+    db.execute("UPDATE users SET display_name='_gg_sync' WHERE id=?", (uid,))
+    _mk_account(db, uid, "gg_adv_s1", _status_id(db, "存活"))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/accounts/sync-from-sheet", headers=h, json={"dry_run": False})
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert "affected_account_ids" in body, f"响应缺 affected_account_ids：{body}"
+    assert "gg_adv_s1" in body["affected_account_ids"], \
+        f"回写腿涉及的账户应被回传（不能是空表）：{body}"
