@@ -387,3 +387,56 @@ class TestWeeklyCleanupLoop:
 
         assert main._get_last_run()["cleanup"]["ok"] is True
 
+
+# ============================================================
+#  Task 4：三个 trigger 接口改 scheduler_required + 记录上次执行
+# ============================================================
+
+class TestTriggerEndpoints:
+    """真实接口上的权限与记录（Task 1 测的是装饰器本身，这里测接线是否正确）。"""
+
+    ENDPOINTS = [
+        ("/api/admin/trigger-delist-check", "gg"),
+        ("/api/admin/trigger-tt-delist-check", "tt"),
+        ("/api/admin/trigger-weekly-cleanup", "gg"),
+    ]
+
+    def test_admins_are_not_flat_403(self, client, admin_gg_headers, monkeypatch):
+        """⚠️ 改造前三个接口对 admin 一律 403。这里断言「不再是权限拒绝」。
+
+        不实际执行任务（会真跑检测/真删文件），只验权限闸门。
+        """
+        monkeypatch.setattr(main, "_run_delist_check_once", lambda: {"total": 0, "delisted": 0, "results": []})
+        resp = client.post("/api/admin/trigger-delist-check", headers=admin_gg_headers)
+        assert resp.status_code == 200
+
+    def test_tt_admin_blocked_from_gg_endpoint(self, client, admin_tt_headers):
+        assert client.post("/api/admin/trigger-delist-check", headers=admin_tt_headers).status_code == 403
+
+    def test_gg_admin_blocked_from_tt_endpoint(self, client, admin_gg_headers):
+        assert client.post("/api/admin/trigger-tt-delist-check", headers=admin_gg_headers).status_code == 403
+
+    def test_huguan_blocked_everywhere(self, client, huguan_headers):
+        for path, _ in self.ENDPOINTS:
+            assert client.post(path, headers=huguan_headers).status_code == 403
+
+    def test_trigger_records_last_run(self, client, admin_gg_headers, monkeypatch):
+        """执行完要留下记录 —— 界面上「上次执行」才有来源。"""
+        monkeypatch.setattr(main, "_run_delist_check_once", lambda: {"total": 0, "delisted": 0, "results": []})
+        client.post("/api/admin/trigger-delist-check", headers=admin_gg_headers)
+        assert main._get_last_run()["gg_delist"]["ok"] is True
+
+    def test_trigger_failure_records_not_ok(self, client, admin_gg_headers, monkeypatch):
+        """⚠️ 失败分支也要记账（ok=False）—— 界面据此区分「失败」与「未执行」。
+
+        与上一条的 ok=True 互为对照：删掉 except 里的
+        `_mark_task_run("gg_delist", ok=False)`，本测试即红（KeyError: 'gg_delist'）。
+        """
+        def _boom():
+            raise RuntimeError("检测炸了")
+
+        monkeypatch.setattr(main, "_run_delist_check_once", _boom)
+        resp = client.post("/api/admin/trigger-delist-check", headers=admin_gg_headers)
+        assert resp.status_code == 500
+        assert main._get_last_run()["gg_delist"]["ok"] is False
+

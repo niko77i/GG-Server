@@ -42,6 +42,7 @@ import datetime
 import requests
 from functools import wraps
 from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform, no_huguan
+from routes.decorators import scheduler_required
 from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES, GLOBAL_OPTION_ROLES
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 import huguan_dashboard as hd
@@ -9344,46 +9345,43 @@ def _start_tt_delist_scheduler():
 
 @app.route("/api/admin/trigger-weekly-cleanup", methods=["POST"])
 @jwt_required()
+@scheduler_required("gg")
 def admin_trigger_weekly_cleanup():
-    """手动触发每周清理任务。"""
-    user_id = int(get_jwt_identity())
-    user = auth.get_user_by_id(user_id)
-    if not user or user["role"] != "developer":
-        return jsonify(success=False, error="Permission denied"), 403
+    """手动触发每周清理任务（GG 管理员 / developer）。"""
     try:
         _run_weekly_cleanup_once()
+        _mark_task_run("cleanup", ok=True)
         return jsonify(success=True, message="每周清理已执行完成")
     except Exception as e:
+        _mark_task_run("cleanup", ok=False)
         return jsonify(success=False, error=str(e)), 500
 
 
 @app.route("/api/admin/trigger-delist-check", methods=["POST"])
 @jwt_required()
+@scheduler_required("gg")
 def admin_trigger_delist_check():
-    """手动触发掉包检测任务。"""
-    user_id = int(get_jwt_identity())
-    user = auth.get_user_by_id(user_id)
-    if not user or user["role"] != "developer":
-        return jsonify(success=False, error="Permission denied"), 403
+    """手动触发 GG 掉包检测任务。"""
     try:
         result = _run_delist_check_once()
+        _mark_task_run("gg_delist", ok=True)
         return jsonify(success=True, **result)
     except Exception as e:
+        _mark_task_run("gg_delist", ok=False)
         return jsonify(success=False, error=str(e)), 500
 
 
 @app.route("/api/admin/trigger-tt-delist-check", methods=["POST"])
 @jwt_required()
+@scheduler_required("tt")
 def admin_trigger_tt_delist_check():
     """手动触发 TT 掉包检测任务。"""
-    user_id = int(get_jwt_identity())
-    user = auth.get_user_by_id(user_id)
-    if not user or user["role"] != "developer":
-        return jsonify(success=False, error="Permission denied"), 403
     try:
         result = _run_tt_delist_check_once()
+        _mark_task_run("tt_delist", ok=True)
         return jsonify(success=True, **result)
     except Exception as e:
+        _mark_task_run("tt_delist", ok=False)
         return jsonify(success=False, error=str(e)), 500
 
 
