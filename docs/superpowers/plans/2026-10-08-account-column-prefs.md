@@ -1103,41 +1103,68 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
     return isOnlyVisible(prefOf(panelKey), registry, isAvailable(), key)
   }
 
+  /**
+   * 登出 / 换号时清空。
+   *
+   * 必须清四样，少一样都会串号：
+   *   - prefs：否则 B 看到 A 的列
+   *   - ready：否则 ensureLoaded 被 `if (ready.value) return` 挡住，B 永远不会重拉
+   *   - loadPromise：否则 B 拿到的是 A 那次请求的 promise
+   *   - 未落地的防抖定时器：**最隐蔽的一样**。A 改完列 400ms 内登出、B 立刻登录，
+   *     那个定时器会带着 B 的新 token 把 A 的配置写进 B 的 key。
+   */
+  function clear() {
+    for (const key of Object.keys(saveTimers)) {
+      clearTimeout(saveTimers[key])
+      delete saveTimers[key]
+    }
+    prefs.value = {}
+    lastConfirmed = {}
+    ready.value = false
+    loadPromise = null
+  }
+
   return {
     prefs, ready,
     visibleOrder, settingsList, onlyVisible,
-    toggle, move, reset,
+    toggle, move, reset, clear,
     ensureLoaded,
   }
 })
 ```
 
-- [ ] **Step 3: App 启动时预拉**
+- [ ] **Step 3: App 启动时预拉（必须挂在 user.id 的 watch 上，不是裸调一次）**
 
-`frontend/src/App.vue` 找到（约 38-41 行）：
-
-```js
-auth.initFromStorage()
-auth.fetchMe()
-```
-
-在同一处补上：
+`frontend/src/App.vue` 的 `<script setup>` 里，import 区加：
 
 ```js
-columnPrefs.ensureLoaded()
-```
-
-并在 `<script setup>` 的 import 区加：
-
-```js
+import { watch } from 'vue'          // 若已 import 则跳过
 import { useColumnPrefsStore } from '@/stores/columnPrefs'
 ```
 
-以及实例化（跟在 `const auth = useAuthStore()` 一类语句之后）：
+实例化（跟在 `const auth = useAuthStore()` 一行之后，`App.vue:33`）：
 
 ```js
 const columnPrefs = useColumnPrefsStore()
 ```
+
+**不要**在 `onMounted` 里裸调 `ensureLoaded()`，改成 watch `auth.user?.id`：
+
+```js
+// 跟着登录态走，而不是只在 onMounted 调一次。两个理由：
+//   ① onMounted 那一刻用户可能还没登录（先落在 /login），裸调会 401 且永不重试
+//   ② stores/auth.js:77-84 的 logout() **不刷新页面**（fetchMe 失败时也会走它，
+//      见 stores/auth.js:68）。同浏览器换号时 store 还留着上一个人的 prefs，
+//      而 ensureLoaded 有 `if (ready.value) return` 守卫，不会重拉 —— B 会看到 A 的列。
+// 同类写法先例见 composables/useOwnerPicker.js:35-38。
+watch(
+  () => auth.user?.id,
+  (uid) => { uid ? columnPrefs.ensureLoaded() : columnPrefs.clear() },
+  { immediate: true },
+)
+```
+
+`immediate: true` 让「已登录状态下刷新页面」这条路径也能立即预拉。
 
 - [ ] **Step 4: 起前端确认不报错**
 
@@ -1320,7 +1347,7 @@ cd "D:/server/cc/GG-Server" && git add frontend/src/components/ColumnSettings.vu
 **Interfaces:**
 - Consumes: 无（纯展示组件）
 - Produces:
-  - `<SheetWriteCell :row="object" :failure="object|undefined" @retry="fn" />`
+  - `<SheetWriteCell :failure="object|undefined" @retry="fn" />`
   - `<OwnerCell :row="object" :account-key="string" :loaded="bool" :failed="bool" :options="Array" :option-map="object" :pending="Set" @change="fn" />`
 
 **这是一次纯粹的行为保持重构 —— 不改任何单元格逻辑。** 抽完后 GG / TT 的写表与户归属两列必须与抽取前逐字一致。
@@ -1351,17 +1378,17 @@ markup 从 `TtAccountPanel.vue:59-71` 逐字搬入（与 GG 版同构，只差 `
 <script setup>
 // 「写表」列单元格。GG 与 TT 原本各有一份逐字复制的 markup（注释自述
 // 「语汇 / 位置 / 宽度逐字沿用」），这里合并为一份，改一处两平台同时生效。
+//
+// 只收 failure 一个 prop：单元格只按失败状态决定渲染，行数据一概不需要
+// （失败信息由调用方按 row 取出后传进来）。不预留没人用的 row prop。
 import { sheetWriteMark as mark, sheetWriteTone as tone, sheetWriteHint as hint } from '@/utils/sheetWriteUi'
 
 defineProps({
-  row: { type: Object, required: true },
   failure: { type: Object, default: null },
 })
 defineEmits(['retry'])
 </script>
 ```
-
-> `row` 目前未被模板直接使用，但保留它是因为：① 调用方语义清晰（这是某一行的单元格）；② 将来要在单元格里显示行相关信息的改动不必再改接口。若担心 lint 报未使用，可在模板里不加 `row` 引用并接受 prop 仅作为契约。
 
 - [ ] **Step 3: 创建 `OwnerCell.vue`**
 
@@ -1463,7 +1490,7 @@ import OwnerCell from '@/components/cells/OwnerCell.vue'
 
 ```html
           <template #default="{ row }">
-            <SheetWriteCell :row="row" :failure="sheetWriteFailures[row.account_id]"
+            <SheetWriteCell :failure="sheetWriteFailures[row.account_id]"
               @retry="retrySheetWrite(row)" />
           </template>
 ```
@@ -1490,7 +1517,7 @@ import OwnerCell from '@/components/cells/OwnerCell.vue'
 
 ```html
           <template #default="{ row }">
-            <SheetWriteCell :row="row" :failure="sheetWriteFailures[row.advertiser_id]"
+            <SheetWriteCell :failure="sheetWriteFailures[row.advertiser_id]"
               @retry="retrySheetWrite(row)" />
           </template>
 ```
@@ -1643,7 +1670,7 @@ const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.GG_ADS, 
           </el-table-column>
           <el-table-column v-else-if="key === 'sheet_write'" v-bind="COL_ATTRS.sheet_write">
             <template #default="{ row }">
-              <SheetWriteCell :row="row" :failure="sheetWriteFailures[row.account_id]"
+              <SheetWriteCell :failure="sheetWriteFailures[row.account_id]"
                 @retry="retrySheetWrite(row)" />
             </template>
           </el-table-column>
@@ -1785,7 +1812,7 @@ const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.TT_ADS, 
         <template v-for="key in visibleOrder" :key="key">
           <el-table-column v-if="key === 'sheet_write'" v-bind="COL_ATTRS.sheet_write">
             <template #default="{ row }">
-              <SheetWriteCell :row="row" :failure="sheetWriteFailures[row.advertiser_id]"
+              <SheetWriteCell :failure="sheetWriteFailures[row.advertiser_id]"
                 @retry="retrySheetWrite(row)" />
             </template>
           </el-table-column>
