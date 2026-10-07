@@ -391,7 +391,11 @@ SQLite 3.45.1 的变量上限是 32766。1 万户现在能跑，但**超过 3.2 
 `too many SQL variables`**。加统一 `chunk(900)` helper（900 取整、留足余量）。
 
 应用点：`main.py:5070/5155`、`batch-lookup`（`main.py:4337`）、GG sync（`main.py:5307`）、
-`huguan_dashboard.py:500/956/1331`，以及 §5 新增的批量查询。
+`huguan_dashboard.py:500/1331`，以及 §5 新增的批量查询。
+
+> 更正（2026-10-07 写计划时核实）：早先此处误把 `huguan_dashboard.py:956` 也列为 `IN` 子句。
+> 它实际是 `INSERT INTO {table}({cols}) VALUES({marks})` 的**列绑定**，只有十几个字段，
+> 不存在变量上限问题 —— 不要动它。
 
 > 行号会随后续改动漂移，定位时以**函数名**为准。
 
