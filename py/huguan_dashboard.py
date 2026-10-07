@@ -1310,8 +1310,13 @@ def push_rows(user_id: int, platform: str, account_ids=None) -> None:
         import google_sheets_service as gs
         from main import _GOOGLE_SHEETS_CONFIG
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        # 定位列必须按平台取：写入器默认 "C"（GG/TT 的账户ID列），而 FB 的
+        # 账户ID在 **D** 列（C 是「账户名称」）—— 不传就按错误的列定位、写空，
+        # 且不抛异常（后台线程连日志都没有，纯静默）。
+        # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
         gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                     conf["sheet_name"], rows)
+                                     conf["sheet_name"], rows,
+                                     key_col=KEY_COL[platform])
 
     from main import _sync_sheets_background
     _sync_sheets_background(_do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)

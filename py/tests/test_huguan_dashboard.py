@@ -2505,6 +2505,72 @@ class TestSyncWritebackKeyColumn:
         assert all(c["key_col"] == "C" for c in captured), [c["key_col"] for c in captured]
 
 
+class TestWritebackRowsKeyColumn:
+    """修复轮 4 · 同族最后一处：`push_rows` 的回写也要按平台的定位列。
+
+    `push_rows` 是 `writeback_rows` 的下游、也是 FB **自动回写**的唯一入口。
+    它此前调 `gs.update_rows_by_account_id(...)` 不传 key_col，于是 fb 路径按
+    C 列（账户名称）找资产UID → 整批落进 not_found、静默写空；且本路径跑在
+    后台线程里、失败只在**抛异常**时记日志，而它不抛 ⇒ 完全无声。
+    gg/tt 的 KEY_COL 恰是 "C"，与写入器默认值相同 ⇒ 对它们显式传参是无操作。
+
+    与 `TestSyncWritebackKeyColumn` 的区别：那条打的是 `/sync` 的
+    `_write_background`，本族**走真实入口** `hd.writeback_rows` —— 直接拼
+    `update_rows_by_account_id` 的参数再断言测不到 `push_rows` 这一层。
+    """
+
+    def test_fb_writeback_rows_passes_key_col_D(self, client, monkeypatch):
+        """FB 自动回写必须传 "D"。
+
+        判别力：把 `push_rows` 里的 `key_col=KEY_COL[platform]` 去掉（退回
+        默认值 "C"），本用例立刻变红。
+        """
+        from huguan_dashboard import KEY_COL
+        assert KEY_COL["fb"] == "D", "前提：FB 的资产UID在 D 列；列规格变了本用例要重写"
+
+        hg, uid = _create_user(client, "_wb_kc_fb", role="huguan", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', ?, ?)",
+                   ("WB-KC-FB-1", uid))
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        import huguan_dashboard as hd
+        hd.writeback_rows(uid, "fb", ["WB-KC-FB-1"])
+
+        assert captured, "对照：写入器必须被调用过，否则下面断言是空集上的恒真式"
+        assert all(c["key_col"] == "D" for c in captured), [c["key_col"] for c in captured]
+
+    def test_gg_writeback_rows_passes_key_col_C(self, client, monkeypatch):
+        """对照组：GG 的 KEY_COL 是 "C"，与写入器默认值相同 ⇒ 显式传参必须是无操作。
+
+        这条同时挡住「不看平台、一律硬传 D」的变异体（那样 GG 会红）。
+        """
+        hg, uid = _create_user(client, "_wb_kc_gg", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        _seed_account(db, "WB-KC-GG-1", uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        import huguan_dashboard as hd
+        hd.writeback_rows(uid, "gg", ["WB-KC-GG-1"])
+
+        assert captured, "对照：写入器必须被调用过，否则下面的断言无判别力"
+        assert all(c["key_col"] == "C" for c in captured), [c["key_col"] for c in captured]
+
+
 class TestPushSnapshotReadFailure:
     """修复轮 2 · Important：读快照失败必须冒泡 + 上一份快照原封不动。
 
