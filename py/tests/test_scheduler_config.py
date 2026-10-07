@@ -401,6 +401,39 @@ class TestTriggerEndpoints:
         ("/api/admin/trigger-weekly-cleanup", "gg"),
     ]
 
+    def test_admin_platform_matrix(self, client, admin_gg_headers, admin_tt_headers,
+                                   admin_fb_headers, monkeypatch):
+        """⚠️ 平台映射矩阵：逐接口、双向断言「本平台 admin 200 / 其余平台 admin 403」。
+
+        驱动式：遍历 ENDPOINTS（接口 → 期望平台）这张表，而非写死三条断言。
+        将来新增接口、或改某接口的平台，只需改表，本用例自动覆盖。
+
+        判别力来源（把任一接口的平台参数改错，哪一格会红）：
+          - trigger-weekly-cleanup 的 "gg" 误写成 "tt" ⇒ admin_gg 得 403（本平台腿红）、
+            admin_tt 得 200（非本平台腿红）；误写成 "fb" 同理（admin_gg 403 腿红）。
+          - trigger-tt-delist-check 的 "tt" 误写成 "gg"/"fb" ⇒ admin_tt 得 403（本平台腿红）。
+          - trigger-delist-check 的 "gg" 误写成 "tt"/"fb" ⇒ admin_gg 得 403（本平台腿红）。
+        两条腿缺一不可：只断言 403 一侧，误写成 "fb" 仍全绿（FB 不是任何接口的本平台）；
+        只断言 200 一侧，谁都被放行（403 腿丢）也看不出来。
+        """
+        # 三个接口都会真跑任务（掉包检测 / 每周清理），全部 stub 掉，绝不真执行。
+        monkeypatch.setattr(main, "_run_delist_check_once",
+                            lambda: {"total": 0, "delisted": 0, "results": []})
+        monkeypatch.setattr(main, "_run_tt_delist_check_once",
+                            lambda: {"total": 0, "delisted": 0, "results": []})
+        monkeypatch.setattr(main, "_run_weekly_cleanup_once", lambda: None)
+
+        admins = {"gg": admin_gg_headers, "tt": admin_tt_headers, "fb": admin_fb_headers}
+        for path, expect_platform in self.ENDPOINTS:
+            for platform, headers in admins.items():
+                status = client.post(path, headers=headers).status_code
+                if platform == expect_platform:
+                    assert status == 200, (
+                        f"{path} 期望平台={expect_platform}：{platform} admin 应放行，实得 {status}")
+                else:
+                    assert status == 403, (
+                        f"{path} 期望平台={expect_platform}：{platform} admin 应被拒，实得 {status}")
+
     def test_admins_are_not_flat_403(self, client, admin_gg_headers, monkeypatch):
         """⚠️ 改造前三个接口对 admin 一律 403。这里断言「不再是权限拒绝」。
 
