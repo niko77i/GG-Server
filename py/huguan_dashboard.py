@@ -268,6 +268,30 @@ def delete_undo(db, user_id: int, platform: str, direction: str) -> None:
                "WHERE user_id=? AND platform=? AND direction=?", (user_id, platform, direction))
 
 
+def load_undo_meta(db, user_id: int, platform: str, direction: str) -> dict | None:
+    """读某方向快照的 payload 与 created_at；无行 / 坏 payload 都是 None。
+
+    `load_undo` 的契约是「返回 payload 本身」（Task 1 已交付，测试按此断言），
+    改它会把契约撑破；而 GET 状态端点要报「上一次：10-06 14:32」（spec §7 / §八），
+    需要 created_at。故单开本函数，两类信息一起给。
+
+    坏 payload 与「无快照」同形（都 None），与 `load_undo` 的短路口径一致 ——
+    撤回入口据此禁用，不会拿一份读不懂的快照去写表。
+    """
+    row = db.execute("SELECT payload, created_at FROM huguan_sync_undo "
+                     "WHERE user_id=? AND platform=? AND direction=?",
+                     (user_id, platform, direction)).fetchone()
+    if not row or not row["payload"]:
+        return None
+    try:
+        loaded = json.loads(row["payload"])
+    except Exception:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    return {"payload": loaded, "created_at": row["created_at"]}
+
+
 def resolve_named_id(db, sql: str, params: tuple = ()) -> int | None:
     """按名称查唯一主键。命中 0 条或 ≥2 条都返回 None（规格 §8.4）。
 
@@ -1320,6 +1344,59 @@ def push_rows(user_id: int, platform: str, account_ids=None) -> None:
 
     from main import _sync_sheets_background
     _sync_sheets_background(_do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)
+
+
+def undo_push(user_id: int, platform: str) -> dict:
+    """撤回上一次「刷新到看板」：把快照里的格子写回原值，然后作废快照。
+
+    **无条件写回**，不做 CAS（spec §6.1）：快照记的就是「写之前那格长什么样」，
+    把它盖回去即可，不比对表当前值（表在后来的协同里被改过也照盖 —— 那是 spec
+    明确接受的口径）。未配置看板或没有快照 → 返回全零。
+
+    **同步执行**，不挂后台线程：撤回是用户当场点、当场要结果的显式操作，
+    要能立刻报出 `updated` / `not_found`（与 push_rows 的「后台、失败只记日志」
+    契约相反，故不复用 _sync_sheets_background）。
+    """
+    db = _open_db()
+    try:
+        conf = get_platform_config(db, user_id, platform)
+        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+            return {"updated": 0, "not_found": []}
+        payload = load_undo(db, user_id, platform, "push")
+    finally:
+        db.close()
+    if not payload:
+        return {"updated": 0, "not_found": []}
+
+    rows = push_undo_cells(payload)
+    if not rows:
+        # 快照存在但覆盖 0 行 ⇒ 没东西可退；作废它，否则撤回按钮永久亮着。
+        db = _open_db()
+        try:
+            delete_undo(db, user_id, platform, "push")
+            db.commit()
+        finally:
+            db.close()
+        return {"updated": 0, "not_found": []}
+
+    import google_sheets_service as gs
+    from main import _GOOGLE_SHEETS_CONFIG
+    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+    # 定位列必须与**快照用的同一列**（`KEY_COL[platform]`，见 snapshot_push_targets）：
+    # 写入器默认值是 "C"（GG/TT 的账户ID列），而 **FB 的账户ID在 D 列**
+    # （C 是「账户名称」）—— fb 路径不传就按错误的列定位、整批写空，且不抛异常（静默）。
+    # 必须用字典查表：按平台分流不许二元 else 兜底，缺键就要 KeyError。
+    # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
+    res = gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
+                                       conf["sheet_name"], rows,
+                                       key_col=KEY_COL[platform])
+    db = _open_db()
+    try:
+        delete_undo(db, user_id, platform, "push")
+        db.commit()
+    finally:
+        db.close()
+    return {"updated": res["updated"], "not_found": res["not_found"]}
 
 
 def push_remark_to_operator_dashboard(owner_id: int, account_id: str, value: str) -> None:

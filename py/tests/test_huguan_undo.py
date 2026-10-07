@@ -191,3 +191,256 @@ class TestPushSnapshot:
         out = hd.push_undo_cells(payload)
         assert out[0]["account_id"] == "U1"
         assert out[0]["cells"] == {"C": "旧", "G": "9"}
+
+
+# ---------- load_undo_meta：只给状态端点用的「payload + created_at」 ----------
+
+class TestLoadUndoMeta:
+    """`load_undo` 的契约是「返回 payload 本身」，不能改动；created_at 另走本函数。"""
+
+    def test_meta_returns_payload_and_created_at(self, client, fb_user):
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push", {"cells": [{"account_id": "A"}]})
+        db.commit()
+        meta = hd.load_undo_meta(db, fb_user, "fb", "push")
+        db.close()
+        assert meta["payload"] == {"cells": [{"account_id": "A"}]}
+        # 建表时 created_at 是 DEFAULT (datetime('now','localtime'))，落库后必须非空
+        assert meta["created_at"]
+
+    def test_meta_missing_returns_none(self, client, fb_user):
+        db = database.get_db()
+        assert hd.load_undo_meta(db, fb_user, "fb", "sync") is None
+        db.close()
+
+    def test_meta_bad_payload_returns_none(self, client, fb_user):
+        """坏 payload 与「无快照」同形（都 None），与 load_undo 的短路口径一致。"""
+        db = database.get_db()
+        db.execute("INSERT INTO huguan_sync_undo(user_id, platform, direction, payload) "
+                   "VALUES(?, 'fb', 'push', ?)", (fb_user, "{not json"))
+        db.commit()
+        assert hd.load_undo_meta(db, fb_user, "fb", "push") is None
+        db.close()
+
+    def test_meta_does_not_change_load_undo_contract(self, client, fb_user):
+        """回归哨兵：load_undo 仍旧只返回 payload（Task 1 已交付的契约）。"""
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push", {"v": 1})
+        db.commit()
+        assert hd.load_undo(db, fb_user, "fb", "push") == {"v": 1}
+        db.close()
+
+
+class TestPushUndoRoute:
+    """`undo_push` 的执行：写回快照里的格子 → 作废快照（规格 §6.1）。"""
+
+    def test_undo_available_reflects_snapshot(self, client, fb_user):
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push", {"cells": [{"account_id": "A", "cells": {}}]})
+        db.commit()
+        db.close()
+        # 直接调逻辑层（路由层需要 JWT，另测）
+        db = database.get_db()
+        got = hd.load_undo(db, fb_user, "fb", "push")
+        db.close()
+        assert got is not None
+
+    def test_undo_only_touches_own_records(self, client, fb_user):
+        db = database.get_db()
+        db.execute("INSERT INTO users(username, password, role, platform) "
+                   "VALUES('u_other', 'x', 'huguan', 'fb')")
+        other = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        hd.save_undo(db, fb_user, "fb", "push", {"v": 1})
+        db.commit()
+        assert hd.load_undo(db, other, "fb", "push") is None
+        db.close()
+
+    def test_undo_uses_writeback_helper(self, client, fb_user, monkeypatch):
+        """撤回走 update_rows_by_account_id，且只带快照里的格子。"""
+        calls = []
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push",
+                     {"spreadsheet_id": "S", "sheet_name": "N",
+                      "cells": [{"account_id": "U9", "cells": {"C": "旧名"}}]})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, uid, p: {"spreadsheet_id": "S", "sheet_name": "N"})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, name, rows, key_col="C":
+                            calls.append({"sid": sid, "name": name,
+                                          "rows": rows, "key_col": key_col})
+                            or {"updated": len(rows), "not_found": []})
+        out = hd.undo_push(fb_user, "fb")
+        assert calls and calls[0]["rows"][0]["account_id"] == "U9"
+        assert calls[0]["rows"][0]["cells"] == {"C": "旧名"}
+        # FB 的账户ID在 D 列：不显式传 key_col 就退回默认 "C"（账户名称）→ 整批静默写空
+        assert calls[0]["key_col"] == "D"
+        assert out["updated"] == 1
+
+    def test_gg_undo_uses_key_col_C(self, client, monkeypatch):
+        """对照：GG 的定位列是 "C"，显式传参必须仍是 "C"（挡「一律硬传 D」的变异体）。"""
+        _hg, uid = _make_user(client, "_undo_gg_keycol", role="huguan", platform="gg")
+        calls = []
+        db = database.get_db()
+        hd.save_undo(db, uid, "gg", "push",
+                     {"spreadsheet_id": "S", "sheet_name": "N",
+                      "cells": [{"account_id": "G1", "cells": {"C": "跨平台旧值"}}]})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, u, p: {"spreadsheet_id": "S", "sheet_name": "N"})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, name, rows, key_col="C":
+                            calls.append(key_col) or {"updated": len(rows), "not_found": []})
+        hd.undo_push(uid, "gg")
+        assert calls == ["C"]
+
+    def test_undo_deletes_snapshot_after_write(self, client, fb_user, monkeypatch):
+        """写回成功后快照必须作废 —— 否则能对同一次 push 反复撤回。"""
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push",
+                     {"spreadsheet_id": "S", "sheet_name": "N",
+                      "cells": [{"account_id": "U9", "cells": {"C": "旧"}}]})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, uid, p: {"spreadsheet_id": "S", "sheet_name": "N"})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: {"updated": 1, "not_found": []})
+        hd.undo_push(fb_user, "fb")
+        db = database.get_db()
+        assert hd.load_undo(db, fb_user, "fb", "push") is None
+        db.close()
+
+    def test_undo_without_snapshot_is_noop(self, client, fb_user, monkeypatch):
+        """没有快照 ⇒ 全零，且绝不碰写入器（不能凭空写表）。"""
+        calls = []
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, uid, p: {"spreadsheet_id": "S", "sheet_name": "N"})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: calls.append(1) or {"updated": 0, "not_found": []})
+        out = hd.undo_push(fb_user, "fb")
+        assert out == {"updated": 0, "not_found": []}
+        assert calls == []
+
+    def test_undo_unconfigured_dashboard_returns_zero(self, client, fb_user, monkeypatch):
+        """未配置看板 ⇒ 全零（与 push_rows 的静默跳过同口径），不碰写入器。"""
+        calls = []
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, uid, p: {"spreadsheet_id": "", "sheet_name": ""})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: calls.append(1) or {"updated": 0, "not_found": []})
+        assert hd.undo_push(fb_user, "fb") == {"updated": 0, "not_found": []}
+        assert calls == []
+
+    def test_undo_empty_cells_clears_snapshot(self, client, fb_user, monkeypatch):
+        """快照覆盖 0 行 ⇒ 没东西可退，但快照要作废（否则按钮永久可点）。"""
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push", {"spreadsheet_id": "S", "cells": []})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, uid, p: {"spreadsheet_id": "S", "sheet_name": "N"})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: {"updated": 0, "not_found": []})
+        assert hd.undo_push(fb_user, "fb") == {"updated": 0, "not_found": []}
+        db = database.get_db()
+        assert hd.load_undo(db, fb_user, "fb", "push") is None
+        db.close()
+
+
+def _make_user(client, username, role="huguan", platform="fb"):
+    """注册用户 → 改写 role/platform → 登录。返回 (headers, uid)。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role=?, platform=? WHERE username=?",
+               (role, platform, username))
+    db.commit()
+    uid = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()["id"]
+    db.close()
+    resp = client.post("/api/auth/login",
+                       json={"username": username, "password": "test123"})
+    return {"Authorization": f"Bearer {resp.get_json()['access_token']}"}, uid
+
+
+def _huguan_headers(client, username, platform="fb"):
+    """注册一个户管角色用户并登录，返回 (headers, uid)。"""
+    return _make_user(client, username, role="huguan", platform=platform)
+
+
+class TestUndoStatusRoute:
+    """GET /api/huguan/dashboard/undo：两方向各有无可撤快照 + 时间（spec §7 / §八）。"""
+
+    def test_reports_both_directions_with_created_at(self, client):
+        hg, uid = _huguan_headers(client, "_undo_status")
+        db = database.get_db()
+        hd.save_undo(db, uid, "fb", "push",
+                     {"cells": [{"account_id": "A"}, {"account_id": "B"}]})
+        # sync 的 count 口径 = updates 项数 + created 项数
+        hd.save_undo(db, uid, "fb", "sync",
+                     {"updates": [{"account_id": "A"}], "created": [{"account_id": "C"}]})
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
+        assert got["success"] is True
+        assert got["push"]["count"] == 2
+        assert got["sync"]["count"] == 2
+        # spec §八：按钮旁小字「上一次：10-06 14:32」需要 created_at
+        assert got["push"]["created_at"]
+        assert got["sync"]["created_at"]
+
+    def test_null_when_no_snapshot(self, client):
+        hg, _ = _huguan_headers(client, "_undo_status_none")
+        got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
+        assert got["push"] is None
+        assert got["sync"] is None
+
+    def test_only_own_snapshots_are_reported(self, client):
+        """记录按 JWT 里的 uid 取：别人的快照不得让我的按钮亮起来。"""
+        hg, _uid = _huguan_headers(client, "_undo_status_mine")
+        _other_hg, other = _huguan_headers(client, "_undo_status_other")
+        db = database.get_db()
+        hd.save_undo(db, other, "fb", "push", {"cells": [{"account_id": "X"}]})
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
+        assert got["push"] is None
+
+    def test_platform_isolation(self, client):
+        hg, uid = _huguan_headers(client, "_undo_status_iso")
+        db = database.get_db()
+        hd.save_undo(db, uid, "gg", "push", {"cells": [{"account_id": "A"}]})
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
+        assert got["push"] is None
+
+    def test_bad_platform_400(self, client):
+        hg, _ = _huguan_headers(client, "_undo_status_bad")
+        assert client.get("/api/huguan/dashboard/undo?platform=xx",
+                          headers=hg).status_code == 400
+
+    def test_missing_platform_400(self, client):
+        hg, _ = _huguan_headers(client, "_undo_status_missing")
+        assert client.get("/api/huguan/dashboard/undo", headers=hg).status_code == 400
+
+    def test_non_huguan_403(self, client):
+        h, _ = _make_user(client, "_undo_status_user", role="user")
+        assert client.get("/api/huguan/dashboard/undo?platform=gg",
+                          headers=h).status_code == 403

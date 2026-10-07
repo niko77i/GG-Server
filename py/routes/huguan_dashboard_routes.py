@@ -250,6 +250,45 @@ def _discard_push_undo(uid: int, platform: str) -> None:
         log.warning("作废 push 撤回快照失败: %s", e)
 
 
+@huguan_dashboard_bp.route("/api/huguan/dashboard/undo", methods=["GET"])
+@jwt_required()
+@huguan_required
+def dashboard_undo_status():
+    """两个方向各有没有可撤的快照（spec §7）。
+
+    响应形状 `{"success": true, "push": {...}|null, "sync": {...}|null}`：平铺，
+    不套一层 "undo" —— 与 spec §7 的接口表、以及本任务 brief 的 Produces 契约行一致
+    （brief Step 3 的示例代码写的是 `ok({"undo": out})`，那是计划快照里的笔误）。
+
+    push 的 count 是「快照覆盖的行数」；sync 的 count 是「updates 项数 + created 项数」，
+    与前端要显示的规模口径一致（spec §八 的「影响 N 行」）。
+
+    created_at 取自快照行（「上一次：10-06 14:32」），行不存在或 payload 坏掉 → null，
+    与「没有快照」同形。
+    """
+    platform = str(request.args.get("platform") or "").strip()
+    if platform not in hd.PLATFORMS:
+        return err("platform 必须是 gg、tt 或 fb", 400)
+    uid = get_uid()
+    db = database.get_db()
+    try:
+        out = {}
+        for direction in hd.UNDO_DIRECTIONS:
+            meta = hd.load_undo_meta(db, uid, platform, direction)
+            if not meta:
+                out[direction] = None
+            elif direction == "push":
+                out[direction] = {"count": len(meta["payload"].get("cells", [])),
+                                  "created_at": meta["created_at"]}
+            else:
+                out[direction] = {"count": len(meta["payload"].get("updates", []))
+                                           + len(meta["payload"].get("created", [])),
+                                  "created_at": meta["created_at"]}
+    finally:
+        db.close()
+    return ok(out)
+
+
 def _owner_option_platform():
     """owner-options 要按哪个平台隔离。
 
