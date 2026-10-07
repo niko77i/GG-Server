@@ -382,6 +382,8 @@ def batch_lookup_accounts():
     """
     db = get_db()
     data = parse_body()
+    if not isinstance(data, dict):
+        return err('请求体格式错误', 400)
     account_ids = data.get('account_ids') or []
     if not account_ids or not isinstance(account_ids, list):
         return err('请提供 account_ids 列表', 400)
@@ -437,11 +439,16 @@ def batch_delete_accounts():
     """
     db = get_db()
     data = parse_body()
+    if not isinstance(data, dict):
+        return err('请求体格式错误', 400)
     ids = data.get('ids') or []
     if not ids or not isinstance(ids, list):
         return err('未选择账户', 400)
-    # ids 元素闸门：元素随后原样绑进 sqlite（逐条 UPDATE），
-    # 非 ASCII 数字串 / 超 int64 会抛 OverflowError ⇒ 提前 400 挡下。
+    # ids 元素闸门：非法 / 超 int64 的元素必须回 400，而不是被静默吞掉。
+    # 下面绑定的是 `_valid_pk_int64(aid)` 的**返回值**（非法已归一为 None），
+    # 原始值到不了绑定处 ⇒ 本端点没有 OverflowError 路径；不挡的话会
+    # 落成 `id = NULL`，匹配不到任何行 ⇒ 进 not_found 并回 200。
+    # （GG `main.py` 的同名端点绑的是裸 `aid`，那边的注释才谈 OverflowError。）
     for _i in ids:
         if _valid_pk_int64(_i) is None:
             return err('ids 不合法', 400)

@@ -839,6 +839,17 @@ class TestFbBatchLookup:
             resp = client.post("/api/fb/accounts/batch-lookup", json=body, headers=hdr)
             assert resp.status_code == 400, f"未拦下：{body!r}"
 
+    def test_batch_lookup_rejects_non_dict_body(self, client):
+        """**非 dict 请求体（JSON 数组）⇒ 400，不是 500。**
+
+        `parse_body()` 里 `or {}` 只兜得住 `null`/`false`/`0` 这类假值；
+        非空数组会被原样返回，随后的 `data.get(...)` 抛 AttributeError。
+        去掉 `isinstance(data, dict)` 守卫这条会变红（500）。
+        """
+        hdr, _ = _fb_user(client, "t_lk_arr")
+        resp = client.post("/api/fb/accounts/batch-lookup", json=[1, 2], headers=hdr)
+        assert resp.status_code == 400, resp.get_data(as_text=True)
+
 
 # ==================== FB 账户面板批量能力（Task 2：批量软删） ====================
 #
@@ -921,6 +932,23 @@ class TestFbBatchDelete:
         hdr, _ = _fb_user(client, "t_bd_empty")
         assert client.post("/api/fb/accounts/batch-delete", json={"ids": []},
                            headers=hdr).status_code == 400
+
+    def test_rejects_non_list_ids(self, client):
+        """非列表 ids（如字符串）⇒ 400（形状照同族 batch-lookup 那条）。"""
+        hdr, _ = _fb_user(client, "t_bd_nonlist")
+        for body in ({"ids": "x"}, {"ids": 1}):
+            resp = client.post("/api/fb/accounts/batch-delete", json=body, headers=hdr)
+            assert resp.status_code == 400, f"未拦下：{body!r}"
+
+    def test_rejects_non_dict_body(self, client):
+        """**非 dict 请求体（JSON 数组）⇒ 400，不是 500。**
+
+        同上：`parse_body()` 的 `or {}` 兜不住非空数组，去掉
+        `isinstance(data, dict)` 守卫这条会变红（500）。
+        """
+        hdr, _ = _fb_user(client, "t_bd_arr")
+        resp = client.post("/api/fb/accounts/batch-delete", json=[1, 2], headers=hdr)
+        assert resp.status_code == 400, resp.get_data(as_text=True)
 
     def test_oversized_or_non_ascii_id_is_400_not_500(self, client):
         """非法 / 超 int64 的 id 元素必须 400，不能漏到 sqlite 绑定处变 500。"""
