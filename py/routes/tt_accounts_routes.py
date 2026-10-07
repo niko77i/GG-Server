@@ -10,7 +10,7 @@ from flask_jwt_extended import jwt_required
 import database
 from cache import cache as _app_cache
 
-from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
+from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES, parse_pagination
 from .decorators import tt_required, tt_write_required
 
 import huguan_dashboard as hd
@@ -207,8 +207,7 @@ def list_accounts():
     uid = get_uid()
     role = _get_role(db, uid)
 
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     search = (request.args.get('search') or '').strip()
     bc_id = (request.args.get('bc_id') or '').strip()
     agent_id = (request.args.get('agent_id') or '').strip()

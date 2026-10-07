@@ -43,7 +43,7 @@ import requests
 from functools import wraps
 from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform, no_huguan
 from routes.decorators import scheduler_required
-from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES, GLOBAL_OPTION_ROLES
+from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES, GLOBAL_OPTION_ROLES, parse_pagination
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 import huguan_dashboard as hd
 # google_ads_service 按需加载，不打包进 EXE
@@ -2771,8 +2771,7 @@ def products_list():
     mcc_id = request.args.get("mcc_id", "").strip()
     status_filter = request.args.get("status")  # None=不传, ""=正常, "paused"=暂停
     runner = request.args.get("runner", "mine").strip()  # "mine" | "all" | <user_id>
-    page = int(request.args.get("page", 1) or 1)
-    size = int(request.args.get("size", 20) or 20)
+    page, size = parse_pagination()
     db = _yt_db()
 
     # viewer 默认查看全部产品
@@ -3509,8 +3508,7 @@ def products_batch_delete_packages():
 @no_huguan
 def audit_log_list():
     """返回删除产品的审计日志列表（所有角色可查看）。"""
-    page = request.args.get("page", 1, type=int)
-    size = request.args.get("size", 20, type=int)
+    page, size = parse_pagination()
     offset = (page - 1) * size
 
     db = _yt_db()
@@ -4070,8 +4068,7 @@ def accounts_list():
     status = request.args.get("status", "").strip()
     agent = request.args.get("agent", "").strip()
     timezone = request.args.get("timezone", "").strip()
-    page = int(request.args.get("page", 1) or 1)
-    size = int(request.args.get("size", 20) or 20)
+    page, size = parse_pagination()
     db = _yt_db()
     if cross_user:
         where = ["a.deleted_at IS NULL"]; params = []
@@ -6001,8 +5998,7 @@ def mcc_list():
     search = request.args.get("search", "").strip()
     level = request.args.get("level", "").strip()
     parent_filter = request.args.get("parent_filter", "")  # "has_parent", "top", ""
-    page = int(request.args.get("page", 1) or 1)
-    size = int(request.args.get("size", 20) or 20)
+    page, size = parse_pagination()
     db = _yt_db()
     uid_str = str(user_id)
     actor = auth.get_user_by_id(user_id)
@@ -8419,8 +8415,7 @@ def admin_list_users():
     if not user or user["role"] not in ("developer", "admin", "huguan"):
         return jsonify(success=False, error="Permission denied"), 403
     search = request.args.get("search", "")
-    page = int(request.args.get("page", 1))
-    page_size = int(request.args.get("page_size", 20))
+    page, page_size = parse_pagination(name="page_size")
     platform = request.args.get("platform") or None  # 'gg' | 'fb' | None（全部）
     role_filter = "huguan" if user["role"] == "huguan" else None
     result = auth.list_users(search, page, page_size, current_user_id=user_id,
@@ -9992,8 +9987,7 @@ def ad_reports_list():
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
     search = request.args.get("search", "").strip()
-    page = int(request.args.get("page", 1))
-    size = int(request.args.get("size", 50))
+    page, size = parse_pagination(default=50)
 
     db = _yt_db()
 

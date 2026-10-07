@@ -1,7 +1,7 @@
 """Facebook 平台 API 路由 — 产品管理 / 账户管理 / BM管理 / 像素BM管理 / 数据提取 / 数据管理"""
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
+from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES, parse_pagination
 from .decorators import fb_required, no_huguan
 import huguan_dashboard as hd
 import re
@@ -17,8 +17,7 @@ fb_bp = Blueprint('fb', __name__)
 @fb_required
 def list_bms():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     status = request.args.get('status', '')
     offset = (page - 1) * size
     uid = get_uid()
@@ -59,8 +58,7 @@ def list_bms():
 @fb_required
 def list_bms_unified():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     search = request.args.get('search', '')
     status = request.args.get('status', '')
     bm_type = request.args.get('bm_type', '')
@@ -266,8 +264,7 @@ def ban_and_migrate(bid):
 @fb_required
 def list_accounts():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     bm_filter = request.args.get('bm_id', '', type=str)
     status_filter = request.args.get('status_id', '', type=str)
     search = request.args.get('search', '', type=str)
@@ -460,8 +457,7 @@ def delete_account(aid):
 def list_deleted_accounts():
     """返回已删除账户列表"""
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     offset = (page - 1) * size
     uid = get_uid()
 
@@ -634,8 +630,7 @@ def account_bm_history(aid):
 @fb_required
 def list_products():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     search = request.args.get('search', '')
     status = request.args.get('status', '')
     region = request.args.get('region', '')
@@ -917,8 +912,7 @@ def delete_line(lid):
 @fb_required
 def list_pixel_bms():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     offset = (page - 1) * size
     uid = get_uid()
 
@@ -1142,8 +1136,7 @@ def delete_pixel(pxid):
 @fb_required
 def list_all_pixels():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     search = request.args.get('search', '')
     offset = (page - 1) * size
 
@@ -1649,8 +1642,7 @@ def fb_retry_sheets_sync():
 @fb_required
 def list_reports():
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 50, type=int)
+    page, size = parse_pagination(default=50)
     product_name = request.args.get('product_name', '')
     line_name = request.args.get('line_name', '')
     date_from = request.args.get('date_from', '')
