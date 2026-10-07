@@ -310,28 +310,60 @@ class TestFbBatchCreate:
         data = resp.get_json()
         assert data["created"] == 2
         assert sorted(data["created_ids"]) == ["BC-1", "BC-2"]
-        # 落库校验：name = "前缀 BC-1"，owner 是调用者，owner 不是提交人以外的人
+        # 落库校验（不是只看响应体）：名称与归属
+        rows = _fb_accounts_by_ids(["BC-1", "BC-2"])
+        assert {r["name"] for r in rows} == {"前缀 BC-1", "前缀 BC-2"}
+        assert {r["timezone"] for r in rows} == {"UTC+8"}
+        owner = _uid_of(fb_user_headers)
+        assert {r["owner_id"] for r in rows} == {owner}
 
     def test_overrides_win_over_common(self, client, fb_user_headers):
-        """overrides 逐行覆盖共用默认值。"""
-        # 传 timezone 共用 "UTC+8"、overrides 里 BC-3 给 "UTC+9"
-        # 断言 BC-3 落库的 timezone 是 UTC+9、BC-4 是 UTC+8
+        resp = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["BC-3", "BC-4"], "timezone": "UTC+8",
+            "overrides": {"BC-3": {"timezone": "UTC+9", "name": "手填名"}},
+        }, headers=fb_user_headers)
+        assert resp.get_json()["created"] == 2
+        rows = {r["account_id"]: r for r in _fb_accounts_by_ids(["BC-3", "BC-4"])}
+        assert rows["BC-3"]["timezone"] == "UTC+9"     # override 生效
+        assert rows["BC-3"]["name"] == "手填名"          # overrides.name 直接当完整名称
+        assert rows["BC-4"]["timezone"] == "UTC+8"     # 未覆盖的走共用值
 
     def test_duplicate_account_id_reports_exists_not_generic(self, client, fb_user_headers):
         """撞 UNIQUE ⇒ 「已存在」，不是「操作失败」。"""
-        # 先建 BC-DUP，再批量建同 ID
+        client.post("/api/fb/accounts/create",
+                    json={"name": "dup", "account_id": "BC-DUP"}, headers=fb_user_headers)
+        data = client.post("/api/fb/accounts/batch-create",
+                           json={"account_ids": ["BC-DUP"]}, headers=fb_user_headers).get_json()
+        assert data["created"] == 0
         assert [e["account_id"] for e in data["errors"]] == ["BC-DUP"]
         assert "已存在" in data["errors"][0]["error"]
+
+    def test_partial_failure_does_not_abort_batch(self, client, fb_user_headers):
+        """一条失败不影响其余（逐行独立 try/except）。"""
+        client.post("/api/fb/accounts/create",
+                    json={"name": "dup", "account_id": "BC-DUP2"}, headers=fb_user_headers)
+        data = client.post("/api/fb/accounts/batch-create",
+                           json={"account_ids": ["BC-OK", "BC-DUP2", "BC-OK2"]},
+                           headers=fb_user_headers).get_json()
+        assert data["created"] == 2
+        assert [e["account_id"] for e in data["errors"]] == ["BC-DUP2"]
+
+    def test_non_digit_account_id_goes_to_errors_not_500(self, client, fb_user_headers):
+        """账户ID 非纯数字 ⇒ 落 errors（照 create_account 的既有校验），不是 500。"""
+        data = client.post("/api/fb/accounts/batch-create",
+                           json={"account_ids": ["不是数字"]}, headers=fb_user_headers).get_json()
+        assert data["created"] == 0
+        assert "纯数字" in data["errors"][0]["error"]
 
     def test_blank_and_non_list_are_400(self, client, fb_user_headers):
         for body in ({"account_ids": []}, {"account_ids": "x"}, {}):
             assert client.post("/api/fb/accounts/batch-create", json=body,
                                headers=fb_user_headers).status_code == 400
-
-    def test_partial_failure_does_not_abort_batch(self, client, fb_user_headers):
-        """一条失败不影响其余（逐行独立 try/except）。"""
-        # ["BC-OK","BC-DUP","BC-OK2"] ⇒ created==2 且 errors 只有 BC-DUP
 ```
+
+> `_fb_accounts_by_ids` / `_uid_of` 是**本测试文件内的读取助手**（直接 `database.get_db()` 查
+> `fb_accounts`）。若文件里已有等价助手就复用；没有再写，**别让断言只落在响应体上** ——
+> 「返回 created=2 但库里没落」这种情况只有查库才测得出来。
 
 - [ ] **Step 2: 运行确认失败**
 - [ ] **Step 3: 实现**
@@ -415,6 +447,13 @@ def batch_create_accounts():
 ```
 
 - [ ] **Step 4: 运行确认通过**
+
+> **一处有意的取舍，写进端点 docstring**：`status_id` / `primary_bm_id` 过 `_valid_pk_int64`
+> 后非法值会**静默变成 None**（＝不设状态／不挂主 BM），而不是 400 拒绝整批。
+> 理由：批量建户是「尽量多建几条」的语义（单条失败进 `errors` 而不中断整批），
+> 一个字段格式不对不该让整批失败；但**这条必须写进 docstring**，否则后来者会以为漏了校验。
+> 若你核对现行代码后认为这类非法值应当整批 400，**先问控制端**再改。
+
 - [ ] **Step 5: 提交**
 
 ```bash
@@ -460,7 +499,16 @@ git commit -m "feat(fb): 批量建户端点（共用默认值 + overrides）"
       <el-table-column type="selection" width="46" />
 ```
 
-并以**同一 `@selection-change` 处理器**维护 `const selected = ref([])`。
+并在 `<script setup>` 里补**四个 ref**（前三颗按钮要用，缺了会直接报未定义）：
+
+```js
+const selected = ref([])
+const lookupVisible = ref(false)
+const batchImportVisible = ref(false)
+const deletedVisible = ref(false)
+```
+
+并以**同一 `@selection-change` 处理器**维护 `selected`（`const selected = ref([])` 即上面的第一个）。
 
 批量删除复用既有单删的二次确认口径（`ElMessageBox.confirm`），成功后 `load()` 刷新。
 
