@@ -1434,3 +1434,61 @@ class TestSyncRouteSnapshotWiring:
         assert hd.load_undo(db, uid, "gg", "sync") is None
         db.close()
 
+
+# ---------- Task 6: 删用户时的快照清理 ----------
+
+
+class TestDeleteUserCleanup:
+    """`huguan_sync_undo.user_id REFERENCES users(id)` 且无 ON DELETE，连接又开着
+    `PRAGMA foreign_keys=ON` ⇒ 不清理的话，**删任何用过看板的户管都会
+    `FOREIGN KEY constraint failed`（500）**。spec §八 / 计划 Task 6。
+    """
+
+    def test_deleting_user_via_endpoint_succeeds_with_undo_row_present(self, client, fb_user):
+        """**驱动真实删用户端点**：户管有快照时删他，不能以 FOREIGN KEY constraint
+        failed 收场。
+
+        ⚠️ 这条**不能**自己 DELETE 再断言行没了 —— 那是自证式空转，测不到
+        `admin_delete_user`。必须在删之前留下快照，然后走真实删用户路径，断言它
+        成功且快照也没了。
+
+        `developer` 身份发起（删用户需要 admin/developer；developer 不受
+        `_check_modify_user` 的同级保护拦截）。目标户管的 role 先改成 'user'：
+        `admin_delete_user` 对 developer 目标直接 400，用 'user' 让本测试只测
+        「快照清理」这一件事。
+        """
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push", {"v": 1})
+        db.commit()
+        # 目标用户不能是 developer/admin，否则会被同级保护 / 400 拦掉
+        db.execute("UPDATE users SET role='user' WHERE id=?", (fb_user,))
+        db.commit()
+        db.close()
+
+        # ⚠️ 偏离 brief：brief 用 `INSERT INTO users(...password='test123')` 造 developer，
+        # 但 `login_user` 走 `check_password_hash`，明文密码必然 401（KeyError:
+        # 'access_token'）。改用仓内既定写法 `_make_user`（register 落哈希 + UPDATE
+        # 改角色），断言与意图不变。
+        dev_headers, _dev_id = _make_user(client, "_undo_del_dev", role="developer")
+
+        r = client.delete(f"/api/admin/users/{fb_user}", headers=dev_headers)
+        assert r.status_code == 200, r.get_json()
+
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM huguan_sync_undo WHERE user_id=?",
+                       (fb_user,)).fetchone()[0]
+        db.close()
+        assert n == 0
+
+    def test_undo_table_is_in_delete_user_cleanup_list(self):
+        """静态守卫：`admin_delete_user` 的代码里必须出现 `huguan_sync_undo`。
+
+        上面那条是端到端行为（更强），这条是**直指根因**的守卫 —— 将来有人重构删
+        用户逻辑、把清理行弄丢了，这条会立刻红并说清原因。
+        """
+        import inspect
+        import main
+        src = inspect.getsource(main.admin_delete_user)
+        assert "huguan_sync_undo" in src, \
+            "admin_delete_user 未清理 huguan_sync_undo —— 删任何用过看板的户管都会 FOREIGN KEY 500"
+

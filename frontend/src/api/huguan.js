@@ -13,6 +13,13 @@ export const huguanApi = {
   /** 表 → 系统：dry_run=true 出差异报告，false 才落库 */
   sync: (body) => api.post('/huguan/dashboard/sync', body),
 
+  /** 两个方向各有没有可撤的快照（子项目 ③）。平铺：res.push / res.sync，各为
+   *  `{count, created_at}` 或 null。⚠️ **不是** res.undo.push（计划里的写法已弃用）。 */
+  getUndo: (platform) => api.get('/huguan/dashboard/undo', { params: { platform } }),
+
+  /** 执行一次撤回。direction: 'push' | 'sync'。uid 由后端从 JWT 取，请求体不带。 */
+  doUndo: (platform, direction) => api.post('/huguan/dashboard/undo', { platform, direction }),
+
   // 「户归属」下拉的数据源（**编辑**用途：当前看板平台的用户 + developer/户管）。
   // **不要**换回 /platform/users：那个端点是给「归属人」筛选器用的，只列该平台有未
   // 删除账户的人；拿它当改归属的选项源，户管就没法把户转给刚建号、还没分到户的新人。

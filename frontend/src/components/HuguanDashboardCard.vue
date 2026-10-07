@@ -56,11 +56,25 @@
         </div>
         <el-tooltip content="请先填写表格地址、选择工作表并保存配置" placement="top"
                     :disabled="hdConfigured">
-          <span style="display:inline-flex;gap:8px;">
-            <el-button @click="pushDlg.visible = true" :loading="hdPushing"
-                       :disabled="!hdConfigured || hdBusy">🔄 刷新到看板</el-button>
-            <el-button @click="syncHd" :loading="hdSyncing"
-                       :disabled="!hdConfigured || hdBusy">⬇️ 从表同步到系统</el-button>
+          <span style="display:inline-flex;gap:24px;align-items:center;flex-wrap:wrap;">
+            <span style="display:inline-flex;gap:8px;align-items:center;">
+              <el-button @click="pushDlg.visible = true" :loading="hdPushing"
+                         :disabled="!hdConfigured || hdBusy">🔄 刷新到看板</el-button>
+              <el-button @click="askUndo('push')" :loading="hdUndoing === 'push'"
+                         :disabled="!hdUndo.push || hdBusy">↩️ 撤回上次</el-button>
+              <span v-if="hdUndo.push" style="font-size:12px;color:#6b7280;">
+                上一次：{{ hdUndoText('push') }}
+              </span>
+            </span>
+            <span style="display:inline-flex;gap:8px;align-items:center;">
+              <el-button @click="syncHd" :loading="hdSyncing"
+                         :disabled="!hdConfigured || hdBusy">⬇️ 从表同步到系统</el-button>
+              <el-button @click="askUndo('sync')" :loading="hdUndoing === 'sync'"
+                         :disabled="!hdUndo.sync || hdBusy">↩️ 撤回上次</el-button>
+              <span v-if="hdUndo.sync" style="font-size:12px;color:#6b7280;">
+                上一次：{{ hdUndoText('sync') }}
+              </span>
+            </span>
           </span>
         </el-tooltip>
       </div>
@@ -390,13 +404,87 @@
       </div>
     </template>
   </el-dialog>
+
+  <!-- ↩️ 撤回上次 · 结果报告（与差异报告同一口径：冲突 / 保留 / 表里找不到的行都逐条列出，
+       不能只弹一个「成功 N 项」—— spec §八 明文要求） -->
+  <el-dialog v-if="authStore.isHuguan" v-model="undoDlg.visible" :title="undoTitle"
+             width="760px" top="8vh" :close-on-click-modal="false">
+    <div style="max-height:70vh;overflow-y:auto;">
+      <el-alert v-if="undoDlg.error" type="error" show-icon :closable="false">
+        <template #title>撤回失败：{{ undoDlg.error }}</template>
+        <div style="font-size:12px;">本次没有撤回任何内容，请重试。</div>
+      </el-alert>
+
+      <template v-else>
+        <el-alert type="success" show-icon :closable="false">
+          <template #title>{{ undoDoneText }}</template>
+        </el-alert>
+
+        <!-- 冲突：同步之后被别人改过，一律跳过、不覆盖 -->
+        <div v-if="undoConflicts.length" style="margin-top:14px;">
+          <el-alert type="warning" show-icon :closable="false">
+            <template #title>有 {{ undoConflicts.length }} 项没有撤回（同步后被改过）</template>
+            <div style="font-size:12px;">下面这些项在你同步之后被改动过，系统没有覆盖它们，改动保留。</div>
+          </el-alert>
+          <el-table :data="undoConflictsShown" size="small" border style="margin-top:8px;">
+            <el-table-column label="账户ID" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">{{ hdUndoItemLabel(row) }}</template>
+            </el-table-column>
+            <el-table-column prop="reason" label="原因" min-width="160" />
+          </el-table>
+          <div v-if="undoConflicts.length > 20" style="margin-top:6px;font-size:12px;color:#6b7280;">
+            …另有 {{ undoConflicts.length - 20 }} 项
+          </div>
+        </div>
+
+        <!-- 保留：新建的账户被同步之后改过，保留不删 -->
+        <div v-if="undoKept.length" style="margin-top:14px;">
+          <el-alert type="warning" show-icon :closable="false">
+            <template #title>有 {{ undoKept.length }} 个新建账户没有删除（同步后被改过）</template>
+            <div style="font-size:12px;">这些账户是你那次同步新建的，之后被人改过，系统保留它们、没有删除。</div>
+          </el-alert>
+          <el-table :data="undoKeptShown" size="small" border style="margin-top:8px;">
+            <el-table-column label="账户ID" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">{{ hdUndoItemLabel(row) }}</template>
+            </el-table-column>
+            <el-table-column prop="reason" label="原因" min-width="160" />
+          </el-table>
+          <div v-if="undoKept.length > 20" style="margin-top:6px;font-size:12px;color:#6b7280;">
+            …另有 {{ undoKept.length - 20 }} 个
+          </div>
+        </div>
+
+        <!-- 表里找不到的行 -->
+        <div v-if="undoNotFound.length" style="margin-top:14px;">
+          <el-alert type="warning" show-icon :closable="false">
+            <template #title>有 {{ undoNotFound.length }} 个账户不在你的表里</template>
+            <div style="font-size:12px;">这些账户在表里的行已经不在了，本次没能还原它们。</div>
+          </el-alert>
+          <el-table :data="undoNotFoundShown" size="small" border style="margin-top:8px;">
+            <el-table-column label="账户ID" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">{{ hdUndoItemLabel(row) }}</template>
+            </el-table-column>
+          </el-table>
+          <div v-if="undoNotFound.length > 20" style="margin-top:6px;font-size:12px;color:#6b7280;">
+            …另有 {{ undoNotFound.length - 20 }} 个
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <template #footer>
+      <div style="margin-left:auto;">
+        <el-button type="primary" @click="undoDlg.visible = false">关闭</el-button>
+      </div>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { huguanApi } from '@/api/huguan'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api/client'
 
 const authStore = useAuthStore()
@@ -441,6 +529,13 @@ const updateTblRef = ref(null)
 
 const pushDlg = reactive({ visible: false })
 const syncDlg = reactive({ visible: false, mode: 'A', applyError: '', applying: false })
+
+// 撤回（子项目 ③，spec §八）：hdUndo 是「两个方向各有没有可撤的快照」，
+// 平铺取自 GET /huguan/dashboard/undo 的 res.push / res.sync（各为 {count, created_at} 或 null）。
+// 撤回成功后这两个值会作废，必须重新拉一次，否则按钮状态停在旧值。
+const hdUndo = ref({ push: null, sync: null })
+const hdUndoing = ref(null)            // 'push' | 'sync' | null，用于按钮 loading
+const undoDlg = reactive({ visible: false, direction: 'push', result: null, error: '' })
 const clearingExpanded = ref(false)
 
 const syncDiff = ref(null)
@@ -450,7 +545,8 @@ const selCreate = ref([])
 const selUpdate = ref([])
 
 const hdBusy = computed(() =>
-  hdReading.value || hdSaving.value || hdPushing.value || hdSyncing.value || syncDlg.applying)
+  hdReading.value || hdSaving.value || hdPushing.value || hdSyncing.value
+  || !!hdUndoing.value || syncDlg.applying)
 const hdConfigured = computed(() => !!(hdForm.value.spreadsheet_id && hdForm.value.sheet_name))
 
 // 提示条三态：显式消息 > 未配置空态 > 无。type 只跟着显式消息走。
@@ -536,6 +632,26 @@ function hdWarnText(message) {
   return out
 }
 const hdWriteBackText = OWNER_WRITEBACK_TEXT[HD_PLATFORM]
+
+// ---------- 撤回按钮的小字与报告项标签（spec §八） ----------
+// 小字格式「上一次：10-06 14:32 · 影响 128 行」。created_at 由后端按
+// datetime('now','localtime') 落成 "YYYY-MM-DD HH:MM:SS"，此处只取「月-日 时:分」。
+function hdUndoText(direction) {
+  const meta = hdUndo.value[direction]
+  if (!meta) return ''
+  const raw = String(meta.created_at || '')
+  // 形状对不上就原样显示 —— 绝不静默吞掉一个时间（宁可难看也不丢信息）
+  const when = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(raw) ? raw.slice(5, 16) : (raw || '未知时间')
+  const unit = direction === 'push' ? '行' : '项'
+  return `${when} · 影响 ${meta.count || 0} ${unit}`
+}
+// 报告项可能是对象（conflicts / kept：{account_id} 或状态类 {name}），
+// 也可能是纯字符串（not_found：账户ID 列表）—— 两种形状都要能显示。
+function hdUndoItemLabel(row) {
+  if (row === null || row === undefined) return '—'
+  if (typeof row !== 'object') return String(row)
+  return row.account_id || row.name || '—'
+}
 
 function hdFieldNewValue(value, cleared) {
   if (typeof value === 'boolean') return value ? '是' : '否'
@@ -629,6 +745,26 @@ const hdClearingShown = computed(() => clearingExpanded.value ? hdClearing.value
 const hdResult = computed(() => syncResult.value || {})
 const hdNotAppliedShown = computed(() => (hdResult.value.not_applied || []).slice(0, 20))
 
+// ---------- 撤回结果的派生数据（与差异报告同一渲染口径） ----------
+// 结果体按方向形状不同：push {updated, not_found}；sync {reverted, conflicts, kept, not_found}。
+// 报告必须能列出冲突项与未命中项 —— 不能只弹一个「成功 N 项」（spec §八）。
+const undoResult = computed(() => undoDlg.result || {})
+const undoConflicts = computed(() => undoResult.value.conflicts || [])
+const undoKept = computed(() => undoResult.value.kept || [])
+const undoNotFound = computed(() => undoResult.value.not_found || [])
+const undoConflictsShown = computed(() => undoConflicts.value.slice(0, 20))
+const undoKeptShown = computed(() => undoKept.value.slice(0, 20))
+const undoNotFoundShown = computed(() => undoNotFound.value.slice(0, 20))
+const undoDoneText = computed(() => {
+  const r = undoResult.value
+  return undoDlg.direction === 'push'
+    ? `已撤回上一次刷新：还原 ${r.updated || 0} 行。`
+    : `已撤回上一次同步：还原 ${r.reverted || 0} 项。`
+})
+const undoTitle = computed(() => (undoDlg.direction === 'push'
+  ? '撤回上次 · 刷新到看板'
+  : '撤回上次 · 从表同步到系统'))
+
 const selectedCount = computed(() => selCreate.value.length + selUpdate.value.length + selOwner.value.length)
 // 只有「这次点下去会不可逆地清空字段」才染红（永远染红等于没染）
 const willClear = computed(() => selUpdate.value.some(x => (x.clears || []).length))
@@ -662,6 +798,53 @@ async function loadHdConfig() {
     ElMessage.error(e?.response?.data?.error || '读取看板配置失败')
   } finally {
     hdLoadingConfig.value = false
+  }
+}
+
+async function loadHdUndo() {
+  if (!authStore.isHuguan) return
+  try {
+    const res = await huguanApi.getUndo(HD_PLATFORM)
+    // 平铺：res.push / res.sync（不是 res.undo.push）
+    hdUndo.value = { push: res.push || null, sync: res.sync || null }
+  } catch {
+    // 快照状态只是「撤回按钮亮不亮」的信息，拉不到就当没有（按钮禁用），
+    // 不打断用户 —— 刷新/同步主流程照常可用。
+    hdUndo.value = { push: null, sync: null }
+  }
+}
+
+async function askUndo(direction) {
+  const label = direction === 'push' ? '刷新到看板' : '从表同步到系统'
+  try {
+    await ElMessageBox.confirm(
+      `确定撤回上一次「${label}」吗？这与那次同步相反：系统会把当时写下的值还原成之前的样子。`,
+      '确认撤回',
+      { type: 'warning', confirmButtonText: '确认撤回', cancelButtonText: '取消',
+        distinguishCancelAndClose: true },
+    )
+  } catch {
+    // 用户取消或关闭二次确认（ElMessageBox reject 的是 'cancel'/'close'，
+    // 不是操作失败）—— 什么都不做。
+    return
+  }
+
+  hdUndoing.value = direction
+  try {
+    const res = await huguanApi.doUndo(HD_PLATFORM, direction)
+    undoDlg.direction = direction
+    undoDlg.result = res
+    undoDlg.error = ''
+    undoDlg.visible = true
+    // 快照已被本次撤回作废 ⇒ 必须重新拉一次，否则按钮状态停在旧值。
+    await loadHdUndo()
+  } catch (e) {
+    undoDlg.direction = direction
+    undoDlg.result = null
+    undoDlg.error = e?.response?.data?.error || '撤回失败'
+    undoDlg.visible = true
+  } finally {
+    hdUndoing.value = null
   }
 }
 
@@ -727,6 +910,9 @@ async function doPushHd() {
     setHdHint('刷新到看板失败。本次没有写入任何数据，直接重试是安全的。', 'error')
   } finally {
     hdPushing.value = false
+    // 这次刷新留下了新快照（写失败/空写时后端作废，拉回来就是 null）⇒
+    // 重新拉一次，「撤回上次」按钮才会随本次操作亮起。
+    loadHdUndo()
   }
 }
 
@@ -807,8 +993,14 @@ async function applySync() {
     syncDlg.applyError = e?.response?.data?.error || '从表同步到系统失败'
   } finally {
     syncDlg.applying = false
+    // 这次同步留下了新快照 ⇒ 重新拉一次，「撤回上次」按钮随之亮起。
+    loadHdUndo()
   }
 }
 
-onMounted(loadHdConfig)
+onMounted(() => {
+  // 并行拉一次：配置与「有没有可撤的快照」互不依赖。
+  loadHdConfig()
+  loadHdUndo()
+})
 </script>

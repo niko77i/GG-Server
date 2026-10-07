@@ -8426,6 +8426,11 @@ def admin_delete_user(uid):
         conn.execute("UPDATE fb_bms SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE fb_pixel_bms SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE fb_account_bm_history SET changed_by = NULL WHERE changed_by = ?", (uid,))
+        # 户管看板同步撤回快照（子项目 ③）：user_id REFERENCES users(id) 且无 ON DELETE，
+        # 而连接开着 PRAGMA foreign_keys=ON ⇒ 不清理的话，删**任何用过看板的户管**都会以
+        # `FOREIGN KEY constraint failed` 收场（实测复现）。快照是纯归属关系（只有本人会
+        # 读写的凭据），与上面「在跑人员 / 做表数据」同类，直接删除。
+        conn.execute("DELETE FROM huguan_sync_undo WHERE user_id = ?", (uid,))
         # 字典表（选项）的创建人
         conn.execute("UPDATE agents SET owner_id = NULL WHERE owner_id = ?", (uid,))
         conn.execute("UPDATE account_statuses SET owner_id = NULL WHERE owner_id = ?", (uid,))
