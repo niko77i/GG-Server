@@ -41,6 +41,12 @@ config/google_sheets_credentials.json
 config/google_sheets_token.json
 config/fit-boulevard-503111-u4-812bc02c2000.json
 
+# Claude Code 的 worktree 工作副本（2026-10-07 补）
+# 不加这条时 `git status` 会一直挂着 `?? .claude/`，一次 `git add .` 就会把
+# 整个 worktree 的工作副本（含 frontend/dist、node_modules 等）提交进仓库。
+# 只忽略 worktrees/ 子目录：.claude/settings.json 是团队共享配置，要入库。
+.claude/worktrees/
+
 # 系统文件
 .DS_Store
 Thumbs.db
