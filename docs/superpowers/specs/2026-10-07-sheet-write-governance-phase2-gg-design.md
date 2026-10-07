@@ -241,4 +241,11 @@ def run_write_many(db, *, user_id, platform, target, business_keys,
 1. **充值路径是在工作的路径** —— 迁移会动 `_on_fail`、前端 tooltip 与重试入口。缓解：`recharge_records` 的列保留（可回退读），且改造前后前端行为一致（都是「失败才显示 ⚠️」）。
 2. **`run_write_many` 是新契约** —— 但加法式：`run_write` 不动，一期已审代码零改动。
 3. **批量点位从「一个线程串行 N 次 API」不变**（`run_write_many` 保持一个线程），只是多了 N 行日志。
-4. **前端运行时行为仍需人工验证** —— 与一期同：`npm run build` 只证明能编译。
+4. **跨用户充值失败只通知操作者**（Task 3 审查点名的 plan-mandated 项，用户 2026-10-07 未裁决，按推荐保持）。
+   改前 `⚠️` 是 `recharge_records` 上的**列**，任何能看到该账户的人（owner / admin / 户管）打开账户都能看到；
+   改后日志行按 `sheet_write_log.user_id = 操作者` 归属，`/api/sheet-write/status` 只回自己的行 ⇒
+   **管理员/户管替他人账户充值而写表失败时，账户 owner 看不到、也无法重试**。
+   保持现状的理由：① 这条通知的语义是「**我这次操作**没写进去」，操作者才能重试；
+   ② 扩大到按账户可见需要改 `/status` 的隔离规则（不再是 `WHERE user_id=?`），属碰数据隔离模型的独立改动。
+   **将来若要求按账户可见，改的是 status 接口的隔离规则，不是这一处。**
+5. **前端运行时行为仍需人工验证** —— 与一期同：`npm run build` 只证明能编译。
