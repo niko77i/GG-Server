@@ -697,6 +697,8 @@ uid 只从 JWT 取，请求体里的 uid 被忽略（有专门用例覆盖）。
 
   **参数约定**：`isAvailable` 恒为第 3 参，类型是 `(col) => boolean`（接收注册表里的一项，判断该列对当前角色是否可见）。它是谓词，**不是** auth store 对象。
 
+  **`isAvailable` 是可见性的唯一权威**，本模块内不做任何「列自身 `available` 闸门」的兜底。也就是说：**谁调用谁负责把列自身的闸门折算进谓词**。Task 4 的 store 就是这么做的（`(col) => !col.available || col.available(auth)`）；若调用方直接传一个不过滤闸门的谓词，带闸门的列（如仅户管可见的「户归属」）就会对所有人显示 —— 这是本模块最容易踩的坑。
+
 - [ ] **Step 1: 写失败测试**
 
 创建 `frontend/tests/columnPrefsLogic.test.mjs`：
@@ -882,7 +884,14 @@ export function indexByKey(registry) {
 }
 
 function available(col, isAvailable) {
-  return !col.available || isAvailable(col)
+  // isAvailable 是**唯一权威**，这里不做「列自身 available 闸门」的兜底判定。
+  //
+  // 曾经的错误写法是 `!col.available || isAvailable(col)`：它会让不带 available 的
+  // 列**永远**通过，于是 `(col) => Boolean(col.available)` 这类严格谓词根本无法把
+  // 非闸门列挡掉 —— 实测该写法会让「被角色闸门挡掉的列不算可见」这条用例变红
+  // （19 pass / 1 fail）。列自身的闸门由调用方折算进谓词，见 Task 4 store 的
+  // `isAvailable()`：`(col) => !col.available || col.available(auth)`。
+  return isAvailable(col)
 }
 
 /**
@@ -1058,6 +1067,12 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
     return prefs.value?.[panelKey] ?? null
   }
 
+  /**
+   * 可见性谓词。**必须在这里把列自身的 `available` 闸门折算进来** ——
+   * columnPrefsLogic 里的 `available()` 只做 `isAvailable(col)` 透传，
+   * 不再兜底判断列的闸门（那种兜底会让严格谓词失效，见该模块的注释）。
+   * 漏掉这里的 `!col.available ||` 会让「户归属」这类仅户管可见的列对所有人显示。
+   */
   function isAvailable() {
     const auth = useAuthStore()
     return (col) => !col.available || col.available(auth)
