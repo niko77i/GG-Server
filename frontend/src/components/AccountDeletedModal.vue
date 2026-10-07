@@ -88,6 +88,7 @@ function onSizeChange(s) { size.value = s; page.value = 1; load() }
 // 每次打开都从第一页、清空搜索重来 —— 与改动前 @open="load" 的行为一致。
 watch(() => props.visible, (v) => {
   if (v) { page.value = 1; searchText.value = ''; load() }
+  else { clearTimeout(searchTimer) }
 })
 
 async function doRestore(row) {
