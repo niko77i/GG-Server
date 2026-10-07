@@ -1,5 +1,6 @@
 """TikTok 广告账户 API 路由 — 账户管理 / 充值 / 同步 / 回收原因"""
 import json
+import logging
 import datetime
 import sqlite3
 
@@ -14,6 +15,9 @@ from .decorators import tt_required, tt_write_required
 
 import huguan_dashboard as hd
 import sheet_write
+
+# 与 main.py / huguan_dashboard_routes.py 同一个 logger：handler 由 logging_setup 挂在 root 上。
+log = logging.getLogger("gg-server")
 
 tt_accounts_bp = Blueprint('tt_accounts', __name__)
 
@@ -452,7 +456,9 @@ def batch_create_accounts():
             if "advertiser_id" in err_msg or "unique" in err_msg:
                 skipped.append({"advertiser_id": aid, "reason": "已存在"})
             else:
-                skipped.append({"advertiser_id": aid, "reason": str(e)})
+                # 裸 `str(e)` 会把 sqlite 异常原文回给客户端（CWE-209）；详情只落日志。
+                log.exception("导入 TT 账户失败 advertiser_id=%s", aid)
+                skipped.append({"advertiser_id": aid, "reason": "导入失败，详情见服务端日志"})
     # 户管看板单行回写（规格 §6.2）。created 里装的就是 advertiser_id。
     hd.writeback_rows(uid, "tt", created)
     return ok({"created": len(created), "created_ids": created, "skipped": skipped})

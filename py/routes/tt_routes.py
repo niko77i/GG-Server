@@ -1,5 +1,6 @@
 """TikTok 平台 API 路由 — 产品管理 / BC管理 / 投放对象 / 掉包检测 / 素材关联"""
 import json
+import logging
 import os
 import re
 import urllib.parse
@@ -8,6 +9,9 @@ from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES
 from .decorators import tt_required, tt_write_required, no_huguan, reject_huguan, require_platform
+
+# 与 main.py / huguan_dashboard_routes.py 同一个 logger：handler 由 logging_setup 挂在 root 上。
+log = logging.getLogger("gg-server")
 
 # 脏数据解析用的链接正则。两个 pattern 合成一个 alternation，
 # 这样 re.finditer 能按**原文出现顺序**输出，而不是「先排完 Play 再排苹果」，
@@ -105,7 +109,9 @@ def create_bc():
         db.commit()
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
-        return err(str(e))
+        # 裸 `str(e)` 会把 UNIQUE/FK 等 schema 细节回给客户端（CWE-209）；详情只落日志。
+        log.exception("新建 BC 失败 bc_id=%s", bc_id)
+        return err("新建 BC 失败，请查看服务端日志")
 
 
 @tt_bp.route('/api/tt/bcs/<int:bid>', methods=['PUT'])
@@ -303,7 +309,8 @@ def create_product():
         db.commit()
         return ok({'id': pid})
     except Exception as e:
-        return err(str(e))
+        log.exception("新建产品失败 pid=%s", pid)
+        return err("新建产品失败，请查看服务端日志")
 
 
 @tt_bp.route('/api/tt/products/<int:pid>', methods=['PUT'])
@@ -464,7 +471,8 @@ def add_package(pid):
         db.commit()
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
-        return err(str(e))
+        log.exception("新建包失败 pid=%s", pid)
+        return err("新建包失败，请查看服务端日志")
 
 
 @tt_bp.route('/api/tt/packages/<int:pkg_id>', methods=['PUT'])

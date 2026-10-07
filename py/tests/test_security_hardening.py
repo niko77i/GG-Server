@@ -1015,3 +1015,265 @@ class TestE4TtIntPathParamBounds:
         assert resp.status_code == 200, (
             f"合法上界 id 被闸门误拦（实得 {resp.status_code}）—— 上界被写成 `>=`？"
         )
+
+
+# ---------------------------------------------------------------------------
+# E 组（续）：上一轮登记、未闭的同族泄露路径收口
+#   E-5 `accounts_reassign` 自己的终末 `except` 不再回显 `str(e)`
+#       （它**绕过**全局 500 兜底 —— 端点自己吞了异常）
+#   E-6 GG 侧 `<int:aid>` 路径参数补 int64 上界（与 TT 侧同口径 404）
+#   E-7 `batch-update` / `batch-delete` 的 `ids` **数组元素**过闸门
+#   E-8 `accounts_create` 的 status_id / agent_id / mcc_id 过闸门
+# ---------------------------------------------------------------------------
+
+# 固定脱敏文案 —— 与全局 500 兜底（main.py 的 `internal_error`）**逐字节一致**，
+# 沿用仓库既有措辞，不自创。
+SANITIZED_500 = "服务器内部错误，请查看控制台日志"
+
+
+class TestE5SelfSwallowedExceptIsSanitized:
+    """端点自带终末 `except` 时，第一层全局兜底**管不到**它 ⇒ 必须自己脱敏。
+
+    `accounts_reassign` 尾部是 `except Exception as e: ... jsonify(error=str(e)), 500`。
+    走 `{owner_id: <他人>, status_id: 999999}`：999999 是**合法 int64**（过第二层闸门），
+    但库里没有该行 ⇒ UPDATE 撞 `PRAGMA foreign_keys=ON` ⇒ IntegrityError ⇒ 被本端点
+    自己的 except 吞下并回 `str(e)`（"FOREIGN KEY constraint failed"）。
+    改前该文案直出客户端（CWE-209）；改后为固定中文，且详情仍进日志。
+    """
+
+    def _dev_with_account(self, client, tag):
+        dev, dev_id = _create_user(client, f"_e5_dev_{tag}", role="developer")
+        _, target = _create_user(client, f"_e5_tgt_{tag}", role="user")
+        db = database.get_db()
+        _mk_account(db, dev_id, f"GG-E5-{tag}")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id=?", (f"GG-E5-{tag}",)).fetchone()["id"]
+        db.close()
+        return dev, dev_id, target, aid
+
+    def test_fk_violation_returns_fixed_chinese_message(self, client, caplog):
+        dev, _dev_id, target, aid = self._dev_with_account(client, "fk")
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.put(f"/api/accounts/{aid}/reassign",
+                              json={"owner_id": target, "status_id": 999999},
+                              headers=dev)
+        assert resp.status_code == 500, (
+            f"reassign 撞外键应仍回既有 500（状态码不在本任务范围），实得 {resp.status_code}"
+        )
+        body = resp.get_json()
+        assert body is not None, "响应不再是 JSON"
+        assert body["error"] == SANITIZED_500, (
+            f"终末 except 仍回显英文异常原文：{body['error']!r}"
+        )
+        _assert_no_internal_leak(resp)
+        assert "FOREIGN KEY" not in resp.get_data(as_text=True)
+        # 异常详情不得被一起砍掉：仍须进 gg-server 日志（用 caplog 钉住）
+        assert "FOREIGN KEY constraint failed" in caplog.text, (
+            "异常详情没进日志 —— 排查线索被脱敏一并砍掉了"
+        )
+
+    def test_sibling_terminal_except_accounts_update_also_sanitized(self, client, monkeypatch, caplog):
+        """同一模式的其他站点（`accounts_update` 终末 except）也必须脱敏 —— 断点式验证。
+
+        `accounts_update` 里 `_record_mcc_change` 抛非 IntegrityError 的异常时会落到它
+        自己的 `except Exception as e: str(e)`（绕过全局兜底）。把它 patch 成炸掉，
+        钉住响应文案 + 日志仍留详情。
+        """
+        import main as main_mod
+
+        hdr, uid = _create_user(client, "_e5_upd", role="user")
+        db = database.get_db()
+        _mk_account(db, uid, "GG-E5-UPD")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-E5-UPD'").fetchone()["id"]
+        db.close()
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("内部炸了 D:\\server\\cc\\GG-Server\\py\\main.py:42")
+
+        monkeypatch.setattr(main_mod, "_record_mcc_change", _boom)
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.put(f"/api/accounts/{aid}", json={"mcc_id": 1}, headers=hdr)
+
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == SANITIZED_500, (
+            f"accounts_update 终末 except 仍回显原文：{resp.get_json()['error']!r}"
+        )
+        _assert_no_internal_leak(resp)
+        assert "内部炸了" not in resp.get_data(as_text=True)
+        assert "内部炸了" in caplog.text, "异常详情没进日志"
+
+
+# GG 侧带 `<int:aid>` 的全部路由（Werkzeug IntegerConverter 无上界）。超 int64 的 id
+# 不可能命中任何行 ⇒ 与 TT 侧/既有 reassign aid 守卫同口径：404「账户不存在」。
+GG_INT_AID_ROUTES = [
+    ("put",    "/api/accounts/{i}",                   {}),
+    ("delete", "/api/accounts/{i}",                   None),
+    ("post",   "/api/accounts/{i}/restore",           None),
+    ("delete", "/api/accounts/{i}/permanent",         None),
+    ("get",    "/api/accounts/{i}/recharge-records",  None),
+    ("get",    "/api/accounts/{i}/mcc-history",       None),
+    ("delete", "/api/accounts/{i}/mcc-history/{i}",   None),
+    # `/api/agents/<int:aid>` 的参数名同样是 `aid`、同样直接进 sqlite 绑定 ⇒ 同族。
+    ("put",    "/api/agents/{i}",                     {"name": "E6代理"}),
+    ("delete", "/api/agents/{i}",                     None),
+]
+
+
+class TestE6GgIntAidPathParamBounds:
+    """GG 侧 `<int:aid>` 补 int64 上界（上一轮只补了 TT 侧）。
+
+    改前：`PUT/DELETE /api/accounts/<10**30>` 等会在 sqlite3 绑定处抛 OverflowError
+    （无 try 的直接逸出视图 ⇒ 500 + traceback；有 try 的回 `str(e)` 英文原文）。
+    """
+
+    @pytest.mark.parametrize("method,path,body", GG_INT_AID_ROUTES)
+    @pytest.mark.parametrize("bad", [2 ** 63, 10 ** 30, "9" * 30])
+    def test_oversized_aid_is_404_not_500(self, client, method, path, body, bad):
+        hdr, _ = _create_user(client, "_e6_gg", role="developer")
+        url = path.format(i=bad)
+        fn = getattr(client, method)
+        resp = (fn(url, json=body, headers=hdr) if body is not None
+                else fn(url, headers=hdr))
+        assert resp.status_code == 404, (
+            f"{method.upper()} {path} aid={bad!r} 应 404，实得 {resp.status_code}"
+            f"（{resp.get_data(as_text=True)[:120]}）"
+        )
+        _assert_no_internal_leak(resp)
+
+    def test_max_valid_int64_aid_passes_guard(self, client):
+        """边界对照：2**63-1 是**合法** int64 ⇒ 必须穿过守卫、落到既有业务路径。
+
+        取 `DELETE /api/accounts/<m>`：守卫命中回 404「账户不存在」，而该值能正常绑定、
+        查无此行时回**既有** 404「账户不存在或已删除」—— 文案不同即可区分是否穿过守卫。
+        若上界被误写成 `>= 2**63 - 1`，文案会变成「账户不存在」⇒ 本用例红。
+        """
+        hdr, _ = _create_user(client, "_e6_max", role="developer")
+        m = 2 ** 63 - 1
+        resp = client.delete(f"/api/accounts/{m}", headers=hdr)
+        assert resp.status_code == 404
+        assert resp.get_json()["error"] == "账户不存在或已删除", (
+            f"合法上界 aid 被守卫误拦（文案 {resp.get_json()['error']!r}）"
+        )
+
+
+class TestE7BatchIdsArrayGate:
+    """`ids` 数组**元素**是独立向量：归属过滤的 `IN (?)` 与逐条 UPDATE/DELETE 都会绑定它。
+
+    改前 `ids=[10**30]` ⇒ OverflowError（无 try 的逸出视图 ⇒ 500 + traceback）。
+    """
+
+    OVERSIZE = (2 ** 63, 10 ** 30, "9" * 30)
+
+    def _body(self, endpoint, ids):
+        if endpoint == "batch-update":
+            return {"ids": ids, "field": "status_id", "value": 1}
+        return {"ids": ids}
+
+    @pytest.mark.parametrize("endpoint", ["batch-update", "batch-delete"])
+    @pytest.mark.parametrize("bad", OVERSIZE)
+    def test_oversized_id_element_is_400(self, client, endpoint, bad):
+        hdr, _ = _create_user(client, f"_e7_{endpoint}", role="user")
+        resp = client.post(f"/api/accounts/{endpoint}", json=self._body(endpoint, [bad]), headers=hdr)
+        assert resp.status_code == 400, (
+            f"{endpoint} ids=[{bad!r}] 应 400，实得 {resp.status_code}"
+            f"（{resp.get_data(as_text=True)[:120]}）"
+        )
+        assert resp.get_json()["error"] == "ids 不合法"
+        _assert_no_internal_leak(resp)
+
+    @pytest.mark.parametrize("endpoint", ["batch-update", "batch-delete"])
+    def test_oversized_id_mixed_with_valid_element_still_400(self, client, endpoint):
+        """混入一个合法元素也必须整体拒绝 —— 逐个元素都过闸门，不是只看第一个。"""
+        hdr, uid = _create_user(client, f"_e7_mix_{endpoint}", role="user")
+        db = database.get_db()
+        _mk_account(db, uid, f"GG-E7-{endpoint}")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id=?", (f"GG-E7-{endpoint}",)).fetchone()["id"]
+        db.close()
+        resp = client.post(f"/api/accounts/{endpoint}", json=self._body(endpoint, [aid, 10 ** 30]), headers=hdr)
+        assert resp.status_code == 400, (
+            f"{endpoint} ids=[valid, 10**30] 应 400，实得 {resp.status_code}"
+        )
+
+    @pytest.mark.parametrize("endpoint", ["batch-update", "batch-delete"])
+    def test_max_valid_int64_id_element_passes_gate(self, client, endpoint):
+        """边界对照：2**63-1 合法 ⇒ 穿过闸门，落到既有业务路径（而非新的 400）。
+
+        - batch-delete：无归属预检，逐条 UPDATE 命中 0 行 ⇒ 既有 `200 + deleted=0`；
+        - batch-update：归属预检 COUNT=0 ≠ len(ids) ⇒ 既有 `403 包含无权操作的账户`。
+        """
+        hdr, _ = _create_user(client, f"_e7_max_{endpoint}", role="user")
+        m = 2 ** 63 - 1
+        resp = client.post(f"/api/accounts/{endpoint}", json=self._body(endpoint, [m]), headers=hdr)
+        assert resp.status_code != 400, f"{endpoint} ids=[2**63-1] 被闸门误拦成 400"
+        assert resp.get_json().get("error") != "ids 不合法"
+        if endpoint == "batch-delete":
+            assert resp.status_code == 200 and resp.get_json()["deleted"] == 0
+        else:
+            assert resp.status_code == 403
+
+
+class TestE8CreatePkFieldGate:
+    """`accounts_create` 的 status_id / agent_id / mcc_id 仍是裸绑定（上一轮只修了 owner 解析）。
+
+    改前：超 int64 ⇒ sqlite3 绑定处 OverflowError（本端点只 catch IntegrityError ⇒
+    异常逸出视图 ⇒ 500 + traceback）。
+    """
+
+    PK_FIELDS = ("status_id", "agent_id", "mcc_id")
+    OVERSIZE = (2 ** 63, 10 ** 30, "9" * 30)
+
+    @pytest.mark.parametrize("field", PK_FIELDS)
+    def test_create_rejects_oversized_pk(self, client, field):
+        hdr, _ = _create_user(client, f"_e8_{field}", role="user")
+        for n, bad in enumerate(self.OVERSIZE):
+            resp = client.post("/api/accounts/create",
+                               json={"name": "E8账户", "account_id": f"GG-E8-{field}-{n}", field: bad},
+                               headers=hdr)
+            assert resp.status_code == 400, (
+                f"create {field}={bad!r} 应 400，实得 {resp.status_code}"
+                f"（{resp.get_data(as_text=True)[:120]}）"
+            )
+            assert resp.get_json()["error"] == f"{field} 不合法"
+            _assert_no_internal_leak(resp)
+
+    @pytest.mark.parametrize("field", PK_FIELDS)
+    def test_create_rejects_wrong_type(self, client, field):
+        hdr, _ = _create_user(client, f"_e8_ty_{field}", role="user")
+        for bad in ("abc", "-1", "²", "١", True, [1]):
+            resp = client.post("/api/accounts/create",
+                               json={"name": "E8账户", "account_id": f"GG-E8-TY-{field}", field: bad},
+                               headers=hdr)
+            assert resp.status_code == 400, (
+                f"create {field}={bad!r} 应 400，实得 {resp.status_code}"
+            )
+            assert resp.get_json()["error"] == f"{field} 不合法"
+
+    def test_create_max_valid_int64_status_id_reaches_business_path(self, client):
+        """边界对照：2**63-1 合法 ⇒ 穿过闸门、真的走到 INSERT 并撞外键 ⇒ 既有 409。
+
+        若上界被误写成 `>=`，值会被闸门拦成 400「status_id 不合法」⇒ 本用例红。
+        """
+        hdr, _ = _create_user(client, "_e8_max", role="user")
+        resp = client.post("/api/accounts/create",
+                           json={"name": "E8上界", "account_id": "GG-E8-MAX",
+                                 "status_id": 2 ** 63 - 1},
+                           headers=hdr)
+        assert resp.status_code == 409, (
+            f"合法上界 status_id 未穿过闸门（实得 {resp.status_code}）—— 上界被写成 `>=`？"
+        )
+
+    def test_create_mcc_id_empty_still_clears(self, client):
+        """对照：mcc_id 的既有「空值/0 ⇒ 清空」语义不得被新闸门误伤。
+
+        注：本端点把 mcc_id 写进 INSERT 用的是 `data.get("mcc_id") or None`，故
+        `None` / `0` / `""` 三个**假值**都会被归一成 NULL；而字符串 `"0"` 是**真值**、
+        既有的 create 路径本就不清空它（会走到 FK 校验）—— 该不对称是既有行为，
+        不在本任务范围，故此处不构造 `"0"`。
+        """
+        hdr, _ = _create_user(client, "_e8_clr", role="user")
+        for n, ok in enumerate((None, 0, "")):
+            resp = client.post("/api/accounts/create",
+                               json={"name": "E8清空", "account_id": f"GG-E8-CLR-{n}", "mcc_id": ok},
+                               headers=hdr)
+            assert resp.status_code == 200, (
+                f"mcc_id={ok!r} 应沿用既有『清空』走 200，实得 {resp.status_code}"
+            )

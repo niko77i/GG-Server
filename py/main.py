@@ -1336,7 +1336,9 @@ def video_upload_music():
             except: pass
             return jsonify({"success": True, "name": out_name, "path": out_fp})
         except Exception as e:
-            return jsonify({"success": False, "error": f"音频提取失败: {str(e)}"}), 500
+            # 自带终末 except ⇒ 绕过模块级 500 兜底，须自行脱敏；详情只落日志。
+            log.exception("音频提取失败")
+            return jsonify({"success": False, "error": "音频提取失败，请查看控制台日志"}), 500
 
     return jsonify({"success": True, "name": filename, "path": raw_fp})
 
@@ -4405,6 +4407,18 @@ def accounts_create():
     account_id = (data.get("account_id") or "").strip()
     if not name or not account_id:
         return jsonify({"success": False, "error": "账户名称和ID不能为空"}), 400
+    # 主键字段闸门（口径同 accounts_update / batch-update 的主键字段闸门）：status_id /
+    # agent_id / mcc_id 随后原样绑进 INSERT。非 ASCII 数字串 / 超 int64 会在 sqlite3
+    # 绑定处抛 OverflowError（本端点只 catch IntegrityError ⇒ 异常逸出视图 ⇒ 500）。
+    # mcc_id 的假值（None/0/""）属既有「清空」语义，不在此拦。
+    for _f in ("status_id", "agent_id", "mcc_id"):
+        _v = data.get(_f)
+        if _v is None:
+            continue
+        if _f == "mcc_id" and (_v == 0 or _v == "0" or (isinstance(_v, str) and not _v.strip())):
+            continue
+        if _valid_pk_int64(_v) is None:
+            return jsonify({"success": False, "error": f"{_f} 不合法"}), 400
     db = _yt_db()
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -4600,7 +4614,8 @@ def accounts_batch_create():
                     owner = ex["display_name"] or ex["username"] or "未知"
                 skipped.append({"account_id": aid, "reason": f"已存在，归属人：{owner}"})
             else:
-                skipped.append({"account_id": aid, "reason": str(e)})
+                log.exception("批量创建账户失败 account_id=%s", aid)
+                skipped.append({"account_id": aid, "reason": "创建失败，详情见服务端日志"})
 
     db.close()
     # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
@@ -4640,6 +4655,9 @@ def _valid_pk_int64(raw):
 @app.route("/api/accounts/<int:aid>", methods=["PUT"])
 @jwt_required()
 def accounts_update(aid):
+    # `<int:aid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "账户不存在"}), 404
     data = request.get_json(silent=True) or {}
     db = _yt_db()
     try:
@@ -4779,7 +4797,9 @@ def accounts_update(aid):
             return jsonify({"success": False, "error": "所属 MCC 不存在，请先选择有效的 MCC"}), 409
         return jsonify({"success": False, "error": f"数据完整性错误: {e}"}), 409
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        # 同 reassign：自带终末 except ⇒ 绕过模块级 500 兜底，须自行为客户端脱敏。
+        log.exception("账户更新失败")
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
     finally:
         db.close()
 
@@ -4891,13 +4911,20 @@ def accounts_reassign(aid):
             "message": msg
         })
     except Exception as e:
+        # ⚠️ 本端点自带终末 except ⇒ **绕过**模块级 500 兜底。改前直接把 `str(e)` 回给
+        # 客户端（如撞 `PRAGMA foreign_keys=ON` 时的 "FOREIGN KEY constraint failed"，
+        # CWE-209）。现只回固定文案，异常详情仍完整落日志。
         db.close()
-        return jsonify({"success": False, "error": str(e)}), 500
+        log.exception("账户重新分配失败 aid=%s", aid)
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 @app.route("/api/accounts/<int:aid>", methods=["DELETE"])
 @jwt_required()
 def accounts_delete(aid):
+    # `<int:aid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "账户不存在"}), 404
     user_id = int(get_jwt_identity())
     db = _yt_db()
     try:
@@ -4940,6 +4967,11 @@ def accounts_batch_delete():
     ids = data.get("ids") or []
     if not ids:
         return jsonify({"success": False, "error": "未选择账户"}), 400
+    # ids 数组元素闸门（口径同各端点主键字段闸门）：元素随后原样绑进 sqlite（归属过滤的
+    # IN 与逐条 UPDATE），非 ASCII 数字串 / 超 int64 会抛 OverflowError ⇒ 提前 400 挡下。
+    for _i in ids:
+        if _valid_pk_int64(_i) is None:
+            return jsonify({"success": False, "error": "ids 不合法"}), 400
     db = _yt_db()
     try:
         cross_user = _cross_user_actor(user_id)
@@ -4963,6 +4995,9 @@ def accounts_batch_delete():
 @jwt_required()
 def accounts_restore(aid):
     """恢复已删除的账户。"""
+    # `<int:aid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "账户不存在"}), 404
     user_id = int(get_jwt_identity())
     db = _yt_db()
     try:
@@ -5000,6 +5035,9 @@ def accounts_restore(aid):
 @jwt_required()
 def accounts_permanent_delete(aid):
     """物理删除已软删除的账户（不可恢复）。"""
+    # `<int:aid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "账户不存在"}), 404
     user_id = int(get_jwt_identity())
     db = _yt_db()
     try:
@@ -5058,6 +5096,11 @@ def accounts_batch_update():
     allowed = ["status_id", "agent_id", "mcc_id", "timezone"]
     if field not in allowed:
         return jsonify({"success": False, "error": f"不允许修改字段: {field}"}), 400
+    # ids 数组元素闸门（口径同 value 的主键字段闸门）：元素随后原样绑进 sqlite
+    # （归属过滤的 IN 与逐条 UPDATE），超 int64 会抛 OverflowError ⇒ 提前 400 挡下。
+    for _i in ids:
+        if _valid_pk_int64(_i) is None:
+            return jsonify({"success": False, "error": "ids 不合法"}), 400
     db = _yt_db()
     try:
         # mcc_id 空值/0 转 None，避免 FK 约束失败
@@ -5410,7 +5453,8 @@ def accounts_sync_from_sheet():
                 _execute_sync_create(db, item, user_id)
                 created_count += 1
             except Exception as e:
-                errors.append({"account_id": item.get("account_id", "unknown") if isinstance(item, dict) else str(item), "error": str(e)})
+                log.exception("表格同步：创建账户失败")
+                errors.append({"account_id": item.get("account_id", "unknown") if isinstance(item, dict) else str(item), "error": "创建失败，详情见服务端日志"})
 
         # 10b. 执行状态更新
         for item in confirmed.get("update", []):
@@ -5438,7 +5482,8 @@ def accounts_sync_from_sheet():
                         )
                     updated_count += 1
             except Exception as e:
-                errors.append({"account_id": item.get("account_id", ""), "error": str(e)})
+                log.exception("表格同步：更新账户失败")
+                errors.append({"account_id": item.get("account_id", ""), "error": "更新失败，详情见服务端日志"})
 
         db.commit()
         # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
@@ -5653,9 +5698,10 @@ def recharge_submit():
 
         return jsonify({"success": True, "id": record_id})
     except Exception as e:
+        log.exception("新增充值记录失败")
         try: db.close()
         except: pass
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 @app.route("/api/recharge/batch-submit", methods=["POST"])
@@ -5751,15 +5797,19 @@ def recharge_batch_submit():
 
         return jsonify({"success": True, "count": len(valid_rows)})
     except Exception as e:
+        log.exception("批量提交充值失败")
         try: db.close()
         except: pass
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 @app.route("/api/accounts/<int:aid>/recharge-records", methods=["GET"])
 @jwt_required()
 def accounts_recharge_records(aid):
     """获取指定账户的充值记录。"""
+    # `<int:aid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "账户不存在"}), 404
     db = _yt_db()
     account = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()
     if not account:
@@ -5806,8 +5856,9 @@ def recharge_update(rid):
         db.close()
         return jsonify({"success": True})
     except Exception as e:
+        log.exception("编辑充值记录失败 rid=%s", rid)
         db.close()
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 @app.route("/api/recharge/<int:rid>", methods=["DELETE"])
@@ -5824,8 +5875,9 @@ def recharge_delete(rid):
         db.close()
         return jsonify({"success": True})
     except Exception as e:
+        log.exception("删除充值记录失败 rid=%s", rid)
         db.close()
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 @app.route("/api/recharge/<int:rid>/retry-sheets", methods=["POST"])
@@ -5865,6 +5917,8 @@ def recharge_retry_sheets(rid):
         db.close()
         return jsonify({"success": True})
     except Exception as e:
+        # 详情仍落库（sheets_error 是内部列，供排查）+ 落日志；客户端只收固定文案。
+        log.exception("充值记录 Sheets 重试失败 rid=%s", rid)
         msg = str(e)
         try:
             db.execute("UPDATE recharge_records SET sheets_error=? WHERE id=?", (msg, rid))
@@ -5872,13 +5926,16 @@ def recharge_retry_sheets(rid):
         except: pass
         try: db.close()
         except: pass
-        return jsonify({"success": False, "error": msg}), 500
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 @app.route("/api/accounts/<int:aid>/mcc-history", methods=["GET"])
 @jwt_required()
 def accounts_mcc_history(aid):
     """获取账户的 MCC 变更历史"""
+    # `<int:aid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "账户不存在"}), 404
     db = _yt_db()
     try:
         rows = db.execute(
@@ -5903,8 +5960,9 @@ def accounts_mcc_history(aid):
         db.close()
         return jsonify({"success": True, "history": history})
     except Exception as e:
+        log.exception("读取 MCC 变更历史失败 aid=%s", aid)
         db.close()
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 @app.route("/api/accounts/<int:aid>/mcc-history/<int:hid>", methods=["DELETE"])
@@ -5915,6 +5973,9 @@ def accounts_mcc_history_delete(aid, hid):
     user = auth.get_user_by_id(user_id)
     if not user or user["role"] not in CROSS_USER_ROLES:
         return jsonify({"success": False, "error": "权限不足"}), 403
+    # `<int:aid>` / `<int:hid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1 or hid > 2**63 - 1:
+        return jsonify({"success": False, "error": "记录不存在"}), 404
     db = _yt_db()
     try:
         cur = db.execute(
@@ -5926,8 +5987,9 @@ def accounts_mcc_history_delete(aid, hid):
         db.close()
         return jsonify({"success": True, "deleted": deleted})
     except Exception as e:
+        log.exception("删除 MCC 变更历史失败 aid=%s hid=%s", aid, hid)
         db.close()
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 # ---------- MCC API ----------
@@ -6375,6 +6437,9 @@ def agents_create():
 @jwt_required()
 def agents_rename(aid):
     """重命名代理 — 所有 JOIN 引用自动生效。"""
+    # `<int:aid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "代理不存在"}), 404
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
@@ -6431,6 +6496,9 @@ def agents_rename(aid):
 @jwt_required()
 def agents_delete(aid):
     """删除代理 — 账户引用阻止删除，充值记录自动清空关联。"""
+    # `<int:aid>` 无上界；超 int64 的 id 会在 sqlite 绑定处抛 OverflowError ⇒ 提前 404
+    if aid > 2**63 - 1:
+        return jsonify({"success": False, "error": "代理不存在"}), 404
     user_id = int(get_jwt_identity())
     db = _yt_db()
     platform = request.args.get("platform", "")
@@ -7615,7 +7683,8 @@ def google_sheets_retry_sync():
             (msg, log_row["id"])
         )
         db2.commit(); db2.close()
-        return jsonify({"success": False, "error": msg}), 500
+        log.exception("投手看板表格写入失败")
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 # ---------- 文件浏览 API ----------
@@ -8066,7 +8135,8 @@ def google_sheets_status():
         result["success"] = True
         return jsonify(result)
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        log.exception("Google Sheets 配置检查失败")
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 @app.route("/api/google-sheets/sheets", methods=["GET"])
@@ -8263,7 +8333,8 @@ def translate_text():
         result = GoogleTranslator(source='auto', target=target).translate(text)
         return jsonify({"success": True, "translated": result})
     except Exception as e:
-        return jsonify({"success": False, "error": f"翻译失败: {str(e)}"}), 500
+        log.exception("翻译失败")
+        return jsonify({"success": False, "error": "翻译失败，请查看控制台日志"}), 500
 
 
 # ---------- 启动 ----------
@@ -8534,7 +8605,8 @@ def admin_delete_user(uid):
         conn.commit()
         return jsonify(success=True)
     except Exception as e:
-        return jsonify(success=False, error=f"删除失败: {str(e)}"), 500
+        log.exception("删除用户失败 uid=%s", uid)
+        return jsonify(success=False, error="删除失败，请查看控制台日志"), 500
     finally:
         conn.close()
 
@@ -8722,7 +8794,8 @@ def data_import():
 
         return jsonify(report)
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        log.exception("数据导入失败")
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
     finally:
         try:
             os.unlink(tmp_path)
@@ -8798,7 +8871,8 @@ def admin_data_import():
         report = data_service.execute_import(tmp_path, file_type, user_id)
         return jsonify(report)
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        log.exception("数据导入失败")
+        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
     finally:
         try:
             os.unlink(tmp_path)
@@ -9354,7 +9428,8 @@ def admin_trigger_weekly_cleanup():
         return jsonify(success=True, message="每周清理已执行完成")
     except Exception as e:
         _mark_task_run("cleanup", ok=False)
-        return jsonify(success=False, error=str(e)), 500
+        log.exception("手动触发每周清理失败")
+        return jsonify(success=False, error="服务器内部错误，请查看控制台日志"), 500
 
 
 @app.route("/api/admin/trigger-delist-check", methods=["POST"])
@@ -9368,7 +9443,8 @@ def admin_trigger_delist_check():
         return jsonify(success=True, **result)
     except Exception as e:
         _mark_task_run("gg_delist", ok=False)
-        return jsonify(success=False, error=str(e)), 500
+        log.exception("手动触发 GG 掉包检测失败")
+        return jsonify(success=False, error="服务器内部错误，请查看控制台日志"), 500
 
 
 @app.route("/api/admin/trigger-tt-delist-check", methods=["POST"])
@@ -9382,7 +9458,8 @@ def admin_trigger_tt_delist_check():
         return jsonify(success=True, **result)
     except Exception as e:
         _mark_task_run("tt_delist", ok=False)
-        return jsonify(success=False, error=str(e)), 500
+        log.exception("手动触发 TT 掉包检测失败")
+        return jsonify(success=False, error="服务器内部错误，请查看控制台日志"), 500
 
 
 # 任务 → 平台 / 配置字段映射。GET 与 PUT 共用，避免两处口径漂移。
@@ -11108,7 +11185,8 @@ def ad_reports_multi_ai_chat():
         else:
             answer = f"AI 服务返回错误({resp.status_code}): {resp.text[:300]}"
     except Exception as e:
-        answer = f"AI 服务调用失败: {str(e)[:200]}"
+        log.exception("AI 服务调用失败")
+        answer = "AI 服务调用失败，请查看控制台日志"
 
     return jsonify({"success": True, "enabled": True, "answer": answer})
 
@@ -11230,7 +11308,8 @@ def ad_reports_analyze():
         else:
             answer = f"AI 服务返回错误({resp.status_code}): {resp.text[:300]}"
     except Exception as e:
-        answer = f"AI 服务调用失败: {str(e)[:200]}"
+        log.exception("AI 服务调用失败")
+        answer = "AI 服务调用失败，请查看控制台日志"
 
     return jsonify({
         "success": True,
