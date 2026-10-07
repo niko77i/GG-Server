@@ -1494,9 +1494,11 @@ def tt_data_import():
         delist_count = len(delist_packages)
 
         db.commit()
-    except Exception as e:
+    except Exception:
         db.rollback()
-        return err(f'导入失败：{e}')
+        # 裸 `{e}` 会把 sqlite schema 细节 / 英文库异常回给客户端（CWE-209）；详情只落日志。
+        log.exception("导入失败")
+        return err("导入失败，请查看服务端日志")
     finally:
         db.execute("PRAGMA foreign_keys=ON")
 

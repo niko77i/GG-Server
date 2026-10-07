@@ -685,8 +685,10 @@ def scrape():
 
     try:
         os.makedirs(pkg_dir, exist_ok=True)
-    except OSError as e:
-        return jsonify({"success": False, "error": f"无法创建目录: {e}"}), 500
+    except OSError:
+        # OSError 原文含服务端绝对路径与英文 errno ⇒ 只留固定文案，详情进日志
+        log.exception("爬取：创建包目录失败 pkg_dir=%s", pkg_dir)
+        return jsonify({"success": False, "error": "无法创建目录，详情见服务端日志"}), 500
 
     response = {
         "success": True,
@@ -1060,8 +1062,10 @@ def video_generate():
     if out_dir:
         try:
             os.makedirs(out_dir, exist_ok=True)
-        except OSError as e:
-            return jsonify({"success": False, "error": f"无法创建输出目录: {e}"}), 400
+        except OSError:
+            # OSError 原文含落盘绝对路径与英文 errno ⇒ 只留固定文案，详情进日志
+            log.exception("视频生成：创建输出目录失败 out_dir=%s", out_dir)
+            return jsonify({"success": False, "error": "无法创建输出目录，详情见服务端日志"}), 400
 
     # 创建任务
     task = VideoTask(data)
@@ -1088,6 +1092,9 @@ def video_generate():
             try:
                 ai_provider = get_provider(ai.get("service", "doubao"))
             except AIServiceError as e:
+                # 刻意保留原文：task.message 会经 /api/video/progress 原样回给前端，
+                # 但 get_provider 抛的 AIServiceError 文案是**自造中文**（"不支持的 AI 服务: X。可用: [...]"），
+                # 不含 schema / 服务端路径 / 英文库异常 —— 属「用户可据以行动」的信息，脱敏反而使其无用。
                 task.message = f"AI 服务初始化失败: {e}"
 
             if ai_provider:
@@ -4514,8 +4521,9 @@ def accounts_create():
                     }
                 }), 409
             return jsonify({"success": False, "error": f"账户 ID '{account_id}' 已存在"}), 409
+        log.exception("创建账户：数据完整性错误 account_id=%s", account_id)
         db.close()
-        return jsonify({"success": False, "error": f"数据完整性错误: {e}"}), 409
+        return jsonify({"success": False, "error": "数据完整性错误，详情见服务端日志"}), 409
 
 
 @app.route("/api/accounts/batch-create", methods=["POST"])
@@ -4795,7 +4803,9 @@ def accounts_update(aid):
         err_msg = str(e).lower()
         if "foreign key" in err_msg:
             return jsonify({"success": False, "error": "所属 MCC 不存在，请先选择有效的 MCC"}), 409
-        return jsonify({"success": False, "error": f"数据完整性错误: {e}"}), 409
+        # IntegrityError 原文含 schema/列名细节（如 NOT NULL constraint failed: accounts.name）⇒ 固定文案
+        log.exception("账户更新：数据完整性错误 aid=%s", aid)
+        return jsonify({"success": False, "error": "数据完整性错误，详情见服务端日志"}), 409
     except Exception as e:
         # 同 reassign：自带终末 except ⇒ 绕过模块级 500 兜底，须自行为客户端脱敏。
         log.exception("账户更新失败")
@@ -5297,9 +5307,11 @@ def accounts_sync_from_sheet():
     except gs.GoogleSheetsServiceError as e:
         db.close()
         return jsonify({"success": False, "error": str(e)}), 400
-    except Exception as e:
+    except Exception:
+        # 通用异常原文可能带服务端路径 / 英文库异常 ⇒ 固定文案，详情进日志
+        log.exception("同步账户：读取表格失败")
         db.close()
-        return jsonify({"success": False, "error": f"无法读取表格: {e}"}), 400
+        return jsonify({"success": False, "error": "无法读取表格，详情见服务端日志"}), 400
 
     if not rows or len(rows) < 2:
         db.close()
@@ -8018,8 +8030,10 @@ def google_ads_accounts():
         return jsonify({"success": True, "accounts": accounts})
     except GoogleAdsServiceError as e:
         return jsonify({"success": False, "error": str(e)}), 500
-    except Exception as e:
-        return jsonify({"success": False, "error": f"未知错误: {e}"}), 500
+    except Exception:
+        # 通用异常原文可能带服务端路径 / 英文库异常 ⇒ 固定文案，详情进日志
+        log.exception("Google Ads：拉取账户列表失败")
+        return jsonify({"success": False, "error": "未知错误，详情见服务端日志"}), 500
 
 
 @app.route("/api/google-ads/report", methods=["POST"])
@@ -8048,8 +8062,10 @@ def google_ads_report():
         return jsonify({"success": True, "rows": results, "count": len(results)})
     except GoogleAdsServiceError as e:
         return jsonify({"success": False, "error": str(e)}), 500
-    except Exception as e:
-        return jsonify({"success": False, "error": f"未知错误: {e}"}), 500
+    except Exception:
+        # 通用异常原文可能带服务端路径 / 英文库异常 ⇒ 固定文案，详情进日志
+        log.exception("Google Ads：拉取报告失败")
+        return jsonify({"success": False, "error": "未知错误，详情见服务端日志"}), 500
 
 
 # ---------- Google Sheets API ----------
@@ -8164,8 +8180,10 @@ def google_sheets_list_sheets():
         return jsonify({"success": True, "sheets": info.get("sheets", [])})
     except gs.GoogleSheetsServiceError as e:
         return jsonify({"success": False, "error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"success": False, "error": f"无法访问表格: {e}"}), 400
+    except Exception:
+        # 通用异常原文可能带服务端路径 / 英文库异常 ⇒ 固定文案，详情进日志
+        log.exception("读取表格信息失败")
+        return jsonify({"success": False, "error": "无法访问表格，详情见服务端日志"}), 400
 
 
 # ---------- 文案管理 API ----------
