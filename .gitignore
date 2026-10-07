@@ -26,6 +26,7 @@ temp/*.db-wal
 temp/*.db
 temp/app.db
 temp/audio_replace
+temp/logs/
 # 调试/审查草稿（2026-09-25 被 git add -A 误扫进索引 168 个文件，事后补的规则）
 temp/_*
 temp/mut-backup/

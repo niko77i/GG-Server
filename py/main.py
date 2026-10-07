@@ -3,7 +3,6 @@ import os
 import subprocess
 import sys
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("gg-server")
 
 # 屏蔽 Werkzeug 对高频轮询接口的日志
@@ -14,6 +13,12 @@ _werkzeug_log.addFilter(lambda r: "/api/delist/pending" not in r.getMessage())
 _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
     sys.path.insert(0, _current_dir)
+
+# 日志落盘：控制台 + temp/logs/ 轮转文件。必须在 sys.path 就绪之后调用，
+# 否则 logging_setup 可能被 site-packages 里的同名包顶掉
+from logging_setup import setup_logging as _setup_logging
+
+_setup_logging()
 
 from flask import Flask, request, jsonify, send_file, send_from_directory, g
 from flask_cors import CORS

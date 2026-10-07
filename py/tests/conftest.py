@@ -12,6 +12,15 @@ _py_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _py_dir not in sys.path:
     sys.path.insert(0, _py_dir)
 
+import logging_setup  # noqa: E402
+
+# 测试日志不落盘：必须抢在 main 导入之前占位。main.py 顶层会调
+# setup_logging()，而该函数首次调用后即锁定是否写文件 —— 先在这里用
+# enable_file=False 占位，main 那次调用就不会再加 FileHandler。
+# 否则测试造的假故障会写进生产日志（2026-10-07 实测：mock 出来的
+# WARNING「读投手看板备注失败…网络炸了」混进了 temp/logs/gg-server.log）。
+logging_setup.setup_logging(enable_file=False)
+
 from main import app as _flask_app  # noqa: E402
 import database  # noqa: E402
 
