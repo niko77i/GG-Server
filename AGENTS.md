@@ -945,6 +945,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [TT 备注（remark）跨看板同步优先级](docs/superpowers/specs/2026-10-06-tt-remark-sync-precedence-design.md)（方案 A：首次入库户管触发以投手为准、此后投手权威永久；新建「系统 → 投手看板」推送通路）
 - [定时任务：权限下放到管理员 + 周期可配置](docs/superpowers/specs/2026-10-07-scheduler-admin-access-and-interval-config-design.md)（admin 按平台隔离；周期可配置存 `config.scheduler_config`，上次执行存 `scheduler_last_run`）
 - [定时任务管理页：周期编辑视觉设计](docs/superpowers/specs/2026-10-07-scheduler-frontend-visual-design.md)（卡片内划「调度条」：左周期右上次执行；顺带修 TT 卡片写错的频率文案）
+- [定时任务功能：审查发现清单（含三态裁定）](docs/superpowers/specs/2026-10-07-scheduler-open-findings.md)（**未处理项台账**：2 条建议排期 / 17 条可延后 / 4 条判定无需处理；另附本次已处理项供追溯）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
