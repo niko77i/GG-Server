@@ -139,10 +139,10 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onUnmounted } from 'vue'
 import { accountsApi, rechargeApi } from '@/api/accounts'
 import { sheetWriteApi } from '@/api/sheetWrite'
-import { sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+import { SHEET_WRITE_TOAST, sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 import { useAccountStore } from '@/stores/accounts'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -159,6 +159,20 @@ const editingId = ref(null)
 const editForm = reactive({ amount: '', agent: '' })
 // 写表失败治理：business_key（= recharge_records.id 的字符串）-> 该条的终态记录
 const sheetWriteFailures = ref({})
+
+const SHEET_WRITE_POLL_MS = 3000
+const SHEET_WRITE_POLL_MAX = 14          // ~42s，覆盖 30s 重试窗口
+// 本弹窗只认 gg_recharge。GG 下 gg_my_dashboard（键 = accounts.account_id，带连字符的
+// Ads ID）与 gg_recharge（键 = 充值记录主键，裸整数）共用一个 business_key 命名空间：
+// 不按 target 过滤，就可能把「我的看板」的失败标到充值行上，并用错的 target 去重试。
+const RECHARGE_TARGET = 'gg_recharge'
+// 每个 business_key 一个定时器（批量/多次重试下共用一个变量会互相 clear）。
+const sheetWriteTimers = new Map()       // business_key -> timerId
+
+onUnmounted(() => {
+  for (const t of sheetWriteTimers.values()) clearTimeout(t)
+  sheetWriteTimers.clear()
+})
 
 function statusTagType(status) {
   const map = { '存活': 'success', '验证': 'warning', '死亡': 'danger' }
@@ -203,18 +217,53 @@ async function loadSheetWriteFailures() {
   try {
     const res = await sheetWriteApi.status({ platform: 'gg' })
     const map = {}
-    for (const it of res.items || []) map[it.business_key] = it
+    for (const it of res.items || []) {
+      if (it.target !== RECHARGE_TARGET) continue
+      map[it.business_key] = it
+    }
     sheetWriteFailures.value = map
   } catch { /* 标记拉不到不该打扰用户，保持上一次的结果 */ }
 }
 
-/** 重试按钮：异步提交到统一入口，立即返回，结果靠重开弹窗时的标记兜底 */
+/**
+ * 轮询单条直到终态（照搬一期 TtAccountPanel 的形状：按 business_key 独立计时）。
+ * 中间态（pending/failed）继续等，不提示。
+ */
+function pollSheetWrite(businessKey) {
+  let attempts = 0
+  const stop = () => { sheetWriteTimers.delete(businessKey) }
+  const tick = async () => {
+    if (attempts >= SHEET_WRITE_POLL_MAX) { stop(); return }
+    attempts++
+    try {
+      const res = await sheetWriteApi.status({ platform: 'gg', businessKey })
+      const it = res.item
+      // 无记录 = 这条路径没触发写表，**不是失败**（未配表格时 Task 4 的字段照样回，
+      // 但根本没登记 sheet_write_log）。把它当失败正是 Task 2 修过的镜像 bug。
+      if (!it || it.target !== RECHARGE_TARGET) { stop(); return }
+      if (it.status === 'synced') { loadSheetWriteFailures(); stop(); return }
+      if (it.status === 'pending' || it.status === 'failed') {
+        sheetWriteTimers.set(businessKey, setTimeout(tick, SHEET_WRITE_POLL_MS))
+        return
+      }
+      SHEET_WRITE_TOAST[sheetWriteTone(it.status)](sheetWriteHint(it))
+      loadSheetWriteFailures()
+      stop()
+    } catch { stop() /* 轮询失败静默，靠持久标记兜底 */ }
+  }
+  const prev = sheetWriteTimers.get(businessKey)
+  if (prev) clearTimeout(prev)
+  sheetWriteTimers.set(businessKey, setTimeout(tick, SHEET_WRITE_POLL_MS))
+}
+
+/** 重试按钮：异步提交到统一入口、立即返回，随后主动轮询 —— 再失败当场就能看到 */
 async function retrySheetWrite(row) {
   const f = sheetWriteFailures.value[String(row.id)]
   if (!f) return
   try {
     await sheetWriteApi.retry({ platform: 'gg', target: f.target, businessKey: String(row.id) })
     ElMessage.success('已重新提交，请稍后查看结果')
+    pollSheetWrite(String(row.id))
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '重试失败')
   }

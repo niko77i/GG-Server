@@ -71,7 +71,8 @@ async function doRestore(row) {
     await store.restoreAccount(row.id)
     allAccounts.value = allAccounts.value.filter(a => a.id !== row.id)
     ElMessage.success('账户已恢复')
-    emit('restored')
+    // 带上 account_id：被删的户不在父组件列表里，父组件要靠它轮询 gg_my_dashboard
+    emit('restored', row.account_id)
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '恢复失败')
   } finally {

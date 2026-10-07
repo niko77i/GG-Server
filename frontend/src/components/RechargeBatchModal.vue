@@ -83,7 +83,8 @@ async function submit() {
     if (res.warning) ElMessage.warning(res.warning)
     else ElMessage.success(`已提交 ${res.count} 条充值记录`)
     emit('update:visible', false)
-    emit('saved')
+    // 带上响应：父组件靠 res.recharge_ids 对每笔充值轮询 gg_recharge 写表结果
+    emit('saved', res)
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '批量充值失败')
   }
