@@ -10,6 +10,7 @@ import json
 import logging
 
 from google_sheets_service import col_index, read_sheet_values
+from utils import chunk
 
 log = logging.getLogger("gg-server")
 
@@ -497,16 +498,17 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
 
     existing_map = {}
     if ids:
-        marks = ",".join("?" for _ in ids)
         table = _TABLE_FOR_PLATFORM[platform]
-        rows = db.execute(
-            f"""SELECT a.*, u.display_name AS owner_display, u.username AS owner_username
-                FROM {table} a LEFT JOIN users u ON a.owner_id = u.id
-                WHERE a.{key_field} IN ({marks})""",
-            ids,
-        ).fetchall()
-        for r in rows:
-            existing_map[r[key_field]] = dict(r)
+        # 分块绑定：上万账户时一次 IN 会超 SQLite 的 32766 变量上限。
+        for part in chunk(ids):
+            marks = ",".join("?" for _ in part)
+            for r in db.execute(
+                f"""SELECT a.*, u.display_name AS owner_display, u.username AS owner_username
+                    FROM {table} a LEFT JOIN users u ON a.owner_id = u.id
+                    WHERE a.{key_field} IN ({marks})""",
+                tuple(part),
+            ).fetchall():
+                existing_map[r[key_field]] = dict(r)
 
     for p in parsed_rows:
         row_no = p.get("row")
@@ -1321,23 +1323,28 @@ def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
     主动从看板撤下的意图，刷新不该把它复活。
     """
     sql = _ROW_SQL[platform]
-    params = ()
     # 两个基语句都没有 WHERE 子句，故条件先累积成 list 再统一拼 —— 避免
     # 「先拼 WHERE 再找地方插 AND」那种在无 WHERE 时静默拼错条件的写法。
     conds = ["a.deleted_at IS NULL"]
-    if account_ids is not None:
+    # 每项是 (sql, params)。account_ids 给定时用 chunk 切成多段查询（防上万账户
+    # 超 SQLite 的 32766 变量上限）；None 表示全部，单条查询即可。
+    queries = []
+    if account_ids is None:
+        queries.append((sql + " WHERE " + " AND ".join(conds), ()))
+    else:
         if not account_ids:
             return []
-        marks = ",".join("?" for _ in account_ids)
-        conds.append(f"a.{ACCOUNT_KEY_FIELD[platform]} IN ({marks})")
-        params = tuple(account_ids)
-    sql += " WHERE " + " AND ".join(conds)
+        for part in chunk(account_ids):
+            marks = ",".join("?" for _ in part)
+            part_conds = conds + [f"a.{ACCOUNT_KEY_FIELD[platform]} IN ({marks})"]
+            queries.append((sql + " WHERE " + " AND ".join(part_conds), tuple(part)))
 
     out = []
-    for r in db.execute(sql, params).fetchall():
-        row = dict(r)
-        out.append({"account_id": str(row.get("account_id") or "").strip(),
-                    "cells": cells_for_row(row, platform)})
+    for q_sql, q_params in queries:
+        for r in db.execute(q_sql, q_params).fetchall():
+            row = dict(r)
+            out.append({"account_id": str(row.get("account_id") or "").strip(),
+                        "cells": cells_for_row(row, platform)})
     return [o for o in out if o["account_id"]]
 
 

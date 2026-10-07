@@ -26,7 +26,7 @@ from flask_compress import Compress
 
 from scraper import scrape_images, scrape_logo, ScrapeError
 from resizer import process_image, save_logo, ResizeError
-from utils import extract_package_name, natural_sort_key
+from utils import extract_package_name, natural_sort_key, chunk
 from url_signing import sign_query as _sign_query, verify_query as _verify_query
 from video_processor import VideoTask, VideoError
 from ai_service import get_provider, AIServiceError
@@ -4328,18 +4328,22 @@ def accounts_batch_lookup():
         return jsonify({"success": True, "found": [], "not_found": []})
 
     db = _yt_db()
-    placeholders = ",".join(["?"] * len(clean_ids))
-    rows = db.execute(
-        f"SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name, "
-        f"ag.name AS agent_name, st.name AS status_name "
-        f"FROM accounts a "
-        f"LEFT JOIN mcc m ON a.mcc_id = m.id "
-        f"LEFT JOIN users u ON a.owner_id = u.id "
-        f"LEFT JOIN agents ag ON a.agent_id = ag.id "
-        f"LEFT JOIN account_statuses st ON a.status_id = st.id "
-        f"WHERE a.account_id IN ({placeholders})",
-        clean_ids
-    ).fetchall()
+    # 分块绑定：SQLite 3.45.1 的变量上限是 32766，上万 id 一次绑定会抛
+    # `too many SQL variables`。用 chunk 分批，结果合并。
+    rows = []
+    for part in chunk(clean_ids):
+        marks = ",".join("?" for _ in part)
+        rows.extend(db.execute(
+            f"SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name, "
+            f"ag.name AS agent_name, st.name AS status_name "
+            f"FROM accounts a "
+            f"LEFT JOIN mcc m ON a.mcc_id = m.id "
+            f"LEFT JOIN users u ON a.owner_id = u.id "
+            f"LEFT JOIN agents ag ON a.agent_id = ag.id "
+            f"LEFT JOIN account_statuses st ON a.status_id = st.id "
+            f"WHERE a.account_id IN ({marks})",
+            part
+        ).fetchall())
 
     found = [_account_row_to_dict(dict(r)) for r in rows]
     found_ids = {f["account_id"] for f in found}
@@ -5139,11 +5143,15 @@ def accounts_batch_update():
         user_id = int(get_jwt_identity())
         # 归属校验：非跨用户角色批量改时，ids 必须全部属于自己（任一越权即整体拒绝）
         if not _cross_user_actor(user_id) and ids:
-            placeholders = ",".join("?" for _ in ids)
-            owned = db.execute(
-                f"SELECT COUNT(*) FROM accounts WHERE id IN ({placeholders}) AND owner_id=?",
-                (*ids, user_id)
-            ).fetchone()[0]
+            # 分块绑定：SQLite 3.45.1 变量上限 32766，上万 id 一次绑定会抛
+            # `too many SQL variables`。各段计数**累加**（不是只取最后一段）。
+            owned = 0
+            for part in chunk(ids):
+                marks = ",".join("?" for _ in part)
+                owned += db.execute(
+                    f"SELECT COUNT(*) FROM accounts WHERE id IN ({marks}) AND owner_id=?",
+                    tuple(part) + (user_id,)
+                ).fetchone()[0]
             if owned != len(ids):
                 return jsonify({"success": False, "error": "包含无权操作的账户"}), 403
         # 主键字段闸门（口径同 reassign 的 owner_id 闸门）：value 随后原样绑进 sqlite，
@@ -5224,11 +5232,17 @@ def accounts_batch_update():
         # 户管看板单行回写（规格 §6.2）：只刷真的落库了的那些行。
         # 本端点只有主键 ids，回写需要 account_id 字符串，故按主键反查。
         if ids:
-            _marks = ",".join("?" for _ in ids)
-            _affected = db.execute(
-                f"SELECT account_id FROM accounts WHERE id IN ({_marks})", tuple(ids)
-            ).fetchall()
-            hd.writeback_rows(user_id, "gg", [r["account_id"] for r in _affected])
+            # 分块绑定 + 结果合并：同上，防上万 id 超 SQLite 变量上限。
+            _affected_ids = []
+            for _part in chunk(ids):
+                _marks = ",".join("?" for _ in _part)
+                _affected_ids.extend(
+                    r["account_id"] for r in db.execute(
+                        f"SELECT account_id FROM accounts WHERE id IN ({_marks})",
+                        tuple(_part)
+                    ).fetchall()
+                )
+            hd.writeback_rows(user_id, "gg", _affected_ids)
         # 后台同步 Google Sheets（仅写入新插入的记录）
         if field in ("status", "status_id") and value and new_clear_rows:
             sheet_id = _get_sync_spreadsheet_id(db)
@@ -5377,21 +5391,22 @@ def accounts_sync_from_sheet():
 
     # 7. 批量查询系统现有账户
     sheet_ids = [a["account_id"] for a in sheet_accounts]
-    placeholders = ",".join(["?" for _ in sheet_ids])
-    existing_rows = db.execute(
-        f"""SELECT a.id, a.account_id, a.timezone, a.agent_id, a.status_id,
-                   a.deleted_at,
-                   ag.name AS agent_name, st.name AS status_name
-            FROM accounts a
-            LEFT JOIN agents ag ON a.agent_id = ag.id
-            LEFT JOIN account_statuses st ON a.status_id = st.id
-            WHERE a.account_id IN ({placeholders}) AND a.owner_id = ?""",
-        sheet_ids + [user_id]
-    ).fetchall()
-
+    # 分块绑定：SQLite 3.45.1 的变量上限是 32766，上万账户一次 IN 会抛
+    # `too many SQL variables`。逐段查询、合并进同一个 existing_map。
     existing_map = {}
-    for r in existing_rows:
-        existing_map[r["account_id"]] = dict(r)
+    for part in chunk(sheet_ids):
+        marks = ",".join("?" for _ in part)
+        for r in db.execute(
+            f"""SELECT a.id, a.account_id, a.timezone, a.agent_id, a.status_id,
+                       a.deleted_at,
+                       ag.name AS agent_name, st.name AS status_name
+                FROM accounts a
+                LEFT JOIN agents ag ON a.agent_id = ag.id
+                LEFT JOIN account_statuses st ON a.status_id = st.id
+                WHERE a.account_id IN ({marks}) AND a.owner_id = ?""",
+            tuple(part) + (user_id,)
+        ).fetchall():
+            existing_map[r["account_id"]] = dict(r)
 
     # 8. 逐行比对
     to_create = []
@@ -5527,14 +5542,19 @@ def accounts_sync_from_sheet():
             # 同时查询 deleted_at，用于写 H 列"解绑"
             _sync_back_rows = []      # (account_id, status, deleted_at)
             if sheet_ids:
-                _fresh_rows = db.execute(
-                    f"""SELECT a.account_id, COALESCE(st.name, '存活') AS status_name,
-                               a.deleted_at
-                        FROM accounts a
-                        LEFT JOIN account_statuses st ON a.status_id = st.id
-                        WHERE a.account_id IN ({placeholders}) AND a.owner_id = ?""",
-                    sheet_ids + [user_id]
-                ).fetchall()
+                # 同 7. 的分块口径：本查询与上面那条共用 sheet_ids，也必须分块，
+                # 否则上万账户在这一步照样抛 `too many SQL variables`。
+                _fresh_rows = []
+                for _part in chunk(sheet_ids):
+                    _marks = ",".join("?" for _ in _part)
+                    _fresh_rows.extend(db.execute(
+                        f"""SELECT a.account_id, COALESCE(st.name, '存活') AS status_name,
+                                   a.deleted_at
+                            FROM accounts a
+                            LEFT JOIN account_statuses st ON a.status_id = st.id
+                            WHERE a.account_id IN ({_marks}) AND a.owner_id = ?""",
+                        tuple(_part) + (user_id,)
+                    ).fetchall())
                 for r in _fresh_rows:
                     _sync_back_rows.append((
                         r["account_id"],
