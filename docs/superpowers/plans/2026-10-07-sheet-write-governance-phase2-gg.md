@@ -517,7 +517,9 @@ def _gg_dashboard_write(dash_uid, account_ids):
     """
     import database
     import google_sheets_service as gs
-    from main import _GOOGLE_SHEETS_CONFIG
+    # 延迟 import：这两个 helper 定义在 main.py，而 main 会 import 本模块（注册 target），
+    # 顶层 import 会成环。GOOGLE_SHEETS_CONFIG 同理。
+    from main import _GOOGLE_SHEETS_CONFIG, _get_sync_spreadsheet_id, _get_my_dashboard_name
 
     db = database.get_db()
     try:
@@ -573,7 +575,9 @@ def _gg_dashboard_rebuild(user_id, business_key, payload):
 sheet_write.register_target(TARGET, rebuild=_gg_dashboard_rebuild)
 ```
 
-> `_get_sync_spreadsheet_id` / `_get_my_dashboard_name` 现在定义在 `main.py`。**在本文件里用延迟 import 取**（`from main import _get_sync_spreadsheet_id, _get_my_dashboard_name`）—— 放在函数内，避免与本文件被 `main` import 形成循环。**先把上面代码里的裸调用补上这个 import**，否则会 `NameError`。
+> `_get_sync_spreadsheet_id` / `_get_my_dashboard_name` 定义在 `main.py`，而 `main` 会 import
+> 本模块（注册 target）—— 故上面用**函数内延迟 import**，顶层 import 会成环。
+> `_gg_dashboard_rebuild` 里的 `import database` 同理放在闭包内。
 
 - [ ] **Step 4: 改 `py/main.py` 的 5 个点位**
 
