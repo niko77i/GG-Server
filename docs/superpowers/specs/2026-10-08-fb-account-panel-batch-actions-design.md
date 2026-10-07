@@ -124,11 +124,15 @@ FB 版一律带 owner 过滤。
 只判类型会把 FOREIGN KEY / NOT NULL 也误报成「已存在」。
 `create_pixel_bm` 那类未收口的口径**不要**在这里复制。
 
-### 7.3 状态解析必须带 `platform='fb'`
-`account_statuses` 是 `UNIQUE(name, platform)` 的共享字典，「存活」在 gg/fb/tt 各有一行。
-凡按名字取状态行**必须带 `platform='fb'`**，且**不要带 `owner_id`**
-（`owner_id` 记的是创建者，与账户归属无关）。AGENTS.md 已记过这个陷阱的两次事故
-（GG 侧 43 个账户被写成 fb 的状态 id；`data_service` 的选项导入被整次打崩）。
+### 7.3 ~~状态解析必须带 `platform='fb'`~~ —— **勘误：本需求不涉及**
+
+> **2026-10-08 勘误（写实现计划时核对现行代码发现）**：本条初稿是照 AGENTS.md 的通用警告写的，
+> 但**对本需求不适用**。核对 `fb_routes.py` 后确认：该文件**从不直接读写 `account_statuses`**
+> （全文 grep 无命中）；FB 的建户路径（`create_account`）是**前端直接传 `status_id` 数值**，
+> **不做「状态名 → id」解析** —— 因此 `(name, platform)` 唯一键这个陷阱在 FB 账户路径上根本走不到。
+>
+> 保留此条仅为记录：**将来若有人给 FB 加「按状态名解析」的路径**（如从表格同步账户时读回中文状态名），
+> 那时才必须带 `platform='fb'` 且不带 `owner_id`。
 
 ### 7.4 纯增量
 **不改任何 GG / TT 的现有代码**（那正是选方案 A 而非 B 的原因）。
