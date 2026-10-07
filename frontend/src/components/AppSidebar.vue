@@ -75,7 +75,7 @@ const ggNavItems = [
   { key: 'toolkit', icon: '🧰', label: '工具集', sections: [{ title: '工具', items: [{ icon:'📊',label:'做表数据',path:'/toolkit/zuobiao'},{ icon:'🎵',label:'音频替换',path:'/toolkit/audio'},{ icon:'🌐',label:'翻译工具',path:'/toolkit/translate'}]}]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
   { key: 'data-manage', icon: '📋', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'数据管理',path:'/data-manage'}]}]},
-  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',admin:true }] }]},
 ]
 
 const fbNavItems = [
@@ -93,7 +93,7 @@ const fbNavItems = [
   { key: 'fb-extract', icon: '📋', label: '数据提取', sections: [{ title: '提取', items: [{ icon:'📥',label:'FB数据提取',path:'/fb/extract'}]}]},
   { key: 'fb-data', icon: '📊', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'FB数据管理',path:'/fb/data-manage'}]}]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
-  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',admin:true }] }]},
 ]
 
 const ttNavItems = [
@@ -109,7 +109,7 @@ const ttNavItems = [
   ]},
   { key: 'tt-extract', icon: '📥', label: '数据提取', sections: [{ title: '提取', items: [{ icon:'📥',label:'TT数据提取',path:'/tt/extract' }] }]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
-  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',developer:true }] }]},
+  { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',admin:true }] }]},
 ]
 
 // 户管：只有账户区、设置、用户管理；不含产品 / 视频 / 媒体 / 工具集 / 数据分析 / 定时任务

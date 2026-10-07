@@ -84,7 +84,7 @@ const routes = [
   {
     path: '/admin/scheduler',
     component: () => import('../views/SchedulerView.vue'),
-    meta: { developer: true, title: '定时任务' }
+    meta: { admin: true, title: '定时任务' }
   },
   {
     path: '/profile',

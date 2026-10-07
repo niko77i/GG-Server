@@ -33,5 +33,11 @@ export const adminApi = {
   },
   triggerTtDelistCheck() {
     return api.post('/admin/trigger-tt-delist-check')
-  }
+  },
+  getSchedulerConfig() {
+    return api.get('/admin/scheduler/config')
+  },
+  updateSchedulerConfig(data) {
+    return api.put('/admin/scheduler/config', data)
+  },
 }
