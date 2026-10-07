@@ -293,6 +293,11 @@ def list_accounts():
 @jwt_required()
 @tt_write_required
 def update_account(aid):
+    # 路径参数 `<int:aid>` 无上界（Werkzeug 只保证可解析为 int，不限 int64）：超界 id
+    # 不可能命中任何行，却会在 sqlite3 参数绑定处抛 OverflowError ⇒ 500。
+    # 口径同 GG 侧 main.py 的 aid 守卫，提前按「账户不存在」返回。
+    if aid > 2**63 - 1:
+        return err("账户不存在", 404)
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
@@ -517,6 +522,10 @@ def batch_update_accounts():
 @jwt_required()
 @tt_write_required
 def reassign_account(aid):
+    # 路径参数 `<int:aid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    # 口径同 GG 侧 main.py 的 aid 守卫（owner_id 那道闸门只管 body 侧）。
+    if aid > 2**63 - 1:
+        return err("账户不存在", 404)
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
@@ -609,6 +618,9 @@ def reassign_account(aid):
 @jwt_required()
 @tt_write_required
 def delete_account(aid):
+    # 路径参数 `<int:aid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if aid > 2**63 - 1:
+        return err("账户不存在或已删除", 404)
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
@@ -646,6 +658,9 @@ def batch_delete_accounts():
 @jwt_required()
 @tt_write_required
 def restore_account(aid):
+    # 路径参数 `<int:aid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if aid > 2**63 - 1:
+        return err("账户不存在或未被删除", 404)
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
@@ -663,6 +678,9 @@ def restore_account(aid):
 @jwt_required()
 @tt_write_required
 def permanent_delete_account(aid):
+    # 路径参数 `<int:aid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if aid > 2**63 - 1:
+        return err("账户不存在或未被删除", 404)
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
@@ -714,6 +732,9 @@ def deleted_accounts_list():
 @jwt_required()
 @tt_required
 def bc_history(aid):
+    # 路径参数 `<int:aid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if aid > 2**63 - 1:
+        return err("账户不存在", 404)
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
@@ -745,6 +766,9 @@ def bc_history(aid):
 @jwt_required()
 @tt_write_required
 def delete_bc_history(aid, hid):
+    # 两个路径参数均无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if aid > 2**63 - 1 or hid > 2**63 - 1:
+        return err("记录不存在", 404)
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
@@ -798,6 +822,9 @@ def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
 @jwt_required()
 @tt_required
 def recharge_records(aid):
+    # 路径参数 `<int:aid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if aid > 2**63 - 1:
+        return err("账户不存在", 404)
     db = get_db()
     uid = get_uid()
     ac = db.execute("SELECT advertiser_id, owner_id FROM tt_accounts WHERE id=? AND deleted_at IS NULL",
@@ -923,6 +950,9 @@ def recharge_batch_submit():
 @jwt_required()
 @tt_write_required
 def recharge_update(rid):
+    # 路径参数 `<int:rid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if rid > 2**63 - 1:
+        return err("充值记录不存在", 404)
     db = get_db()
     uid = get_uid()
     data = parse_body()
@@ -944,6 +974,9 @@ def recharge_update(rid):
 @jwt_required()
 @tt_write_required
 def recharge_delete(rid):
+    # 路径参数 `<int:rid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if rid > 2**63 - 1:
+        return err("充值记录不存在", 404)
     db = get_db()
     uid = get_uid()
     row = db.execute("SELECT created_by FROM tt_recharge_records WHERE id=?", (rid,)).fetchone()
@@ -961,6 +994,9 @@ def recharge_delete(rid):
 @jwt_required()
 @tt_write_required
 def recharge_retry_sheets(rid):
+    # 路径参数 `<int:rid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if rid > 2**63 - 1:
+        return err("充值记录不存在", 404)
     db = get_db()
     uid = get_uid()
     row = db.execute(
@@ -1020,6 +1056,9 @@ def recycle_reason_create():
 @tt_write_required
 def recycle_reason_rename(rid):
     """公用词表：任何非 viewer 均可改名；name 全局唯一。"""
+    # 路径参数 `<int:rid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if rid > 2**63 - 1:
+        return err("回收原因不存在", 404)
     db = get_db()
     name = (parse_body().get("name") or "").strip()
     if not name:
@@ -1044,6 +1083,9 @@ def recycle_reason_rename(rid):
 @tt_write_required
 def recycle_reason_delete(rid):
     """公用词表：任何非 viewer 均可删除。"""
+    # 路径参数 `<int:rid>` 无上界：超 int64 会在 sqlite 绑定处抛 OverflowError ⇒ 500。
+    if rid > 2**63 - 1:
+        return err("回收原因不存在", 404)
     db = get_db()
     row = db.execute("SELECT id FROM tt_recycle_reasons WHERE id=?", (rid,)).fetchone()
     if not row:

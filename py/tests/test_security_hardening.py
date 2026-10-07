@@ -1,4 +1,5 @@
 """安全加固测试 — A/B/C/D 类缺陷收口。"""
+import logging
 import os
 import shutil
 
@@ -699,4 +700,318 @@ class TestB3DownloadsRequireAuthOrSignature:
         assert resp.status_code == 401, (
             f"video/download 的签名挪用到 scrape/download 后被放行"
             f"（{resp.status_code}）—— 端点的 endpoint 串绑定失效"
+        )
+
+
+# ---------------------------------------------------------------------------
+# E 组：信息泄露（CWE-209）收口
+#   E-1 全局 500 处理器不再回显异常原文 / traceback（治本）
+#   E-2 status_id / agent_id / mcc_id × 三个端点补 int64 上界与类型闸门
+# ---------------------------------------------------------------------------
+
+# 客户端响应里绝不允许出现的「内部细节」标记（第一层的直接守门断言）
+LEAK_MARKERS = ("Traceback", "main.py", "SQLite", "sqlite3", "OverflowError",
+                "IntegrityError", "FOREIGN KEY")
+
+
+def _assert_no_internal_leak(resp):
+    """响应体（含 JSON 与 header 之外的全部文本）不得含异常类型/消息/源码路径/行号。"""
+    raw = resp.get_data(as_text=True)
+    for marker in LEAK_MARKERS:
+        assert marker not in raw, f"响应体泄露内部细节 {marker!r}: {raw[:200]!r}"
+
+
+class TestE1Global500HandlerHidesInternals:
+    """第一层：任意**未预期**异常 ⇒ 固定文案 + 500；详情只落服务端日志。
+
+    改前该处理器藏在 `if __name__ == "__main__":` 块内 ⇒ 以导入方式拉起应用时
+    压根不注册，响应退化成 Flask 默认 HTML，且原实现把 `str(e)` 与 `tb[-2000:]`
+    （含 `py/main.py` 源码路径与行号）一并回给客户端。去掉本层修复，
+    `body["success"]` 这行即红（响应不再是 JSON）。
+    """
+
+    def test_unexpected_exception_response_hides_internals(self, client, app, monkeypatch, caplog):
+        import main as main_mod
+
+        def _boom():
+            raise RuntimeError("内部炸了 D:\\server\\cc\\GG-Server\\py\\main.py:42")
+
+        # 让工厂默认的「测试期异常上抛」让位于本用例要钉的兜底路径
+        monkeypatch.setitem(app.config, "PROPAGATE_EXCEPTIONS", False)
+        monkeypatch.setattr(main_mod, "_scan_fonts_dir", _boom)
+
+        with caplog.at_level(logging.ERROR, logger="gg-server"):
+            resp = client.get("/api/fonts/list", headers=_login(client, "e1user"))
+
+        assert resp.status_code == 500
+        body = resp.get_json()
+        assert body is not None, "500 不再是 JSON —— 兜底处理器未注册"
+        assert body["success"] is False
+        assert body["error"] == "服务器内部错误，请查看控制台日志"
+        assert "trace" not in body, "响应体重新带上了 traceback 字段"
+        _assert_no_internal_leak(resp)
+        assert "内部炸了" not in resp.get_data(as_text=True)
+        # 异常详情不得丢：仍在日志里（排查能力不因脱敏而降级）
+        assert "内部炸了" in caplog.text
+
+
+def _login(client, username, role="user"):
+    """注册 + 登录，返回认证头（E 组用例专用的小工具）。"""
+    return _create_user(client, username, role=role)[0]
+
+
+class TestE2PkFieldGate:
+    """第二层：三个端点的 status_id / agent_id / mcc_id 补上界与类型闸门 ⇒ 400。
+
+    合法范围 = 能安全绑进 sqlite3 的整数主键：[0, 2**63-1]。闸门口径与
+    `accounts_reassign` 既有的 owner_id 闸门一致（ASCII 数字串 → int → 上界）。
+    """
+
+    PK_FIELDS = ("status_id", "agent_id", "mcc_id")
+    # 数值超 int64（int 与「数字串」两种外形都覆盖：后者 TEXT 绑定会绕过 OverflowError，
+    # 转而在 `PRAGMA foreign_keys=ON` 下撞外键约束）
+    OVERSIZE = (2 ** 63, 10 ** 30, "9223372036854775808", "9" * 19, "9" * 30)
+
+    def _own_account(self, client, username, account_id):
+        """建一个普通用户 + 归其名下的账户，返回 (认证头, 账户主键 aid)。"""
+        hdr, uid = _create_user(client, username, role="user")
+        db = database.get_db()
+        _mk_account(db, uid, account_id)
+        aid = db.execute("SELECT id FROM accounts WHERE account_id=?", (account_id,)).fetchone()["id"]
+        db.close()
+        return hdr, aid
+
+    # ---- PUT /api/accounts/<aid> -------------------------------------------
+
+    @pytest.mark.parametrize("field", PK_FIELDS)
+    def test_update_rejects_oversized_pk(self, client, field):
+        hdr, aid = self._own_account(client, f"_e2_upd_{field}", "GG-E2-UPD")
+        for bad in self.OVERSIZE:
+            resp = client.put(f"/api/accounts/{aid}", json={field: bad}, headers=hdr)
+            assert resp.status_code == 400, (
+                f"update {field}={bad!r} 应 400，实得 {resp.status_code}（{resp.get_data(as_text=True)[:120]}）"
+            )
+            assert resp.get_json()["error"] == f"{field} 不合法"
+            _assert_no_internal_leak(resp)
+
+    @pytest.mark.parametrize("field", PK_FIELDS)
+    def test_update_rejects_wrong_type_and_bool(self, client, field):
+        """类型闸门：非数字串、负数、Unicode 数字、bool 一律 400（bool 是 int 子类，
+        但 `str(True)=='True'` 不是数字串 ⇒ 被同一口径挡下，不会静默绑成 1）。"""
+        hdr, aid = self._own_account(client, f"_e2_uty_{field}", "GG-E2-UTY")
+        for bad in ("abc", "-1", "1.5", "²", "١", True, [1], {"a": 1}):
+            resp = client.put(f"/api/accounts/{aid}", json={field: bad}, headers=hdr)
+            assert resp.status_code == 400, (
+                f"update {field}={bad!r} 应 400，实得 {resp.status_code}"
+            )
+            assert resp.get_json()["error"] == f"{field} 不合法"
+
+    def test_mcc_id_empty_values_still_clear(self, client):
+        """对照：mcc_id 的既有「空值/0 ⇒ 清空 MCC」语义不得被新闸门误伤。
+
+        （`False == 0` 在 Python 为真，故 mcc_id=False 走的也是这条既有归一化路径，
+        属预期的「清空」而非闸门漏放 —— 它不会绑出任何伪造主键。）
+        """
+        hdr, aid = self._own_account(client, "_e2_clr", "GG-E2-CLR")
+        for ok in (None, 0, "0", "", False):
+            resp = client.put(f"/api/accounts/{aid}", json={"mcc_id": ok}, headers=hdr)
+            assert resp.status_code == 200, (
+                f"mcc_id={ok!r} 应沿用『清空 MCC』走 200，实得 {resp.status_code}"
+            )
+            db = database.get_db()
+            mcc = db.execute("SELECT mcc_id FROM accounts WHERE id=?", (aid,)).fetchone()["mcc_id"]
+            db.close()
+            assert mcc is None
+
+    # ---- POST /api/accounts/batch-update ----------------------------------
+
+    @pytest.mark.parametrize("field", PK_FIELDS)
+    def test_batch_update_rejects_oversized_pk(self, client, field):
+        hdr, aid = self._own_account(client, f"_e2_batch_{field}", "GG-E2-BATCH")
+        for bad in self.OVERSIZE:
+            resp = client.post("/api/accounts/batch-update",
+                               json={"ids": [aid], "field": field, "value": bad}, headers=hdr)
+            assert resp.status_code == 400, (
+                f"batch-update {field}={bad!r} 应 400，实得 {resp.status_code}"
+            )
+            assert resp.get_json()["error"] == f"{field} 不合法"
+            _assert_no_internal_leak(resp)
+
+    # ---- PUT /api/accounts/<aid>/reassign ---------------------------------
+
+    @pytest.mark.parametrize("field", PK_FIELDS)
+    def test_reassign_rejects_oversized_pk(self, client, field):
+        """reassign 的字段向量需跨用户角色、且转移到**他人**名下才走得到字段更新那段循环。"""
+        dev, dev_id = _create_user(client, f"_e2_re_{field}", role="developer")
+        _, target = _create_user(client, f"_e2_re_t_{field}", role="user")
+        db = database.get_db()
+        _mk_account(db, dev_id, "GG-E2-RE")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-E2-RE'").fetchone()["id"]
+        db.close()
+        for bad in self.OVERSIZE:
+            resp = client.put(f"/api/accounts/{aid}/reassign",
+                              json={"owner_id": target, field: bad}, headers=dev)
+            assert resp.status_code == 400, (
+                f"reassign {field}={bad!r} 应 400，实得 {resp.status_code}"
+            )
+            assert resp.get_json()["error"] == f"{field} 不合法"
+            _assert_no_internal_leak(resp)
+
+    # ---- 边界对照：合法上界值不得被新闸门误拦 ------------------------------
+
+    def test_max_valid_int64_still_reaches_business_path(self, client):
+        """`2**63-1` 是**合法** int64 上界 ⇒ 必须穿过闸门、落到既有业务路径。
+
+        改前该值在 accounts_update 会绑进 sqlite 并撞外键 ⇒ 409「所属 MCC 不存在…」；
+        若闸门把上界误写成 `>= 2**63 - 1`，本用例会改成 400 + `xxx 不合法` ⇒ 红。
+        """
+        hdr, aid = self._own_account(client, "_e2_max", "GG-E2-MAX")
+        m = 2 ** 63 - 1
+        for field in self.PK_FIELDS:
+            resp = client.put(f"/api/accounts/{aid}", json={field: m}, headers=hdr)
+            assert resp.status_code != 400, (
+                f"{field}={m}（合法上界）被闸门误拦成 400"
+            )
+            assert resp.get_json()["error"] != f"{field} 不合法", (
+                f"{field}={m}（合法上界）被格式/上界闸门拒掉"
+            )
+            # 走到既有业务路径：外键不存在 ⇒ 既有 409（中文），而非新的格式 400
+            assert resp.status_code == 409
+
+    def test_max_valid_int64_reassign_not_rejected_by_gate(self, client):
+        """reassign 侧的同一对照：上界值不得被新闸门拦成 400「不合法」。"""
+        dev, dev_id = _create_user(client, "_e2_max_re", role="developer")
+        _, target = _create_user(client, "_e2_max_re_t", role="user")
+        db = database.get_db()
+        _mk_account(db, dev_id, "GG-E2-MAX-RE")
+        aid = db.execute("SELECT id FROM accounts WHERE account_id='GG-E2-MAX-RE'").fetchone()["id"]
+        db.close()
+        m = 2 ** 63 - 1
+        for field in self.PK_FIELDS:
+            resp = client.put(f"/api/accounts/{aid}/reassign",
+                              json={"owner_id": target, field: m}, headers=dev)
+            assert resp.status_code != 400, f"reassign {field}={m}（合法上界）被闸门误拦"
+            assert resp.get_json()["error"] != f"{field} 不合法"
+
+
+class TestE3CreateOwnerParseGate:
+    """追加站点 1：`POST /api/accounts/create` 的 owner 解析改用同口径闸门。
+
+    改前是裸 `.isdigit()` —— Unicode 数字（"²"/"①"/"٣" 等）为真，但 `int()` 对它们抛
+    ValueError，且该 `int()` 在 try 之外 ⇒ 500（本端点无泛 `except Exception`，异常逸出）。
+    超 int64 的纯数字串则会在 sqlite 绑定处抛 OverflowError ⇒ 同样 500。
+
+    该端点**既有语义**是「owner_id 不合规就忽略、建到自己名下」，故修复后仍应落回自己
+    名下（而不是新增一种拒绝行为，也不是把账户建到伪造的 id 上）。
+    """
+
+    @pytest.mark.parametrize("bad", ["²", "①", "٣", "9" * 30, 10 ** 30, 2 ** 63])
+    def test_create_with_unparsable_owner_falls_back_to_self(self, client, bad):
+        """先刻意建够用户，使 id=3 真实存在：阿拉伯-印度数字 "٣" 经裸 `int()` 会解析成 3
+        （Python 的 int() 接受 Unicode 十进制数字）⇒ 改前账户会被**静默建到 id=3 的用户名下**。
+        断言 `owner_id == hg_id` 让这条构造同时钉住「不 500」与「不越权代建」。
+        """
+        hg, hg_id = _create_user(client, "_e3_hg", role="huguan")
+        _create_user(client, "_e3_f2", role="user")
+        _, u3 = _create_user(client, "_e3_f3", role="user")
+        if bad == "٣":
+            assert u3 == 3 and int(bad) == 3, "前置失败：三号用户 id 非 3，越权构造失效"
+        resp = client.post("/api/accounts/create",
+                           json={"name": "E3账户", "account_id": "GG-E3-1", "owner_id": bad},
+                           headers=hg)
+        assert resp.status_code == 200, (
+            f"owner_id={bad!r} 应回落到自己名下（200），实得 {resp.status_code}"
+        )
+        db = database.get_db()
+        own = db.execute("SELECT owner_id FROM accounts WHERE account_id='GG-E3-1'").fetchone()
+        db.close()
+        assert own is not None and own["owner_id"] == hg_id
+
+    def test_create_with_valid_owner_still_honoured(self, client):
+        """对照：合法 owner_id 仍必须真的建到目标用户名下（闸门不得收过头）。"""
+        hg, _ = _create_user(client, "_e3_hg_ok", role="huguan")
+        _, target = _create_user(client, "_e3_target", role="user")
+        resp = client.post("/api/accounts/create",
+                           json={"name": "E3代建", "account_id": "GG-E3-2",
+                                 "owner_id": str(target)},
+                           headers=hg)
+        assert resp.status_code == 200
+        db = database.get_db()
+        own = db.execute("SELECT owner_id FROM accounts WHERE account_id='GG-E3-2'").fetchone()
+        db.close()
+        assert own["owner_id"] == target
+
+    def test_max_valid_int64_owner_not_rejected_by_gate(self, client):
+        """边界对照：2**63-1 是**合法** int64 ⇒ 必须穿过闸门、落到 DB 绑定上。
+
+        判据取 409 而不是「非 500」：`accounts.owner_id` 是 `REFERENCES users(id)`，
+        连接开着 `PRAGMA foreign_keys=ON` ⇒ 该值会真的走到 INSERT 并撞外键，被既有
+        IntegrityError 分支接成 409。若上界误写成 `>= 2**63 - 1`，值会被静默忽略、
+        target_owner 落回自己 ⇒ 建库成功 200 ⇒ 本用例红。
+        """
+        hg, _ = _create_user(client, "_e3_hg_max", role="huguan")
+        resp = client.post("/api/accounts/create",
+                           json={"name": "E3上界", "account_id": "GG-E3-3",
+                                 "owner_id": str(2 ** 63 - 1)},
+                           headers=hg)
+        assert resp.status_code == 409, (
+            f"合法上界 owner_id 未穿过闸门（实得 {resp.status_code}）—— 上界被写成 `>=`？"
+        )
+
+
+# TT 侧全部带 `<int:...>` 路径参数的端点：超 int64 的 id 不可能命中任何行。
+# 期望 404 而非 400/500 —— 与 GG main.py 的 aid 守卫同口径（该守卫明确定调
+# 「超 int64 的 id 不可能匹配任何行 ⇒ 按『账户不存在』返回 404」）。
+TT_INT64_ROUTES = [
+    ("put",    "/api/tt/accounts/{i}",                     None),
+    ("put",    "/api/tt/accounts/{i}/reassign",            {}),
+    ("delete", "/api/tt/accounts/{i}",                     None),
+    ("post",   "/api/tt/accounts/{i}/restore",             None),
+    ("delete", "/api/tt/accounts/{i}/permanent",           None),
+    ("get",    "/api/tt/accounts/{i}/bc-history",          None),
+    ("delete", "/api/tt/accounts/{i}/bc-history/{i}",      None),
+    ("get",    "/api/tt/accounts/{i}/recharge-records",    None),
+    ("put",    "/api/tt/recharge/{i}",                     {}),
+    ("delete", "/api/tt/recharge/{i}",                     None),
+    ("post",   "/api/tt/recharge/{i}/retry-sheets",        None),
+    ("put",    "/api/tt/recycle-reasons/{i}",              {"name": "E4原因"}),
+    ("delete", "/api/tt/recycle-reasons/{i}",              None),
+]
+
+
+class TestE4TtIntPathParamBounds:
+    """追加站点 2：TT 侧所有 `<int:...>` 路径参数补 int64 上界。
+
+    Werkzeug 的 IntegerConverter 只保证「能解析成 int」，不限 int64 ⇒ 超界 id 会在
+    sqlite3 参数绑定处抛 OverflowError（异常逸出视图 ⇒ 500 + traceback）。把 GG 侧
+    `if aid > 2**63 - 1` 的守卫补到 TT 全部 13 条带 `<int:>` 的路由上。
+    """
+
+    @pytest.mark.parametrize("method,path,body", TT_INT64_ROUTES)
+    @pytest.mark.parametrize("bad", [2 ** 63, 10 ** 30, "9" * 30])
+    def test_oversized_int_path_param_is_not_500(self, client, method, path, body, bad):
+        hdr, _ = _create_user(client, "_e4_tt", role="user", platform="tt")
+        url = path.format(i=bad)
+        fn = getattr(client, method)
+        resp = (fn(url, json=body, headers=hdr) if body is not None
+                else fn(url, headers=hdr))
+        assert resp.status_code == 404, (
+            f"{method.upper()} {path} id={bad!r} 应 404，实得 {resp.status_code}"
+            f"（{resp.get_data(as_text=True)[:120]}）"
+        )
+        _assert_no_internal_leak(resp)
+
+    def test_max_valid_int64_tt_aid_not_rejected_by_guard(self, client):
+        """边界对照：2**63-1 是**合法** int64 ⇒ 必须穿过闸门、落到既有业务路径。
+
+        TT 各端点对不存在的账户本就回 404（与超界守卫**同码**）⇒ 单看状态码无法区分，
+        故改挑 `delete_bc_history`：该端点**没有**存在性校验，穿过闸门后会真的执行
+        DELETE 并回 200；而超界守卫命中时是 404「记录不存在」。用 developer 身份穿过
+        它前面的「非跨用户角色 403」那层。
+        """
+        dev, _ = _create_user(client, "_e4_tt_max", role="developer")
+        m = 2 ** 63 - 1
+        resp = client.delete(f"/api/tt/accounts/{m}/bc-history/{m}", headers=dev)
+        assert resp.status_code == 200, (
+            f"合法上界 id 被闸门误拦（实得 {resp.status_code}）—— 上界被写成 `>=`？"
         )

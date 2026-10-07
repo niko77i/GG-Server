@@ -525,6 +525,23 @@ def index():
     return send_from_directory(_FRONTEND_DIR, "index.html")
 
 
+@app.errorhandler(500)
+def internal_error(e):
+    """未处理异常的兜底：客户端只收**固定文案**，异常详情（含 traceback）只落服务端日志。
+
+    此前本处理器把 `str(e)` 与 `tb[-2000:]` 原样回给客户端 ⇒ 任何未收敛的绑定点/编码错误
+    都会把英文异常原文与源码路径、行号泄露出去（CWE-209）。响应形状（JSON + success:false）
+    与状态码 500 保持不变；排查线索仍完整进 `log`（控制台 + temp/logs 轮转文件）。
+
+    注册在模块级（此前藏在 `if __name__ == "__main__":` 块内）—— 否则以导入方式拉起
+    应用时该兜底根本不生效，测试也无从钉住它。
+    """
+    import traceback
+    tb = traceback.format_exc()
+    log.error("未处理的服务器异常:\n%s", tb)
+    return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
+
+
 @app.errorhandler(404)
 def spa_fallback(e):
     """API 404 返回 JSON，其余返回 index.html（SPA 路由）。"""
@@ -4376,8 +4393,13 @@ def accounts_create():
     target_owner = user_id
     if actor_role in CROSS_USER_ROLES:
         raw_owner = (data.get("owner_id") or "")
-        if str(raw_owner).strip().isdigit():
-            target_owner = int(str(raw_owner).strip())
+        # 口径同 accounts_reassign 的 owner_id 闸门：必须 ASCII 十进制数字串且 ≤ 2**63-1。
+        # 此前是裸 `.isdigit()`：Unicode 数字（"²"/"①"/"٣" …）为真但 int() 抛 ValueError
+        # ⇒ 500；超 int64 的数字串则可解析、却在 sqlite 绑定处抛 OverflowError ⇒ 同样 500。
+        # 本端点既有语义是「owner_id 不合规就忽略、建到自己名下」，故保持该分支行为不变。
+        _pk = _valid_pk_int64(raw_owner)
+        if _pk is not None:
+            target_owner = _pk
     name = (data.get("name") or "").strip()
     account_id = (data.get("account_id") or "").strip()
     if not name or not account_id:
@@ -4592,6 +4614,28 @@ def accounts_batch_create():
     })
 
 
+def _valid_pk_int64(raw):
+    """主键/外键候选值的闸门 —— 口径与 accounts_reassign 的 owner_id 闸门**完全一致**。
+
+    合法 = `str(raw).strip()` 后是纯 ASCII 十进制数字串（无正负号、无小数点 ⇒ 天然 ≥ 0，
+    即下界 0），且数值 ≤ 2**63-1（SQLite INTEGER 是 64 位有符号，即上界）。
+    非法（含 bool：`str(True)` 不是数字串）返回 None。
+
+    为什么必须有：这些值随后原样交给 sqlite3 参数绑定。超上界时 Python 的 int() 能解析，
+    但绑定处会抛 OverflowError（内建，非 sqlite3.OverflowError）⇒ 500 + 英文异常原文。
+    """
+    s = str(raw).strip()
+    if not (s.isascii() and s.isdigit()):
+        return None
+    try:
+        v = int(s)
+    except (ValueError, OverflowError):
+        return None
+    if v > 2**63 - 1:
+        return None
+    return v
+
+
 @app.route("/api/accounts/<int:aid>", methods=["PUT"])
 @jwt_required()
 def accounts_update(aid):
@@ -4615,9 +4659,16 @@ def accounts_update(aid):
             if f in data:
                 val = data[f]
                 # mcc_id 空字符串/0 转 None，避免 FK 约束失败
+                if f == "mcc_id" and (val is None or val == 0 or val == "0"
+                                      or (isinstance(val, str) and not val.strip())):
+                    val = None
+                # 主键字段闸门（口径同 reassign 的 owner_id 闸门）：非数字串 / 超 int64 的值
+                # 会在 sqlite3 绑定处抛 OverflowError（500 + 英文原文），提前 400 挡下
+                if f in ("mcc_id", "agent_id", "status_id") and val is not None:
+                    val = _valid_pk_int64(val)
+                    if val is None:
+                        return jsonify({"success": False, "error": f"{f} 不合法"}), 400
                 if f == "mcc_id":
-                    if val is None or val == 0 or val == "0" or (isinstance(val, str) and not val.strip()):
-                        val = None
                     _record_mcc_change(db, aid, val, user_id, "manual")
                 db.execute(f"UPDATE accounts SET {f}=?, updated_at=datetime('now','localtime') WHERE id=?",
                            (val, aid))
@@ -4763,6 +4814,17 @@ def accounts_reassign(aid):
     # 超 int64 的 id 不可能匹配任何行，在绑定处却会抛 OverflowError ⇒ 提前按「账户不存在」返回。
     if aid > 2**63 - 1:
         return jsonify({"success": False, "error": "账户不存在"}), 404
+    # 同族向量（口径同上方 owner_id 闸门）：三个可编辑主键字段随后原样绑进 sqlite，
+    # 非数字串 / 超 int64 会在绑定处抛 OverflowError 或撞外键约束 ⇒ 500 + 英文原文。
+    # mcc_id 的空值/0 属既有「清空 MCC」语义（下方会转 None），不在此拦。
+    for _f in ("agent_id", "status_id", "mcc_id"):
+        _v = data.get(_f)
+        if _v is None:
+            continue
+        if _f == "mcc_id" and (_v == 0 or _v == "0" or (isinstance(_v, str) and not _v.strip())):
+            continue
+        if _valid_pk_int64(_v) is None:
+            return jsonify({"success": False, "error": f"{_f} 不合法"}), 400
     db = _yt_db()
     try:
         # 检查账户是否存在
@@ -5010,6 +5072,12 @@ def accounts_batch_update():
             ).fetchone()[0]
             if owned != len(ids):
                 return jsonify({"success": False, "error": "包含无权操作的账户"}), 403
+        # 主键字段闸门（口径同 reassign 的 owner_id 闸门）：value 随后原样绑进 sqlite，
+        # 非数字串 / 超 int64 会抛 OverflowError（异常逸出视图 ⇒ 500 + traceback），提前 400 挡下
+        if field in ("mcc_id", "agent_id", "status_id") and value is not None:
+            value = _valid_pk_int64(value)
+            if value is None:
+                return jsonify({"success": False, "error": f"{field} 不合法"}), 400
         new_clear_rows = []
         dashboard_sync_rows = []  # 收集状态变更账户，供 my_dashboard 后台同步
 
@@ -11136,14 +11204,7 @@ if __name__ == "__main__":
     print("正在初始化数据库...")
     database.get_db().close()
     print("数据库初始化完成。")
-    # 全局 500 处理器，开发时返回详细错误
-    @app.errorhandler(500)
-    def _internal_error(e):
-        import traceback
-        tb = traceback.format_exc()
-        print(f"[500 ERROR] {tb}", file=sys.stderr)
-        return jsonify({"success": False, "error": str(e), "trace": tb[-2000:]}), 500
-
+    # 全局 500 处理器已上移到模块级（见文件上部的 internal_error）
     print(f"服务已启动: http://{host}:{port}")
     print("在浏览器中打开上方地址即可使用。")
     # 自动打开浏览器
