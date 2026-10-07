@@ -99,13 +99,12 @@ def load_prefs(db, user_id: int) -> dict:
         order = _lenient_key_list(entry.get("order"))
         if order is None:
             continue                        # order 坏掉：整面板降级为默认
-        # hidden 缺省视为空表（只有 order 的面板仍可用）；但一旦给了值却不是
-        # list，说明这条面板记录形状不完整，与 order 坏掉同档处理 —— 整面板降级
-        # 为默认。`entry.get("hidden", [])` 把「键缺失」降级成 []，而显式的
-        # null / 数字 / 字符串都会走到 `_lenient_key_list -> None` 这一档。
-        hidden = _lenient_key_list(entry.get("hidden", []))
-        if hidden is None:
-            continue
+        # hidden 是**字段级**降级（设计 §4.4「该字段降级」）：hidden 坏掉只丢
+        # 该字段、完好的 order 原样保留，整面板不连坐 —— 否则用户会白丢自己排好
+        # 的列顺序。键缺失 / null / 非 list（数字、字符串、dict）都归一到空表。
+        # 与 order 的处理刻意不对称：order 是面板的主结构，坏掉就无从渲染，故整
+        # 面板降级（见上）。
+        hidden = _lenient_key_list(entry.get("hidden")) or []
         prefs[panel] = {"order": order, "hidden": [k for k in hidden if k in order]}
     return prefs
 

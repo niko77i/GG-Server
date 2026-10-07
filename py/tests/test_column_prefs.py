@@ -55,10 +55,14 @@ def _put_raw(uid, value):
     '{"gg_ads": "nope"}',       # 面板值是字符串
     '{"gg_ads": ["a","b"]}',    # 面板值是 list 而不是 dict（旧格式）
     '{"gg_ads": {"order": "x"}}',   # order 不是 list
-    '{"gg_ads": {"order": ["a"], "hidden": 5}}',  # hidden 不是 list
 ])
 def test_load_prefs_degrades_on_garbage(app, raw):
-    """任何畸形存量值都必须降级，不许抛异常。"""
+    """任何畸形存量值都必须降级，不许抛异常。
+
+    **注意 `hidden` 坏掉的情形不在这组里**：按设计 §4.4「`order`/`hidden`
+    不是 list → **该字段降级**」，hidden 坏掉只丢该字段、保留完好的 order，
+    不是整面板降级。见下方 test_load_prefs_hidden_garbage_degrades_field_only。
+    """
     _put_raw(9999, raw)
     db = database.get_db()
     try:
@@ -66,6 +70,33 @@ def test_load_prefs_degrades_on_garbage(app, raw):
     finally:
         db.close()
     assert prefs == {}, f"畸形值 {raw!r} 未被降级：{prefs}"
+
+
+@pytest.mark.parametrize("bad_hidden", [5, "x", None, {"a": 1}])
+def test_load_prefs_hidden_garbage_degrades_field_only(app, bad_hidden):
+    """hidden 坏掉只降级该字段，order 原样保留（设计 §4.4「该字段降级」）。
+
+    order 是完好的合法数据，不该因为 hidden 坏掉就连坐回默认 —— 那会让
+    用户白丢自己排好的列顺序。hidden 键**缺失**时同样视为空表。
+    """
+    _put_raw(9996, json.dumps({"gg_ads": {"order": ["a", "b"], "hidden": bad_hidden}}))
+    db = database.get_db()
+    try:
+        prefs = cp.load_prefs(db, 9996)
+    finally:
+        db.close()
+    assert prefs == {"gg_ads": {"order": ["a", "b"], "hidden": []}}
+
+
+def test_load_prefs_missing_hidden_is_empty(app):
+    """只有 order 的面板仍然可用（hidden 键缺失 = 没有隐藏列）。"""
+    _put_raw(9995, json.dumps({"gg_ads": {"order": ["a", "b"]}}))
+    db = database.get_db()
+    try:
+        prefs = cp.load_prefs(db, 9995)
+    finally:
+        db.close()
+    assert prefs == {"gg_ads": {"order": ["a", "b"], "hidden": []}}
 
 
 def test_load_prefs_keeps_valid_and_drops_unknown_panel(app):
