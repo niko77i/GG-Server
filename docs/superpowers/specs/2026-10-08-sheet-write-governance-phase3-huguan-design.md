@@ -58,16 +58,23 @@
 
 | target token | business_key | 表主人如何取得 | 覆盖点位 |
 |---|---|---|---|
-| `huguan_dashboard` | `account_id` | 调用方传入的 `user_id`（= 表主人，因只有户管会触发） | **#1** + **#5 的 :159/:171/:180** |
+| `huguan_dashboard` | `account_id` | 调用方传入的 `user_id`（= 表主人，因只有户管会触发） | **#1** + **#5 的 :159/:180** |
 | `huguan_owner_channel` | `account_id` | 同上传入的 `user_id` | **#3** + **#5 的 :165**（写值或清空，同一列） |
 | `operator_dashboard_remark` | `account_id` | **入参 `owner_id`**（账户 owner = 投手）—— 本期唯一真正的第三方 | **#2** |
-| `huguan_fb_acceptor` | `account_id` | 调用方传入的 `user_id` | **#4** |
+| `huguan_fb_acceptor` | `account_id` | 调用方传入的 `user_id` | **#4** + **#5 的 :171** |
 
 > **#1 与 #5 合并的代价（须知）**：#5 原本每个点位只写**一列**，而合并后重建走
 > `collect_rows_for_push` ⇒ **重试会写该账户的全部可写列**（即整行刷新）。
 > 这是**有意的**：重试的语义就是「把这行刷到与系统一致」，且 `cells_for_row` 只产出
 > 系统拥有的可写列（**刻意不含**归属变更通道列，规格 §7.2 规则 2），故不会碰到
 > 户管自己用公式维护的列。
+>
+> **勘误（2026-10-08，Task 3 实施发现）**：#5 的 `:171`（fb 换绑记录写 I 列）**不能**走
+> `huguan_dashboard` 整行重建 —— 对 `fb` 而言 I 列在 `COLUMN_SPEC` 里 `writable=False`，
+> 且 `OWNER_CHANNEL_COL['fb'] is None`，落进整行重建会被**静默丢弃**。本节初稿声称它被覆盖，
+> **是错的**。故 `_write_background` 要**三分**：通道列 → `huguan_owner_channel`；
+> fb 接户运营列 → `huguan_fb_acceptor`；其余 → `huguan_dashboard`。划分一律**按身份**，
+> 不能用 `in`（dict 的 `in` 是按值比较）。
 >
 > ⚠️ **通道列被 `cells_for_row` 排除**，所以它必须单列一个 target（`huguan_owner_channel`），
 > 否则 #5 的 :165（清空通道列）与 #3（写通道列）都无法重建。
