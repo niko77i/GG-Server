@@ -1676,6 +1676,53 @@ class TestPushRouteSnapshotLifecycle:
         db.close()
         assert got is None, "空写 ⇒ 没有可撤回的东西，快照必须被作废"
 
+    def test_partial_write_failure_keeps_snapshot(self, client, monkeypatch):
+        """多表下「表 1 写成功、表 2 抛异常」⇒ 快照必须**保留**（审查修复轮 1 · Finding 2）。
+
+        判别力：改前 `except` 分支无条件 `_discard_push_undo(...)` ⇒ 表 1 已被改、它的
+        撤回入口却被**永久丢掉**（按钮消失，户管再也退不回去）。本用例会红。
+        单表下「一个字都没写」时仍作废（spec §十 第 1 条，见上面两条用例）—— 此处
+        表 1 已写成功，故不在「都没写」之列。
+        """
+        import google_sheets_service as gs
+        hg, uid = _huguan_headers(client, "_push_partial", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "总户-加白"},
+                           {"name": "企业户", "sheet_name": "总户-企业"}]}})))
+        _seed_tt_account(db, "8001", uid, account_type="加白户")
+        _seed_tt_account(db, "8002", uid, account_type="企业户")
+        db.commit()
+        db.close()
+
+        # 快照读表：两张表各命中自己的账户 ⇒ 快照非空，「保留」与「本来就没有」不再同形
+        grids = {"总户-加白": [["", "", ""], ["", "", "8001"]],
+                 "总户-企业": [["", "", ""], ["", "", "8002"]]}
+        monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: grids[a[2]])
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+
+        wrote = []
+
+        def _partial(svc, sid, name, rows, key_col="C"):
+            wrote.append(name)
+            if name == "总户-企业":
+                raise RuntimeError("表 2 炸了")
+            return {"updated": len(rows), "not_found": []}
+
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _partial)
+
+        with pytest.raises(RuntimeError, match="表 2 炸了"):
+            client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "tt"})
+        assert wrote and wrote[0] == "总户-加白", \
+            "表 1 必须先写成功，否则本用例测不到「部分写」"
+
+        db = database.get_db()
+        got = hd.load_undo(db, uid, "tt", "push")
+        db.close()
+        assert got is not None, "部分写成功 ⇒ 快照必须保留（表 1 的撤回入口不能丢）"
+
 
 class TestPushUndoNotFoundPassthrough:
     """规格 §6.1 / §十 第 2 条：push 撤回时写入器报告的「表里找不到的行」原样透传。"""
@@ -1809,11 +1856,15 @@ class TestCrossTableDuplicateSheetBack:
         assert writes[0][2] == "C"
 
         # ④ 撤回：库侧回退 + 表侧盖回**前表**的原值。
-        #    这里把 conf 补成「单表形状」只为让表侧那一步真的执行 —— 多表配置下
-        #    conf["sheet_name"] 恒为空串（tt 多表的表名在 tables 里），见报告里的遗留项。
-        monkeypatch.setattr(hd, "get_platform_config",
-                            lambda db_, u, p: {"spreadsheet_id": "SS",
-                                               "sheet_name": "总户-加白"})
+        #    **不再把 conf 打桩成单表形状**（审查修复轮 1 · Finding 1）：表名从快照的
+        #    `sheet_back_sheets` 来，真实的 tt 多表配置（无顶层 sheet_name）即可跑通 ——
+        #    这正是「表侧回退在 tt 多表下不再静默失效」的钉子。
+        #
+        #    判别力（审查修复轮 1 · Finding 3）：同步自己的定向回写（writes[0]）与撤回的
+        #    表侧回退（writes[-1]）在「前表 + G=张三」上**逐字相同** ⇒ 只断言 writes[-1] 的
+        #    话，撤回表侧那步被短路（一个字都不写）时断言照样过。故先钉「撤回阶段真的新写了
+        #    一次表」—— 短路时 writes 不增长，这里必红。
+        n_before_undo = len(writes)
         out = hd.undo_sync(uid, "tt")
         assert out["reverted"] == 1
         db = database.get_db()
@@ -1822,6 +1873,8 @@ class TestCrossTableDuplicateSheetBack:
         assert owner == li, "撤回后归属必须回到李四"
         assert hd.load_undo(db, uid, "tt", "sync") is None
         db.close()
+        assert len(writes) == n_before_undo + 1, \
+            "撤回必须真的写一次表（表侧那步被短路时这里会红）"
         assert writes[-1][0] == "总户-加白"
         assert [(r["account_id"], r["cells"]) for r in writes[-1][1]] == [("8003", {"G": "张三"})]
         assert writes[-1][2] == "C"

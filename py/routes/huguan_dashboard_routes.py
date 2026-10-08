@@ -197,10 +197,19 @@ def dashboard_sync():
         # 而字典推导是「后出现覆盖」—— 两者方向相反 ⇒ 快照里的表侧原值会取自**后**
         # 那张表，撤回时把后表的运营名写进前表（串表）。用 setdefault 钉住首次。
         sheet_from = {}
+        # 审查修复轮 1 · Finding 1：同时记下**每个账户来自哪张表**，作为快照的**新增键**
+        # `sheet_back_sheets`（`{account_id: sheet_name}`）。`undo_sync` 的表侧回退据此
+        # 按表分组写回 —— tt 多表下 `conf["sheet_name"]` 恒为空串，没有这个映射，表侧那步
+        # 就静默不写（库侧照退、表侧不动，下次同步把撤回重做一遍）。
+        # ⚠️ **不改 `sheet_back` 的既有形状**：下游 `undo_sync` 与多条用例都消费它。
+        # 同样钉「首次出现生效」（与 `sheet_from` / `build_diff` 去重口径一致）：跨表重复
+        # 时撤回必须写回**胜出**的那张表，不是后表。
+        sheet_back_sheets = {}
         for p in parsed_rows:
             aid = p.get("account_id")
             if aid:
                 sheet_from.setdefault(aid, hd._owner_sheet_from(p, platform))
+                sheet_back_sheets.setdefault(aid, hd._conf_text(p.get("_sheet")))
         try:
             result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid,
                                    collect_undo=True, sheet_from=sheet_from)
@@ -211,7 +220,11 @@ def dashboard_sync():
             raise
         # apply_diff 正常返回 ⇒ 本次同步完整成功，快照才有撤回资格。
         # 先摘出 "undo"：它是内部凭据，不随响应体发给前端。
-        hd.save_undo(db, uid, platform, "sync", result.pop("undo"))
+        undo = result.pop("undo")
+        # 审查修复轮 1 · Finding 1：把「账户 → 来源表」映射并进快照（新增键，旧快照没有）。
+        # 缺这个键时 `undo_sync` 回落到 `conf["sheet_name"]`（gg/fb 与旧单表 tt 的旧行为）。
+        undo["sheet_back_sheets"] = sheet_back_sheets
+        hd.save_undo(db, uid, platform, "sync", undo)
         db.commit()
 
         # 规格 §8.3 步骤 8：落库后清缓存（账户写入了，代理/列表下拉必须立即刷新）。
@@ -329,10 +342,15 @@ def dashboard_push():
             total_updated += res["updated"]
             total_not_found.extend(res["not_found"])
     except Exception:
-        # 写表抛异常 ⇒ 该批一个字都没写（update_rows_by_account_id 的单次
-        # batchUpdate 是原子的）⇒ 本次同步不算成功，快照没有撤回资格。作废后原样
-        # 抛出，维持既有的 500 行为。
-        _discard_push_undo(uid, platform)
+        # 多表之后**不再整批原子**：`groups` 里可能「表 1 已写成功、表 2 抛异常」——
+        # `update_rows_by_account_id` 只保证**单次** batchUpdate 原子，不是整轮循环原子。
+        # 若无条件作废整份快照，已写成功的表的撤回入口会被**永久丢掉**（按钮消失），而那张
+        # 表已经被改了，户管再也退不回去。故失败时**不再一律丢弃**，改用与成功路径同一口径：
+        # 本次**一个字都没写**（表没变，撤回没有意义，spec §十 第 1 条）才作废；有写就**保留**
+        # —— 对未写的表而言，后续撤回把旧值写回去是**幂等无操作**（写回原值），安全。
+        # 原样抛出，维持既有的 500 行为。
+        if not total_updated and not total_not_found:
+            _discard_push_undo(uid, platform)
         raise
 
     if not total_updated and not total_not_found:

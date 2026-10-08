@@ -1862,13 +1862,37 @@ def undo_sync(user_id: int, platform: str) -> dict:
     back = [{"account_id": item["account_id"], "cells": dict(item["cells"])}
             for item in payload.get("sheet_back", []) if item.get("cells")]
     table_result = {"updated": 0, "not_found": []}
-    if back and conf["spreadsheet_id"] and conf["sheet_name"]:
-        import google_sheets_service as gs
-        from main import _GOOGLE_SHEETS_CONFIG
-        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        table_result = gs.update_rows_by_account_id(
-            service, conf["spreadsheet_id"], conf["sheet_name"], back,
-            key_col=KEY_COL[platform])
+    # 逐表分组写回（审查修复轮 1 · Finding 1）：tt 多表下 `conf["sheet_name"]` **恒为空串**
+    # （`get_platform_config` 只读顶层 `sheet_name`，而 tt 多表的表名写在 `tables` 里）
+    # ⇒ 沿用旧的单表判据 `... and conf["sheet_name"]` 会**恒假**：库侧 CAS 照做、表侧一个字
+    # 都不写，下次同步立刻判定出归属变更、把撤回重做一遍（正是本函数 docstring 的失败模式）。
+    #
+    # 表名的来源优先级：
+    #   ① 快照里的 `sheet_back_sheets[account_id]`（审查修复轮 1 新增键，多表同步才有）；
+    #   ② 回落到 `conf["sheet_name"]` —— 旧存量快照没有该键，gg/fb 与旧的单表 tt 走这条，
+    #      与改动前**逐字等价**（表名为空时同样一个字不写）。
+    # 两边都没有 ⇒ 跳过该账户并记 warning，**绝不退回写第一张表**（与本批其它任务同一口径：
+    # 宁可漏写也不写错表）。
+    if back and conf["spreadsheet_id"]:
+        sheet_back_sheets = payload.get("sheet_back_sheets") or {}
+        by_sheet = {}
+        for item in back:
+            name = sheet_back_sheets.get(item["account_id"]) or conf["sheet_name"]
+            if not name:
+                log.warning("撤回同步：账户 %s 查不到所在工作表，跳过表侧回退 platform=%s",
+                            item["account_id"], platform)
+                continue
+            by_sheet.setdefault(name, []).append(item)
+        if by_sheet:
+            import google_sheets_service as gs
+            from main import _GOOGLE_SHEETS_CONFIG
+            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+            for name, rows in by_sheet.items():
+                res = gs.update_rows_by_account_id(
+                    service, conf["spreadsheet_id"], name, rows,
+                    key_col=KEY_COL[platform])
+                table_result["updated"] += res["updated"]
+                table_result["not_found"].extend(res["not_found"])
 
     # ---- 2. 再回退库（单事务）----
     reverted, conflicts, kept = 0, [], []
