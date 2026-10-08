@@ -1032,6 +1032,7 @@ def _ensure_schema(conn: sqlite3.Connection):
             status_changed_date TEXT DEFAULT '',
             remark TEXT DEFAULT '',
             owner_change_note TEXT DEFAULT '',
+            account_type TEXT DEFAULT '',
             owner_id INTEGER REFERENCES users(id),
             deleted_at TEXT DEFAULT NULL,
             created_at TEXT DEFAULT (datetime('now','localtime')),
