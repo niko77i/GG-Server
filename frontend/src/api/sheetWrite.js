@@ -3,8 +3,9 @@ import client from './client'
 
 export const sheetWriteApi = {
   // 带 business_key 供轮询单条；不带则只回需要提示的终态，供列表标记
-  status({ platform, businessKey } = {}) {
+  status({ platform, target, businessKey } = {}) {
     const params = { platform }
+    if (target) params.target = target
     if (businessKey) params.business_key = businessKey
     return client.get('/sheet-write/status', { params })
   },

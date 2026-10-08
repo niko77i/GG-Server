@@ -979,3 +979,40 @@ def test_run_write_many_error_msg_has_no_exception_text(client, monkeypatch, cap
         f"落库文案应为固定文案，实际 {item['error_msg']!r}")
     # 异常详情不得被一并砍掉
     assert "写表炸了" in caplog.text, "写表异常详情没进日志（脱敏不该连日志一起砍）"
+
+
+def test_status_target_param_disambiguates_same_business_key(client):
+    """同一 business_key 跨 target 时必须能各取各的 —— 不给 target 就只回最新一行。
+
+    这是三期**必需**的改动：4 个 target 的 business_key 都是 account_id，
+    同一账户同时有 huguan_dashboard 与 operator_dashboard_remark 两条是正常的。
+    不过滤 ⇒ 一个 target 的行遮住另一个 ⇒ **静默漏报**。
+    去掉 `if target:` 过滤 ⇒ 本用例红。
+    """
+    client.post("/api/auth/register", json={"username": "_swtgt", "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET platform='tt' WHERE username='_swtgt'")
+    db.commit()
+    uid = db.execute("SELECT id FROM users WHERE username='_swtgt'").fetchone()["id"]
+    for tgt in ("huguan_dashboard", "operator_dashboard_remark"):
+        db.execute(
+            "INSERT INTO sheet_write_log (user_id, platform, target, business_key, status) "
+            "VALUES (?, 'tt', ?, 'acc_same', 'retry_failed')", (uid, tgt))
+    db.commit()
+    db.close()
+    hdr = {"Authorization": "Bearer " + client.post(
+        "/api/auth/login", json={"username": "_swtgt", "password": "test123"}
+    ).get_json()["access_token"]}
+
+    # 不带 target：只回最新一行（列表标记用）
+    r0 = client.get("/api/sheet-write/status?platform=tt&business_key=acc_same", headers=hdr)
+    assert r0.get_json()["item"]["target"] in ("huguan_dashboard", "operator_dashboard_remark")
+
+    # 带 target：精确取该 target 的行（被遮蔽即红）
+    for tgt in ("huguan_dashboard", "operator_dashboard_remark"):
+        r = client.get(f"/api/sheet-write/status?platform=tt&target={tgt}"
+                       "&business_key=acc_same", headers=hdr)
+        assert r.status_code == 200, r.get_data(as_text=True)[:200]
+        item = r.get_json()["item"]
+        assert item is not None, f"带 target={tgt} 应能取到该行（被遮蔽即红）"
+        assert item["target"] == tgt, f"取到了别的 target 的行：{item}"

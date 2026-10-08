@@ -37,6 +37,11 @@ def sheet_write_status():
     uid = get_uid()
     platform = (request.args.get("platform") or "").strip()
     business_key = (request.args.get("business_key") or "").strip()
+    # 三期新增：按 target 过滤。4 个 target 的 business_key 都是 account_id，
+    # 同一账户同时有两条（如 huguan_dashboard + operator_dashboard_remark）正常；
+    # 不过滤会让一个 target 的行遮住另一个 ⇒ 静默漏报。
+    # **不传时行为与改动前完全一致**（向后兼容一期 TT / 二期 GG 的前端）。
+    target = (request.args.get("target") or "").strip()
     if platform not in _PLATFORMS:
         db.close()
         return err("platform 必须是 gg / tt / fb", 400)
@@ -48,6 +53,9 @@ def sheet_write_status():
     sql = ("SELECT business_key, target, status, error_msg, created_at, updated_at, settled_at "
            "FROM sheet_write_log WHERE user_id=? AND platform=?")
     params = [uid, platform]
+    if target:
+        sql += " AND target=?"
+        params.append(target)
     if business_key:
         sql += " AND business_key=?"
         params.append(business_key)
