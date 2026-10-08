@@ -408,6 +408,12 @@
         </el-alert>
         <el-table v-if="(hdResult.errors || []).length" :data="hdResult.errors" size="small"
                   border style="margin-top:8px;">
+          <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">
+              <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
           <el-table-column label="表行" width="86">
             <template #default="{ row }">
               <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -666,6 +672,8 @@ const FIELD_LABELS = {
     agent_id: '所属渠道',
     status_id: '状态',
     _is_dead: '是否回收',
+    // 合成键，类型改写时 build_diff 会放进 fields：不映射就会露出 _account_type
+    _account_type: '户类型',
   },
   fb: {
     acquired_date: '日期', name: '账户名称',
