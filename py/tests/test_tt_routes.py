@@ -680,6 +680,36 @@ def test_settings_save_huguan_writes_recharge_and_recycle(client):
     db.close()
 
 
+def test_huguan_save_merges_instead_of_overwriting_admin_keys(client, tt_headers):
+    """户管只改 recharge/recycle 时，**不得**抹掉 admin 先前配的 accounts。
+
+    单纯的「户管写入 = {recharge,recycle}」在空库上也成立，锚不住「合并」这条约束 ——
+    必须先由 admin 写进一个户管无权写的键，再看它是否幸存。
+    """
+    db = database.get_db()
+    db.execute("UPDATE users SET role='admin' WHERE username='ttuser'")
+    db.commit()
+    db.close()
+    admin = tt_headers
+
+    assert client.post("/api/tt/settings", headers=admin, json={
+        "sheet_mappings": {"accounts": "admin 的账户明细", "recharge": "admin 充值表"},
+    }).status_code == 200
+
+    hg = _make_huguan_headers(client, "mrghuguan")
+    assert client.post("/api/tt/settings", headers=hg, json={
+        "sheet_mappings": {"recharge": "户管充值表", "recycle": "户管回收表"},
+    }).status_code == 200
+
+    db = database.get_db()
+    row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_mappings'").fetchone()
+    db.close()
+    got = json.loads(row["value"])
+    assert got == {"accounts": "admin 的账户明细",
+                   "recharge": "户管充值表",
+                   "recycle": "户管回收表"}, f"合并失败，实际={got}"
+
+
 def test_settings_save_plain_user_still_only_private(client, tt_headers):
     """既有行为不许被改坏：普通投手仍然只写自己的 my_dashboard。"""
     client.post("/api/tt/settings", headers=tt_headers, json={
