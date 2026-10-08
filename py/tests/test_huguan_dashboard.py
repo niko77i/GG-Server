@@ -601,6 +601,13 @@ def _create_user(client, username, role="user", platform="gg"):
     return {"Authorization": f"Bearer {resp.get_json()['access_token']}"}, row["id"]
 
 
+def _uid_of(username):
+    db = database.get_db()
+    row = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+    db.close()
+    return row["id"]
+
+
 class TestDashboardConfig:
     def test_save_then_get_roundtrip(self, client):
         hg, _ = _create_user(client, "_hg_cfg1", role="huguan")
@@ -4461,8 +4468,11 @@ class TestRemarkPushPath:
                                  "confirmed": {"create": ["E2E-1"]}})
         assert resp.status_code == 200
         rows = [r for c in captured for r in c["rows"]]
-        assert {"account_id": "E2E-1", "cells": {"M": "投手填的"}} in rows, \
-            "投手赢 → 回写户管看板 M 列"
+        # 行的形状现在多带一个 `account_type`（`_write_background_tables` 按户类型
+        # 路由时现查补上的；`update_rows_by_account_id` 只读 account_id / cells，
+        # 多带一个键在线上是无操作）。故不能再按整字典相等断言，改钉「哪个账户 + 写了哪一格」。
+        assert any(r["account_id"] == "E2E-1" and r["cells"] == {"M": "投手填的"}
+                   for r in rows), "投手赢 → 回写户管看板 M 列"
         assert not any("J" in r["cells"] for r in rows), "投手赢时不应推投手看板"
 
 
@@ -4804,3 +4814,142 @@ class TestAccountTypeFlow:
         cols = {r[1] for r in db.execute("PRAGMA table_info(accounts)").fetchall()}
         assert "account_type" not in cols, "gg 的账户表不该被加上这一列"
         db.close()
+
+
+# ---------- Task 5: 同步路由逐表读 ----------
+
+class TestMultiTableSync:
+    def test_tt_reads_every_table_and_tags_rows(self, client, monkeypatch):
+        hg, _ = _create_user(client, "_mts1", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_mts1')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "总户-加白"},
+                           {"name": "企业户", "sheet_name": "总户-企业"}]}})))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        reads = []
+        tabs = {
+            "总户-加白": [["入库时间", "是否回收", "账户ID"],
+                          ["2026-10-01", "否", "8001"]],
+            "总户-企业": [["入库时间", "是否回收", "账户ID"],
+                          ["2026-10-02", "否", "8002"]],
+        }
+
+        def _read(svc, sheet_id, sheet_name, rng):
+            reads.append(sheet_name)
+            return tabs[sheet_name]
+
+        monkeypatch.setattr(gs, "read_sheet_values", _read)
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True})
+        assert resp.status_code == 200
+        assert reads == ["总户-加白", "总户-企业"], "必须按配置顺序逐张表读一次"
+        created = {c["account_id"]: c for c in resp.get_json()["diff"]["to_create"]}
+        assert created["8001"]["sheet"] == "总户-加白"
+        assert created["8002"]["sheet"] == "总户-企业"
+
+    def test_route_writeback_enriches_type_before_grouping(self, client, monkeypatch):
+        """回归：归属变更的定向回写行**不带** account_type，路由必须现查补上，
+        否则整批会落进「无类型」桶、被当成「查不到工作表」静默跳过。"""
+        hg, _ = _create_user(client, "_mts4", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type) "
+                   "VALUES('a','8010','企业户')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_mts4')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "总户-加白"},
+                           {"name": "企业户", "sheet_name": "总户-企业"}]}})))
+        db.commit()
+
+        import routes.huguan_dashboard_routes as hdr
+        calls = []
+        monkeypatch.setattr(hdr, "_write_background",
+                            lambda conf, rows, platform: calls.append(
+                                (conf["sheet_name"], [r["account_id"] for r in rows])))
+        hdr._write_background_tables(db, _uid_of('_mts4'), "tt",
+                                     [{"account_id": "8010", "cells": {"G": "张三"}}])
+        db.close()
+        assert calls == [("总户-企业", ["8010"])]
+
+    def test_cross_table_duplicate_first_table_wins_with_warning(self, client, monkeypatch):
+        hg, _ = _create_user(client, "_mts2", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_mts2')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "A"},
+                           {"name": "企业户", "sheet_name": "B"}]}})))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        hdr = ["入库时间", "是否回收", "账户ID"]
+        tabs = {"A": [hdr, ["2026-10-01", "否", "8003"]],
+                "B": [hdr, ["2026-10-02", "否", "8003"]]}
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda svc, sid, name, rng: tabs[name])
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True}).get_json()["diff"]
+        assert [c["account_id"] for c in diff["to_create"]] == ["8003"]
+        assert diff["to_create"][0]["sheet"] == "A", "配置里靠前的那张表生效"
+        assert any(w["sheet"] == "B" for w in diff["warnings"]), "warning 要指出被跳过的那张表"
+
+    def test_gg_still_reads_once(self, client, monkeypatch):
+        hg, _ = _create_user(client, "_mts3", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_mts3')}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "看板G"}})))
+        db.commit()
+        db.close()
+        import google_sheets_service as gs
+        reads = []
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda svc, sid, name, rng: reads.append(name) or [])
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        client.post("/api/huguan/dashboard/sync", headers=hg,
+                    json={"platform": "gg", "dry_run": True})
+        assert reads == ["看板G"]
+
+    def test_existing_same_type_row_not_reported_as_update(self, client, monkeypatch):
+        """耦合契约 #1 的路由层锚点：每一行都必须被**无条件**注入真实户类型。
+
+        `_collect_updates` 对 tt 会无条件产出 `out["_account_type"]`；某行若没被
+        注入（键缺失 → `_conf_text(None)` → 空串），`_same_as_existing` 会拿
+        库里的「加白户」与空串比 ⇒ 判为「变了」⇒ **整行虚报「将更新」**，
+        差异报告数字虚高。这里把类型**没有变**的既有账户同步一遍，断言它
+        不出现在 to_update 里。把路由里的 `parsed["_account_type"] = t["name"]`
+        写成 `if t["name"]: ...` 或整行删掉，本用例立刻变红。
+        """
+        hg, uid = _create_user(client, "_mts5", role="huguan")
+        db = database.get_db()
+        # 用 `_seed_tt_account` 而不是裸 INSERT：tt_accounts.acquired_date 的列默认值
+        # 是 `date('now','localtime')`，裸插入会带上今天，而表里 A 列空着 ⇒ 该行会因
+        # **另一个**字段（acquired_date）被报成 to_update，本用例就测不到户类型了。
+        _seed_tt_account(db, "8011", uid, account_type="加白户")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_mts5')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "总户-加白"},
+                           {"name": "企业户", "sheet_name": "总户-企业"}]}})))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values", lambda svc, sid, name, rng: [
+            ["入库时间", "是否回收", "账户ID"], ["", "", "8011"]])
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True}).get_json()["diff"]
+        assert diff["to_update"] == [], \
+            "类型没变的既有账户不该出现在 to_update（缺 _account_type 会虚报整行更新）"

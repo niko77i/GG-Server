@@ -104,6 +104,15 @@ def dashboard_config_save():
     return ok({"message": "配置已保存"})
 
 
+def _spreadsheet_id(db, uid: int, platform: str) -> str:
+    """该户管该平台的表格 ID（未配置时空串）。
+
+    单拎出来只为让「有没有配表」的校验与「逐表读」循环共用同一次取值口径，
+    免得两处各自 `get_platform_config(...)` 后改一处漏一处。
+    """
+    return hd.get_platform_config(db, uid, platform)["spreadsheet_id"]
+
+
 @huguan_dashboard_bp.route("/api/huguan/dashboard/sync", methods=["POST"])
 @jwt_required()
 @huguan_required
@@ -123,22 +132,40 @@ def dashboard_sync():
     uid = get_uid()
     db = database.get_db()
     try:
-        conf = hd.get_platform_config(db, uid, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+        if not _spreadsheet_id(db, uid, platform):
+            return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
+
+        tables = hd.get_platform_tables(db, uid, platform)
+        tables = [t for t in tables if t["sheet_name"]]
+        if not tables:
             return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
 
         import google_sheets_service as gs
         from main import _GOOGLE_SHEETS_CONFIG
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        grid = gs.read_sheet_values(service, conf["spreadsheet_id"],
-                                   conf["sheet_name"], hd.READ_RANGE[platform])
 
-        # 第 1 行是表头；不跳任何数据行（户管看板没有「是否解绑」列可用作跳过标记）
+        # 逐张表各读一次，再**合并成一个列表**进 build_diff —— 跨表去重、冲突检测、
+        # 归属变更全部沿用既有逻辑，不另写一套。
+        # 顺序即优先级：同一账户出现在两张表时，靠前的那张表先出现 ⇒ 现有
+        # 「首次出现生效 + warning」规则自然让靠前的表胜出（规格 §4.3 跨表重复）。
         parsed_rows = []
-        for i, values in enumerate(grid[1:], start=2):
-            parsed = hd.parse_row(values, platform)
-            parsed["row"] = i
-            parsed_rows.append(parsed)
+        spreadsheet_id = _spreadsheet_id(db, uid, platform)
+        for t in tables:
+            grid = gs.read_sheet_values(service, spreadsheet_id,
+                                        t["sheet_name"], hd.READ_RANGE[platform])
+            # 第 1 行是表头；不跳任何数据行（户管看板没有「是否解绑」列可用作跳过标记）
+            for i, values in enumerate(grid[1:], start=2):
+                parsed = hd.parse_row(values, platform)
+                parsed["row"] = i
+                # 多表后「第 N 行」会撞：带上表名，前端按表分组展示（规格 §4.3 的坑）
+                parsed["_sheet"] = t["sheet_name"]
+                if platform == "tt":
+                    # 户类型的来源：这一行是从哪张表读出来的。表名即类型名。
+                    # **无条件赋值**：`_collect_updates` 对 tt 无条件产出
+                    # `_account_type`，缺键（→ 空串）会让「加白户」的既有账户被判成
+                    # 「变了」⇒ 整行虚报「将更新」（见 `_same_as_existing`）。
+                    parsed["_account_type"] = t["name"]
+                parsed_rows.append(parsed)
 
         diff = hd.build_diff(db, parsed_rows, platform)
 
@@ -195,30 +222,33 @@ def dashboard_sync():
             rows = [{"account_id": item["account_id"],
                      "cells": {hd.OWNER_COL[platform]: item["to"]}}
                     for item in applied]
-            _write_background(conf, rows, platform)
+            # 定向回写一律经 `_write_background_tables`：TT 多表后必须按户类型落到
+            # 各自的 worksheet，写死第一张表正是本次要消除的「填错表」。
+            # gg / fb 只有一张表，分组后退化回原来的单次写入（行为不变）。
+            _write_background_tables(db, uid, platform, rows)
             # 规则 3② 只对 GG 生效（2026-10-06 规格）：TT 的 L 列已是换绑记录，
             # 同步时清空会抹掉记录，且因读回按表覆盖会连带清掉系统里的值。
             # FB 同理、且更彻底：它根本没有通道列（OWNER_CHANNEL_COL 无 fb 键），
             # 对 fb 硬调 owner_channel_cells 会 KeyError —— 换成下面的 I 列定向写。
             if platform not in ("tt", "fb"):
-                _write_background(conf, hd.owner_channel_cells(applied, platform, ""),
-                                  platform)
+                _write_background_tables(db, uid, platform,
+                                         hd.owner_channel_cells(applied, platform, ""))
             if platform == "fb":
                 # FB 没有通道列可清；改为把换绑记录定向写进 I 列。
                 # 注意 _fb_acceptor_cells 的签名是 (rows, value)，value 是**同一个串**
                 # 写给所有行 —— 而这里每行的串不同，所以不能用它，直接构造 rows。
-                _write_background(conf, [
+                _write_background_tables(db, uid, platform, [
                     {"account_id": r["account_id"],
                      "cells": {"I": hd._fb_owner_transition(r.get("from", ""), r["to"])}}
-                    for r in applied], platform)
+                    for r in applied])
 
         # TT 备注首次对齐的两个写回（2026-10-06 规格）。与 applied_owner_rows 同法：
         # 先从 result 摘掉，再发起后台写回 —— 只写单列，绝不整行推送。
         m_writeback = result.pop("remark_m_writeback", [])
         if m_writeback:
-            _write_background(conf, [{"account_id": r["account_id"],
-                                      "cells": {"M": r["value"]}} for r in m_writeback],
-                              platform)
+            _write_background_tables(db, uid, platform, [
+                {"account_id": r["account_id"], "cells": {"M": r["value"]}}
+                for r in m_writeback])
         for r in result.pop("remark_operator_push", []):
             hd.push_remark_to_operator_dashboard(r["owner_id"], r["account_id"], r["value"])
     finally:
@@ -459,6 +489,39 @@ def dashboard_owner_options():
     finally:
         db.close()
     return ok({"users": [dict(r) for r in rows]})
+
+
+def _write_background_tables(db, uid: int, platform: str, rows) -> None:
+    """定向写回（归属变更 / 备注等）也要按户类型落到各自的 worksheet。
+
+    与 push_rows 的分组口径完全一致：查不到对应工作表的类型**跳过**，
+    绝不退回写第一张表 —— 那正是本次要消除的「填错表」。
+
+    ⚠️ 本函数的入参 rows 是 `[{"account_id", "cells"}]` 形状，**不带 `account_type`**
+      —— 它不经过 `collect_rows_for_push`（那条路才带类型）。必须在这里按账户 ID
+      现查一次类型补上，否则每一行都会落进「无类型」桶、被 `group_rows_by_sheet`
+      当成「查不到工作表」整批跳过：表现是**归属变更静默不回写**，不报错、不抛异常。
+    """
+    rows = [dict(r) for r in rows]
+    if platform == "tt" and rows:
+        ids = [r["account_id"] for r in rows if r.get("account_id")]
+        type_by_id = {}
+        for part in hd.chunk(ids):
+            marks = ",".join("?" for _ in part)
+            for r in db.execute(
+                    f"SELECT advertiser_id, account_type FROM tt_accounts "
+                    f"WHERE advertiser_id IN ({marks})", tuple(part)).fetchall():
+                type_by_id[r["advertiser_id"]] = r["account_type"] or ""
+        for r in rows:
+            r["account_type"] = type_by_id.get(r.get("account_id"), "")
+
+    groups, skipped = hd.group_rows_by_sheet(db, uid, platform, rows)
+    for t in skipped:
+        log.warning("回写跳过：户类型「%s」查不到工作表 platform=%s", t, platform)
+    spreadsheet_id = hd.get_platform_config(db, uid, platform)["spreadsheet_id"]
+    for sheet_name, sheet_rows in groups:
+        _write_background({"spreadsheet_id": spreadsheet_id, "sheet_name": sheet_name},
+                          sheet_rows, platform)
 
 
 def _write_background(conf, rows, platform):
