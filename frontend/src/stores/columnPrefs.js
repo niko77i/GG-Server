@@ -131,15 +131,18 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
   /**
    * 登出 / 换号时清空。
    *
-   * 必须清四样，少一样都会串号：
+   * 以下每一项都要清，少一样都会串号（前四项是状态，后一项是在途请求的守卫）：
    *   - prefs：否则 B 看到 A 的列
    *   - ready：否则 ensureLoaded 被 `if (ready.value) return` 挡住，B 永远不会重拉
    *   - loadPromise：否则 B 拿到的是 A 那次请求的 promise
    *   - 未落地的防抖定时器：**最隐蔽的一样**。A 改完列 400ms 内登出、B 立刻登录，
    *     那个定时器会带着 B 的新 token 把 A 的配置写进 B 的 key。
+   *   - lastConfirmed：回滚快照，否则 B 保存失败时会回滚到 A 的配置
    *   - **代际号**：定时器只能取消「还没发出」的保存；**已经在途**的 PUT 取消不了，
    *     它的响应回来时若不带守卫就会把 A 的 prefs 写进已清空的 store。
    *     故这里 bump 所有已知面板的代际，让那些在途响应被丢弃。
+   *     （用 bump 而非归零是刻意的：代际号严格单调，跨账号不会出现新旧响应
+   *     因数值相同而被误判为同代的 ABA 碰撞。）
    */
   function clear() {
     for (const key of Object.keys(saveTimers)) {
