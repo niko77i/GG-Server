@@ -805,6 +805,24 @@ class TestFbBatchLookup:
         assert data["found"][0]["bm_name"] == "测试BM"
         assert data["found"][0]["owner_id"] == uid
 
+    def test_batch_lookup_returns_primary_key_id(self, client):
+        """**found 项带账户主键 `id`，且与库里该账户主键一致。**
+
+        前端「认领」靠这个 id 调 `PUT /accounts/<aid>/reassign`；响应若无此键，
+        FB 侧永远认领不了（GG/TT 的 batch-lookup 都回 id）。
+        """
+        hdr, uid = _fb_user(client, "t_lk_pk")
+        db = database.get_db()
+        pk = _mk_fb_account(db, uid, "LOOKUP-PK", "带主键的账户")
+        db.close()
+
+        resp = client.post("/api/fb/accounts/batch-lookup",
+                           json={"account_ids": ["LOOKUP-PK"]}, headers=hdr)
+        found = resp.get_json()["found"]
+        assert [f["account_id"] for f in found] == ["LOOKUP-PK"]
+        assert "id" in found[0], "found 项缺主键 id，前端认领无 id 可传"
+        assert found[0]["id"] == pk
+
     def test_batch_lookup_does_not_leak_other_users_account(self, client):
         """**归属隔离**：别人的账户查不到，且落在 not_found 里。"""
         a_hdr, _ = _fb_user(client, "t_lk_a")

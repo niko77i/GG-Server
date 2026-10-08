@@ -419,7 +419,7 @@ def batch_lookup_accounts():
         params.append(uid)
 
     rows = db.execute(
-        "SELECT a.account_id, a.name, a.owner_id, a.timezone, "
+        "SELECT a.id, a.account_id, a.name, a.owner_id, a.timezone, "
         "       u.display_name AS owner_display, u.username AS owner_username, "
         "       st.name AS status_name, b.name AS bm_name "
         "FROM fb_accounts a "
@@ -432,6 +432,8 @@ def batch_lookup_accounts():
     ).fetchall()
 
     found = [{
+        # 主键 id 供前端「认领」通路调用 PUT /accounts/<aid>/reassign（GG/TT 同形）。
+        'id': r['id'],
         'account_id': r['account_id'],
         'name': r['name'],
         'owner_id': r['owner_id'],

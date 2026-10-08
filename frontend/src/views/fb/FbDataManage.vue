@@ -146,8 +146,10 @@ async function handleSaveEdit() {
 
 async function handleDelete(id) { await fbApi.deleteReport(id); ElMessage.success('已删除'); loadData() }
 async function handleBatchDelete() {
-  await fbApi.batchDeleteReports(selectedIds.value)
-  ElMessage.success(`已删除${selectedIds.value.length}条`); selectedIds.value = []; loadData()
+  // 用后端返回的真实删除数 `deleted`（cursor.rowcount），不按选中条数：
+  // 非跨用户角色删「自己的 1 条 + 别人的 1 条」时后端只删 1 条，按选中数会谎报 2。
+  const res = await fbApi.batchDeleteReports(selectedIds.value)
+  ElMessage.success(`已删除${res.deleted}条`); selectedIds.value = []; loadData()
 }
 
 async function retrySheets() {
