@@ -39,128 +39,131 @@
           <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
         </el-select>
         <OwnerFilterSelect v-model="store.acFilters.owner_id" @change="searchAndLoad" />
+        <ColumnSettings :panel-key="PANEL_KEYS.GG_ADS" :registry="GG_ADS_COLUMNS" />
       </div>
     </div>
 
     <!-- 表格 + 分页 — 滚动区 -->
     <div style="flex:1;min-height:0;overflow-y:auto;">
-      <el-table :data="store.accounts" @selection-change="val => selected = val" :row-class-name="mccRowClass">
+      <el-table v-if="columnPrefs.ready" :data="store.accounts" @selection-change="val => selected = val" :row-class-name="mccRowClass">
         <el-table-column type="selection" width="45" />
-        <el-table-column label="账号名称" min-width="140">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingNameId === row.id">
-              <el-input v-model="editNameValue" size="small" class="inline-name-input"
-                :ref="el => { if (el) nameInputRef = el }"
-                @blur="saveName(row)" @keyup.enter="saveName(row)" @keyup.escape="cancelNameEdit" />
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.name }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditName(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="account_id" label="账号 ID" min-width="140" show-overflow-tooltip />
-        <!-- 写表状态。语汇 / 位置 / 宽度逐字沿用一期 TT 账户表：⚠️ 点它即重试、✅ 已同步，
-             两张表并列出现时跨平台一致。紧跟「账号 ID」—— 本表列多，横向必滚，
-             埋到表尾在左滚状态下会被漏看，那就等于没做。 -->
-        <el-table-column label="写表" width="54" align="center">
-          <template #default="{ row }">
-            <SheetWriteCell :failure="sheetWriteFailures[row.account_id]"
-              @retry="retrySheetWrite(row)" />
-          </template>
-        </el-table-column>
-        <el-table-column label="所属 MCC" min-width="140">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingMccId === row.id">
-              <el-select v-model="editMccValue" size="small" class="inline-mcc-select"
-                filterable clearable placeholder="选择 MCC"
-                @change="saveMcc(row)" @blur="onMccBlur"
-                @visible-change="v => { if (!v && !mccPending) cancelMccEdit() }">
-                <el-option v-for="m in mccOptions" :key="m.id"
-                  :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
-              </el-select>
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <div class="mcc-text-block" v-if="row.mcc_name">
-                <div class="inline-cell-text" style="color:#0891b2;">{{ row.mcc_name }}</div>
-                <div style="font-size:10px;color:#0891b2;white-space:nowrap;">{{ row.mcc_code }}</div>
+        <template v-for="key in visibleOrder" :key="key">
+          <el-table-column v-if="key === 'name'" v-bind="COL_ATTRS.name">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingNameId === row.id">
+                <el-input v-model="editNameValue" size="small" class="inline-name-input"
+                  :ref="el => { if (el) nameInputRef = el }"
+                  @blur="saveName(row)" @keyup.enter="saveName(row)" @keyup.escape="cancelNameEdit" />
               </div>
-              <span v-else style="color:#888;white-space:nowrap;">未分配</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditMcc(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="时区" min-width="120">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingTimezoneId === row.id">
-              <el-select v-model="editTimezoneValue" size="small" class="inline-tz-select"
-                filterable allow-create default-first-option placeholder="时区"
-                @change="saveTimezone(row)" @blur="onTimezoneBlur"
-                @visible-change="v => { if (!v && !tzPending) cancelTimezoneEdit() }">
-                <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
-              </el-select>
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.timezone || '—' }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditTimezone(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="代理" min-width="140">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingAgentId === row.id">
-              <el-select v-model="editAgentValue" size="small" class="inline-agent-select"
-                filterable clearable placeholder="选择代理"
-                @change="saveAgent(row)" @blur="onAgentBlur"
-                @visible-change="v => { if (!v && !agentPending) cancelAgentEdit() }">
-                <el-option v-for="a in agentOptions" :key="a.id" :label="a.name" :value="a.id" />
-              </el-select>
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.agent || '—' }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditAgent(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" min-width="120">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingStatusId === row.id">
-              <el-select v-model="editStatusValue" size="small" class="inline-status-select"
-                filterable placeholder="选择状态"
-                @change="saveStatus(row)" @blur="onStatusBlur"
-                @visible-change="v => { if (!v && !statusPending) cancelStatusEdit() }">
-                <el-option v-for="s in store.options.statuses" :key="s.id" :label="s.name" :value="s.id" />
-              </el-select>
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <el-tag size="small" class="status-tag" :type="row.status === '存活' ? 'success' : row.status === '验证' ? 'warning' : row.status === '死亡' ? 'danger' : 'info'">{{ row.status || '未知' }}</el-tag>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditStatus(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="acquired_date" label="到手时间" min-width="100" show-overflow-tooltip />
-        <el-table-column label="状态变更时间" min-width="110" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span v-if="row.status_changed_date" style="font-size:12px;">{{ row.status_changed_date }}</span>
-            <span v-else style="color:#ccc;">—</span>
-          </template>
-        </el-table-column>
-        <!-- 户归属：只有户管可见可编辑（规格 §9.2）。管理员的入口在 AccountModal，不在这里。 -->
-        <el-table-column v-if="authStore.isHuguan" label="户归属" width="160" align="center">
-          <template #header>
-            <el-tooltip placement="top"
-              content="这个户归谁管。如果配置了户管看板，改这里会把新归属写进看板的「重新分配」列（TT 是「换绑情况」列），等你在看板同步时生效。">
-              <span style="cursor:help;">户归属 ⓘ</span>
-            </el-tooltip>
-          </template>
-          <template #default="{ row }">
-            <OwnerCell :row="row" account-key="account_id"
-              :loaded="ownerOptionsLoaded" :failed="ownerOptionsFailed"
-              :options="ownerOptions" :option-map="ownerOptionMap"
-              :pending="ownerPending"
-              @change="(v) => changeOwner(row, v)" />
-          </template>
-        </el-table-column>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">{{ row.name }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditName(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <!-- 写表状态。语汇 / 位置 / 宽度逐字沿用一期 TT 账户表：⚠️ 点它即重试、✅ 已同步，
+               两张表并列出现时跨平台一致。紧跟「账号 ID」—— 本表列多，横向必滚，
+               埋到表尾在左滚状态下会被漏看，那就等于没做。 -->
+          <el-table-column v-else-if="key === 'sheet_write'" v-bind="COL_ATTRS.sheet_write">
+            <template #default="{ row }">
+              <SheetWriteCell :failure="sheetWriteFailures[row.account_id]"
+                @retry="retrySheetWrite(row)" />
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'mcc'" v-bind="COL_ATTRS.mcc">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingMccId === row.id">
+                <el-select v-model="editMccValue" size="small" class="inline-mcc-select"
+                  filterable clearable placeholder="选择 MCC"
+                  @change="saveMcc(row)" @blur="onMccBlur"
+                  @visible-change="v => { if (!v && !mccPending) cancelMccEdit() }">
+                  <el-option v-for="m in mccOptions" :key="m.id"
+                    :label="m.name + ' (' + m.mcc_id + ')'" :value="m.id" />
+                </el-select>
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <div class="mcc-text-block" v-if="row.mcc_name">
+                  <div class="inline-cell-text" style="color:#0891b2;">{{ row.mcc_name }}</div>
+                  <div style="font-size:10px;color:#0891b2;white-space:nowrap;">{{ row.mcc_code }}</div>
+                </div>
+                <span v-else style="color:#888;white-space:nowrap;">未分配</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditMcc(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'timezone'" v-bind="COL_ATTRS.timezone">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingTimezoneId === row.id">
+                <el-select v-model="editTimezoneValue" size="small" class="inline-tz-select"
+                  filterable allow-create default-first-option placeholder="时区"
+                  @change="saveTimezone(row)" @blur="onTimezoneBlur"
+                  @visible-change="v => { if (!v && !tzPending) cancelTimezoneEdit() }">
+                  <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+                </el-select>
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">{{ row.timezone || '—' }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditTimezone(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'agent'" v-bind="COL_ATTRS.agent">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingAgentId === row.id">
+                <el-select v-model="editAgentValue" size="small" class="inline-agent-select"
+                  filterable clearable placeholder="选择代理"
+                  @change="saveAgent(row)" @blur="onAgentBlur"
+                  @visible-change="v => { if (!v && !agentPending) cancelAgentEdit() }">
+                  <el-option v-for="a in agentOptions" :key="a.id" :label="a.name" :value="a.id" />
+                </el-select>
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">{{ row.agent || '—' }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditAgent(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'status'" v-bind="COL_ATTRS.status">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingStatusId === row.id">
+                <el-select v-model="editStatusValue" size="small" class="inline-status-select"
+                  filterable placeholder="选择状态"
+                  @change="saveStatus(row)" @blur="onStatusBlur"
+                  @visible-change="v => { if (!v && !statusPending) cancelStatusEdit() }">
+                  <el-option v-for="s in store.options.statuses" :key="s.id" :label="s.name" :value="s.id" />
+                </el-select>
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <el-tag size="small" class="status-tag" :type="row.status === '存活' ? 'success' : row.status === '验证' ? 'warning' : row.status === '死亡' ? 'danger' : 'info'">{{ row.status || '未知' }}</el-tag>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditStatus(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'status_changed'" v-bind="COL_ATTRS.status_changed">
+            <template #default="{ row }">
+              <span v-if="row.status_changed_date" style="font-size:12px;">{{ row.status_changed_date }}</span>
+              <span v-else style="color:#ccc;">—</span>
+            </template>
+          </el-table-column>
+          <!-- 户归属：只有户管可见可编辑（规格 §9.2）。管理员的入口在 AccountModal，不在这里。 -->
+          <el-table-column v-else-if="key === 'owner'" v-bind="COL_ATTRS.owner">
+            <template #header>
+              <el-tooltip placement="top"
+                content="这个户归谁管。如果配置了户管看板，改这里会把新归属写进看板的「重新分配」列（TT 是「换绑情况」列），等你在看板同步时生效。">
+                <span style="cursor:help;">户归属 ⓘ</span>
+              </el-tooltip>
+            </template>
+            <template #default="{ row }">
+              <OwnerCell :row="row" account-key="account_id"
+                :loaded="ownerOptionsLoaded" :failed="ownerOptionsFailed"
+                :options="ownerOptions" :option-map="ownerOptionMap"
+                :pending="ownerPending"
+                @change="(v) => changeOwner(row, v)" />
+            </template>
+          </el-table-column>
+          <!-- 纯 prop 列兜底：account_id / acquired_date 走这里 -->
+          <el-table-column v-else v-bind="COL_ATTRS[key]" />
+        </template>
         <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showModal(row.id)">✏️</el-button>
@@ -208,12 +211,21 @@ import RechargeBatchModal from '@/components/RechargeBatchModal.vue'
 import AccountSyncModal from '@/components/AccountSyncModal.vue'
 import AccountDeletedModal from '@/components/AccountDeletedModal.vue'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
+import ColumnSettings from '@/components/ColumnSettings.vue'
+import { PANEL_KEYS, GG_ADS_COLUMNS } from '@/constants/accountColumns'
+import { indexByKey } from '@/utils/columnPrefsLogic.mjs'
+import { useColumnPrefsStore } from '@/stores/columnPrefs'
 import { useAuthStore } from '@/stores/auth'
 import { useOwnerPicker } from '@/composables/useOwnerPicker'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
 const store = useAccountStore()
+// 自定义列：可见列顺序来自 columnPrefs store（缺省走注册表默认顺序）。
+// COL_ATTRS 是 key → 可 v-bind 列属性的索引，供各 v-if 分支取用。
+const columnPrefs = useColumnPrefsStore()
+const COL_ATTRS = indexByKey(GG_ADS_COLUMNS)
+const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.GG_ADS, GG_ADS_COLUMNS))
 // 「默认只展示存活」必须在 **setup 顶层**落进筛选状态，不能放 onMounted：
 // 子组件 OwnerFilterSelect 的 setup 恒早于本组件 onMounted，它会同步 emit('change')
 // → searchAndLoad() → loadAccounts()，首次请求就以 status=''（全部状态）发出。
