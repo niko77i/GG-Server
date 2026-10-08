@@ -743,8 +743,12 @@ def _write_background(conf, rows, platform, user_id):
     import routes.huguan_sheet_targets as _hst
 
     channel_col = hd.OWNER_CHANNEL_COL.get(platform)
-    channel_rows = [r for r in rows if channel_col and channel_col in (r.get("cells") or {})]
-    other_rows = [r for r in rows if r not in channel_rows]
+    # 按**身份**划分，不要用 `r not in channel_rows` —— dict 的 in 是**按值比较**，
+    # 两行内容相同的行会被一起划进/划出（勘误：初稿写的就是这个写法）。
+    channel_rows, other_rows = [], []
+    for r in rows:
+        (channel_rows if (channel_col and channel_col in (r.get("cells") or {}))
+         else other_rows).append(r)
 
     db = database.get_db()
     try:
