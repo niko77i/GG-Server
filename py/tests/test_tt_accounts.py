@@ -1231,3 +1231,46 @@ def test_trigger_recycle_on_non_alive_status(app):
 
     assert writer.call_count == 3
     db.close()
+
+
+def test_list_filters_by_account_types(client, tt_headers):
+    db = database.get_db()
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'a','6101','加白户', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'b','6102','企业户', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'c','6103','企业户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+
+    data = client.get("/api/tt/accounts/list?account_types=企业户",
+                      headers=tt_headers).get_json()
+    assert data["total"] == 2
+    assert {i["advertiser_id"] for i in data["items"]} == {"6102", "6103"}
+    assert data["type_counts"] == {"加白户": 1, "企业户": 2}
+
+    data = client.get("/api/tt/accounts/list?account_types=加白户&account_types=企业户",
+                      headers=tt_headers).get_json()
+    assert data["total"] == 3
+
+
+def test_type_counts_ignores_type_filter_but_respects_search(client, tt_headers):
+    """type_counts 与 status_counts 同底：含 search，不含 account_types 自身。"""
+    db = database.get_db()
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'a','6201','加白户', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'b','6202','企业户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+    data = client.get("/api/tt/accounts/list?account_types=加白户&search=6202",
+                      headers=tt_headers).get_json()
+    assert data["total"] == 0
+    assert data["type_counts"] == {"企业户": 1}, "计数要跟着 search 走"
+
+
+def test_list_extra_blank_account_types_ignored(client, tt_headers):
+    data = client.get("/api/tt/accounts/list?account_types=&account_types=",
+                      headers=tt_headers).get_json()
+    assert data["success"] is True

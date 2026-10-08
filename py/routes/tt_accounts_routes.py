@@ -45,6 +45,11 @@ def _get_tt_sheet_mappings(db):
             "my_dashboard": "我的看板", "recycle": "回收户清单"}
 
 
+def _default_account_type_tt(db, uid):
+    """新建账户未指定类型时的兜底类型名（取该用户自己看板配置的第一条）。"""
+    return hd._default_account_type(db, uid)
+
+
 def _resolve_agent_id(db, agent, agent_id):
     """agent_id 为 None 且有 agent 文本时，按 platform='tt' 查/插 agents。"""
     if agent_id is not None:
@@ -214,6 +219,9 @@ def list_accounts():
     status_id = (request.args.get('status_id') or '').strip()
     timezone = (request.args.get('timezone') or '').strip()
     owner_id = (request.args.get('owner_id') or '').strip()
+    # 户类型可多选：**用重复查询参数**（?account_types=A&account_types=B），
+    # 不用逗号分隔 —— 类型名是用户自己起的，完全可能含逗号，切开会静默筛不到任何行。
+    account_types = [t.strip() for t in request.args.getlist("account_types") if t.strip()]
 
     where = ["a.deleted_at IS NULL"]
     params = []
@@ -262,6 +270,10 @@ def list_accounts():
             # 等值匹配，正常情形恒筛不到（0 行）。绝不退化成「不加条件」，那会返回全部。
             where.append("a.status_id = ?")
             params.append(status_id)
+    if account_types:
+        marks = ",".join("?" for _ in account_types)
+        where.append(f"a.account_type IN ({marks})")
+        params += account_types
     if timezone:
         where.append("a.timezone = ?"); params.append(timezone)
 
@@ -317,8 +329,21 @@ def list_accounts():
         s = r["status"] or "存活"
         status_counts[s] = status_counts.get(s, 0) + r["cnt"]
 
+    # 各户类型计数。口径与 status_counts **完全同底**：都基于 sc_where2
+    # （含 search/bc/agent/timezone/owner，不含 status 与 account_types 自身）——
+    # 两排按钮的数字必须能对上同一批账户，否则户管看到「两排加起来不等于总数」会怀疑数据。
+    default_type = _default_account_type_tt(db, uid)
+    type_counts = {}
+    for r in db.execute(
+        "SELECT COALESCE(NULLIF(a.account_type, ''), ?) AS atype, COUNT(*) AS cnt "
+        "FROM tt_accounts a WHERE " + " AND ".join(sc_where2) + " GROUP BY atype",
+        [default_type] + sc_params2
+    ).fetchall():
+        t = r["atype"] or default_type
+        type_counts[t] = type_counts.get(t, 0) + r["cnt"]
+
     return ok({'items': items, 'total': total, 'page': page, 'size': size,
-               'status_counts': status_counts})
+               'status_counts': status_counts, 'type_counts': type_counts})
 
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>', methods=['PUT'])
