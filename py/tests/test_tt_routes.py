@@ -28,6 +28,17 @@ def _make_tt_headers(client, username):
     return {"Authorization": f"Bearer {token}"}
 
 
+def _make_huguan_headers(client, username):
+    """户管（跨平台角色）。"""
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role='huguan', platform='gg' WHERE username=?", (username,))
+    db.commit()
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    return {"Authorization": f"Bearer {resp.get_json()['access_token']}"}
+
+
 def test_bc_crud(client, tt_headers):
     # 创建
     resp = client.post("/api/tt/bcs/create", headers=tt_headers, json={
@@ -648,6 +659,35 @@ def test_settings_save_and_readback(client, tt_headers):
     data = resp.get_json()
     assert data["settings"]["sheet_id"] == "abc123"
     assert data["settings"]["sheet_mappings"]["accounts"] == "账户明细表"
+
+
+def test_settings_save_huguan_writes_recharge_and_recycle(client):
+    hg = _make_huguan_headers(client, "huguants1")
+    resp = client.post("/api/tt/settings", headers=hg, json={
+        "sheet_id": "MUST_NOT_WRITE",
+        "sheet_mappings": {"accounts": "不该写", "recharge": "户管充值表",
+                           "recycle": "户管回收表", "my_dashboard": "也不该写"},
+    })
+    assert resp.status_code == 200
+
+    db = database.get_db()
+    assert db.execute("SELECT value FROM tags WHERE key='tt_sheet_id'").fetchone() is None, \
+        "户管不许改全局表格 ID"
+    row = db.execute("SELECT value FROM tags WHERE key='tt_sheet_mappings'").fetchone()
+    got = json.loads(row["value"])
+    assert got == {"recharge": "户管充值表", "recycle": "户管回收表"}, \
+        "户管只能写 recharge / recycle，accounts 不许进全局"
+    db.close()
+
+
+def test_settings_save_plain_user_still_only_private(client, tt_headers):
+    """既有行为不许被改坏：普通投手仍然只写自己的 my_dashboard。"""
+    client.post("/api/tt/settings", headers=tt_headers, json={
+        "sheet_mappings": {"recharge": "投手不该写", "my_dashboard": "我的"},
+    })
+    db = database.get_db()
+    assert db.execute("SELECT value FROM tags WHERE key='tt_sheet_mappings'").fetchone() is None
+    db.close()
 
 
 # ==================== 数据导出 / 导入 ====================
