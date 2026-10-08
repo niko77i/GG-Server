@@ -3,6 +3,7 @@
 设计见 docs/superpowers/specs/2026-10-06-huguan-sync-undo-design.md。
 本文件不打真实 Google API。
 """
+import json
 import logging
 import sqlite3
 
@@ -161,8 +162,8 @@ class TestPushSnapshot:
                             lambda svc, sid, name, rng: grid)
 
         payload = hd.snapshot_push_targets(
-            FakeService(), {"spreadsheet_id": "S", "sheet_name": "N"}, "fb", rows)
-        ids = [c["account_id"] for c in payload["cells"]]
+            FakeService(), {"spreadsheet_id": "S"}, "fb", [("N", rows)])
+        ids = [c["account_id"] for c in payload["sheets"][0]["cells"]]
         assert ids == ["U1"]
 
     def test_snapshot_records_only_columns_that_will_be_written(self, client, fb_user, monkeypatch):
@@ -181,19 +182,21 @@ class TestPushSnapshot:
                             lambda svc, sid, name, rng: grid)
 
         payload = hd.snapshot_push_targets(
-            FakeService(), {"spreadsheet_id": "S", "sheet_name": "N"}, "fb", rows)
-        cells = payload["cells"][0]["cells"]
+            FakeService(), {"spreadsheet_id": "S"}, "fb", [("N", rows)])
+        cells = payload["sheets"][0]["cells"][0]["cells"]
         # C 列会被批量写（writable=True）⇒ 必须记
         assert cells.get("C") == "表里的旧名"
         # I 列 writable=False ⇒ 批量根本不写它，不该进快照
         assert "I" not in cells
 
     def test_undo_cells_are_writable_input(self, client, fb_user, monkeypatch):
+        """旧形状快照仍要能转出写表入参（按表分组：`{"sheet_name", "rows"}`）。"""
         payload = {"spreadsheet_id": "S", "sheet_name": "N",
                    "cells": [{"account_id": "U1", "cells": {"C": "旧", "G": "9"}}]}
         out = hd.push_undo_cells(payload)
-        assert out[0]["account_id"] == "U1"
-        assert out[0]["cells"] == {"C": "旧", "G": "9"}
+        assert out[0]["sheet_name"] == "N"
+        assert out[0]["rows"][0]["account_id"] == "U1"
+        assert out[0]["rows"][0]["cells"] == {"C": "旧", "G": "9"}
 
 
 # ---------- load_undo_meta：只给状态端点用的「payload + created_at」 ----------
@@ -344,6 +347,29 @@ class TestPushUndoRoute:
         monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
         monkeypatch.setattr(hd, "get_platform_config",
                             lambda db_, uid, p: {"spreadsheet_id": "", "sheet_name": ""})
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: calls.append(1) or {"updated": 0, "not_found": []})
+        assert hd.undo_push(fb_user, "fb") == {"updated": 0, "not_found": []}
+        assert calls == []
+
+    def test_undo_half_configured_dashboard_returns_zero(self, client, fb_user, monkeypatch):
+        """gg/fb 的「有表格ID、工作表名为空」半截配置 ⇒ 全零、不碰写入器。
+
+        等价性哨兵：多表改造把前置判据从 `conf["sheet_name"]` 换成 `tables` 之后，
+        gg/fb 的 `tables` 恒为单元素列表（工作表名可以为空）⇒ 少了
+        `platform != "tt"` 那一支，这里会拿空表名去写表（改动前是直接返回全零）。
+        """
+        calls = []
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "fb", "push",
+                     {"spreadsheet_id": "S", "sheet_name": "N",
+                      "cells": [{"account_id": "U9", "cells": {"C": "旧名"}}]})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, uid, p: {"spreadsheet_id": "S", "sheet_name": ""})
         import google_sheets_service as gs
         monkeypatch.setattr(gs, "update_rows_by_account_id",
                             lambda *a, **k: calls.append(1) or {"updated": 0, "not_found": []})
@@ -1673,4 +1699,195 @@ class TestPushUndoNotFoundPassthrough:
         out = hd.undo_push(fb_user, "fb")
         assert out["not_found"] == ["X1"]
         assert out["updated"] == 0
+
+
+# ========== Task 7: 撤回快照支持多表（每张表一份 + 旧单表快照兼容） ==========
+
+
+def test_snapshot_and_undo_across_two_sheets(monkeypatch):
+    """快照逐表分份，`push_undo_cells` 按表还原。
+
+    ⚠️ 偏离 brief（一处，必要）：brief 给的 grid 把账户ID 放在**第 0 行**，而
+    `snapshot_push_targets` 跳过表头（`grid[1:]`）⇒ 那个 grid 一个账户都命不中，
+    `cells` 恒为空、断言必红（且是「空集上的恒真/恒假」式的红，测不到东西）。
+    此处只把 ID 行挪到数据行（第 1 行），其余逐字照抄：断言的值与形状都不变。
+    """
+    import huguan_dashboard as hd
+    import google_sheets_service as gs  # noqa: F401  （brief 原样保留）
+
+    grids = {
+        "总户-加白": [["", "", ""], ["", "", "8001"]],
+        "总户-企业": [["", "", ""], ["", "", "8002"]],
+    }
+
+    def _read(svc, sid, name, rng):
+        return grids[name]
+
+    monkeypatch.setattr(hd, "read_sheet_values", _read)
+
+    groups = [("总户-加白", [{"account_id": "8001", "cells": {"A": "x"}}]),
+              ("总户-企业", [{"account_id": "8002", "cells": {"A": "y"}}])]
+    snap = hd.snapshot_push_targets(object(), {"spreadsheet_id": "SS"}, "tt", groups)
+    assert [s["sheet_name"] for s in snap["sheets"]] == ["总户-加白", "总户-企业"]
+    assert (push_undo_calls := hd.push_undo_cells(snap))
+    assert [(c["sheet_name"], [r["account_id"] for r in c["rows"]]) for c in push_undo_calls] == \
+        [("总户-加白", ["8001"]), ("总户-企业", ["8002"])]
+
+
+def _seed_tt_account(db, advertiser_id, owner_id, **over):
+    """TT 侧夹具（本文件专用；定位键是 `advertiser_id`）。"""
+    cols = {"advertiser_id": advertiser_id, "name": advertiser_id, "owner_id": owner_id,
+            "country": "", "timezone": "", "consumption": "", "remark": "",
+            "death_date": "", "deleted_at": None, "acquired_date": ""}
+    cols.update(over)
+    keys = ", ".join(cols)
+    marks = ", ".join("?" for _ in cols)
+    db.execute(f"INSERT INTO tt_accounts({keys}) VALUES({marks})", tuple(cols.values()))
+    return db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+
+class TestCrossTableDuplicateSheetBack:
+    """跨表重复 + 归属变更 + 撤回（此前完全没有覆盖的组合）。
+
+    Task 5 让「同一账户同时出现在两张 worksheet」成为可能。此时：
+      - `build_diff` 的去重是**首次出现生效**（靠前的表胜出，后表记 warning）
+      - 路由构造 `sheet_from` 曾经是**字典推导 = 后出现覆盖**
+    两者方向相反 ⇒ 快照里的表侧原值取自**后**那张表，而系统里生效的是**前**那张表。
+    撤回时就会把后表的运营名写进前表（串表），且没有任何测试能发现。
+    """
+
+    def test_first_table_wins_and_undo_restores_that_value(self, client, monkeypatch):
+        import main
+        import google_sheets_service as gs
+
+        hg, uid = _huguan_headers(client, "_undo_xtab", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "总户-加白"},
+                           {"name": "企业户", "sheet_name": "总户-企业"}]}})))
+        li = _seed_user(db, "u_xtab_li", "李四")        # 库里 8003 的当前归属
+        zhang = _seed_user(db, "u_xtab_zhang", "张三")   # 表里（前表）要改成的人
+        _seed_tt_account(db, "8003", li, account_type="加白户")
+        db.commit()
+        db.close()
+
+        hdr = ["入库时间", "是否回收", "账户ID"]
+        # 同一账户 8003 在两张表里，且「接户运营」不同：前表=张三（胜出）、后表=李四
+        tabs = {"总户-加白": [hdr, _tt_row("8003", "张三")],
+                "总户-企业": [hdr, _tt_row("8003", "李四")]}
+        monkeypatch.setattr(gs, "read_sheet_values", lambda svc, sid, name, rng: tabs[name])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        writes = []
+
+        def _write(svc, sid, name, rows, key_col="C"):
+            writes.append((name, rows, key_col))
+            return {"updated": len(rows), "not_found": []}
+
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _write)
+        monkeypatch.setattr(main, "_sync_sheets_background", lambda fn, cb: fn())
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": False,
+                                 "confirmed": {"owner": ["8003"]}})
+        assert resp.status_code == 200, resp.get_json()
+
+        db = database.get_db()
+        payload = hd.load_undo(db, uid, "tt", "sync")
+        db.close()
+
+        # ① 系统里生效的是**前表**：归属 李四 → 张三
+        assert payload["owner_changes"][0]["account_id"] == "8003"
+        assert payload["owner_changes"][0]["cols"]["owner_id"] == {"old": li, "new": zhang}
+        # ② 表侧原值必须取自**同一张**（前）表 —— 后表是李四，写回前表就是串表
+        assert payload["sheet_back"] == [{"account_id": "8003",
+                                          "cells": {"G": "张三"}}]
+        # ③ 同步收尾的定向回写也确实落在前表（按账户类型分组；行里多带 account_type）
+        assert writes[0][0] == "总户-加白"
+        assert [(r["account_id"], r["cells"]) for r in writes[0][1]] == [("8003", {"G": "张三"})]
+        assert writes[0][2] == "C"
+
+        # ④ 撤回：库侧回退 + 表侧盖回**前表**的原值。
+        #    这里把 conf 补成「单表形状」只为让表侧那一步真的执行 —— 多表配置下
+        #    conf["sheet_name"] 恒为空串（tt 多表的表名在 tables 里），见报告里的遗留项。
+        monkeypatch.setattr(hd, "get_platform_config",
+                            lambda db_, u, p: {"spreadsheet_id": "SS",
+                                               "sheet_name": "总户-加白"})
+        out = hd.undo_sync(uid, "tt")
+        assert out["reverted"] == 1
+        db = database.get_db()
+        owner = db.execute("SELECT owner_id FROM tt_accounts "
+                           "WHERE advertiser_id='8003'").fetchone()[0]
+        assert owner == li, "撤回后归属必须回到李四"
+        assert hd.load_undo(db, uid, "tt", "sync") is None
+        db.close()
+        assert writes[-1][0] == "总户-加白"
+        assert [(r["account_id"], r["cells"]) for r in writes[-1][1]] == [("8003", {"G": "张三"})]
+        assert writes[-1][2] == "C"
+
+
+class TestPushUndoAcrossTwoSheets:
+    """`undo_push` 在多表配置下逐表还原（tt 多表 conf 里没有 sheet_name）。"""
+
+    def test_undo_push_writes_each_sheet(self, client, monkeypatch):
+        """tt 多表：两个 worksheet 各写一次，且都按 `KEY_COL["tt"]`（C 列）定位。
+
+        判别力：`undo_push` 改前用 `conf["spreadsheet_id"] / conf["sheet_name"]` 做前置
+        校验与写表目标，而 tt 多表配置的 `sheet_name` 恒为空串 ⇒ 直接短路返回全零、
+        一个字都不写（撤回按钮还亮着）。本用例会红。
+        """
+        import google_sheets_service as gs
+
+        hg, uid = _huguan_headers(client, "_undo_multi", platform="gg")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "总户-加白"},
+                           {"name": "企业户", "sheet_name": "总户-企业"}]}})))
+        hd.save_undo(db, uid, "tt", "push",
+                     {"spreadsheet_id": "SS", "sheets": [
+                         {"sheet_name": "总户-加白",
+                          "cells": [{"account_id": "8001", "cells": {"D": "旧BC"}}]},
+                         {"sheet_name": "总户-企业",
+                          "cells": [{"account_id": "8002", "cells": {"D": "旧BC2"}}]}]})
+        db.commit()
+        db.close()
+
+        calls = []
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, name, rows, key_col="C":
+                            calls.append((sid, name, rows, key_col))
+                            or {"updated": len(rows), "not_found": []})
+
+        out = hd.undo_push(uid, "tt")
+        assert [(c[1], [r["account_id"] for r in c[2]]) for c in calls] == \
+            [("总户-加白", ["8001"]), ("总户-企业", ["8002"])]
+        assert {c[3] for c in calls} == {"C"}, "tt 的定位列是 C（账户ID）"
+        assert out == {"updated": 2, "not_found": []}
+        db = database.get_db()
+        assert hd.load_undo(db, uid, "tt", "push") is None
+        db.close()
+
+
+class TestUndoStatusCountAcrossShapes:
+    def test_push_count_sums_sheets_of_new_shape(self, client):
+        """新形状是多表快照 ⇒ 「影响 N 行」必须把各表行数加起来。
+
+        改前只数 payload 顶层的 `cells`，新形状没有这个键 ⇒ 按钮亮着却显示
+        「影响 0 行」。
+        """
+        hg, uid = _huguan_headers(client, "_undo_cnt_new", platform="fb")
+        db = database.get_db()
+        hd.save_undo(db, uid, "fb", "push",
+                     {"spreadsheet_id": "S", "sheets": [
+                         {"sheet_name": "A", "cells": [{"account_id": "1"}]},
+                         {"sheet_name": "B", "cells": [{"account_id": "2"},
+                                                       {"account_id": "3"}]}]})
+        db.commit()
+        db.close()
+        got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
+        assert got["push"]["count"] == 3
 

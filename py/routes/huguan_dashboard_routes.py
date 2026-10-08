@@ -191,8 +191,16 @@ def dashboard_sync():
         # 传进 apply_diff（`build_diff` 的返回值是前端契约，不许为它加键）。
         # **必须传**：不传则快照的 `sheet_back` 全空 ⇒ 表侧撤回静默失效（不报错、
         # 不抛异常）。键按 `account_id`、**不按行号** —— 行号在重新拉表后会整体位移。
-        sheet_from = {p["account_id"]: hd._owner_sheet_from(p, platform)
-                      for p in parsed_rows if p.get("account_id")}
+        #
+        # ⚠️ 必须是**首次出现生效**（与 `build_diff` 的去重口径逐字对齐）：同一账户同时
+        # 出现在两张表时（多表后成为可能），`build_diff` 保留的是**靠前**那张表的行，
+        # 而字典推导是「后出现覆盖」—— 两者方向相反 ⇒ 快照里的表侧原值会取自**后**
+        # 那张表，撤回时把后表的运营名写进前表（串表）。用 setdefault 钉住首次。
+        sheet_from = {}
+        for p in parsed_rows:
+            aid = p.get("account_id")
+            if aid:
+                sheet_from.setdefault(aid, hd._owner_sheet_from(p, platform))
         try:
             result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid,
                                    collect_undo=True, sheet_from=sheet_from)
@@ -272,12 +280,22 @@ def dashboard_push():
     uid = get_uid()
     db = database.get_db()
     try:
-        conf = hd.get_platform_config(db, uid, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+        conf = {p: hd.get_platform_config(db, uid, p) for p in (platform,)}
+        c = conf[platform]
+        tables = hd.get_platform_tables(db, uid, platform)
+        # gg/fb：判据里必须留着 `c["sheet_name"]` —— 「有表格ID 但工作表名为空」的半截
+        # 配置是 POST 端点允许存下的（它不校验非空），改动前会在这里 400。
+        # tt：工作表名在 `tables` 里（多表配置的 `conf["sheet_name"]` 恒为空串），
+        # 沿用旧判据会把已配好的多表看板当成「未配置」。
+        if (not c["spreadsheet_id"] or not tables
+                or (platform != "tt" and not c["sheet_name"])):
             return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
         rows = hd.collect_rows_for_push(db, platform)
+        groups, skipped = hd.group_rows_by_sheet(db, uid, platform, rows)
     finally:
         db.close()
+    for name in skipped:
+        log.warning("全量刷新跳过：户类型「%s」查不到工作表", name)
 
     import google_sheets_service as gs
     from main import _GOOGLE_SHEETS_CONFIG
@@ -288,36 +306,41 @@ def dashboard_push():
     # 网络调用，快照事务不能挂在它上面等（会长时间持写锁），故单独开一条短连接。
     # 读表失败就照常抛（与其它 Sheets 调用同口径）：此时快照没 commit ⇒ 一行都没写，
     # 上一份快照原封不动，仍可撤回上一次真正成功的同步。
+    # 多表后快照是**每张表一份**（Task 7）：逐表读、逐表记，撤回才能逐表还原。
     undo_db = database.get_db()
     try:
         hd.save_undo(undo_db, uid, platform, "push",
-                     hd.snapshot_push_targets(service, conf, platform, rows))
+                     hd.snapshot_push_targets(service, c, platform, groups))
         undo_db.commit()
     finally:
         undo_db.close()
 
+    total_updated, total_not_found = 0, []
     try:
         # 定位列必须与快照用的同一列（`hd.KEY_COL[platform]`）：写表按它找行，
         # 快照也按它找行，两边不一致时快照记的行集合与真正被写的行就对不上。
         # 写入器的默认值是 "C"（GG/TT 的账户ID列），但 **FB 的账户ID在 D 列**
         # （C 是「账户名称」），所以 fb 路径不传就会按错误的列定位、写空。
         # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
-        res = gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                           conf["sheet_name"], rows,
-                                           key_col=hd.KEY_COL[platform])
+        for sheet_name, sheet_rows in groups:
+            res = gs.update_rows_by_account_id(service, c["spreadsheet_id"],
+                                               sheet_name, sheet_rows,
+                                               key_col=hd.KEY_COL[platform])
+            total_updated += res["updated"]
+            total_not_found.extend(res["not_found"])
     except Exception:
-        # 写表抛异常 ⇒ 整批一个字都没写（update_rows_by_account_id 的单次
+        # 写表抛异常 ⇒ 该批一个字都没写（update_rows_by_account_id 的单次
         # batchUpdate 是原子的）⇒ 本次同步不算成功，快照没有撤回资格。作废后原样
         # 抛出，维持既有的 500 行为。
         _discard_push_undo(uid, platform)
         raise
 
-    if not res["updated"] and not res["not_found"]:
+    if not total_updated and not total_not_found:
         # 一个字都没写 ⇒ 没有可撤回的东西，作废快照
         _discard_push_undo(uid, platform)
 
-    return ok({"result": {"rows": len(rows), "updated": res["updated"],
-                          "not_found": res["not_found"]}})
+    return ok({"result": {"rows": len(rows), "updated": total_updated,
+                          "not_found": total_not_found}})
 
 
 def _discard_undo(uid: int, platform: str, direction: str) -> None:
@@ -372,7 +395,10 @@ def dashboard_undo_status():
             if not meta:
                 out[direction] = None
             elif direction == "push":
-                out[direction] = {"count": len(meta["payload"].get("cells", [])),
+                # 口径 = 快照覆盖的行数。多表后快照是「每张表一份」（Task 7）：
+                # 直接取顶层 `cells` 会恒为 0（新形状没有这个键）⇒ 按钮亮着却显示
+                # 「影响 0 行」。`push_undo_row_count` 两种形状都数得对。
+                out[direction] = {"count": hd.push_undo_row_count(meta["payload"]),
                                   "created_at": meta["created_at"]}
             else:
                 out[direction] = {"count": len(meta["payload"].get("updates", []))

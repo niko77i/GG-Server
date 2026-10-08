@@ -2459,6 +2459,29 @@ class TestPushEndpoint:
         push_rows(99999, "gg")
         assert called == []
 
+    def test_half_configured_gg_dashboard_is_rejected(self, client, monkeypatch):
+        """gg/fb 的「有表格ID、工作表名为空」半截配置必须仍是 400。
+
+        POST 配置端点不校验工作表名非空，这种配置存得下。多表改造把校验从
+        `conf["sheet_name"]` 换成 `tables` 之后，gg/fb 的 tables 恒为单元素列表
+        （名可以为空）⇒ 少了 `platform != "tt"` 那一支，这里会拿空表名去写表。
+        本用例就是那条等价性的哨兵。
+        """
+        hg, uid = _create_user(client, "_push_half", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": ""}})))
+        _seed_account(db, "HALF-1", uid)
+        db.commit()
+        db.close()
+
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+        resp = client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "gg"})
+        assert resp.status_code == 400
+        assert captured == [], "一行都不许写"
+
     def test_push_writes_all_visible_accounts(self, client, monkeypatch):
         hg, uid = _create_user(client, "_push_ep", role="huguan")
         db = database.get_db()

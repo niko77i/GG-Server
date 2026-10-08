@@ -1595,8 +1595,10 @@ def read_operator_remark_map(db, owner_id: int) -> dict:
         return {}
 
 
-def snapshot_push_targets(service, conf: dict, platform: str, rows: list) -> dict:
-    """读整片表，记下「本次刷新将会写到的每个格子」的当前值。
+def snapshot_push_targets(service, conf: dict, platform: str, groups: list) -> dict:
+    """读每张表，记下「本次刷新将会写到的每个格子」的当前值。
+
+    `groups` 是 `group_rows_by_sheet` 的产出：`[(sheet_name, rows)]`。
 
     只覆盖**真正会被写**的行与列：
       - 行：`rows` 里在表中命中定位键的那些（表里没有的账户 update_rows_by_account_id
@@ -1604,41 +1606,83 @@ def snapshot_push_targets(service, conf: dict, platform: str, rows: list) -> dic
       - 列：该行 `cells_for_row` 会产出的列（即 COLUMN_SPEC 里 writable=True 的）
 
     ⚠️ 必须在**写表之前**调用 —— 写完之后原值就没了。
+    ⚠️ 返回值从「单表快照」改成**每张表一份**（2026-10-08 多表规格 §4.4）：
+       TT 现在一个平台有多张 worksheet，撤回必须逐表还原。
+       兼容性：旧快照 payload 是 `{spreadsheet_id, sheet_name, cells}`，
+       `push_undo_cells` 两种形状都认（见下），所以历史快照仍能撤回一次。
     """
-    sheet_name = conf["sheet_name"]
-    grid = read_sheet_values(service, conf["spreadsheet_id"], sheet_name, READ_RANGE[platform])
-    key_i = col_index(KEY_COL[platform])
-
-    where = {}
-    for i, values in enumerate(grid[1:], start=2):
-        if len(values) <= key_i:
+    spreadsheets = conf.get("spreadsheet_id") or ""
+    out_sheets = []
+    for sheet_name, rows in groups:
+        if not rows:
             continue
-        raw = ("" if values[key_i] is None else str(values[key_i])).strip().lstrip("'").strip()
-        if raw and raw not in where:
-            where[raw] = values
+        grid = read_sheet_values(service, spreadsheets, sheet_name, READ_RANGE[platform])
+        key_i = col_index(KEY_COL[platform])
 
-    out = []
-    for r in rows:
-        aid = r["account_id"]
-        values = where.get(aid)
-        if values is None:
-            continue
-        cells = {}
-        for col in r["cells"]:
-            i = col_index(col)
-            cells[col] = ("" if len(values) <= i or values[i] is None
-                          else str(values[i])).strip()
-        if cells:
-            out.append({"account_id": aid, "cells": cells})
-    return {"spreadsheet_id": conf["spreadsheet_id"],
-            "sheet_name": sheet_name,
-            "cells": out}
+        where = {}
+        for i, values in enumerate(grid[1:], start=2):
+            if len(values) <= key_i:
+                continue
+            raw = ("" if values[key_i] is None else str(values[key_i])).strip().lstrip("'").strip()
+            if raw and raw not in where:
+                where[raw] = values
+
+        cells = []
+        for r in rows:
+            aid = r["account_id"]
+            values = where.get(aid)
+            if values is None:
+                continue
+            row_cells = {}
+            for col in r["cells"]:
+                i = col_index(col)
+                row_cells[col] = ("" if len(values) <= i or values[i] is None
+                                  else str(values[i])).strip()
+            if row_cells:
+                cells.append({"account_id": aid, "cells": row_cells})
+        out_sheets.append({"sheet_name": sheet_name, "cells": cells})
+    return {"spreadsheet_id": spreadsheets, "sheets": out_sheets}
 
 
 def push_undo_cells(payload: dict) -> list:
-    """把 push 快照转成 `update_rows_by_account_id` 的入参形状。"""
-    return [{"account_id": c["account_id"], "cells": dict(c["cells"])}
-            for c in (payload or {}).get("cells", [])]
+    """把 push 快照转成「按表分组」的写表入参：`[{"sheet_name", "rows"}]`。
+
+    兼容两种快照形状：
+      - 新（2026-10-08 起）：`{spreadsheet_id, sheets: [{sheet_name, cells}]}`
+      - 旧（多表之前）：`{spreadsheet_id, sheet_name, cells}`
+    旧快照必须继续认，否则升级那一刻「撤回上次」会静默变成空操作。
+
+    ⚠️ 每项的形状是 `{"sheet_name", "rows"}`（计划里的 Produces 契约行），
+      **不是**元组 —— Task 7 的验收用例按 `c["sheet_name"]` / `c["rows"]` 取值。
+    """
+    payload = payload or {}
+    sheets = payload.get("sheets")
+    if isinstance(sheets, list):
+        return [{"sheet_name": s.get("sheet_name") or "",
+                 "rows": [{"account_id": c["account_id"], "cells": dict(c["cells"])}
+                          for c in (s.get("cells") or [])]}
+                for s in sheets if isinstance(s, dict) and s.get("sheet_name")]
+    legacy_name = payload.get("sheet_name") or ""
+    if not legacy_name:
+        return []
+    return [{"sheet_name": legacy_name,
+             "rows": [{"account_id": c["account_id"], "cells": dict(c["cells"])}
+                      for c in (payload.get("cells") or [])]}]
+
+
+def push_undo_row_count(payload: dict) -> int:
+    """push 快照覆盖的行数（撤回按钮小字「影响 N 行」）。
+
+    三种形状都要数对，否则升级后按钮亮着却显示「影响 0 行」：
+      - 新：`{sheets: [{sheet_name, cells}]}`（各表行数之和）
+      - 旧：`{sheet_name, cells}`
+      - 裸：`{cells}`（历史/既有测试里的最小形状）
+    """
+    payload = payload or {}
+    sheets = payload.get("sheets")
+    if isinstance(sheets, list):
+        return sum(len(s.get("cells") or []) for s in sheets if isinstance(s, dict))
+    return len(payload.get("cells") or [])
 
 
 def push_rows(user_id: int, platform: str, account_ids=None) -> None:
@@ -1698,6 +1742,9 @@ def undo_push(user_id: int, platform: str) -> dict:
     把它盖回去即可，不比对表当前值（表在后来的协同里被改过也照盖 —— 那是 spec
     明确接受的口径）。未配置看板或没有快照 → 返回全零。
 
+    **逐表还原**：快照是「每张工作表一份」（2026-10-08 多表规格 §4.4），本函数按
+    `push_undo_cells` 的分组逐张表各写一次；`updated` / `not_found` 是各表之和。
+
     **同步执行**，不挂后台线程：撤回是用户当场点、当场要结果的显式操作，
     要能立刻报出 `updated` / `not_found`（与 push_rows 的「后台、失败只记日志」
     契约相反，故不复用 _sync_sheets_background）。
@@ -1705,7 +1752,13 @@ def undo_push(user_id: int, platform: str) -> dict:
     db = _open_db()
     try:
         conf = get_platform_config(db, user_id, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+        tables = get_platform_tables(db, user_id, platform)
+        # gg/fb：只有一张表，工作表名仍在 conf 里 —— 判据与改动前逐字等价（表名为空
+        # 时同样返回全零，不碰写入器）。
+        # tt：工作表名在 tables 里。多表配置的 `conf["sheet_name"]` **恒为空串**
+        # （表名存在 `tables` 里），沿用旧判据会让 TT 撤回**静默变成空操作**：
+        # 一个字都不写、快照也不作废，撤回按钮永久亮着。
+        if not conf["spreadsheet_id"] or not tables or (platform != "tt" and not conf["sheet_name"]):
             return {"updated": 0, "not_found": []}
         payload = load_undo(db, user_id, platform, "push")
     finally:
@@ -1713,8 +1766,8 @@ def undo_push(user_id: int, platform: str) -> dict:
     if not payload:
         return {"updated": 0, "not_found": []}
 
-    rows = push_undo_cells(payload)
-    if not rows:
+    groups = push_undo_cells(payload)
+    if not any(g["rows"] for g in groups):
         # 快照存在但覆盖 0 行 ⇒ 没东西可退；作废它，否则撤回按钮永久亮着。
         db = _open_db()
         try:
@@ -1727,21 +1780,30 @@ def undo_push(user_id: int, platform: str) -> dict:
     import google_sheets_service as gs
     from main import _GOOGLE_SHEETS_CONFIG
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+    # 表地址取自**快照自己记的那张**（与它描述的那次写入同源），不取当前配置 ——
+    # 两者之间用户可能改过配置，撤回要退回到当初写的地方。
+    spreadsheet_id = payload.get("spreadsheet_id") or ""
+    total_updated, total_not_found = 0, []
     # 定位列必须与**快照用的同一列**（`KEY_COL[platform]`，见 snapshot_push_targets）：
     # 写入器默认值是 "C"（GG/TT 的账户ID列），而 **FB 的账户ID在 D 列**
     # （C 是「账户名称」）—— fb 路径不传就按错误的列定位、整批写空，且不抛异常（静默）。
     # 必须用字典查表：按平台分流不许二元 else 兜底，缺键就要 KeyError。
     # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
-    res = gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                       conf["sheet_name"], rows,
-                                       key_col=KEY_COL[platform])
+    for g in groups:
+        sheet_name, rows = g["sheet_name"], g["rows"]
+        if not rows:
+            continue
+        res = gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows,
+                                           key_col=KEY_COL[platform])
+        total_updated += res["updated"]
+        total_not_found.extend(res["not_found"])
     db = _open_db()
     try:
         delete_undo(db, user_id, platform, "push")
         db.commit()
     finally:
         db.close()
-    return {"updated": res["updated"], "not_found": res["not_found"]}
+    return {"updated": total_updated, "not_found": total_not_found}
 
 
 # 「这一项不能撤」的文案：库里的值与本次同步写下去的值不等 ⇒ 同步之后有人改过它。
