@@ -3,7 +3,13 @@
     <!-- 页面头部 -->
     <div class="panel-header">
       <h2 class="panel-title">FB账户管理</h2>
-      <el-button type="primary" @click="openCreate">新增账户</el-button>
+      <div class="header-actions">
+        <el-button type="primary" @click="openCreate">新增账户</el-button>
+        <el-button @click="batchImportVisible = true">📥 批量导入</el-button>
+        <el-button @click="lookupVisible = true">🔍 批量查户</el-button>
+        <el-button @click="deletedVisible = true">🗑 回收站</el-button>
+        <el-button v-if="selected.length" @click="batchDelete" style="margin-left:auto;">🗑 批量删除</el-button>
+      </div>
     </div>
 
     <!-- 统计卡片 -->
@@ -37,9 +43,7 @@
         </el-select>
         <OwnerFilterSelect v-model="ownerId" @change="onOwnerChange" />
         <el-button @click="loadData">刷新</el-button>
-        <el-button type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">
-          批量删除({{ selectedIds.length }})
-        </el-button>
+        <ColumnSettings :panel-key="PANEL_KEYS.FB_ADS" :registry="FB_ADS_COLUMNS" />
       </div>
     </el-card>
 
@@ -48,46 +52,45 @@
       <template #header>
         <span class="table-card__header-text">共 {{ total }} 个账户</span>
       </template>
-      <el-table :data="items" stripe border v-loading="loading" @selection-change="onSelect">
+      <el-table v-if="columnPrefs.ready" :data="items" stripe border v-loading="loading" @selection-change="val => selected = val">
         <el-table-column type="selection" width="45" />
-        <el-table-column prop="name" label="账户名" min-width="120" />
-        <el-table-column prop="account_id" label="账户ID" width="160" />
-        <!-- 写表状态。沿用二期 TT 账户表已确认的方案（同一位置、同一宽度、同一三态语汇），
-             两张表并列出现时跨平台一致。 -->
-        <el-table-column label="写表" width="54" align="center">
-          <template #default="{ row }">
-            <template v-if="sheetWriteFailures[row.account_id]">
-              <el-tooltip placement="top"
-                :content="sheetWriteHint(sheetWriteFailures[row.account_id])">
-                <el-button link size="small"
-                  :type="sheetWriteTone(sheetWriteFailures[row.account_id].status)"
-                  @click.stop="retrySheetWrite(row)">{{ sheetWriteMark(sheetWriteFailures[row.account_id].status) }}</el-button>
-              </el-tooltip>
+        <!-- 自定义列：顺序与显隐来自 columnPrefs store（缺省走 FB_ADS_COLUMNS 默认顺序）。
+             各列内部 markup 逐字沿用改造前模板，仅搬进 v-for 并加分支条件。
+             纯 prop 列（name/account_id/operator/timezone/acquired_date）走 v-else 兜底。 -->
+        <template v-for="key in visibleOrder" :key="key">
+          <!-- 写表状态。沿用二期 TT / GG 账户表已确认的方案（同一位置、同一宽度、同一三态
+               语汇，共用 components/cells/SheetWriteCell.vue），三张表并列出现时跨平台一致。
+               必须走**显式 v-if 分支**，不能落到下面的 v-else 兜底 —— 那里会把它渲染成纯
+               prop 列，插槽无声丢失且不报错（见兜底处的警告）。 -->
+          <el-table-column v-if="key === 'sheet_write'" v-bind="COL_ATTRS.sheet_write">
+            <template #default="{ row }">
+              <SheetWriteCell :failure="sheetWriteFailures[row.account_id]"
+                @retry="retrySheetWrite(row)" />
             </template>
-            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="所属BM" min-width="140">
-          <template #default="{ row }">{{ row.bms?.map(b=>b.name).join(', ') }}</template>
-        </el-table-column>
-        <el-table-column label="位置" min-width="120">
-          <template #default="{ row }">
-            <span v-if="row.primary_bm_name">{{ row.primary_bm_name }}</span>
-            <span v-else style="color:#c0c4cc;">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="所属渠道" width="110">
-          <template #default="{ row }">{{ optName(channelOptions, row.channel_id) }}</template>
-        </el-table-column>
-        <el-table-column label="资产类型" width="110">
-          <template #default="{ row }">{{ optName(assetTypeOptions, row.asset_type_id) }}</template>
-        </el-table-column>
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">{{ optName(statusOptions, row.status_id) }}</template>
-        </el-table-column>
-        <el-table-column prop="operator" label="操作人" width="100" />
-        <el-table-column prop="timezone" label="时区" width="100" />
-        <el-table-column prop="acquired_date" label="到手时间" width="110" />
+          </el-table-column>
+          <el-table-column v-else-if="key === 'bms'" v-bind="COL_ATTRS.bms">
+            <template #default="{ row }">{{ row.bms?.map(b=>b.name).join(', ') }}</template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'location'" v-bind="COL_ATTRS.location">
+            <template #default="{ row }">
+              <span v-if="row.primary_bm_name">{{ row.primary_bm_name }}</span>
+              <span v-else style="color:#c0c4cc;">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'channel'" v-bind="COL_ATTRS.channel">
+            <template #default="{ row }">{{ optName(channelOptions, row.channel_id) }}</template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'asset_type'" v-bind="COL_ATTRS.asset_type">
+            <template #default="{ row }">{{ optName(assetTypeOptions, row.asset_type_id) }}</template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'status'" v-bind="COL_ATTRS.status">
+            <template #default="{ row }">{{ optName(statusOptions, row.status_id) }}</template>
+          </el-table-column>
+          <!-- 纯 prop 列兜底（当前覆盖：name / account_id / operator / timezone / acquired_date）。
+               ⚠️ 新增**带自定义插槽**的列时，必须在上方补显式 v-if/v-else-if 分支，
+               否则它会静默走这里、被渲染成纯 prop 列，插槽（含 #header）无声丢失且不报错。 -->
+          <el-table-column v-else v-bind="COL_ATTRS[key]" />
+        </template>
         <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
@@ -102,6 +105,10 @@
     </el-card>
 
     <!-- 弹窗 -->
+    <FbAccountBatchImportModal v-model:visible="batchImportVisible" @imported="loadData" />
+    <FbAccountBatchLookupModal v-model:visible="lookupVisible" />
+    <FbAccountDeletedModal v-model:visible="deletedVisible" @changed="loadData" />
+
     <el-dialog v-model="dialogVisible" :title="editingId?'编辑账户':'新增账户'" width="520px" class="account-dialog">
       <el-form :model="form" label-width="90px" class="account-form">
         <el-form-item label="账户名" required>
@@ -175,16 +182,31 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { fbApi } from '../../api/fb'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import client from '../../api/client'
 import { sheetWriteApi } from '../../api/sheetWrite'
-import { SHEET_WRITE_TOAST, sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+import { SHEET_WRITE_TOAST, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+import SheetWriteCell from '@/components/cells/SheetWriteCell.vue'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
+import ColumnSettings from '@/components/ColumnSettings.vue'
+import FbAccountBatchImportModal from '@/components/fb/FbAccountBatchImportModal.vue'
+import FbAccountBatchLookupModal from '@/components/fb/FbAccountBatchLookupModal.vue'
+import FbAccountDeletedModal from '@/components/fb/FbAccountDeletedModal.vue'
+import { PANEL_KEYS, FB_ADS_COLUMNS } from '@/constants/accountColumns'
+import { indexByKey } from '@/utils/columnPrefsLogic.mjs'
+import { useColumnPrefsStore } from '@/stores/columnPrefs'
+
+// 自定义列：可见列顺序来自 columnPrefs store（缺省走注册表默认顺序）。
+// COL_ATTRS 是 key → 可 v-bind 列属性的索引，供各 v-if 分支取用。
+const columnPrefs = useColumnPrefsStore()
+const COL_ATTRS = indexByKey(FB_ADS_COLUMNS)
+const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.FB_ADS, FB_ADS_COLUMNS))
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
-const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selectedIds = ref([])
+const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selected = ref([])
+const lookupVisible = ref(false); const batchImportVisible = ref(false); const deletedVisible = ref(false)
 const bmOptions = ref([]); const statusOptions = ref([]); const dialogVisible = ref(false)
 const channelOptions = ref([]); const assetTypeOptions = ref([]); const fbUsers = ref([])
 const editingId = ref(null); const saving = ref(false)
@@ -221,7 +243,6 @@ const form = reactive({
 
 let searchTimer = null
 function onSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(loadData, 300) }
-function onSelect(v) { selectedIds.value = v.map(r=>r.id) }
 
 async function loadData() {
   loading.value = true
@@ -291,9 +312,19 @@ async function handleSave() {
   finally { saving.value = false }
 }
 async function handleDelete(id) { await fbApi.deleteAccount(id); ElMessage.success('已删除'); loadData() }
-async function handleBatchDelete() {
-  for (const id of selectedIds.value) { await fbApi.deleteAccount(id) }
-  ElMessage.success(`已删除${selectedIds.value.length}个`); loadData()
+async function batchDelete() {
+  if (!selected.value.length) return
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${selected.value.length} 个账户？`, '确认', { type: 'warning' })
+  } catch { return }
+  try {
+    await fbApi.batchDelete({ ids: selected.value.map(s => s.id) })
+    ElMessage.success('已删除')
+    selected.value = []
+    loadData()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '删除失败')
+  }
 }
 
 // ===== 写表失败治理：轮询 / 行标记 / 重试 =====
@@ -383,6 +414,12 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .panel-title {

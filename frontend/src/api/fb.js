@@ -18,6 +18,10 @@ export const fbApi = {
   deleteAccount(id) { return client.delete(`/fb/accounts/${id}`) },
   restoreAccount(id) { return client.post(`/fb/accounts/${id}/restore`) },
   permanentDeleteAccount(id) { return client.delete(`/fb/accounts/${id}/permanent`) },
+  listDeleted(params = {}) { return client.get('/fb/accounts/deleted', { params }) },
+  batchLookup(body) { return client.post('/fb/accounts/batch-lookup', body) },
+  batchCreate(body) { return client.post('/fb/accounts/batch-create', body) },
+  batchDelete(body) { return client.post('/fb/accounts/batch-delete', body) },
   accountBmHistory(id) { return client.get(`/fb/accounts/${id}/bm-history`) },
   reassignAccount(id, data) { return client.put(`/fb/accounts/${id}/reassign`, data) },
 

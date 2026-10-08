@@ -106,13 +106,20 @@ def db_conn():
         db.close()
 
 
-def _add_column_if_missing(conn: sqlite3.Connection, table: str, col_name: str, col_def: str):
-    """仅在列不存在时添加。如果表不存在则跳过。"""
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, col_name: str, col_def: str) -> bool:
+    """仅在列不存在时添加。如果表不存在则跳过。
+
+    返回「本次是否真的新增了该列」。既有调用方全部忽略返回值，故是纯增量改动；
+    需要「只在首次建列时做一次性数据迁移」的调用方（见 tt_accounts.account_type）
+    靠这个布尔值区分「刚建出来」与「本来就有」——后者绝不能重复执行迁移。
+    """
     if not _table_exists(conn, table):
-        return
+        return False
     cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if col_name not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+        return True
+    return False
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -210,6 +217,16 @@ def _ensure_columns(conn: sqlite3.Connection):
     # 建表语句服务全新库，这一条服务存量库 —— 两处都要有。
     _add_column_if_missing(conn, "tt_accounts", "owner_change_note",
                            "owner_change_note TEXT DEFAULT ''")
+    # TT 户类型（2026-10-08 规格 §4.1）：存**类型名字符串**（不是 id），查库直接可读。
+    # 名字与配置里的 custom 表名一一对应，改名的级联 UPDATE 在
+    # huguan_dashboard.save_config 里做。
+    # ⚠️ 回填**只在列刚建出来的这一次**执行：_ensure_columns 每次连库都跑，
+    #    无条件 UPDATE 会在户管改名 / 手工清值之后把它打回「加白户」。
+    # ⚠️ 字面量「加白户」与 huguan_dashboard.TT_DEFAULT_ACCOUNT_TYPE 必须一致。
+    if _add_column_if_missing(conn, "tt_accounts", "account_type",
+                              "account_type TEXT DEFAULT ''"):
+        conn.execute("UPDATE tt_accounts SET account_type='加白户' "
+                     "WHERE account_type IS NULL OR account_type=''")
     # 主 BM 标记（「位置」列的存储，规格 4.3）。部分唯一索引保证
     # 「同一账户至多一个主 BM」——**不阻止换 BM**，换法是同一事务内先清后设。
     _add_column_if_missing(conn, "fb_account_bm", "is_primary",

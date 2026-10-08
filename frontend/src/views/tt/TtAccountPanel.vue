@@ -43,211 +43,165 @@
           <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
         </el-select>
         <OwnerFilterSelect v-model="ownerId" @change="filterAndLoad" />
+        <ColumnSettings :panel-key="PANEL_KEYS.TT_ADS" :registry="TT_ADS_COLUMNS" />
       </div>
     </div>
 
     <!-- 表格 + 分页 — 滚动区 -->
     <div style="flex:1;min-height:0;overflow-y:auto;">
-      <el-table :data="items" @selection-change="val => selected = val" :row-class-name="bcRowClass">
+      <el-table v-if="columnPrefs.ready" :data="items" @selection-change="val => selected = val" :row-class-name="bcRowClass">
         <el-table-column type="selection" width="45" />
         <!-- TT 账户列表不展示「账户名称」（用户 2026-10-06 裁定，仅 TT）。
              改名入口保留在行尾 ✏️ 的 TtAccountModal 里。 -->
-        <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="150" show-overflow-tooltip />
-        <!-- 写表状态。沿用充值记录表「表格」列的既有语汇：⚠️ 点它即重试、✅ 已同步，
-             操作员不必重新学。位置紧贴「广告账户 ID」—— 本表 14 列横向必滚，
-             埋到表尾在左滚状态下会被漏看，那就等于没做。 -->
-        <el-table-column label="写表" width="54" align="center">
-          <template #default="{ row }">
-            <template v-if="sheetWriteFailures[row.advertiser_id]">
+        <template v-for="key in visibleOrder" :key="key">
+          <!-- 写表状态。沿用充值记录表「表格」列的既有语汇：⚠️ 点它即重试、✅ 已同步，
+               操作员不必重新学。位置紧贴「广告账户 ID」—— 本表 14 列横向必滚，
+               埋到表尾在左滚状态下会被漏看，那就等于没做。 -->
+          <el-table-column v-if="key === 'sheet_write'" v-bind="COL_ATTRS.sheet_write">
+            <template #default="{ row }">
+              <SheetWriteCell :failure="sheetWriteFailures[row.advertiser_id]"
+                @retry="retrySheetWrite(row)" />
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'bc'" v-bind="COL_ATTRS.bc">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingBcId === row.id">
+                <el-select v-model="editBcValue" size="small" class="inline-bc-select"
+                  filterable clearable placeholder="选择 BC"
+                  @change="saveBc(row)" @blur="onBcBlur"
+                  @visible-change="v => { if (!v && !bcPending) cancelBcEdit() }">
+                  <el-option v-for="b in bcOptions" :key="b.id"
+                    :label="b.name + ' (' + b.bc_id + ')'" :value="b.id" />
+                </el-select>
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <el-tooltip v-if="row.bc_name" placement="top" :show-after="300"
+                  :content="row.bc_name + (bcCode(row) ? '（' + bcCode(row) + '）' : '')">
+                  <div class="bc-text-block">
+                    <div class="inline-cell-text" style="color:#0891b2;">{{ row.bc_name }}</div>
+                    <div v-if="bcCode(row)" style="font-size:10px;color:#0891b2;white-space:nowrap;">{{ bcCode(row) }}</div>
+                  </div>
+                </el-tooltip>
+                <span v-else style="color:#888;white-space:nowrap;">未分配</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditBc(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'timezone'" v-bind="COL_ATTRS.timezone">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingTimezoneId === row.id">
+                <el-select v-model="editTimezoneValue" size="small" class="inline-tz-select"
+                  filterable allow-create default-first-option placeholder="时区"
+                  @change="saveTimezone(row)" @blur="onTimezoneBlur"
+                  @visible-change="v => { if (!v && !tzPending) cancelTimezoneEdit() }">
+                  <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+                </el-select>
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">{{ row.timezone || '—' }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditTimezone(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'agent'" v-bind="COL_ATTRS.agent">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingAgentId === row.id">
+                <el-select v-model="editAgentValue" size="small" class="inline-agent-select"
+                  filterable clearable placeholder="选择代理"
+                  @change="saveAgent(row)" @blur="onAgentBlur"
+                  @visible-change="v => { if (!v && !agentPending) cancelAgentEdit() }">
+                  <el-option v-for="a in agentOptions" :key="a.id" :label="a.name" :value="a.id" />
+                </el-select>
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">{{ row.agent || '—' }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditAgent(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'status'" v-bind="COL_ATTRS.status">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingStatusId === row.id">
+                <el-select v-model="editStatusValue" size="small" class="inline-status-select"
+                  filterable placeholder="选择状态"
+                  @change="saveStatus(row)" @blur="onStatusBlur"
+                  @visible-change="v => { if (!v && !statusPending) cancelStatusEdit() }">
+                  <el-option v-for="s in statusOptions" :key="s.id" :label="s.name" :value="s.id" />
+                </el-select>
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <el-tag size="small" class="status-tag" :type="statusTagType(row.status)">{{ row.status || '未知' }}</el-tag>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditStatus(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'country'" v-bind="COL_ATTRS.country">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingCountryId === row.id">
+                <el-input v-model="editCountryValue" size="small" class="inline-name-input"
+                  :ref="el => { if (el) countryInputRef = el }"
+                  @blur="saveCountry(row)" @keyup.enter="saveCountry(row)" @keyup.escape="cancelCountryEdit" />
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">{{ row.country || '—' }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditCountry(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'consumption'" v-bind="COL_ATTRS.consumption">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingConsumptionId === row.id">
+                <el-input v-model="editConsumptionValue" size="small" class="inline-name-input"
+                  :ref="el => { if (el) consumptionInputRef = el }"
+                  @blur="saveConsumption(row)" @keyup.enter="saveConsumption(row)" @keyup.escape="cancelConsumptionEdit" />
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">{{ row.consumption || '—' }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditConsumption(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'remark'" v-bind="COL_ATTRS.remark">
+            <template #default="{ row }">
+              <div class="inline-edit-cell" v-if="editingRemarkId === row.id">
+                <el-input v-model="editRemarkValue" size="small" class="inline-name-input"
+                  :ref="el => { if (el) remarkInputRef = el }"
+                  @blur="saveRemark(row)" @keyup.enter="saveRemark(row)" @keyup.escape="cancelRemarkEdit" />
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">{{ row.remark || '—' }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditRemark(row)">✏️</el-button>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'status_changed'" v-bind="COL_ATTRS.status_changed">
+            <template #default="{ row }">
+              <span v-if="row.status_changed_date" style="font-size:12px;">{{ row.status_changed_date }}</span>
+              <span v-else style="color:#ccc;">—</span>
+            </template>
+          </el-table-column>
+          <!-- 户归属：只有户管可见可编辑（规格 §9.2）。管理员的入口在 TtAccountModal，不在这里。 -->
+          <el-table-column v-else-if="key === 'owner'" v-bind="COL_ATTRS.owner">
+            <template #header>
               <el-tooltip placement="top"
-                :content="sheetWriteHint(sheetWriteFailures[row.advertiser_id])">
-                <el-button link size="small"
-                  :type="sheetWriteTone(sheetWriteFailures[row.advertiser_id].status)"
-                  @click.stop="retrySheetWrite(row)">{{ sheetWriteMark(sheetWriteFailures[row.advertiser_id].status) }}</el-button>
+                content="这个户归谁管。如果配置了户管看板，改这里会把新归属写进看板的「重新分配」列（TT 是「换绑情况」列），等你在看板同步时生效。">
+                <span style="cursor:help;">户归属 ⓘ</span>
               </el-tooltip>
             </template>
-            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="所属 BC" min-width="160">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingBcId === row.id">
-              <el-select v-model="editBcValue" size="small" class="inline-bc-select"
-                filterable clearable placeholder="选择 BC"
-                @change="saveBc(row)" @blur="onBcBlur"
-                @visible-change="v => { if (!v && !bcPending) cancelBcEdit() }">
-                <el-option v-for="b in bcOptions" :key="b.id"
-                  :label="b.name + ' (' + b.bc_id + ')'" :value="b.id" />
-              </el-select>
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <el-tooltip v-if="row.bc_name" placement="top" :show-after="300"
-                :content="row.bc_name + (bcCode(row) ? '（' + bcCode(row) + '）' : '')">
-                <div class="bc-text-block">
-                  <div class="inline-cell-text" style="color:#0891b2;">{{ row.bc_name }}</div>
-                  <div v-if="bcCode(row)" style="font-size:10px;color:#0891b2;white-space:nowrap;">{{ bcCode(row) }}</div>
-                </div>
-              </el-tooltip>
-              <span v-else style="color:#888;white-space:nowrap;">未分配</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditBc(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="时区" min-width="120">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingTimezoneId === row.id">
-              <el-select v-model="editTimezoneValue" size="small" class="inline-tz-select"
-                filterable allow-create default-first-option placeholder="时区"
-                @change="saveTimezone(row)" @blur="onTimezoneBlur"
-                @visible-change="v => { if (!v && !tzPending) cancelTimezoneEdit() }">
-                <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
-              </el-select>
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.timezone || '—' }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditTimezone(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="代理" min-width="140">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingAgentId === row.id">
-              <el-select v-model="editAgentValue" size="small" class="inline-agent-select"
-                filterable clearable placeholder="选择代理"
-                @change="saveAgent(row)" @blur="onAgentBlur"
-                @visible-change="v => { if (!v && !agentPending) cancelAgentEdit() }">
-                <el-option v-for="a in agentOptions" :key="a.id" :label="a.name" :value="a.id" />
-              </el-select>
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.agent || '—' }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditAgent(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" min-width="120">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingStatusId === row.id">
-              <el-select v-model="editStatusValue" size="small" class="inline-status-select"
-                filterable placeholder="选择状态"
-                @change="saveStatus(row)" @blur="onStatusBlur"
-                @visible-change="v => { if (!v && !statusPending) cancelStatusEdit() }">
-                <el-option v-for="s in statusOptions" :key="s.id" :label="s.name" :value="s.id" />
-              </el-select>
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <el-tag size="small" class="status-tag" :type="statusTagType(row.status)">{{ row.status || '未知' }}</el-tag>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditStatus(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="国家" min-width="110">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingCountryId === row.id">
-              <el-input v-model="editCountryValue" size="small" class="inline-name-input"
-                :ref="el => { if (el) countryInputRef = el }"
-                @blur="saveCountry(row)" @keyup.enter="saveCountry(row)" @keyup.escape="cancelCountryEdit" />
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.country || '—' }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditCountry(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="消耗情况" min-width="120">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingConsumptionId === row.id">
-              <el-input v-model="editConsumptionValue" size="small" class="inline-name-input"
-                :ref="el => { if (el) consumptionInputRef = el }"
-                @blur="saveConsumption(row)" @keyup.enter="saveConsumption(row)" @keyup.escape="cancelConsumptionEdit" />
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.consumption || '—' }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditConsumption(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="备注" min-width="160">
-          <template #default="{ row }">
-            <div class="inline-edit-cell" v-if="editingRemarkId === row.id">
-              <el-input v-model="editRemarkValue" size="small" class="inline-name-input"
-                :ref="el => { if (el) remarkInputRef = el }"
-                @blur="saveRemark(row)" @keyup.enter="saveRemark(row)" @keyup.escape="cancelRemarkEdit" />
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">{{ row.remark || '—' }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditRemark(row)">✏️</el-button>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="acquired_date" label="到手时间" min-width="100" show-overflow-tooltip />
-        <el-table-column label="状态变更时间" min-width="110" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span v-if="row.status_changed_date" style="font-size:12px;">{{ row.status_changed_date }}</span>
-            <span v-else style="color:#ccc;">—</span>
-          </template>
-        </el-table-column>
-        <!-- 户归属：只有户管可见可编辑（规格 §9.2）。管理员的入口在 TtAccountModal，不在这里。 -->
-        <el-table-column v-if="authStore.isHuguan" label="户归属" width="160" align="center">
-          <template #header>
-            <el-tooltip placement="top"
-              content="这个户归谁管。如果配置了户管看板，改这里会把新归属写进看板的「重新分配」列（TT 是「换绑情况」列），等你在看板同步时生效。">
-              <span style="cursor:help;">户归属 ⓘ</span>
-            </el-tooltip>
-          </template>
-          <template #default="{ row }">
-            <div class="owner-cell">
-              <!-- ① 加载中：不用裸 el-select，否则会退化成显示裸 owner_id 数字（§5.4） -->
-              <el-skeleton v-if="!ownerOptionsLoaded" :rows="1" animated />
-              <!-- ⑤ 失败态：列表没回来，写操作不能静默（§5.6） -->
-              <el-select v-else-if="ownerOptionsFailed" :model-value="null" size="small" disabled
-                style="width:100%;" placeholder="暂时无法加载用户列表"
-                :aria-label="`账户 ${row.advertiser_id} 的户归属`" />
-              <!-- ③ 未知归属：不在列表里（账号可能已停用），禁用并说明，不让户管以为能保持现状（§5.4） -->
-              <el-tooltip v-else-if="row.owner_id && !ownerOptionMap[row.owner_id]"
-                content="这个归属人不在用户列表里（账号可能已停用）。请重新选择。">
-                <el-select :model-value="row.owner_id" size="small" filterable disabled
-                  style="width:100%;" placeholder="未知用户"
-                  :aria-label="`账户 ${row.advertiser_id} 的户归属`">
-                  <el-option :key="row.owner_id" :label="`用户 #${row.owner_id}`" :value="row.owner_id" />
-                </el-select>
-              </el-tooltip>
-              <!-- ④ 未分配 -->
-              <el-tooltip v-else-if="!row.owner_id"
-                content="这个账户还没有归属人，普通用户看不到它，只有户管和管理员可见。">
-                <el-select :model-value="row.owner_id" size="small" filterable
-                  placeholder="未分配" style="width:100%;"
-                  :disabled="ownerPending.has(row.id)"
-                  :aria-label="`账户 ${row.advertiser_id} 的户归属`"
-                  @change="v => changeOwner(row, v)">
-                  <el-option v-for="u in ownerOptions" :key="u.id"
-                    :label="u.display_name || u.username" :value="u.id" />
-                  <template #empty>
-                    <div style="padding:8px 12px;font-size:12px;color:#6b7280;line-height:1.6;">
-                      没有匹配的用户。<br />停用的账号不会出现在这里。
-                    </div>
-                  </template>
-                </el-select>
-              </el-tooltip>
-              <!-- ② 正常 -->
-              <el-select v-else :model-value="row.owner_id" size="small" filterable
-                placeholder="未分配" style="width:100%;"
-                :disabled="ownerPending.has(row.id)"
-                :aria-label="`账户 ${row.advertiser_id} 的户归属`"
-                @change="v => changeOwner(row, v)">
-                <el-option v-for="u in ownerOptions" :key="u.id"
-                  :label="u.display_name || u.username" :value="u.id" />
-                <template #empty>
-                  <div style="padding:8px 12px;font-size:12px;color:#6b7280;line-height:1.6;">
-                    没有匹配的用户。<br />停用的账号不会出现在这里。
-                  </div>
-                </template>
-              </el-select>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="authStore.isHuguan" prop="owner_change_note"
-                         label="换绑情况" min-width="160" show-overflow-tooltip />
+            <template #default="{ row }">
+              <OwnerCell :row="row" account-key="advertiser_id"
+                :loaded="ownerOptionsLoaded" :failed="ownerOptionsFailed"
+                :options="ownerOptions" :option-map="ownerOptionMap"
+                :pending="ownerPending"
+                @change="(v) => changeOwner(row, v)" />
+            </template>
+          </el-table-column>
+          <!-- 纯 prop 列兜底（当前覆盖：advertiser_id / owner_change_note / acquired_date）。
+               ⚠️ 新增**带自定义插槽**的列时，必须在上方补显式 v-if/v-else-if 分支，
+               否则它会静默走这里、被渲染成纯 prop 列，插槽（含 #header，如「户归属 ⓘ」）
+               无声丢失且不报错。 -->
+          <el-table-column v-else v-bind="COL_ATTRS[key]" />
+        </template>
         <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showModal(row)">✏️</el-button>
@@ -285,7 +239,9 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ttApi, ttAccountsApi } from '@/api/tt'
 import client from '@/api/client'
 import { sheetWriteApi } from '../../api/sheetWrite'
-import { SHEET_WRITE_TOAST, sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+import { SHEET_WRITE_TOAST, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+import SheetWriteCell from '@/components/cells/SheetWriteCell.vue'
+import OwnerCell from '@/components/cells/OwnerCell.vue'
 import TtAccountModal from '@/components/tt/TtAccountModal.vue'
 import TtAccountDetailModal from '@/components/tt/TtAccountDetailModal.vue'
 import TtAccountDeletedModal from '@/components/tt/TtAccountDeletedModal.vue'
@@ -296,10 +252,19 @@ import TtRechargeBatchModal from '@/components/tt/TtRechargeBatchModal.vue'
 import TtAccountSyncModal from '@/components/tt/TtAccountSyncModal.vue'
 import TtRecycleReasonModal from '@/components/tt/TtRecycleReasonModal.vue'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
-import { useAuthStore } from '@/stores/auth'
+import ColumnSettings from '@/components/ColumnSettings.vue'
+import { PANEL_KEYS, TT_ADS_COLUMNS } from '@/constants/accountColumns'
+import { indexByKey } from '@/utils/columnPrefsLogic.mjs'
+import { useColumnPrefsStore } from '@/stores/columnPrefs'
 import { useOwnerPicker } from '@/composables/useOwnerPicker'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
+
+// 自定义列：可见列顺序来自 columnPrefs store（缺省走注册表默认顺序）。
+// COL_ATTRS 是 key → 可 v-bind 列属性的索引，供各 v-if 分支取用。
+const columnPrefs = useColumnPrefsStore()
+const COL_ATTRS = indexByKey(TT_ADS_COLUMNS)
+const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.TT_ADS, TT_ADS_COLUMNS))
 
 const items = ref([])
 const total = ref(0)
@@ -849,8 +814,8 @@ async function retrySheetWrite(row) {
 // ===== 「户归属」列（仅户管可见可编辑）=====
 // 视觉规格：docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md §5
 // 状态 / 水合时机的惰性加载 / 乐观更新均封装在 useOwnerPicker（GG 与 TT 逐字同构，只差 reassign 实现）。
-// authStore 留给列上的 v-if="authStore.isHuguan"（§5.2：非户管整个字段不渲染）。
-const authStore = useAuthStore()
+// 角色闸门（§5.2：非户管整个字段不渲染）已上移到列注册表 accountColumns.js 的
+// `available: (auth) => auth.isHuguan`，模板与脚本均无 v-if 依赖，此处不再引入 authStore。
 const {
   ownerOptions,
   ownerOptionsLoaded,
@@ -929,18 +894,5 @@ const {
 .inline-agent-select,
 .inline-status-select {
   width: 100%;
-}
-/* 「户归属」列：静息态看去边框（看起来是一段人名文本），悬浮/聚焦时恢复成控件（§5.2）。
-   padding-left 的变化是为了让文本在两种状态下不左右跳动（EP 的 wrapper 默认有内边距）。 */
-.owner-cell :deep(.el-select__wrapper) {
-  box-shadow: none;
-  background: transparent;
-  padding-left: 0;
-}
-.owner-cell:hover :deep(.el-select__wrapper),
-.owner-cell :deep(.el-select__wrapper.is-focused) {
-  box-shadow: 0 0 0 1px var(--el-border-color) inset;
-  background: var(--el-fill-color-blank);
-  padding-left: 11px;
 }
 </style>
