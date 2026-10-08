@@ -142,7 +142,7 @@
               <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">Sheet 映射</div>
               <div style="background:#f9fafb;border-radius:8px;padding:12px;">
                 <div v-for="key in visibleSheetKeys" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                  <span style="white-space:nowrap;font-size:13px;min-width:80px;color:#374151;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}<el-tag v-if="SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].adminOnly" size="small" type="warning" style="margin-left:4px;">仅管理员</el-tag></span>
+                  <span style="white-space:nowrap;font-size:13px;min-width:80px;color:#374151;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}<el-tag v-if="isAdmin && SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].adminOnly" size="small" type="warning" style="margin-left:4px;">仅管理员</el-tag></span>
                   <el-select
                     v-model="form.sheet_mappings[key]"
                     filterable allow-create default-first-option
