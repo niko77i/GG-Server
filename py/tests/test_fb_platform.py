@@ -1893,3 +1893,64 @@ class TestFbDeletedAccountsSearch:
         body = client.get("/api/fb/accounts/deleted?search=zx9q", headers=hdr).get_json()
         assert body["total"] == 1
         assert body["items"][0]["account_id"] == "aown001"
+
+    def test_search_percent_is_literal_not_wildcard(self, client):
+        """**LIKE 通配符转义守卫（`%` 腿）。**
+
+        `%` 是 LIKE 的通配符。不转义时 `LIKE '%%%'` 会匹配当前用户的**全部**已删行
+        ⇒「按关键字过滤」退化成「全部返回」。本用例造两条「名字/ID 都不含 `%`」的行
+        和一条真含 `%` 的行，搜 `%` 时只该命中后者。
+
+        可证伪：去掉 `_escape_like`（或去掉 `ESCAPE '\\'` 声明）后 `%` 被当通配符，
+        total 从 1 变 3 ⇒ 断言变红。用自己的账户造数据（归属隔离不受影响），
+        断言落到具体内容而非只数条数。
+        """
+        hdr, uid = _fb_user(client, "t_ds_esc_pct")
+        db = database.get_db()
+        # 不含 `%` 的两行：搜 `%` 时必须落空
+        _mk_deleted_fb_account(db, uid, "esc0001", "没有百分号")
+        _mk_deleted_fb_account(db, uid, "esc0002", "也没有")
+        # 真含 `%` 的行：应当被搜到
+        _mk_deleted_fb_account(db, uid, "esc0003", "含%的行")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted",
+                          query_string={"search": "%"}, headers=hdr).get_json()
+        assert body["total"] == 1
+        assert [a["account_id"] for a in body["items"]] == ["esc0003"]
+
+    def test_search_underscore_is_literal_not_wildcard(self, client):
+        """**LIKE 通配符转义守卫（`_` 腿）。**
+
+        `_` 匹配任意单字符。不转义时搜 `_` 会命中任意非空名字 ⇒ 全量返回。
+        本用例一条名字不含 `_`、一条真含 `_`，搜 `_` 只该命中后者。
+
+        可证伪：去掉转义后两条都命中，total 从 1 变 2 ⇒ 变红。
+        """
+        hdr, uid = _fb_user(client, "t_ds_esc_us")
+        db = database.get_db()
+        _mk_deleted_fb_account(db, uid, "us0001", "abc")   # `_` 若为通配符会匹配它
+        _mk_deleted_fb_account(db, uid, "us0002", "a_c")   # 真含下划线
+        db.close()
+        body = client.get("/api/fb/accounts/deleted",
+                          query_string={"search": "_"}, headers=hdr).get_json()
+        assert body["total"] == 1
+        assert [a["account_id"] for a in body["items"]] == ["us0002"]
+
+    def test_search_backslash_is_literal(self, client):
+        """**反斜杠转义守卫（转义符声明腿）。**
+
+        转义符是 `\\`，故用户输入的 `\\` 必须先转义成 `\\\\`，且 SQL 必须显式
+        `ESCAPE '\\'`。若只转义不声明 ESCAPE，`\\\\` 会被当成两个字面反斜杠 ⇒
+        搜单个 `\\` 匹配不到含单个 `\\` 的行。
+
+        可证伪：漏掉 `ESCAPE '\\'` 声明（或漏转义 `\\`）时 total 从 1 变 0 ⇒ 变红。
+        """
+        hdr, uid = _fb_user(client, "t_ds_esc_bs")
+        db = database.get_db()
+        _mk_deleted_fb_account(db, uid, "bs0001", "无反斜杠")
+        _mk_deleted_fb_account(db, uid, "bs0002", "含\\反斜杠")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted",
+                          query_string={"search": "\\"}, headers=hdr).get_json()
+        assert body["total"] == 1
+        assert [a["account_id"] for a in body["items"]] == ["bs0002"]

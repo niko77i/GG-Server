@@ -1,7 +1,11 @@
 <template>
   <el-dialog :model-value="visible" @update:model-value="$emit('update:visible', $event)"
     title="🗑 已删除账户" width="820px" @open="init">
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+    <!-- 搜索行：没有可搜内容时不显示「共 0 条」+ 空输入框（略怪）。
+         但**不能只看 total** —— 搜索结果恰好 0 条时 total 也是 0，若据此隐藏，
+         用户就清不掉搜索词、困死在空结果里。故「有内容(total>0) 或 正在搜索
+         (searchText 非空)」才显示：后者保证结果为空时输入框仍在。 -->
+    <div v-if="total > 0 || searchText" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
       <el-input v-model="searchText" @input="onSearchInput"
         placeholder="🔍 搜索账户ID / 名称 / 所属BM..." clearable style="flex:1;" />
       <span style="color:#888;font-size:12px;white-space:nowrap;">共 {{ total }} 条</span>
@@ -73,6 +77,11 @@ const statusOptions = ref([])
 
 let searchTimer = null
 
+// 请求序号：搜索有 300ms 防抖，但防抖只减少请求数、**不保证返回顺序**。
+// 快速输入时先发的请求可能后返回，把新结果覆盖成旧的（列表与输入框不符）。
+// 每次 load 自增并记住自己的序号，只有序号仍是最新的才落地结果 —— 过期响应丢弃。
+let searchSeq = 0
+
 function optName(id) {
   if (id === null || id === undefined || id === '') return ''
   const o = statusOptions.value.find(x => x.id === id)
@@ -87,13 +96,17 @@ async function loadStatusOptions() {
 }
 
 async function load() {
+  const seq = ++searchSeq
   try {
     const res = await fbApi.listDeleted({
       page: page.value, size: size.value, search: searchText.value,
     })
+    // 已有更新的请求在飞 ⇒ 丢弃本次结果，避免旧响应覆盖新列表
+    if (seq !== searchSeq) return
     allAccounts.value = res.items || []
     total.value = res.total || 0
   } catch (e) {
+    if (seq !== searchSeq) return
     ElMessage.error(e.response?.data?.error || '加载失败')
   }
 }

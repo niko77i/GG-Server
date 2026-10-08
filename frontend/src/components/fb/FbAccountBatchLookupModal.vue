@@ -8,8 +8,11 @@
           @input="onIdTextChange" />
       </el-form-item>
 
-      <!-- 解析统计 -->
-      <div v-if="parsedIds.length" style="margin-bottom:12px;font-size:13px;color:#666;">
+      <!-- 解析统计：**parsedIds 为空但有 invalidIds 时也要显示** —— 否则粘一列
+           非 ID 的内容会「什么都不显示、按钮还是灰的」，用户不知道为什么点不动。
+           故条件是 `parsedIds.length || invalidIds.length`（不能只看 parsedIds）。
+           GG 样板同样有此问题，FB 侧先修，GG 待后续对齐。 -->
+      <div v-if="parsedIds.length || invalidIds.length" style="margin-bottom:12px;font-size:13px;color:#666;">
         共识别 <strong>{{ parsedIds.length }}</strong> 个
         <span v-if="invalidIds.length" style="color:#dc2626;margin-left:8px;">✕ {{ invalidIds.length }} 个格式不符</span>
       </div>

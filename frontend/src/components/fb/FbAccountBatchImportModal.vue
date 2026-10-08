@@ -126,7 +126,14 @@
             </el-col>
             <el-col :span="12">
               <el-form-item label="状态" style="margin-bottom:0;">
-                <el-select v-model="newAccountEdits[newEditingId].status_id" size="small" clearable filterable
+                <!-- 逐行状态**不设 clearable**：后端 override 判定是
+                     `'status_id' in ov and ov['status_id'] is not None` ⇒ 传 null 会被当成
+                     「没覆盖」而回落到共用默认值。若这里可清空，用户清空某行后表格显示 `-`、
+                     落库却是共用默认状态（呈现与落库不一致）。去掉 clearable 后，
+                     逐行状态要么是所选值、要么是继承的默认值，两者与后端语义一致。
+                     （共用默认值那栏的 clearable 保留：那里清空 = 整批不设状态，
+                     后端 common.status_id 同样为 null，语义一致，不算歧义。） -->
+                <el-select v-model="newAccountEdits[newEditingId].status_id" size="small" filterable
                   placeholder="选择状态" style="width:100%;">
                   <el-option v-for="s in statusOptions" :key="s.id" :label="s.name" :value="s.id" />
                 </el-select>

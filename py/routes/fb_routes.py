@@ -61,6 +61,24 @@ def _fb_text(value) -> str:
     return '' if value is None else str(value).strip()
 
 
+def _escape_like(value: str) -> str:
+    """转义 LIKE 模式里的通配符，使 `search` 按**字面量**匹配。
+
+    用户输入里的 `%`（匹配任意串）与 `_`（匹配任意单字符）若原样拼进
+    `LIKE '%'||?||'%'` 会退化成通配：搜 `%` 会匹配到自己的**全部**行，
+    搜 `_` 会匹配任意单字符 —— 与「按关键字过滤」的语义不符。这里把
+    `\\` / `%` / `_` 反斜杠转义，调用方再以 `LIKE ? ESCAPE '\\'` 显式声明
+    转义符（该声明是必须的：SQLite 不设默认转义符，光转义不声明等于没转）。
+
+    注意：**FB 侧做了转义，GG 的 `/api/accounts/deleted` 与 TT 的
+    `/api/tt/accounts/deleted` 尚未**（两者仍是裸拼 `%{search}%`）。
+    此分叉是有意的：FB 侧先修，GG/TT 待后续对齐 —— 不要去「顺手统一」它们。
+
+    先转义 `\\` 是为了让用户真实输入的单个 `\\` 变 `\\\\`、不被后续步骤二次转义。
+    """
+    return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
 # ==================== BM 管理 ====================
 
 @fb_bp.route('/api/fb/bms/list', methods=['GET'])
@@ -772,11 +790,15 @@ def list_deleted_accounts():
         # 三个字段与前端原来的客户端过滤口径对齐：账户ID / 名称 / 所属BM名。
         # BM 用 EXISTS 子查询而非 JOIN：JOIN 会让「一个户挂多个 BM」匹配时行重复，
         # total 与实际可翻页数就对不上了。
+        #
+        # 用户输入里的 LIKE 通配符先转义再拼（见 `_escape_like`），并以
+        # `ESCAPE '\'` 显式声明转义符 —— 否则搜 `%` / `_` 会当通配符匹配到自己的
+        # 全部行 / 任意单字符。**FB 侧做了转义，GG/TT 同名端点尚未**（有意分叉）。
         where.append(
-            "(a.account_id LIKE ? OR a.name LIKE ? OR EXISTS ("
+            "(a.account_id LIKE ? ESCAPE '\\' OR a.name LIKE ? ESCAPE '\\' OR EXISTS ("
             "  SELECT 1 FROM fb_account_bm ab JOIN fb_bms b ON ab.bm_id = b.id"
-            "  WHERE ab.account_id = a.id AND b.name LIKE ?))")
-        like = f"%{search}%"
+            "  WHERE ab.account_id = a.id AND b.name LIKE ? ESCAPE '\\'))")
+        like = f"%{_escape_like(search)}%"
         params += [like, like, like]
 
     where_clause = " AND ".join(where)
