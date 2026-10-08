@@ -94,3 +94,37 @@ def test_require_platform_tt_blocks_gg_user(app, monkeypatch):
         resp = dec.require_platform('tt')
     assert resp is not None
     assert resp[1] == 403
+
+
+def test_tt_accounts_has_account_type_column():
+    conn, db_path = _fresh_schema_conn()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tt_accounts)").fetchall()}
+    assert "account_type" in cols
+    conn.close()
+    os.unlink(db_path)
+
+
+def test_add_column_if_missing_returns_whether_added():
+    """返回值必须区分「加了」与「本来就有」——回填只在前者执行。"""
+    conn, db_path = _fresh_schema_conn()
+    assert database._add_column_if_missing(
+        conn, "tt_accounts", "account_type", "account_type TEXT DEFAULT ''") is False
+    assert database._add_column_if_missing(
+        conn, "tt_accounts", "_tmp_probe", "_tmp_probe TEXT DEFAULT ''") is True
+    conn.close()
+    os.unlink(db_path)
+
+
+def test_account_type_backfill_happens_once():
+    """存量行回填成加白户；**列已存在时不再覆盖**（否则户管改名会被打回）。"""
+    conn, db_path = _fresh_schema_conn()
+    conn.execute("INSERT INTO tt_accounts(name, advertiser_id) VALUES('a','111')")
+    conn.execute("UPDATE tt_accounts SET account_type='' WHERE advertiser_id='111'")
+    conn.commit()
+    # 再跑一次列迁移：列已存在 ⇒ 不得回填
+    database._ensure_columns(conn)
+    got = conn.execute(
+        "SELECT account_type FROM tt_accounts WHERE advertiser_id='111'").fetchone()[0]
+    assert got == "", f"列已存在时不该覆盖，实际={got!r}"
+    conn.close()
+    os.unlink(db_path)
