@@ -4622,6 +4622,29 @@ class TestPlatformTables:
         assert got == "白户"
         db.close()
 
+    def test_deleting_middle_table_does_not_rename_other_accounts(self, client):
+        """删掉中间一行时，被删类型的账户必须**保留原名**（设计 §5），
+        不能被位置错位改成下一行的名字。"""
+        db = database.get_db()
+        for aid, t in (("701", "加白户"), ("702", "企业户"), ("703", "特批户")):
+            db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type) "
+                       "VALUES(?,?,?)", (aid, aid, t))
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_9', ?)",
+                   (json.dumps({"tt": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "S1"},
+                       {"name": "企业户", "sheet_name": "S2"},
+                       {"name": "特批户", "sheet_name": "S3"}]}}),))
+        db.commit()
+        hd.save_config(db, 9, "tt", "SS", "", tables=[
+            {"name": "加白户", "sheet_name": "S1"},
+            {"name": "特批户", "sheet_name": "S3"}])
+        db.commit()
+        got = {r["advertiser_id"]: r["account_type"] for r in
+               db.execute("SELECT advertiser_id, account_type FROM tt_accounts").fetchall()}
+        db.close()
+        assert got == {"701": "加白户", "702": "企业户", "703": "特批户"}, \
+            "删掉「企业户」这一行不该改动任何账户的类型"
+
     def test_default_account_type_prefers_first_configured(self, client):
         db = self._db()
         assert hd._default_account_type(db, 9) == hd.TT_DEFAULT_ACCOUNT_TYPE

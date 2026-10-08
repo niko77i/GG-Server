@@ -287,12 +287,16 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
             if not name or not sheet:
                 raise ValueError("每个户类型都需要「类型名」和「工作表名」")
             clean.append({"name": name, "sheet_name": sheet})
-        # 旧类型名 → 新类型名：按**位置**比对（清单是同一个列表，位置即身份）。
-        old_tables = get_platform_tables(db, user_id, "tt")
-        for i, new_t in enumerate(clean):
-            if i >= len(old_tables):
-                break
-            old_name = old_tables[i]["name"]
+        # 行身份 = worksheet 名，**不是下标**。下标在「删掉中间一行」时会整体错位：
+        # 旧 [加白户→S1, 企业户→S2, 特批户→S3] → 新 [加白户→S1, 特批户→S3] 会把
+        # 「企业户」的账户改名成「特批户」（静默并户），与规格 §5「删除类型保留原值」冲突。
+        # worksheet 名可以作为身份，是因为路由层校验了同一次保存内它互不重复
+        # （见 routes/huguan_dashboard_routes.py 的 POST 校验）。
+        # 已知边界：用户同时改「类型名」和「worksheet」时会被当成删+增、不级联，
+        # 该类型账户保留旧名（孤儿）。这是刻意接受的取舍 —— 宁可留孤儿，不可错并户。
+        old_by_sheet = {t["sheet_name"]: t["name"] for t in get_platform_tables(db, user_id, "tt")}
+        for new_t in clean:
+            old_name = old_by_sheet.get(new_t["sheet_name"])
             if old_name and old_name != new_t["name"]:
                 # 类型名字符串即标识（规格 §5）：不级联的话，存量账户会从按钮里凭空消失。
                 db.execute("UPDATE tt_accounts SET account_type=? WHERE account_type=?",
