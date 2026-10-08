@@ -378,6 +378,7 @@ app.register_blueprint(sheet_write_bp)
 import sheet_write
 import routes.gg_dashboard_sheet  # noqa: F401  —— 注册 gg_my_dashboard target
 import routes.gg_recharge_sheet  # noqa: F401  —— 注册 gg_recharge target
+import routes.huguan_sheet_targets  # noqa: F401  —— 注册户管看板域的 4 个写表目标
 
 try:
     auth.init_developer(APP_CONFIG)
