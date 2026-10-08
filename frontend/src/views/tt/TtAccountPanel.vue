@@ -58,15 +58,8 @@
              埋到表尾在左滚状态下会被漏看，那就等于没做。 -->
         <el-table-column label="写表" width="54" align="center">
           <template #default="{ row }">
-            <template v-if="sheetWriteFailures[row.advertiser_id]">
-              <el-tooltip placement="top"
-                :content="sheetWriteHint(sheetWriteFailures[row.advertiser_id])">
-                <el-button link size="small"
-                  :type="sheetWriteTone(sheetWriteFailures[row.advertiser_id].status)"
-                  @click.stop="retrySheetWrite(row)">{{ sheetWriteMark(sheetWriteFailures[row.advertiser_id].status) }}</el-button>
-              </el-tooltip>
-            </template>
-            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
+            <SheetWriteCell :failure="sheetWriteFailures[row.advertiser_id]"
+              @retry="retrySheetWrite(row)" />
           </template>
         </el-table-column>
         <el-table-column label="所属 BC" min-width="160">
@@ -196,54 +189,11 @@
             </el-tooltip>
           </template>
           <template #default="{ row }">
-            <div class="owner-cell">
-              <!-- ① 加载中：不用裸 el-select，否则会退化成显示裸 owner_id 数字（§5.4） -->
-              <el-skeleton v-if="!ownerOptionsLoaded" :rows="1" animated />
-              <!-- ⑤ 失败态：列表没回来，写操作不能静默（§5.6） -->
-              <el-select v-else-if="ownerOptionsFailed" :model-value="null" size="small" disabled
-                style="width:100%;" placeholder="暂时无法加载用户列表"
-                :aria-label="`账户 ${row.advertiser_id} 的户归属`" />
-              <!-- ③ 未知归属：不在列表里（账号可能已停用），禁用并说明，不让户管以为能保持现状（§5.4） -->
-              <el-tooltip v-else-if="row.owner_id && !ownerOptionMap[row.owner_id]"
-                content="这个归属人不在用户列表里（账号可能已停用）。请重新选择。">
-                <el-select :model-value="row.owner_id" size="small" filterable disabled
-                  style="width:100%;" placeholder="未知用户"
-                  :aria-label="`账户 ${row.advertiser_id} 的户归属`">
-                  <el-option :key="row.owner_id" :label="`用户 #${row.owner_id}`" :value="row.owner_id" />
-                </el-select>
-              </el-tooltip>
-              <!-- ④ 未分配 -->
-              <el-tooltip v-else-if="!row.owner_id"
-                content="这个账户还没有归属人，普通用户看不到它，只有户管和管理员可见。">
-                <el-select :model-value="row.owner_id" size="small" filterable
-                  placeholder="未分配" style="width:100%;"
-                  :disabled="ownerPending.has(row.id)"
-                  :aria-label="`账户 ${row.advertiser_id} 的户归属`"
-                  @change="v => changeOwner(row, v)">
-                  <el-option v-for="u in ownerOptions" :key="u.id"
-                    :label="u.display_name || u.username" :value="u.id" />
-                  <template #empty>
-                    <div style="padding:8px 12px;font-size:12px;color:#6b7280;line-height:1.6;">
-                      没有匹配的用户。<br />停用的账号不会出现在这里。
-                    </div>
-                  </template>
-                </el-select>
-              </el-tooltip>
-              <!-- ② 正常 -->
-              <el-select v-else :model-value="row.owner_id" size="small" filterable
-                placeholder="未分配" style="width:100%;"
-                :disabled="ownerPending.has(row.id)"
-                :aria-label="`账户 ${row.advertiser_id} 的户归属`"
-                @change="v => changeOwner(row, v)">
-                <el-option v-for="u in ownerOptions" :key="u.id"
-                  :label="u.display_name || u.username" :value="u.id" />
-                <template #empty>
-                  <div style="padding:8px 12px;font-size:12px;color:#6b7280;line-height:1.6;">
-                    没有匹配的用户。<br />停用的账号不会出现在这里。
-                  </div>
-                </template>
-              </el-select>
-            </div>
+            <OwnerCell :row="row" account-key="advertiser_id"
+              :loaded="ownerOptionsLoaded" :failed="ownerOptionsFailed"
+              :options="ownerOptions" :option-map="ownerOptionMap"
+              :pending="ownerPending"
+              @change="(v) => changeOwner(row, v)" />
           </template>
         </el-table-column>
         <el-table-column v-if="authStore.isHuguan" prop="owner_change_note"
@@ -285,7 +235,9 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ttApi, ttAccountsApi } from '@/api/tt'
 import client from '@/api/client'
 import { sheetWriteApi } from '../../api/sheetWrite'
-import { SHEET_WRITE_TOAST, sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+import { SHEET_WRITE_TOAST, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+import SheetWriteCell from '@/components/cells/SheetWriteCell.vue'
+import OwnerCell from '@/components/cells/OwnerCell.vue'
 import TtAccountModal from '@/components/tt/TtAccountModal.vue'
 import TtAccountDetailModal from '@/components/tt/TtAccountDetailModal.vue'
 import TtAccountDeletedModal from '@/components/tt/TtAccountDeletedModal.vue'
@@ -920,18 +872,5 @@ const {
 .inline-agent-select,
 .inline-status-select {
   width: 100%;
-}
-/* 「户归属」列：静息态看去边框（看起来是一段人名文本），悬浮/聚焦时恢复成控件（§5.2）。
-   padding-left 的变化是为了让文本在两种状态下不左右跳动（EP 的 wrapper 默认有内边距）。 */
-.owner-cell :deep(.el-select__wrapper) {
-  box-shadow: none;
-  background: transparent;
-  padding-left: 0;
-}
-.owner-cell:hover :deep(.el-select__wrapper),
-.owner-cell :deep(.el-select__wrapper.is-focused) {
-  box-shadow: 0 0 0 1px var(--el-border-color) inset;
-  background: var(--el-fill-color-blank);
-  padding-left: 11px;
 }
 </style>
