@@ -2043,22 +2043,49 @@ def delete_report(rid):
 @jwt_required()
 @fb_required
 def batch_delete_reports():
+    """批量硬删做表数据。非跨用户角色只删**自己 user_id**的行；别人的行留下。
+
+    **ids 闸门**（口径照同文件 `batch_delete_accounts`）：`ids` 必须是列表，且每个
+    元素过 `_valid_pk_int64`，否则回 400。**只有空列表（与缺键）保留既有 200 契约。**
+
+    为什么必须有（以下都是**实跑核对过**的旧行为，见报告）：
+      - `ids = None / 5 / True` ⇒ `if ids:` 后取 `len(ids)` 抛 TypeError ⇒ 500；
+      - `ids = {"0": 1}` 且调用者是跨用户角色 ⇒ sqlite3 对位置占位符收到 dict ⇒
+        `ProgrammingError: Binding 1 has no name…` ⇒ 500；
+      - `ids = {"0": 1}` 且非跨角色 ⇒ 绑定的是 dict 的 **keys**，回一个假 200；
+      - `ids = "1,2,3"` ⇒ 字符串被当字符序列绑定，同样回假 200（`deleted` 报字符数）。
+    闸门把这些一律收敛成 400。
+
+    ⚠️ **不是**「占位符个数对不上导致的 500 回归」：非跨角色分支的 SQL 自带一个
+    `AND user_id = ?`，故占位符数 = `len(ids)` + 1 = `len(list(ids) + [uid])`，
+    **数目是配平的** —— 字符串路径旧行为是 200（假成功），不是 500。别按「回归」复述。
+    """
     db = get_db()
     uid = get_uid()
     data = parse_body()
+    # 缺键 ⇒ 空列表（既有 200 契约）；显式传 None / 字符串等非列表 ⇒ 400（见下）。
     ids = data.get('ids', [])
-    if ids:
-        placeholders = ','.join(['?'] * len(ids))
-        # 归属过滤（`user_id` 轴，同 list_reports）：非跨用户角色只删**属于自己**的行，
-        # 别人的行留下 —— 保持「尽量多删自己的」语义，**不整批 403**。跨用户角色不限
-        # （既有行为：可删全部）。返回体形状不变（deleted 仍是请求条数，未改动既有语义）。
-        if _get_role(db, uid) in CROSS_USER_ROLES:
-            db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders})", ids)
-        else:
-            db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders}) "
-                       f"AND user_id = ?", list(ids) + [uid])
-        db.commit()
-    return ok({'deleted': len(ids)})
+    if not isinstance(ids, list):
+        return err('ids 不合法', 400)
+    for _i in ids:
+        if _valid_pk_int64(_i) is None:
+            return err('ids 不合法', 400)
+    if not ids:
+        return ok({'deleted': 0})
+    placeholders = ','.join(['?'] * len(ids))
+    # 归属过滤（`user_id` 轴，同 list_reports）：非跨用户角色只删**属于自己**的行，
+    # 别人的行留下 —— 保持「尽量多删自己的」语义，**不整批 403**。跨用户角色不限
+    # （既有行为：可删全部）。
+    # `deleted` 取 `cursor.rowcount`（实际删掉的行数），不取 `len(ids)`：后者恒等于
+    # 请求条数，被归属过滤掉的他人行也会计入 ⇒ 非跨角色用户请求 3 条只删到 1 条时谎报 3。
+    if _get_role(db, uid) in CROSS_USER_ROLES:
+        cur = db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders})", ids)
+    else:
+        cur = db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders}) "
+                         f"AND user_id = ?", list(ids) + [uid])
+    deleted = cur.rowcount
+    db.commit()
+    return ok({'deleted': deleted})
 
 
 @fb_bp.route('/api/fb/reports/stats', methods=['GET'])

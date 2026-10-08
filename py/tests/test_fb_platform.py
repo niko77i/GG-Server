@@ -985,10 +985,13 @@ def _seed_two_accounts(client, tag, history=True):
     返回 pk_a / pk_b（内部主键）与各自身份头。夹具用本文件既有的
     `_fb_user` / `_mk_fb_account` / `_mk_fb_bm` helper 现造（不臆造新夹具名）。
 
-    `history=False`：permanent-delete 用例不能用带历史的账户 ——
-    `fb_account_bm_history.account_id` 的外键**没有** ON DELETE CASCADE，
-    `permanent_delete_account` 又只删 fb_account_bm（不删历史）⇒ 删带历史的账户会
-    FK 报错。那是该端点**既有**的缺陷（非本轮引入，已在报告登记），不该混进本组用例。
+    `history=False`：permanent-delete 用例不造历史行 —— 该用例的判据是**归属逻辑**
+    （A 越权删 B 的 ⇒ 403，且 B 的账户与 BM 关联原封不动），历史行对该判据没有贡献，
+    造了只是徒增夹具。
+
+    （历史说明：早期此处写「`permanent_delete_account` 不删 fb_account_bm_history ⇒
+    删带历史的账户会 FK 报错」，该**理由已失效** —— `22620f7` 已在永久删除里补上
+    该表的 DELETE。别据旧文推断端点行为。）
     """
     a_hdr, a_id = _fb_user(client, f"{tag}_a")
     b_hdr, b_id = _fb_user(client, f"{tag}_b")
@@ -1026,6 +1029,18 @@ def _dev_headers(client, tag):
     return hdr
 
 
+def _admin_headers(client, tag):
+    """admin 放行腿的身份。
+
+    admin ∈ CROSS_USER_ROLES，但**不在** `PLATFORM_SWITCH_ROLES`（见 helpers.py：
+    「admin 本身按平台隔离」）—— 它的平台门禁走的是 `user.platform == 'fb'` 那条
+    分支，与 developer 走 `PLATFORM_SWITCH_ROLES` 早退**不是同一条**。
+    ⇒ developer 腿绿不能推出 admin 腿绿，需独立覆盖。
+    """
+    hdr, _ = _fb_user(client, f"{tag}_adm", role="admin", platform="fb")
+    return hdr
+
+
 class TestFbAccountOwnershipClosure:
     """accounts 族五个端点补齐归属校验（`owner_id` 轴）。"""
 
@@ -1047,6 +1062,18 @@ class TestFbAccountOwnershipClosure:
         assert client.put(f"/api/fb/accounts/{s['pk_b']}",
                           json={"name": "dev改的"}, headers=dev).status_code == 200
         assert _acc_val(s["pk_b"], "name") == "dev改的"
+        # ③a 跨角色腿（admin）：admin ∈ CROSS_USER_ROLES 但**不在** PLATFORM_SWITCH_ROLES，
+        #    平台门禁靠 platform='fb' 过 —— 与 developer 腿不等价，独立钉一条。
+        adm = _admin_headers(client, "t_accupd")
+        assert client.put(f"/api/fb/accounts/{s['pk_b']}",
+                          json={"name": "adm改的"}, headers=adm).status_code == 200
+        assert _acc_val(s["pk_b"], "name") == "adm改的"
+        # ③b 跨角色腿（户管）：户管 ∈ PLATFORM_SWITCH_ROLES（门禁腿与 developer 等价），
+        #    且 accounts 族**没有** `no_huguan`（对照 products/lines 族）⇒ 也应放行。
+        hg, _ = _fb_user(client, "t_accupd_hg", role="huguan", platform="gg")
+        assert client.put(f"/api/fb/accounts/{s['pk_b']}",
+                          json={"name": "户管改的"}, headers=hg).status_code == 200
+        assert _acc_val(s["pk_b"], "name") == "户管改的"
 
     def test_delete_account_ownership(self, client):
         """DELETE /api/fb/accounts/<aid> —— 缺校验时可软删他人账户。"""
@@ -1250,20 +1277,84 @@ class TestFbReportOwnershipClosure:
         """POST /api/fb/reports/batch-delete —— 混批时只删自己 user_id 的行。
 
         语义是「尽量多删自己的」，**不整批 403**：别人的行必须原封不动留下。
+
+        `deleted` 必须等于**实际删掉的行数**（1），不是请求条数（2）—— 后者会把被
+        归属过滤掉的他人行也算成「已删」，对用户谎报。
         """
         s = _seed_two_reports(client, "t_rbd")
         resp = client.post("/api/fb/reports/batch-delete",
                            json={"ids": [s["rid_a"], s["rid_b"]]}, headers=s["a_hdr"])
         assert resp.status_code == 200
+        assert resp.get_json()["deleted"] == 1                 # 只删到 1 条（改回 len(ids) ⇒ 谎报 2）
         assert _report_col(s["rid_a"], "id") is None           # 自己的删掉了
         assert _report_col(s["rid_b"], "id") == s["rid_b"]     # 别人的留下了（未被越权删）
 
     def test_batch_delete_reports_cross_user_role_deletes_others(self, client):
-        """跨角色腿：developer 批删他人的 ⇒ 仍删得掉（CROSS_USER_ROLES 不放 403）。"""
+        """跨角色腿：developer 批删他人的 ⇒ 仍删得掉（CROSS_USER_ROLES 不放 403）。
+
+        `deleted` 同样按 rowcount 报（跨角色删得动 ⇒ 与请求条数一致）。
+        """
         s = _seed_two_reports(client, "t_rbd_cross")
         dev = _dev_headers(client, "t_rbd_cross")
         resp = client.post("/api/fb/reports/batch-delete",
                            json={"ids": [s["rid_b"]]}, headers=dev)
+        assert resp.status_code == 200
+        assert resp.get_json()["deleted"] == 1
+        assert _report_col(s["rid_b"], "id") is None
+
+    def test_batch_delete_reports_rejects_non_list_ids(self, client):
+        """`ids` 非列表 ⇒ 400。**实跑核对过的旧行为**（见报告表格）：
+
+          - `None` / `5` / `True` ⇒ `len()` 抛 TypeError ⇒ 500；
+          - `{"0": 1}`（跨角色）⇒ sqlite3 ProgrammingError ⇒ 500；
+          - `"1"` / `"1,2,3"` / `""` / `{"0": 1}`（非跨角色）⇒ 假 200（把字符串按
+            字符、dict 按 **keys** 绑定，`deleted` 还报 len）。
+        闸门把这些统统收敛成 400。注意：**不是**「占位符个数对不上」——
+        非跨角色 SQL 自带 `AND user_id = ?`，数目本来就配平。
+        """
+        s = _seed_two_reports(client, "t_rbd_gate")
+        for bad in ["1", "123", "1,2,3", "", None, 5, {"0": 1}, True]:
+            resp = client.post("/api/fb/reports/batch-delete",
+                               json={"ids": bad}, headers=s["a_hdr"])
+            assert resp.status_code == 400, f"ids={bad!r} 应回 400（去掉闸门 ⇒ 500 或假 200）"
+            assert resp.get_json()["success"] is False
+        # 非法请求不得删到任何东西
+        assert _report_col(s["rid_a"], "id") == s["rid_a"]
+
+    def test_batch_delete_reports_rejects_non_list_ids_cross_role(self, client):
+        """跨角色腿也要过同一道闸：`{"0": 1}` 在跨角色分支上正是 ProgrammingError（500）。"""
+        s = _seed_two_reports(client, "t_rbd_gate3")
+        dev = _dev_headers(client, "t_rbd_gate3")
+        resp = client.post("/api/fb/reports/batch-delete",
+                           json={"ids": {"0": 1}}, headers=dev)
+        assert resp.status_code == 400                         # 去掉闸门 ⇒ ProgrammingError ⇒ 500
+        assert _report_col(s["rid_b"], "id") == s["rid_b"]
+
+    def test_batch_delete_reports_rejects_bad_element(self, client):
+        """`ids` 元素非法（超 int64 / 负数 / 非数字）⇒ 400，与 `batch_delete_accounts` 同口径。"""
+        s = _seed_two_reports(client, "t_rbd_gate2")
+        for bad in ["abc", "2**63", "-1", None]:
+            resp = client.post("/api/fb/reports/batch-delete",
+                               json={"ids": [s["rid_a"], bad]}, headers=s["a_hdr"])
+            assert resp.status_code == 400, f"ids 含 {bad!r} 应回 400"
+        assert _report_col(s["rid_a"], "id") == s["rid_a"]     # 未误删
+
+    def test_batch_delete_reports_empty_ids_keeps_existing_contract(self, client):
+        """空 `ids` 保持既有契约：200 且 deleted=0（不因新增闸门而变 400）。"""
+        s = _seed_two_reports(client, "t_rbd_empty")
+        for body in ({"ids": []}, {}):                         # 空列表 / 缺键
+            resp = client.post("/api/fb/reports/batch-delete", json=body, headers=s["a_hdr"])
+            assert resp.status_code == 200
+            assert resp.get_json()["deleted"] == 0
+        assert _report_col(s["rid_a"], "id") == s["rid_a"]     # 没删东西
+
+    def test_batch_delete_reports_admin_role_deletes_others(self, client):
+        """跨角色腿（admin）：admin ∈ CROSS_USER_ROLES 但**不在** PLATFORM_SWITCH_ROLES，
+        平台门禁靠 `platform='fb'` 过 —— 与 developer 腿不等价，独立钉一条。"""
+        s = _seed_two_reports(client, "t_rbd_adm")
+        adm = _admin_headers(client, "t_rbd_adm")
+        resp = client.post("/api/fb/reports/batch-delete",
+                           json={"ids": [s["rid_b"]]}, headers=adm)
         assert resp.status_code == 200
         assert _report_col(s["rid_b"], "id") is None
 
