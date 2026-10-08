@@ -1103,7 +1103,11 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
     loadPromise = (async () => {
       try {
         const resp = await columnPrefsApi.get()
-        prefs.value = resp.data?.prefs ?? {}
+        // 取 resp.prefs，**不是** resp.data.prefs —— client.js:34 的响应拦截器是
+        // `return resp.data`，已经把响应体解包了；后端 ok({"prefs": ...}) 又把 dict
+        // 平铺，所以这里 resp 就是 {success, prefs}。写成 resp.data?.prefs 会恒为
+        // undefined，用户配置永远读不回来（功能整个失效，且静态检查抓不到）。
+        prefs.value = resp.prefs ?? {}
         lastConfirmed = JSON.parse(JSON.stringify(prefs.value))
       } catch (e) {
         // 拉不到就退回默认列。**绝不能让 ready 停在 false** —— 面板的表格
@@ -1123,7 +1127,7 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
       columnPrefsApi.save(panelKey, pref.order, pref.hidden).then((resp) => {
         // 以服务端回写的完整 prefs 为准，并更新「已确认」快照 —— 不回写的话
         // 「连续改两次、第二次失败」会回滚到很久以前的陈旧状态。
-        prefs.value = resp.data?.prefs ?? prefs.value
+        prefs.value = resp.prefs ?? prefs.value
         lastConfirmed = JSON.parse(JSON.stringify(prefs.value))
       }).catch(() => {
         // 失败回滚到上次服务端确认的状态，不留「界面显示已保存、其实没存上」的假象
