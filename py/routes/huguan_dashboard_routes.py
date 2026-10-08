@@ -156,14 +156,14 @@ def dashboard_sync():
             rows = [{"account_id": item["account_id"],
                      "cells": {hd.OWNER_COL[platform]: item["to"]}}
                     for item in applied]
-            _write_background(conf, rows, platform)
+            _write_background(conf, rows, platform, uid)
             # 规则 3② 只对 GG 生效（2026-10-06 规格）：TT 的 L 列已是换绑记录，
             # 同步时清空会抹掉记录，且因读回按表覆盖会连带清掉系统里的值。
             # FB 同理、且更彻底：它根本没有通道列（OWNER_CHANNEL_COL 无 fb 键），
             # 对 fb 硬调 owner_channel_cells 会 KeyError —— 换成下面的 I 列定向写。
             if platform not in ("tt", "fb"):
                 _write_background(conf, hd.owner_channel_cells(applied, platform, ""),
-                                  platform)
+                                  platform, uid)
             if platform == "fb":
                 # FB 没有通道列可清；改为把换绑记录定向写进 I 列。
                 # 注意 _fb_acceptor_cells 的签名是 (rows, value)，value 是**同一个串**
@@ -171,15 +171,17 @@ def dashboard_sync():
                 _write_background(conf, [
                     {"account_id": r["account_id"],
                      "cells": {"I": hd._fb_owner_transition(r.get("from", ""), r["to"])}}
-                    for r in applied], platform)
+                    for r in applied], platform, uid)
 
         # TT 备注首次对齐的两个写回（2026-10-06 规格）。与 applied_owner_rows 同法：
-        # 先从 result 摘掉，再发起后台写回 —— 只写单列，绝不整行推送。
+        # 先从 result 摘掉，再发起后台写回。三期起，M 列经 `huguan_dashboard` target
+        # **整行重建**写回（不再只写单格）；M 是可写列、值已在 apply_diff 里落库，
+        # 故整行重建写出的 M 与这里的 r["value"] 一致。
         m_writeback = result.pop("remark_m_writeback", [])
         if m_writeback:
             _write_background(conf, [{"account_id": r["account_id"],
                                       "cells": {"M": r["value"]}} for r in m_writeback],
-                              platform)
+                              platform, uid)
         for r in result.pop("remark_operator_push", []):
             hd.push_remark_to_operator_dashboard(r["owner_id"], r["account_id"], r["value"])
     finally:
@@ -422,31 +424,70 @@ def dashboard_owner_options():
     return ok({"users": [dict(r) for r in rows]})
 
 
-def _write_background(conf, rows, platform):
-    """后台写表；失败只记日志，不影响同步接口的返回（对照 main.py:5006 的做法）。
+def _write_background(conf, rows, platform, user_id):
+    """后台写表，接入统一治理（三期）。
 
-    `platform` 只用来取 `hd.KEY_COL[platform]` 当定位列：写入器的默认值是 "C"
-    （GG/TT 的账户ID列），而 **FB 的账户ID在 D 列**（C 是「账户名称」），不显式传
-    就会按错误的列定位、整批静默写空。gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒
-    对它们显式传参是无操作（逐字节不变）。
+    `user_id` 是**表主人**（户管自己）—— 原签名只有 `conf`，记不到表主人，
+    故本次新增该形参。四个调用点都要传。
 
-    **service 必须在 _do() 里 build**，不能由调用方传进来：本函数经
-    `_sync_sheets_background` 起**后台线程**执行，失败还会在 30s 后重试一次，
-    而调用点（dashboard_sync）是**背靠背调两次**的 —— 于是两个线程会并发复用
-    同一个 httplib2 客户端（httplib2 非线程安全）。仓库既有写法（huguan_dashboard.py
-    的 push_rows / writeback_owner_channel、main.py 的多个站点）都是在线程内的闭包
-    里 build，此处照该形状。
+    按目标**三向**分派（调用方各自构造不同的 rows）：
+      - 归属变更通道列（`OWNER_CHANNEL_COL`，GG=H / TT=L）→ `huguan_owner_channel`
+        （该列被 `cells_for_row` 刻意排除，全行刷新碰不到它）
+      - FB 的接户运营列（I）→ `huguan_fb_acceptor`
+        （fb 规格里该列 `writable=False`，同样被全行刷新排除 —— 计划书曾误称
+         该分支由整行刷新覆盖，实为静默丢弃，本任务回归修复）
+      - 其余（新归属名 / TT M 列备注 …）→ `huguan_dashboard`（整行重建）
+
+    划分**按身份**逐行归桶，不得用 `r not in channel_rows` 这类写法 ——
+    dict 的 `in` / `==` 是**按值比较**，两行内容相同会被一起划进/划出。
+    这里的 `in` 是判 **cells 的键**，不是判行相等，故安全。
     """
-    import logging
-    log = logging.getLogger("gg-server")
+    import sheet_write
+    import routes.huguan_sheet_targets as _hst
 
-    def _do():
-        import google_sheets_service as gs
-        from main import _GOOGLE_SHEETS_CONFIG
-        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                     conf["sheet_name"], rows,
-                                     key_col=hd.KEY_COL[platform])
+    channel_col = hd.OWNER_CHANNEL_COL.get(platform)
+    channel_rows, acceptor_rows, other_rows = [], [], []
+    for r in rows:
+        cells = r.get("cells") or {}
+        if channel_col and channel_col in cells:
+            channel_rows.append(r)
+        elif platform == "fb" and "I" in cells:
+            acceptor_rows.append(r)
+        else:
+            other_rows.append(r)
 
-    from main import _sync_sheets_background
-    _sync_sheets_background(_do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)
+    db = database.get_db()
+    try:
+        if other_rows:
+            keys = [r["account_id"] for r in other_rows]
+            _payload = {"platform": platform}
+            sheet_write.run_write_many(
+                db, user_id=user_id, platform=platform, target="huguan_dashboard",
+                business_keys=keys,
+                sync_fn=_hst.huguan_dashboard_many_sync(user_id, platform, keys),
+                payload=_payload)
+        if acceptor_rows:
+            # FB 接户运营列：走自己的 target（该列被 cells_for_row 排除）。
+            # 其 rebuild 从 `fb_accounts.acceptor` 读回 —— apply_diff 已把本次
+            # 的「旧转新」串落库，故读回即本次要写的值。
+            _payload = {"platform": platform}
+            for r in acceptor_rows:
+                sheet_write.run_write(
+                    db, user_id=user_id, platform=platform, target="huguan_fb_acceptor",
+                    business_key=r["account_id"],
+                    sync_fn=sheet_write.build_sync("huguan_fb_acceptor", user_id,
+                                                   r["account_id"], _payload),
+                    payload=_payload)
+        if channel_rows:
+            # 通道列：走自己的 target（该列被 cells_for_row 排除）
+            for r in channel_rows:
+                value = (r["cells"] or {}).get(channel_col, "")
+                _payload = {"platform": platform, "mode": "clear" if value == "" else "owner"}
+                sheet_write.run_write(
+                    db, user_id=user_id, platform=platform, target="huguan_owner_channel",
+                    business_key=r["account_id"],
+                    sync_fn=sheet_write.build_sync("huguan_owner_channel", user_id,
+                                                   r["account_id"], _payload),
+                    payload=_payload)
+    finally:
+        db.close()

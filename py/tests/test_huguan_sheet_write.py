@@ -141,3 +141,88 @@ def test_operator_remark_log_row_belongs_to_table_owner(client, monkeypatch):
 
     assert r is not None, "日志行必须记在**表主人**名下"
     assert wrong is None, "不得记在操作者名下（那就没人能看见/重试了）"
+
+
+def test_writeback_rows_registers_huguan_dashboard(client, monkeypatch):
+    """点位 #1：`writeback_rows` 必须登记 huguan_dashboard（原实现只写日志）。"""
+    import google_sheets_service as gs
+    import huguan_dashboard as hd
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
+
+    h, uid = _tt_huguan(client, "_hg_p1")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) "
+               "VALUES ('hg_p1_a','hg_p1_a',?)", (uid,))
+    db.commit()
+    db.close()
+
+    hd.writeback_rows(uid, "tt", ["hg_p1_a"])
+
+    db = database.get_db()
+    r = _settle(db, uid, "huguan_dashboard", "hg_p1_a")
+    db.close()
+    assert r is not None, "writeback_rows 必须登记 huguan_dashboard"
+    assert r["status"] == "synced"
+
+
+def test_write_background_clears_channel_via_owner_channel_target(client, monkeypatch):
+    """点位 #5 的 :165（清空通道列）必须走 huguan_owner_channel，不是全行刷新
+    —— 通道列被 cells_for_row 排除，走错 target 就永远清不掉。"""
+    import google_sheets_service as gs
+    import routes.huguan_dashboard_routes as hr
+    calls = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id",
+                        lambda svc, sid, name, rows, key_col=None:
+                        calls.append([c for r in rows for c in (r.get("cells") or {})]))
+
+    h, uid = _tt_huguan(client, "_hg_p5")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) "
+               "VALUES ('hg_p5_a','hg_p5_a',?)", (uid,))
+    db.commit()
+    conf = __import__("huguan_dashboard").get_platform_config(db, uid, "tt")
+    db.close()
+
+    # 直接调新签名的 _write_background（第 4 个参数是表主人）
+    rows = [{"account_id": "hg_p5_a", "cells": {"L": ""}}]
+    hr._write_background(conf, rows, "tt", uid)
+
+    db = database.get_db()
+    r = _settle(db, uid, "huguan_owner_channel", "hg_p5_a")
+    db.close()
+    assert r is not None, "清空通道列必须登记 huguan_owner_channel"
+
+
+def test_write_background_routes_fb_acceptor_column_to_its_target(client, monkeypatch):
+    """点位 #5 的 :171（FB 旧转新 → I 列）必须走 huguan_fb_acceptor。
+
+    FB 的 I 列在 `COLUMN_SPEC` 里 `writable=False`、`OWNER_CHANNEL_COL` 又没有 fb 键
+    —— 若按「其余走 huguan_dashboard（整行重建）」处理，整行刷新**碰不到** I 列，
+    换绑记录会被**静默丢弃**（三期回归修复点；计划书曾误称该分支已被整行刷新覆盖）。
+    """
+    import google_sheets_service as gs
+    import routes.huguan_dashboard_routes as hr
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
+
+    h, uid = _tt_huguan(client, "_hg_p5fb")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid, platform="fb")
+    db.execute("INSERT INTO fb_accounts (name, account_id, acceptor, owner_id) "
+               "VALUES ('fb_p5','hg_p5fb_a','张三转李四',?)", (uid,))
+    db.commit()
+    conf = __import__("huguan_dashboard").get_platform_config(db, uid, "fb")
+    db.close()
+
+    rows = [{"account_id": "hg_p5fb_a", "cells": {"I": "张三转李四"}}]
+    hr._write_background(conf, rows, "fb", uid)
+
+    db = database.get_db()
+    r = _settle(db, uid, "huguan_fb_acceptor", "hg_p5fb_a")
+    db.close()
+    assert r is not None, "FB I 列（换绑记录）必须登记 huguan_fb_acceptor"
+    assert r["status"] == "synced"

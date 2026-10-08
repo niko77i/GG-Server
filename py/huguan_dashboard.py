@@ -1493,37 +1493,51 @@ def push_rows(user_id: int, platform: str, account_ids=None) -> None:
     """把账户当前值写进该户管自己的看板表。
 
     未配置看板 → 静默返回（不是每个用户都是户管，这不是错误）。
-    后台线程写，失败只记日志，不影响调用方的接口返回。
+    后台线程写，失败落统一治理日志（可查可重试），不影响调用方的接口返回。
     """
-    import logging
-    log = logging.getLogger("gg-server")
-
     db = _open_db()
     try:
         conf = get_platform_config(db, user_id, platform)
         if not conf["spreadsheet_id"] or not conf["sheet_name"]:
             return
-        rows = collect_rows_for_push(db, platform, account_ids)
+        # 只取 business_key 列表：**整行重建在 target 内做**，本函数不调
+        # `collect_rows_for_push`。若在这里先查一次 rows、target 内再查一次，
+        # 同一批账户会被查两遍，且把「上游意图」的调用计数守卫打红（三期回归修复）。
+        if account_ids is None:
+            key_col = ACCOUNT_KEY_FIELD[platform]
+            keys = [str(r["k"]).strip() for r in db.execute(
+                f"SELECT a.{key_col} AS k FROM {_TABLE_FOR_PLATFORM[platform]} a "
+                "WHERE a.deleted_at IS NULL").fetchall()]
+        else:
+            keys = [str(k).strip() for k in account_ids]
     finally:
         db.close()
 
-    if not rows:
+    keys = [k for k in keys if k]
+    if not keys:
         return
 
-    def _do():
-        import google_sheets_service as gs
-        from main import _GOOGLE_SHEETS_CONFIG
-        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        # 定位列必须按平台取：写入器默认 "C"（GG/TT 的账户ID列），而 FB 的
-        # 账户ID在 **D** 列（C 是「账户名称」）—— 不传就按错误的列定位、写空，
-        # 且不抛异常（后台线程连日志都没有，纯静默）。
-        # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
-        gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                     conf["sheet_name"], rows,
-                                     key_col=KEY_COL[platform])
-
-    from main import _sync_sheets_background
-    _sync_sheets_background(_do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)
+    # 接入统一写表治理（三期）：登记 + 后台写 + 失败可查可重试。
+    # business_key 逐账户一行；一次 N 户走 run_write_many（一个线程、N 行日志）。
+    import sheet_write
+    import routes.huguan_sheet_targets as _hst
+    _payload = {"platform": platform}
+    _db = _open_db()
+    try:
+        if len(keys) == 1:
+            sheet_write.run_write(
+                _db, user_id=user_id, platform=platform, target="huguan_dashboard",
+                business_key=keys[0],
+                sync_fn=sheet_write.build_sync("huguan_dashboard", user_id, keys[0], _payload),
+                payload=_payload)
+        else:
+            sheet_write.run_write_many(
+                _db, user_id=user_id, platform=platform, target="huguan_dashboard",
+                business_keys=keys,
+                sync_fn=_hst.huguan_dashboard_many_sync(user_id, platform, keys),
+                payload=_payload)
+    finally:
+        _db.close()
 
 
 def undo_push(user_id: int, platform: str) -> dict:

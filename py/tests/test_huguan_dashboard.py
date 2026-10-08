@@ -4425,7 +4425,15 @@ class TestRemarkPushPath:
         assert called == []
 
     def test_sync_endpoint_emits_remark_writebacks(self, client, monkeypatch):
-        """走真实同步端点：投手赢 → 只回写户管 M；户管赢 → 只推投手 J。"""
+        """走真实同步端点：投手赢 → 只回写户管 M；户管赢 → 只推投手 J。
+
+        **机制在三期变过**：点位 #5 的非通道列回写从「只写调用方传的那一列」
+        改成「在 target 内整行重建」（`huguan_dashboard_sync` → `collect_rows_for_push`）。
+        故本用例不再断言写入调用的**形状**（那一格），改为断言**可观测结果** ——
+        该账户那行里 M 单元格的值 —— 以及「没有打到投手看板的写入」。
+        旧的形状断言（`{"cells": {"M": ...}}` 精确成员、`"J" not in cells`）在三期下
+        恒假/恒真：前者因为整行写、后者因为 TT 的 J 列本就是可写列（消耗）。
+        """
         import google_sheets_service as gs
         hg, uid = _create_user(client, "_rpp_e2e", role="huguan", platform="tt")
         db = database.get_db()
@@ -4455,10 +4463,13 @@ class TestRemarkPushPath:
                            json={"platform": "tt", "dry_run": False,
                                  "confirmed": {"create": ["E2E-1"]}})
         assert resp.status_code == 200
-        rows = [r for c in captured for r in c["rows"]]
-        assert {"account_id": "E2E-1", "cells": {"M": "投手填的"}} in rows, \
-            "投手赢 → 回写户管看板 M 列"
-        assert not any("J" in r["cells"] for r in rows), "投手赢时不应推投手看板"
+        hg_rows = [r for c in captured if c["spreadsheet_id"] == "HG-SS"
+                   for r in c["rows"]]
+        assert any(r["account_id"] == "E2E-1" and r["cells"].get("M") == "投手填的"
+                   for r in hg_rows), "投手赢 → 回写户管看板 M 列"
+        # 投手赢 ⇒ 不推投手看板：没有任何一次写入打到投手看板那张表（OP-SS）。
+        assert not any(c["spreadsheet_id"] == "OP-SS" for c in captured), \
+            "投手赢时不应推投手看板"
 
 
 class TestUpdateAccountPushesRemark:
