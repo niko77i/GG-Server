@@ -578,6 +578,11 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
     key_field = ACCOUNT_KEY_FIELD[platform]
     sheet_rows = len(parsed_rows)   # 表里数据行总数（**去重前**），供 summary 用
 
+    # 多表同步后「第 N 行」在两张表里会撞（规格 §4.3 的坑）：每个产出项都带表名，
+    # 前端按表分组展示，否则户管会去改错表。
+    def _sheet_of(p):
+        return _conf_text(p.get("_sheet"))
+
     # 四个产出列表必须在去重循环**之前**建好：去重本身会往 warnings 里塞一条
     to_create, to_update, owner_changes, to_skip = [], [], [], []
     warnings = []
@@ -592,7 +597,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             deduped.append(p)
             continue
         if aid in seen_rows:
-            warnings.append({"row": p.get("row"),
+            warnings.append({"row": p.get("row"), "sheet": _sheet_of(p),
                              "message": f"账户ID「{aid}」已在第 {seen_rows[aid]} 行出现，本行跳过"})
             continue
         seen_rows[aid] = p.get("row")
@@ -619,7 +624,8 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         row_no = p.get("row")
         aid = p.get("account_id", "")
         if not aid:
-            warnings.append({"row": row_no, "message": "账户ID为空，跳过"})
+            warnings.append({"row": row_no, "sheet": _sheet_of(p),
+                             "message": "账户ID为空，跳过"})
             continue
 
         want_owner_name = effective_owner_name(p, platform)
@@ -627,7 +633,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         if want_owner_name:
             want_owner_id = resolve_owner_id(db, want_owner_name)
             if want_owner_id is None:
-                warnings.append({"row": row_no,
+                warnings.append({"row": row_no, "sheet": _sheet_of(p),
                                  "message": f"运营「{want_owner_name}」无法识别，已跳过归属变更"})
 
         existing = existing_map.get(aid)
@@ -640,6 +646,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             pending = db_values.pop("_pending_status", None)
             to_create.append({
                 "row": row_no,
+                "sheet": _sheet_of(p),
                 "account_id": aid,
                 "owner_id": want_owner_id,
                 "owner_name": want_owner_name,
@@ -653,7 +660,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             continue
 
         if existing.get("deleted_at"):
-            to_skip.append({"row": row_no, "account_id": aid,
+            to_skip.append({"row": row_no, "sheet": _sheet_of(p), "account_id": aid,
                             "reason": "系统中已逻辑删除，不动"})
             continue
 
@@ -661,6 +668,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         if want_owner_id is not None and int(cur_owner or 0) != int(want_owner_id):
             owner_changes.append({
                 "row": row_no,
+                "sheet": _sheet_of(p),
                 "account_id": aid,
                 "existing_id": existing["id"],
                 "from": existing.get("owner_display") or existing.get("owner_username") or "",
@@ -690,7 +698,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         # pending 也算真实变更：系统里没这个状态名，建出来必然与现状不同。
         # 只比 `changed` 会让「这一行只改了状态」被整行漏掉。
         if changed or pending:
-            to_update.append({"row": row_no, "account_id": aid,
+            to_update.append({"row": row_no, "sheet": _sheet_of(p), "account_id": aid,
                               "existing_id": existing["id"], "fields": changed,
                               "pending_status": pending,
                               # apply_diff 建缺失状态行时用它记 owner（谁先建的）
@@ -731,9 +739,10 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     与下方名称类字段的 `if not value: continue` 不对称是**刻意的**：空串在名称
     命名空间里根本没有可解析的候选，属规格 §8.4 的「命中 0 条」。
 
-    产出里可能带三个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
+    产出里可能带四个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
     `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名、
-    `_primary_bm_name`（FB 专有，表里填的主 BM 名）。
+    `_primary_bm_name`（FB 专有，表里填的主 BM 名）、
+    `_account_type`（TT 专有，由调用方按「这一行读自哪张表」注入的户类型）。
 
     create_missing 由 build_diff 传 False（dry_run 只读），落库阶段才用默认 True。
     """
@@ -769,11 +778,17 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
         if not _known:
             continue
         if resolved is None:
-            warnings.append({"row": row_no,
+            warnings.append({"row": row_no, "sheet": _conf_text(p.get("_sheet")),
                              "message": f"{f}「{value}」无法唯一匹配，已跳过该列"})
             continue
         out[_target_column(platform, f)] = resolved
     out["_is_dead"] = is_dead(p)
+    # 户类型的传递链第 ② 环（规格 §4.3）：`account_type` 不是表里的列，
+    # 所以走合成键，与 `_primary_bm_name` 同形 —— 由调用方（同步路由）按
+    # 「这一行是从哪张表读出来的」注入，这里原样搬运。
+    # **不放进 _PLAIN_TEXT_FIELDS**：那个集合参与「文本列空着＝清空系统该列」的口径。
+    if platform == "tt":
+        out["_account_type"] = _conf_text(p.get("_account_type"))
     return out
 
 
@@ -809,6 +824,11 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
     if key == "_is_dead":
         cur_dead = bool((existing.get("death_date") or "").strip())
         return cur_dead == bool(value)
+    if key == "_account_type":
+        # 合成键：库里对应的是真实列 account_type。不加这一支会落到下面的通用比较，
+        # 拿 existing["_account_type"]（不存在 → None）去比 → 恒判「变了」，
+        # 于是每次同步都把每一行报成「将更新」。
+        return _conf_text(existing.get("account_type")) == _conf_text(value)
     if key == "_primary_bm_name":
         # 合成键：当前主 BM 名不在业务表行上（挂在中间表 fb_account_bm），
         # existing 里取不到，必须现查 —— 否则「表里清空位置」会被误判成「没变」
@@ -1046,6 +1066,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # fb_accounts 的列。**必须在下面 `cols = ", ".join(src)` 之前摘掉**，
             # 否则会拼出 `INSERT INTO fb_accounts(..., _primary_bm_name)` 直接报错。
             fb_bm_name = src.pop("_primary_bm_name", None) if platform == "fb" else None
+            # 户类型（规格 §4.3 第 ④ 环）：合成键必须在拼 SQL 之前摘掉，
+            # 否则会拼出 `INSERT INTO tt_accounts(..., _account_type)` 直接报错。
+            account_type = src.pop("_account_type", None) if platform == "tt" else None
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读）
             pending = item.get("pending_status")
             if pending:
@@ -1054,6 +1077,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             src[key_field] = item["account_id"]
             src["name"] = item["account_id"]
             src["owner_id"] = item.get("owner_id")
+            if account_type is not None:
+                src["account_type"] = account_type or TT_DEFAULT_ACCOUNT_TYPE
             # FB 无 death_date 列（子项目 ① 已确认，设计 §6.1）：生死只由状态列承载，
             # 「apply_diff 不据此写 death_date」。无条件写会让 FB 的 INSERT 直接
             # `no column named death_date` —— 整条 to_create 失败，主 BM（位置列）也就挂不上。
@@ -1098,7 +1123,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 异常详情照旧进日志，排查线索不因脱敏而降级。
             log.exception("户管同步：新建账户落库失败 platform=%s row=%s",
                           platform, item["row"])
-            errors.append({"row": item["row"], "error": "创建失败，详情见服务端日志"})
+            errors.append({"row": item["row"], "sheet": item.get("sheet", ""),
+                           "error": "创建失败，详情见服务端日志"})
 
     for item in diff.get("to_update", []):
         if item["account_id"] not in conf.get("update", []):
@@ -1115,6 +1141,11 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 注意空值语义：表里「位置」空着 → 这里是空串（不是 None），
             # 要落到下面的 else 分支「只清主 BM 标记、不删关联行」（设计 §6.3）。
             new_bm_name = fields.pop("_primary_bm_name", None) if platform == "fb" else None
+            # 同 create：`sets = [f"{k}=?" for k in fields]` 会无条件把每个键拼进 SET，
+            # 漏 pop 就是 `UPDATE tt_accounts SET _account_type=?` 直接报错。
+            account_type = fields.pop("_account_type", None) if platform == "tt" else None
+            if account_type:
+                fields["account_type"] = account_type
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读，规格 §8.3
             # 步骤 7/8）。owner 取该行作用域归属，只记「谁先建的」——不参与查重。
             pending = item.get("pending_status")
@@ -1200,7 +1231,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # result 会被路由整体回出，str(e) 即 CWE-209 泄露）。
             log.exception("户管同步：更新账户落库失败 platform=%s row=%s",
                           platform, item["row"])
-            errors.append({"row": item["row"], "error": "更新失败，详情见服务端日志"})
+            errors.append({"row": item["row"], "sheet": item.get("sheet", ""),
+                           "error": "更新失败，详情见服务端日志"})
 
     for item in diff.get("owner_changes", []):
         if item["account_id"] not in conf.get("owner", []):
@@ -1252,7 +1284,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 同前两处：固定文案回响应体，异常详情进日志（路由整体回出 result）。
             log.exception("户管同步：归属变更落库失败 platform=%s row=%s",
                           platform, item["row"])
-            errors.append({"row": item["row"], "error": "归属变更失败，详情见服务端日志"})
+            errors.append({"row": item["row"], "sheet": item.get("sheet", ""),
+                           "error": "归属变更失败，详情见服务端日志"})
 
     # 「勾了却没作用上」是独立信号，不进 errors —— 差异报告变了不是出错，
     # 但户管必须知道自己的勾选没生效。

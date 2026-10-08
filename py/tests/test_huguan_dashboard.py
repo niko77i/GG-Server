@@ -3192,13 +3192,15 @@ class TestOwnerChangeVia:
         """回归：`via` 是**纯增量** —— 既有 6 个键仍在、值一个字都没变。
 
         键集断言用等号而不是子集：既钉住 6 个旧键没丢，也钉住没有夹带别的键。
+        唯一例外是 Task 4 加的 `sheet`（多表同步后行号会撞，diff 每一项都要带表名，
+        规格 §4.3）—— 它是契约变更，不是夹带。
         """
         from huguan_dashboard import build_diff, parse_row
         db, u1, u2 = self._prepare(client)
         existing_id = _seed_account(db, "VIA-REG", u1)
         row = ["", "", "VIA-REG", "", "", "", "张三", "李四"]
         item = build_diff(db, [dict(parse_row(row, "gg"), row=2)], "gg")["owner_changes"][0]
-        assert set(item) == {"row", "account_id", "existing_id", "from", "to",
+        assert set(item) == {"row", "sheet", "account_id", "existing_id", "from", "to",
                              "to_owner_id", "via"}
         assert item["row"] == 2
         assert item["account_id"] == "VIA-REG"
@@ -4718,3 +4720,87 @@ class TestDashboardConfigMultiTable:
         resp = client.post("/api/huguan/dashboard", headers=hg, json={
             "platform": "tt", "spreadsheet_id": "T1", "tables": tables})
         assert resp.status_code == 400
+
+
+# ---------- Task 4: `_account_type` 合成键传递链 + sheet 字段 ----------
+
+class TestAccountTypeFlow:
+    def _seed_user(self):
+        db = database.get_db()
+        db.execute("INSERT OR IGNORE INTO users(id, username, password, role) "
+                   "VALUES(1,'dev','x','developer')")
+        db.commit()
+        return db
+
+    def test_create_row_carries_account_type_and_sheet(self, client):
+        db = self._seed_user()
+        rows = [{"row": 2, "_sheet": "总户-企业", "_account_type": "企业户",
+                 "account_id": "9001", "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "tt")
+        assert diff["to_create"][0]["sheet"] == "总户-企业"
+        assert diff["to_create"][0]["db_values"]["_account_type"] == "企业户"
+
+        result = hd.apply_diff(db, diff, "tt", {"create": ["9001"]}, user_id=1)
+        assert result["created"] == 1
+        got = db.execute("SELECT account_type FROM tt_accounts WHERE advertiser_id='9001'").fetchone()[0]
+        assert got == "企业户"
+        db.close()
+
+    def test_update_rewrites_type_and_does_not_error_on_synthetic_key(self, client):
+        """回归：UPDATE 分支会把 fields 的每个键拼进 SET，漏 pop `_account_type` 直接报错。"""
+        db = self._seed_user()
+        db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type) "
+                   "VALUES('a','9002','加白户')")
+        db.commit()
+        rows = [{"row": 2, "_sheet": "总户-企业", "_account_type": "企业户",
+                 "account_id": "9002", "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "tt")
+        assert diff["to_update"][0]["fields"]["_account_type"] == "企业户"
+        hd.apply_diff(db, diff, "tt", {"update": ["9002"]}, user_id=1)
+        got = db.execute("SELECT account_type FROM tt_accounts WHERE advertiser_id='9002'").fetchone()[0]
+        assert got == "企业户"
+        db.close()
+
+    def test_same_type_produces_no_update(self, client):
+        db = self._seed_user()
+        # 除户类型外的一切都要与表里的行一致，否则两个**与本用例无关**的干扰项会把
+        # 这一行判成「有更新」，测不到「类型没变 ⇒ 不产出更新项」：
+        #   ① 库里的状态名必须先存在。临时库的 account_statuses 是空的，表里写「存活」
+        #      会走 `_pending_status` 那条「系统里还没有」的路 —— `if changed or pending`
+        #      里 pending 单独就能让整行进 to_update。
+        #   ② acquired_date 的列 DEFAULT 是建行当天的日期（非空），而解析行里没有这一列
+        #      ⇒ 空串，二者天然不等。必须显式落空，让它与解析结果一致。
+        # 表里的行 dict 本身保持原样（本用例只该考户类型这一项）。
+        db.execute("INSERT INTO account_statuses(name, platform) VALUES('存活','tt')")
+        sid = db.execute("SELECT id FROM account_statuses "
+                         "WHERE name='存活' AND platform='tt'").fetchone()[0]
+        db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, status_id, "
+                   "acquired_date) VALUES('a','9003','加白户',?,'')", (sid,))
+        db.commit()
+        rows = [{"row": 2, "_sheet": "总户-加白", "_account_type": "加白户",
+                 "account_id": "9003", "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "tt")
+        assert not any(u["account_id"] == "9003" for u in diff["to_update"]), \
+            "类型没变不该产出更新项（否则每次同步都报「将更新」）"
+        db.close()
+
+    def test_warnings_carry_sheet(self, client):
+        db = self._seed_user()
+        rows = [{"row": 5, "_sheet": "总户-企业", "_account_type": "企业户",
+                 "account_id": "", "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "tt")
+        warn = [w for w in diff["warnings"] if w["row"] == 5][0]
+        assert warn["sheet"] == "总户-企业"
+        db.close()
+
+    def test_gg_unaffected(self, client):
+        """gg 的行没有 _account_type，创建路径一个字都不该多写。"""
+        db = self._seed_user()
+        rows = [{"row": 2, "_sheet": "", "account_id": "GG-1",
+                 "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "gg")
+        assert "_account_type" not in diff["to_create"][0]["db_values"]
+        hd.apply_diff(db, diff, "gg", {"create": ["GG-1"]}, user_id=1)
+        cols = {r[1] for r in db.execute("PRAGMA table_info(accounts)").fetchall()}
+        assert "account_type" not in cols, "gg 的账户表不该被加上这一列"
+        db.close()
