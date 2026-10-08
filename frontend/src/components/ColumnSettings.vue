@@ -11,11 +11,10 @@
         <li
           v-for="(col, i) in list" :key="col.key"
           class="column-settings__item"
-          :class="{
-            'is-dragging': dragIndex === i,
-            'is-over': dragIndex > -1 && overIndex === i && dragIndex !== i,
-            'is-hidden': col.hidden,
-          }"
+          :class="[
+            { 'is-dragging': dragIndex === i, 'is-hidden': col.hidden },
+            overSide(i),
+          ]"
           draggable="true"
           @dragstart="onDragStart(i, $event)"
           @dragover.prevent="onDragOver(i)"
@@ -112,13 +111,25 @@ function onDragOver(i) {
   overIndex.value = i
 }
 
+/**
+ * 指示条画在目标行的哪条边。语义由**指示条的位置**承担，不由下标承担：
+ *   向下拖（from < i）→ 画目标行**下边缘** = 「落到该行之后」
+ *   向上拖（from > i）→ 画目标行**上边缘** = 「落到该行之前」
+ * 两个方向的下标因此都恒为悬停行下标 i，与 applyMove 的 toIndex 口径一致。
+ *
+ * 反例（曾经的写法）：指示条恒画上边缘、再把下标换算成 from < i ? i - 1 : i，
+ * 会让可达落点上限变成 n-2 —— 拖到列表末位不可达，而 ↑↓ 按钮到得了。
+ */
+function overSide(i) {
+  if (dragIndex.value === -1 || overIndex.value !== i || dragIndex.value === i) return ''
+  return dragIndex.value < i ? 'is-over-below' : 'is-over-above'
+}
+
 function onDrop(i) {
   const from = dragIndex.value
   if (from > -1 && from !== i) {
-    // 指示条恒画在「第 i 行上方」。向上拖（from > i）时 i 之前的元素没位移，
-    // 落点就是 i；向下拖（from < i）时移除操作让目标行前移一格，故落点是 i - 1。
-    // 不区分方向的话，向下拖的实际落点会比指示条低一行。
-    store.move(props.panelKey, props.registry, from, from < i ? i - 1 : i)
+    // 指示条已按方向画好（见 overSide），故落点下标恒为悬停行下标 i。
+    store.move(props.panelKey, props.registry, from, i)
   }
   onDragEnd()
 }
@@ -150,7 +161,8 @@ function onDragEnd() {
   overflow-y: auto;
 }
 
-/* 每行预留 2px 的插入条位置，落点出现时行高不跳动 */
+/* 上下边缘各预留 2px（透明），指示条变色时行高不跳动。
+   Element Plus 的 index.css 带全局 *{box-sizing:border-box}，故高度恒为 32px。 */
 .column-settings__item {
   display: flex;
   align-items: center;
@@ -158,6 +170,7 @@ function onDragEnd() {
   height: 32px;
   padding: 0 4px;
   border-top: 2px solid transparent;
+  border-bottom: 2px solid transparent;
   border-radius: 4px;
   cursor: grab;
 }
@@ -166,9 +179,14 @@ function onDragEnd() {
   background: #f5f7fa;
 }
 
-/* 落点：顶边亮起一条主色插入条，语义 = 「松手后落到这一格」 */
-.column-settings__item.is-over {
+/* 落点指示条：画在目标行的哪条边由拖拽方向决定（见 overSide），
+   上边缘 = 落到该行之前，下边缘 = 落到该行之后。两者语义都诚实。 */
+.column-settings__item.is-over-above {
   border-top-color: #409eff;
+}
+
+.column-settings__item.is-over-below {
+  border-bottom-color: #409eff;
 }
 
 /* 被拖项：压暗留在原位，不做浮层，避免与 el-popover 的层级打架 */
