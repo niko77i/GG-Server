@@ -340,6 +340,7 @@ const batchBc = ref('')
 // ---------- 写表失败治理（回收户清单异步写表的结果） ----------
 const SHEET_WRITE_POLL_MS = 3000
 const SHEET_WRITE_POLL_MAX = 14          // ~42s，覆盖 30s 重试窗口
+const RECYCLE_TARGET = 'tt_recycle'      // TT 账户行上的标记只反映回收户清单写表
 // 每个账户一个轮询定时器。批量改状态是在同步 for 里逐账户调度的，共用一个变量会
 // 让每次调用把上一个账户的定时器 clear 掉 —— 批量 N 个只有最后 1 个会弹提示。
 const sheetWriteTimers = new Map()       // advertiser_id -> timerId
@@ -787,7 +788,12 @@ async function loadSheetWriteFailures() {
   try {
     const res = await sheetWriteApi.status({ platform: 'tt' })
     const map = {}
-    for (const it of res.items || []) map[it.business_key] = it
+    for (const it of res.items || []) {
+      // 三期新增了 tt 平台的两个 target（huguan_dashboard / operator_dashboard_remark）；
+      // 不过滤会把它们的失败当成回收清单的失败标在账户行上（标错）。
+      if (it.target !== RECYCLE_TARGET) continue
+      map[it.business_key] = it
+    }
     sheetWriteFailures.value = map
   } catch { /* 标记拉不到不该打扰用户，保持上一次的结果 */ }
 }
@@ -802,9 +808,12 @@ function pollSheetWrite(advertiserId) {
     if (attempts >= SHEET_WRITE_POLL_MAX) { stop(); return }
     attempts++
     try {
-      const res = await sheetWriteApi.status({ platform: 'tt', businessKey: advertiserId })
+      const res = await sheetWriteApi.status({ platform: 'tt', target: RECYCLE_TARGET, businessKey: advertiserId })
       const it = res.item
       if (!it) { stop(); return }                        // 无记录 = 这条路径没触发写表
+      // 同 business_key、不同 target 的记录被 target 参数挡在 SQL 外；这里再兜一层，
+      // 防「被遮蔽时误判成回收清单的失败」。
+      if (it.target !== RECYCLE_TARGET) { stop(); return }
       if (it.status === 'synced') { loadSheetWriteFailures(); stop(); return }
       if (it.status === 'pending' || it.status === 'failed') {
         sheetWriteTimers.set(advertiserId, setTimeout(tick, SHEET_WRITE_POLL_MS))

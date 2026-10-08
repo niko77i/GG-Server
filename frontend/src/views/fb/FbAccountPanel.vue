@@ -52,6 +52,21 @@
         <el-table-column type="selection" width="45" />
         <el-table-column prop="name" label="账户名" min-width="120" />
         <el-table-column prop="account_id" label="账户ID" width="160" />
+        <!-- 写表状态。沿用二期 TT 账户表已确认的方案（同一位置、同一宽度、同一三态语汇），
+             两张表并列出现时跨平台一致。 -->
+        <el-table-column label="写表" width="54" align="center">
+          <template #default="{ row }">
+            <template v-if="sheetWriteFailures[row.account_id]">
+              <el-tooltip placement="top"
+                :content="sheetWriteHint(sheetWriteFailures[row.account_id])">
+                <el-button link size="small"
+                  :type="sheetWriteTone(sheetWriteFailures[row.account_id].status)"
+                  @click.stop="retrySheetWrite(row)">{{ sheetWriteMark(sheetWriteFailures[row.account_id].status) }}</el-button>
+              </el-tooltip>
+            </template>
+            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
+          </template>
+        </el-table-column>
         <el-table-column label="所属BM" min-width="140">
           <template #default="{ row }">{{ row.bms?.map(b=>b.name).join(', ') }}</template>
         </el-table-column>
@@ -160,10 +175,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
 import client from '../../api/client'
+import { sheetWriteApi } from '../../api/sheetWrite'
+import { SHEET_WRITE_TOAST, sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
@@ -171,6 +188,18 @@ const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const
 const bmOptions = ref([]); const statusOptions = ref([]); const dialogVisible = ref(false)
 const channelOptions = ref([]); const assetTypeOptions = ref([]); const fbUsers = ref([])
 const editingId = ref(null); const saving = ref(false)
+
+// ---------- 写表失败治理（户管看板域异步写表的结果） ----------
+const SHEET_WRITE_POLL_MS = 3000
+const SHEET_WRITE_POLL_MAX = 14          // ~42s，覆盖 30s 重试窗口
+// FB 下两个 target 共用一个 business_key 命名空间（account_id）：本表这一列只认
+// huguan_dashboard（户管看板整行刷新，由 writeback_rows 触发）。同一 account_id 可能
+// 同时有 huguan_dashboard 与 huguan_fb_acceptor（接户运营 I 列）两条 —— 不过滤会标错。
+const DASH_TARGET = 'huguan_dashboard'
+// 每个账户一个轮询定时器。批量导入等场景会在 for 里逐账户调度，共用一个变量会让每次
+// 调用把上一个账户的定时器 clear 掉 —— N 个只有最后 1 个会弹提示。
+const sheetWriteTimers = new Map()       // account_id -> timerId
+const sheetWriteFailures = ref({})       // account_id -> {target, status, error_msg}
 
 // 选项 id → 名字。后端 list_accounts 只返回 *_id，不返回名字（见 Step 2 的说明），
 // 用本页已加载的选项表映射，避免为此改后端查询。
@@ -203,6 +232,7 @@ async function loadData() {
     if (ownerId.value) p.owner_id = ownerId.value
     const res = await fbApi.listAccounts(p)
     items.value = res.items; total.value = res.total
+    loadSheetWriteFailures()
   } finally { loading.value = false }
 }
 
@@ -252,7 +282,11 @@ async function handleSave() {
     } else {
       await fbApi.createAccount(form)
     }
+    const accountId = form.account_id
     ElMessage.success(editingId.value?'已更新':'已创建'); dialogVisible.value = false; loadData()
+    // 建号 / 编辑都触发户管看板域的整行刷新（writeback_rows → huguan_dashboard），
+    // 成功分支后起轮询，表没写进去时把结果弹出来。
+    if (accountId) pollSheetWrite(accountId)
   } catch(e) { ElMessage.error(e.response?.data?.error||'保存失败') }
   finally { saving.value = false }
 }
@@ -261,7 +295,78 @@ async function handleBatchDelete() {
   for (const id of selectedIds.value) { await fbApi.deleteAccount(id) }
   ElMessage.success(`已删除${selectedIds.value.length}个`); loadData()
 }
-onMounted(() => { loadOptions(); loadData() })
+
+// ===== 写表失败治理：轮询 / 行标记 / 重试 =====
+/** 列表标记用：拉取当前用户所有「需要提示」的写表终态。静默失败（不打扰用户）。 */
+async function loadSheetWriteFailures() {
+  try {
+    const res = await sheetWriteApi.status({ platform: 'fb' })
+    const map = {}
+    for (const it of res.items || []) {
+      // 见 DASH_TARGET 处的说明：两个 target 共用 account_id 键空间，不过滤会标错。
+      if (it.target !== DASH_TARGET) continue
+      map[it.business_key] = it
+    }
+    sheetWriteFailures.value = map
+  } catch { /* 标记拉不到不该打扰用户，保持上一次的结果 */ }
+}
+
+/** 轮询单条直到终态。中间态（pending/failed）继续等，不提示。 */
+function pollSheetWrite(accountId) {
+  let attempts = 0
+  // 本账户轮询停止（终态 / 无记录 / synced / 超限 / 异常）时统一摘掉自己的表项，
+  // 避免 Map 无界增长。每个 return 路径都要走到这里。
+  const stop = () => { sheetWriteTimers.delete(accountId) }
+  const tick = async () => {
+    if (attempts >= SHEET_WRITE_POLL_MAX) { stop(); return }
+    attempts++
+    try {
+      const res = await sheetWriteApi.status({ platform: 'fb', target: DASH_TARGET, businessKey: accountId })
+      const it = res.item
+      if (!it) { stop(); return }                        // 无记录 = 这条路径没触发写表
+      if (it.target !== DASH_TARGET) { stop(); return }  // 防被 huguan_fb_acceptor 遮蔽时误判
+      if (it.status === 'synced') { loadSheetWriteFailures(); stop(); return }
+      if (it.status === 'pending' || it.status === 'failed') {
+        sheetWriteTimers.set(accountId, setTimeout(tick, SHEET_WRITE_POLL_MS))
+        return
+      }
+      // 三种需提示的终态 —— 文案与行内 tooltip 同源（sheetWriteHint），避免两处各写一份
+      const hint = sheetWriteHint(it)
+      SHEET_WRITE_TOAST[sheetWriteTone(it.status)](hint)
+      loadSheetWriteFailures()
+      stop()
+    } catch { stop() /* 轮询失败静默，靠列表标记兜底 */ }
+  }
+  // 同账户重入（例如重试按钮）时先清掉旧链，保证一个账户只有一条在跑
+  const prev = sheetWriteTimers.get(accountId)
+  if (prev) clearTimeout(prev)
+  sheetWriteTimers.set(accountId, setTimeout(tick, SHEET_WRITE_POLL_MS))
+}
+
+/** 重试按钮 */
+async function retrySheetWrite(row) {
+  const f = sheetWriteFailures.value[row.account_id]
+  if (!f) return
+  try {
+    await sheetWriteApi.retry({ platform: 'fb', target: f.target, businessKey: row.account_id })
+    ElMessage.success('已重新提交，请稍后查看结果')
+    pollSheetWrite(row.account_id)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '重试失败')
+  }
+}
+
+onMounted(() => {
+  loadOptions(); loadData()
+  // 初始拉一次写表标记。loadData() 成功分支里也会拉，但它请求失败时会跳过那次，
+  // 所以这里再保证一次：标记是「失败必须可见」的兜底，不能随列表请求的成败而丢。
+  loadSheetWriteFailures()
+})
+
+onUnmounted(() => {
+  for (const t of sheetWriteTimers.values()) clearTimeout(t)
+  sheetWriteTimers.clear()
+})
 </script>
 
 <style scoped>
