@@ -1436,7 +1436,7 @@ LEFT JOIN account_statuses s ON a.status_id = s.id
 """
 
 _TT_ROW_SQL = """
-SELECT a.advertiser_id AS account_id, a.acquired_date, a.death_date, a.country,
+SELECT a.advertiser_id AS account_id, a.account_type, a.acquired_date, a.death_date, a.country,
        a.timezone, a.consumption, a.remark,
        b.name AS bc_name, ag.name AS agent_name,
        COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
@@ -1504,8 +1504,13 @@ def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
     for q_sql, q_params in queries:
         for r in db.execute(q_sql, q_params).fetchall():
             row = dict(r)
-            out.append({"account_id": str(row.get("account_id") or "").strip(),
-                        "cells": cells_for_row(row, platform)})
+            item = {"account_id": str(row.get("account_id") or "").strip(),
+                    "cells": cells_for_row(row, platform)}
+            # 户类型只用于**路由**（决定写哪张 worksheet），不进 cells ——
+            # cells 是「表列字母 → 单元格值」，没有类型这一列。
+            # gg/fb 的 _ROW_SQL 没有这一列 ⇒ 取到空串，分组时只有一组，行为不变。
+            item["account_type"] = row.get("account_type") or ""
+            out.append(item)
     return [o for o in out if o["account_id"]]
 
 
@@ -1647,30 +1652,43 @@ def push_rows(user_id: int, platform: str, account_ids=None) -> None:
 
     db = _open_db()
     try:
-        conf = get_platform_config(db, user_id, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+        tables = get_platform_tables(db, user_id, platform)
+        if not tables:
             return
         rows = collect_rows_for_push(db, platform, account_ids)
+        groups, skipped = group_rows_by_sheet(db, user_id, platform, rows)
+        spreadsheet_id = get_platform_config(db, user_id, platform)["spreadsheet_id"]
     finally:
         db.close()
 
-    if not rows:
+    for name in skipped:
+        log.warning("户管看板回写跳过：户类型「%s」在配置里查不到工作表 user=%s platform=%s",
+                    name, user_id, platform)
+
+    if not groups or not spreadsheet_id:
         return
 
-    def _do():
-        import google_sheets_service as gs
-        from main import _GOOGLE_SHEETS_CONFIG
-        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        # 定位列必须按平台取：写入器默认 "C"（GG/TT 的账户ID列），而 FB 的
-        # 账户ID在 **D** 列（C 是「账户名称」）—— 不传就按错误的列定位、写空，
-        # 且不抛异常（后台线程连日志都没有，纯静默）。
-        # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
-        gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                     conf["sheet_name"], rows,
-                                     key_col=KEY_COL[platform])
-
     from main import _sync_sheets_background
-    _sync_sheets_background(_do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)
+
+    for sheet_name, sheet_rows in groups:
+        # `not sheet_name` 这一支保留改前的 `if not conf["sheet_name"]: return` 语义：
+        # POST 配置端点不校验工作表名非空，能存下「有 spreadsheet_id 但表名为空」的
+        # 半截配置；改前会静默 no-op，不许退化成拿空表名去写（gg/fb 的「等价现状」
+        # 正是以这条为前提）。
+        if not sheet_name or not sheet_rows:
+            continue
+
+        def _do(_sheet=sheet_name, _rows=sheet_rows):
+            import google_sheets_service as gs
+            from main import _GOOGLE_SHEETS_CONFIG
+            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+            # 定位列必须按平台取：写入器默认 "C"（GG/TT 的账户ID列），而 FB 的
+            # 账户ID在 **D** 列（C 是「账户名称」）—— 不传就按错误的列定位、写空。
+            gs.update_rows_by_account_id(service, spreadsheet_id, _sheet, _rows,
+                                         key_col=KEY_COL[platform])
+
+        _sync_sheets_background(
+            _do, lambda s, e: log.warning("户管看板回写失败: %s", e) if e else None)
 
 
 def undo_push(user_id: int, platform: str) -> dict:
@@ -1953,8 +1971,29 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=No
     try:
         db = _open_db()
         try:
-            conf = get_platform_config(db, user_id, platform)
-            if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+            tables = get_platform_tables(db, user_id, platform)
+            if not tables:
+                return
+            spreadsheet_id = get_platform_config(db, user_id, platform)["spreadsheet_id"]
+            if not spreadsheet_id:
+                return
+            atype = ""
+            if platform == "tt":
+                r0 = db.execute("SELECT account_type FROM tt_accounts WHERE advertiser_id=?",
+                                (account_id,)).fetchone()
+                atype = (r0["account_type"] if r0 else "") or ""
+            sheet_name = None
+            for t in tables:
+                if t["name"] == atype:
+                    sheet_name = t["sheet_name"]
+                    break
+            if not sheet_name:
+                # 解析不到工作表 → 跳过 + 日志（规格 §4.4）：绝不退回写第一张表。
+                # `not` 而非 `is None`：gg 的历史配置可能是 spreadsheet_id 有值而
+                # sheet_name 为空，改前那句 `if not conf["sheet_name"]: return` 正是
+                # 拦这一档，语义不能缩。
+                log.warning("归属变更通道列回写跳过：户类型「%s」查不到工作表 account=%s",
+                            atype, account_id)
                 return
             r = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username, '') AS n "
                            "FROM users WHERE id=?", (new_owner_id,)).fetchone()
@@ -1975,8 +2014,7 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=No
             import google_sheets_service as gs
             from main import _GOOGLE_SHEETS_CONFIG
             service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-            gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                         conf["sheet_name"], rows)
+            gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows)
 
         from main import _sync_sheets_background
         _sync_sheets_background(
