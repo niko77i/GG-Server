@@ -782,7 +782,14 @@ def list_deleted_accounts():
     where_clause = " AND ".join(where)
     total = db.execute(f"SELECT COUNT(*) FROM fb_accounts a WHERE {where_clause}", params).fetchone()[0]
     rows = db.execute(
-        f"SELECT a.* FROM fb_accounts a WHERE {where_clause} ORDER BY a.deleted_at DESC LIMIT ? OFFSET ?",
+        # `a.id DESC` 是稳定排序 tiebreaker，口径照 GG 的 `/api/accounts/deleted` /
+        # TT 的 `/api/tt/accounts/deleted`：`deleted_at` 由 datetime('now','localtime')
+        # 生成、只有秒级精度，一次批量删除会让整批行拿到同一时间戳，单靠
+        # `deleted_at DESC` 时这些行的相对顺序未定义 ⇒ 分页翻页时同批行会在页间漂移
+        # （可能被跳过、也可能重复显示）。相同时间戳行的相对顺序不是任何调用方可依赖
+        # 的契约，故补 tiebreaker 不构成行为破坏。
+        f"SELECT a.* FROM fb_accounts a WHERE {where_clause} "
+        f"ORDER BY a.deleted_at DESC, a.id DESC LIMIT ? OFFSET ?",
         params + [size, offset]
     ).fetchall()
 

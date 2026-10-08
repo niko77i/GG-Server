@@ -1793,4 +1793,38 @@ class TestFbDeletedAccountsSearch:
         assert {a["account_id"] for a in body["items"]} == {f"plain{i:04d}" for i in range(5)}
 
         empty = client.get("/api/fb/accounts/deleted?size=200&search=", headers=hdr).get_json()
+        # 加 tiebreaker 后同时间戳行的顺序是确定的（`ORDER BY deleted_at DESC, id DESC`），
+        # 所以这里可以断言顺序 —— 两次调用的 id 序列必须逐项相同。
         assert [a["id"] for a in empty["items"]] == [a["id"] for a in body["items"]]
+
+    def test_same_timestamp_rows_ordered_by_id_desc(self, client):
+        """**tiebreaker 守卫**：`deleted_at` **完全相同**的行必须按 `id DESC` 稳定排序。
+
+        `fb_accounts.deleted_at` 由 `datetime('now','localtime')` 生成、只有秒级精度，
+        一次批量删除会让整批行拿到同一时间戳。此时单靠 `deleted_at DESC` 的相对顺序
+        **未定义**，而回收站是分页的（page / size / total）⇒ 翻页时同批行会在页间漂移
+        （被跳过或重复显示）。故 ORDER BY 必须带 `id DESC`，口径照 GG
+        `/api/accounts/deleted` / TT `/api/tt/accounts/deleted` 同名端点。
+
+        去掉 `, a.id DESC` 后本用例变红：同时间戳下 SQLite 退化为按插入（rowid 升序）
+        返回，即 id 升序 —— 与断言的 id 降序相反。
+        """
+        hdr, uid = _fb_user(client, "t_ds_tie")
+        db = database.get_db()
+        # 三条**同一时间戳**的已删行，插入顺序即 id 升序。
+        ids = []
+        for i in range(3):
+            db.execute(
+                "INSERT INTO fb_accounts(name, account_id, owner_id, deleted_at) "
+                "VALUES(?,?,?,'2026-01-01 00:00:00')",
+                (f"同刻{i}", f"tie{i:04d}", uid))
+            ids.append(db.execute("SELECT id FROM fb_accounts WHERE account_id=?",
+                                  (f"tie{i:04d}",)).fetchone()["id"])
+        db.commit()
+        db.close()
+        assert len(ids) == 3 and len(set(ids)) == 3
+
+        body = client.get("/api/fb/accounts/deleted?size=200", headers=hdr).get_json()
+        got = [a["id"] for a in body["items"]]
+        # 有 tiebreaker ⇒ 同时间戳行的顺序是确定的，所以这里可以断言顺序。
+        assert got == sorted(ids, reverse=True), "同时间戳行必须按 id DESC 稳定排序"
