@@ -79,7 +79,26 @@
 > ⚠️ **通道列被 `cells_for_row` 排除**，所以它必须单列一个 target（`huguan_owner_channel`），
 > 否则 #5 的 :165（清空通道列）与 #3（写通道列）都无法重建。
 
-### 4.2 rebuild 一律从 DB 重算
+### 4.2 rebuild 策略：**优先取 `payload["value"]`，未携带时回读 DB**
+
+> **勘误（2026-10-08，Task 4 实施+审查裁定）**：本节初稿写的是「rebuild 一律**从 DB 重算**，
+> 不重放快照」。该规则**不成立** —— 有三条测试（`TestRemarkPushPath`、
+> `TestWritebackOwnerChannelText` ×3、`TestFbAcceptorWritebackKeyCol`）要求「写入值来自
+> **调用点实参**，即使库里没有对应行」，从 DB 读会得到空值。故实际规则是**按 payload 优先**：
+>
+> - **首次写入**：值直接来自调用点实参（不读库）
+> - **重试**：值从 `sheet_write_log.payload_json` 读回（重试端点已带出该 payload）
+> - **未携带 `value` 时**（`_write_background` 那条路径的调用方就不带）：回**读 DB 列**
+>
+> ⚠️ **两条腿都是生产代码，缺一不可**：payload 分支服务同步端点路径，DB 回读分支服务
+> `_write_background` 路径。删掉任一条都会静默坏掉一半调用方（Task 4 报告曾把 DB 回退误称
+> 「近乎死代码」，**该说法是错的**）。
+>
+> 关于「replay 与从 DB 重算之争」的边界：对本期的 `operator_dashboard_remark` /
+> `huguan_owner_channel(mode=owner)` / `huguan_fb_acceptor`，**写入值含调用点独有信息**
+> （如旧归属名、override 文本），DB 里推不出来，故必须 replay。查重/唯一性仍从 DB 判定。
+
+### 4.2 rebuild 一律从 DB 重算（**已被本节上方勘误取代，保留标题仅作历史定位**）
 
 与二期同思路：`rebuild` 从 `accounts` / `fb_accounts` / 归属字段重算那几列，不重放快照。**实现时逐点核对「该表那一行的列内容能否从当前 DB 完全重算」** —— 若某列依赖已消失的上下文（如某次操作传入的文本），则该点需把该文本放进 `payload_json`（参考二期的 `dash_uid` 做法）。
 
