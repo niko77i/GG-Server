@@ -161,7 +161,10 @@
                 @change="(v) => changeOwner(row, v)" />
             </template>
           </el-table-column>
-          <!-- 纯 prop 列兜底：account_id / acquired_date 走这里 -->
+          <!-- 纯 prop 列兜底（当前覆盖：account_id / acquired_date）。
+               ⚠️ 新增**带自定义插槽**的列时，必须在上方补显式 v-if/v-else-if 分支，
+               否则它会静默走这里、被渲染成纯 prop 列，插槽（含 #header，如「户归属 ⓘ」）
+               无声丢失且不报错。 -->
           <el-table-column v-else v-bind="COL_ATTRS[key]" />
         </template>
         <el-table-column label="操作" width="200">

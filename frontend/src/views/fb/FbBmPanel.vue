@@ -245,9 +245,12 @@ async function handleBanMigrate() {
   banning.value = true
   try {
     const res = await fbApi.banAndMigrate(banTarget.value.id, banForm)
-    ElMessage.success(`已封禁，${res.data.migrated_accounts} 个账户已迁移`)
-    if (res.data.warnings?.length) {
-      setTimeout(() => res.data.warnings.forEach(w => ElMessage.warning(w)), 500)
+    // client.js 的响应拦截器已 `return resp.data`、后端 ok({...}) 又把 dict 平铺，
+    // 故 res 就是 {success, migrated_accounts, warnings, ...}：取 res.data 会恒为
+    // undefined 并在此抛 TypeError（服务端已成功，前端却卡在提示、弹窗不关、列表不刷新）。
+    ElMessage.success(`已封禁，${res.migrated_accounts} 个账户已迁移`)
+    if (res.warnings?.length) {
+      setTimeout(() => res.warnings.forEach(w => ElMessage.warning(w)), 500)
     }
     banDialogVisible.value = false; loadData()
   } catch (e) { ElMessage.error(e.response?.data?.error || '操作失败') }

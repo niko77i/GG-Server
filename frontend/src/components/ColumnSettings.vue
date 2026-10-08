@@ -1,5 +1,7 @@
 <template>
-  <el-popover placement="bottom-start" :width="260" trigger="click">
+  <!-- :teleported="false" —— 让弹层留在原位，Tab 顺序从触发按钮到弹层内容连续。
+       默认 teleport 到 body 末尾会让纯键盘用户要遍历整页才能抵达 ↑↓ 按钮（a11y）。 -->
+  <el-popover placement="bottom-start" :width="260" trigger="click" :teleported="false">
     <template #reference>
       <el-button>📊 列显示</el-button>
     </template>

@@ -12,7 +12,11 @@ import { useAuthStore } from '@/stores/auth'
 const SAVE_DEBOUNCE_MS = 400
 
 export const useColumnPrefsStore = defineStore('columnPrefs', () => {
-  const prefs = ref({})           // 服务端原始 JSON：{panel: {order, hidden}}
+  // 服务端原始 JSON：{panel: {order, hidden}}
+  // ⚠️ 服务端（get / save_panel_prefs）返回的都是**三个面板的完整配置**，
+  //    因此保存响应与失败回滚一律**按面板级合并**（见 scheduleSave）：
+  //    整份替换会跨面板吞掉其它面板尚未落地的本地改动（跨面板竞态）。
+  const prefs = ref({})
   const ready = ref(false)        // 首次拉取是否已落定（成功或失败都置 true）
 
   let loadPromise = null          // 启动预拉的单例，避免多个面板各拉一次
@@ -51,7 +55,9 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
     }))
   }
 
-  // 服务端已确认的状态，回滚用
+  // 每个面板各自「服务端已确认」的状态，回滚用。
+  // **按面板存**：若存成整份快照，会把其它面板的**未保存乐观值**也记进来，
+  // 日后该面板失败回滚时会恢复出一个从未被服务端确认过的值。
   let lastConfirmed = {}
 
   async function ensureLoaded() {
@@ -93,14 +99,27 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
         // 窗口 = 防抖触发后一个往返。clear() 也会 bump 代际，
         // 于是上一个用户的在途响应回来时同样被丢弃（跨账号串写一并关闭）。
         if ((saveGen[panelKey] ?? 0) !== gen) return
-        prefs.value = resp.prefs ?? prefs.value
-        lastConfirmed = JSON.parse(JSON.stringify(prefs.value))
+        // 只合并本次保存的面板 —— 服务端返回的是三面板完整配置，
+        // 整份替换会抹掉其它面板尚未落地的本地改动（跨面板竞态）。
+        const confirmed = resp?.prefs?.[panelKey]
+        if (confirmed) {
+          prefs.value = { ...prefs.value, [panelKey]: confirmed }
+          lastConfirmed = {
+            ...lastConfirmed,
+            [panelKey]: JSON.parse(JSON.stringify(confirmed)),
+          }
+        }
       }).catch(() => {
         // 同上：新一代已接管，别用陈旧快照去回滚它的状态
         if ((saveGen[panelKey] ?? 0) !== gen) return
-        // 失败回滚到上次服务端确认的状态，不留「界面显示已保存、其实没存上」的假象
+        // 失败回滚到上次服务端确认的状态，不留「界面显示已保存、其实没存上」的假象。
+        // 只回滚本次面板，不整份替换 —— 否则会误伤其它面板的在途改动。
         ElMessage.error('列配置保存失败，已还原')
-        prefs.value = JSON.parse(JSON.stringify(lastConfirmed))
+        const next = { ...prefs.value }
+        const prev = lastConfirmed?.[panelKey]
+        if (prev) next[panelKey] = JSON.parse(JSON.stringify(prev))
+        else delete next[panelKey]      // 从无确认值 → 删掉，让 prefOf 回落到默认
+        prefs.value = next
       })
     }, SAVE_DEBOUNCE_MS)
   }
