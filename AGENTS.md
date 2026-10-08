@@ -952,6 +952,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [定时任务功能：审查发现清单（**已全部处理**）](docs/superpowers/specs/2026-10-07-scheduler-open-findings.md)（23 条：19 条可修的已修完并附提交号、4 条经判定不是问题；含一处对初版技术论断的勘误）
 - [上万户规模下的看板同步延迟与数据安全治理](docs/superpowers/specs/2026-10-07-sheet-sync-scale-design.md)（设计分三部分，**目前只落地第 ③ 部分「分页与列表」**：17 处列表端点加 `size` 服务端上限（越界钳制 500、非数字回落不报错）+ `page` 上界、GG/TT「已删除账户」列表补分页与服务端搜索（含稳定排序 tiebreaker）、FB 列表 BM 改批量查消除 N+1、既有 `IN (...)` 接入 `chunk(900)`。实现计划见 `docs/superpowers/plans/2026-10-07-sheet-sync-scale-pagination.md`；连带记有 3 处清单勘误与 4 条后续工单）
 - [FB 账户面板批量能力对齐](docs/superpowers/specs/2026-10-08-fb-account-panel-batch-actions-design.md)（批量查户 / 批量新增导入 / 批量删除 / 回收站四项；**不含**同步与批量充值）
+- [TT 户类型与多账户表](docs/superpowers/specs/2026-10-08-tt-account-types-design.md)
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
@@ -1015,7 +1016,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 | `tt_product_assets` | TT 产品成效素材 | 共享 |
 | `tt_product_runners` | TT 产品在跑人员 | 共享 |
 | `tt_bcs` | TT 商务中心（BC，对应 GG 的 MCC / FB 的 BM） | 共享 |
-| `tt_accounts` | TT 广告账户 | owner_id 隔离 |
+| `tt_accounts` | TT 广告账户；`account_type` 存**户类型名字符串**（加白户 / 企业户…），取值来自户管看板配置 `config.huguan_dashboard_<uid>.tt.tables[].name`，**改名必须级联 `UPDATE tt_accounts.account_type`**（在 `huguan_dashboard.save_config` 里做） | owner_id 隔离 |
 | `tt_account_bc_history` | TT 账户 BC 变更历史 | 关联 tt_accounts |
 | `tt_recycle_reasons` | TT 回收原因 | owner_id |
 | `tt_recharge_records` | TT 充值记录 | created_by 隔离 |
