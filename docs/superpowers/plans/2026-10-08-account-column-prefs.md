@@ -1793,7 +1793,7 @@ const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.GG_ADS, 
       </el-table>
 ```
 
-`v-if="columnPrefs.ready"` 是**必须的**：列序是按 DOM 顺序在 `onMounted` 时注册的，若表格先在默认顺序下挂载、配置随后才到，列序可能不会跟随更新（设计 §8.1）。
+`v-if="columnPrefs.ready"` 保留，但**理由已变**：设计 §8.1 那个「列序可能不跟随更新」的担心**已实测否定**（无头浏览器 spike 8/8：纯响应式重排即时生效，表头与单元格每次都同步）。所以它不再是正确性必需品，只用于避免表格先按默认顺序渲染一帧、等配置到达再跳变。**不要**因为看到这段旧理由被推翻就把 `v-if` 去掉 —— 保留它没有代价（启动时已预拉，进面板时 `ready` 通常已为 true），而去掉会引入一次可视跳变。
 
 - [ ] **Step 3: 在筛选栏接入 `<ColumnSettings>`**
 
