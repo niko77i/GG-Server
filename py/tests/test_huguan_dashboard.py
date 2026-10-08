@@ -3009,19 +3009,6 @@ class TestTtReassignCrossUser:
 
 
 class TestTTTriggerPoints:
-    # ⚠️ 本用例与 test_tt_sync_from_sheet_pushes_exactly_the_landed_ids 依赖 **Task 9**：
-    # 它们经端点新建账户，而 `create_account` / `sync_from_sheet` 目前**不落默认户类型**
-    # （Task 9 才让这两个端点接受并默认 `account_type`）。账户类型为空 ⇒ Task 6 起
-    # 回写按类型路由时被 `group_rows_by_sheet` 跳过（绝不退回第一张表）⇒ 断言无产物。
-    # 这两条经端点建户，而端点要到 Task 9 才写默认 account_type；无类型的 TT 账户
-    # 按 2026-10-08 规格被**正确跳过**（不写错表），所以回写不发生。
-    # ⚠️ 故意用 strict=True：Task 9 落地后它们会 XPASS 转红，**强制**回来删掉这个标记 ——
-    #    若用 strict=False，标记残留会把这个用例未来的真实回归静默吞掉。
-    _NEEDS_TASK9 = pytest.mark.xfail(
-        reason="create/sync-from-sheet 端点尚未落默认户类型（Task 9）；空类型账户被回写路由跳过",
-        strict=True)
-
-    @_NEEDS_TASK9
     def test_tt_create_triggers_writeback(self, client, monkeypatch):
         """新建 → 单行回写（规格 §6.2 触发点 1），且绝不写「换绑情况」列（规则 2）。
 
@@ -3063,12 +3050,8 @@ class TestTTTriggerPoints:
         assert client.delete(f"/api/tt/accounts/{aid}", headers=hg).status_code == 200
         assert captured == []
 
-    @_NEEDS_TASK9
     def test_tt_sync_from_sheet_pushes_exactly_the_landed_ids(self, client, monkeypatch):
         """`sync-from-sheet` 回写的 id 集合 == 真正落库的 id 集合（规格 §6.2 触发点 6）。
-
-        注：本用例当前的 xfail 见类顶 `_NEEDS_TASK9` —— 9990000003 由 sync 端点新建、
-        尚无户类型，Task 6 起会被回写路由跳过；Task 9 让该端点落默认类型后自动 XPASS。
 
         6 个触发点里只有这一个带业务逻辑：id 集合是
         `created ∪ updated ∪ (resolutions ∩ valid_ids) ∪ (status_resolutions ∩ valid_ids)`

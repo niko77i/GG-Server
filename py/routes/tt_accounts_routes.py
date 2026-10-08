@@ -126,17 +126,22 @@ def create_account():
     agent_id = _resolve_agent_id(db, (data.get("agent") or "").strip(), data.get("agent_id"))
     status = (data.get("status") or "").strip() or "存活"
     status_id = _resolve_status_id(db, status, data.get("status_id"))
+    # 户类型：未指定/空白时落默认类型（看板配置第一条，否则常量）。
+    # 服务端不做白名单校验 —— 清单是用户自定义的，硬校验会在「户管刚改名、前端
+    # 还拿着旧清单」的瞬间把建户打断；非法值只会变成待总表同步纠正的孤儿类型。
+    account_type = (data.get("account_type") or "").strip() or hd._default_account_type(db, uid)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         db.execute(
             "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
-            "consumption, status_id, acquired_date, remark, owner_id, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "consumption, status_id, acquired_date, remark, owner_id, account_type, "
+            "created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (name, advertiser_id, bc_id,
              (data.get("country") or "").strip(), agent_id, (data.get("timezone") or "").strip(),
              (data.get("consumption") or "").strip(), status_id,
              (data.get("acquired_date") or None), (data.get("remark") or "").strip(),
-             uid, now, now))
+             uid, account_type, now, now))
     except sqlite3.IntegrityError:
         return err("该广告账户已存在", 409)
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -387,7 +392,12 @@ def update_account(aid):
     }
 
     editable = ["name", "country", "timezone", "consumption",
-                "acquired_date", "death_date", "remark"]
+                "acquired_date", "death_date", "remark", "account_type"]
+    # 该循环对**值非 None** 的字段执行 UPDATE ... SET f=?，所以 account_type 传空串
+    # 会被原样写空。前端下拉不会传空；为稳妥，在循环之前把空串规范成默认类型。
+    if "account_type" in data and data.get("account_type") is not None:
+        _at = str(data["account_type"]).strip()
+        data["account_type"] = _at or hd._default_account_type(db, uid)
     for f in editable:
         if f in data and data[f] is not None:
             db.execute(f"UPDATE tt_accounts SET {f}=? WHERE id=?",
@@ -477,6 +487,7 @@ def batch_create_accounts():
         "status_id": data.get("status_id") or None,
         "country": (data.get("country") or "").strip(),
         "acquired_date": (data.get("acquired_date") or None),
+        "account_type": (data.get("account_type") or "").strip(),
     }
     overrides = data.get("overrides") or {}
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -499,13 +510,15 @@ def batch_create_accounts():
         agent_id = _resolve_agent_id(db, ov.get("agent", common["agent"]), ov.get("agent_id", common["agent_id"]))
         status_id = _resolve_status_id(db, ov.get("status", common["status"]), ov.get("status_id", common["status_id"]))
         acquired_date = ov.get("acquired_date") if "acquired_date" in ov else common["acquired_date"]
+        account_type = (ov.get("account_type") or common["account_type"]).strip() \
+            or hd._default_account_type(db, uid)
         try:
             db.execute(
                 "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
-                "status_id, acquired_date, owner_id, created_at, updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "status_id, acquired_date, owner_id, account_type, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, aid, bc_id, country, agent_id, timezone, status_id,
-                 acquired_date, uid, now, now))
+                 acquired_date, uid, account_type, now, now))
             new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             _record_bc_change(db, new_id, bc_id, uid, "import")
             db.commit()
@@ -1258,6 +1271,10 @@ def sync_from_sheet():
     role = _get_role(db, uid)
     data = parse_body()
     dry_run = bool(data.get("dry_run"))
+    # 投手自选的户类型（2026-10-08 规格 §4.8）：只作用于**本次新建**的账户，
+    # 已存在的账户类型不动（那条通路不做「以表为准」改写，类型最终由户管从总表纠正）。
+    new_account_type = (data.get("account_type") or "").strip() \
+        or hd._default_account_type(db, uid)
     user = db.execute("SELECT display_name, username FROM users WHERE id=?", (uid,)).fetchone()
     if user:
         operator_name = (user["display_name"] or "").strip() or (user["username"] or "")
@@ -1323,9 +1340,11 @@ def sync_from_sheet():
                 death_date = datetime.date.today().strftime("%Y-%m-%d") if sheet_status == "死亡" else ""
                 db.execute(
                     "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
-                    "consumption, status_id, acquired_date, death_date, remark, owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "consumption, status_id, acquired_date, death_date, remark, owner_id, account_type) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (advertiser_id, advertiser_id, bc_id, country, agent_id, timezone,
-                     consumption, status_id, acquired_date or None, death_date, remark, uid))
+                     consumption, status_id, acquired_date or None, death_date, remark, uid,
+                     new_account_type))
                 db.commit()
                 new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
                 _record_bc_change(db, new_id, bc_id, uid, "create")
