@@ -1175,7 +1175,7 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
   /**
    * 登出 / 换号时清空。
    *
-   * 必须清四样，少一样都会串号：
+   * 必须清五样，少一样都会串号（前四样是状态，第五样是在途请求的守卫）：
    *   - prefs：否则 B 看到 A 的列
    *   - ready：否则 ensureLoaded 被 `if (ready.value) return` 挡住，B 永远不会重拉
    *   - loadPromise：否则 B 拿到的是 A 那次请求的 promise
