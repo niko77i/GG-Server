@@ -179,6 +179,10 @@ def is_dead(parsed: dict) -> bool:
 
 CONFIG_KEY = "huguan_dashboard_{uid}"
 
+# 默认户类型名（2026-10-08 规格 §5）。只在「新建账户却没指定类型」时兜底，
+# 与 database.py 里 account_type 回填用的字面量必须一致。
+TT_DEFAULT_ACCOUNT_TYPE = "加白户"
+
 
 def load_config(db, user_id: int) -> dict:
     """读取该户管的看板配置：{"gg": {...}, "tt": {...}}，未配置时为空 dict。"""
@@ -217,18 +221,115 @@ def get_platform_config(db, user_id: int, platform: str) -> dict:
     }
 
 
-def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name: str) -> None:
-    """写入某平台的看板配置，另一个平台的配置保持不变。"""
+def get_platform_tables(db, user_id: int, platform: str) -> list:
+    """取某平台的全部账户表：[{"name": 户类型名, "sheet_name": worksheet 名}]。
+
+    - tt 配了 `tables` → 原样返回（保持配置顺序，顺序即按钮顺序与跨表去重的优先级）；
+    - tt 只有旧的 `sheet_name`（2026-10-08 之前的存量配置）→ 当成单条「加白户」。
+      **只读不改写磁盘**：写回发生在用户下次点保存时，这样出问题能一眼看出是读的还是写的。
+    - gg / fb → 单元素列表，`name` 为空串。下游按 name 分组时只有一组，行为与改动前等价。
+    """
+    entry = load_config(db, user_id).get(platform)
+    if not isinstance(entry, dict):
+        entry = {}
+    if platform == "tt":
+        tables = entry.get("tables")
+        if isinstance(tables, list):
+            out = []
+            for t in tables:
+                if not isinstance(t, dict):
+                    continue
+                name = _conf_text(t.get("name"))
+                sheet_name = _conf_text(t.get("sheet_name"))
+                if name and sheet_name:
+                    out.append({"name": name, "sheet_name": sheet_name})
+            if out:
+                return out
+        legacy = _conf_text(entry.get("sheet_name"))
+        return [{"name": TT_DEFAULT_ACCOUNT_TYPE, "sheet_name": legacy}] if legacy else []
+    return [{"name": "", "sheet_name": _conf_text(entry.get("sheet_name"))}]
+
+
+def _default_account_type(db, user_id: int) -> str:
+    """新建账户未指定类型时的兜底：该用户自己配置里的第一条类型名，否则常量。
+
+    取用户**自己的**配置而不是全局：类型清单本来就随户管看板配置私有存放（规格决策 2）。
+    """
+    tables = get_platform_tables(db, user_id, "tt")
+    if tables and tables[0]["name"]:
+        return tables[0]["name"]
+    return TT_DEFAULT_ACCOUNT_TYPE
+
+
+def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name: str,
+                *, tables=None) -> None:
+    """写入某平台的看板配置，另一个平台的配置保持不变。
+
+    `tables=None`（默认）→ 写旧格式 `{spreadsheet_id, sheet_name}`，行为与改动前**逐字节一致**
+    （gg / fb 走这条路）。`tables` 非 None → 只允许 tt，写新格式
+    `{spreadsheet_id, tables:[{name, sheet_name}]}`，并按类型名改名**级联**回填账户表。
+    """
     if platform not in PLATFORMS:
         raise ValueError(f"不支持的平台: {platform}")
+    if tables is not None and platform != "tt":
+        raise ValueError(f"多账户表只支持 tt，收到: {platform}")
     conf = load_config(db, user_id)
-    conf[platform] = {
-        "spreadsheet_id": _conf_text(spreadsheet_id),
-        "sheet_name": _conf_text(sheet_name),
-    }
+    if tables is None:
+        conf[platform] = {
+            "spreadsheet_id": _conf_text(spreadsheet_id),
+            "sheet_name": _conf_text(sheet_name),
+        }
+    else:
+        clean = []
+        for t in tables:
+            name = _conf_text((t or {}).get("name"))
+            sheet = _conf_text((t or {}).get("sheet_name"))
+            if not name or not sheet:
+                raise ValueError("每个户类型都需要「类型名」和「工作表名」")
+            clean.append({"name": name, "sheet_name": sheet})
+        # 旧类型名 → 新类型名：按**位置**比对（清单是同一个列表，位置即身份）。
+        old_tables = get_platform_tables(db, user_id, "tt")
+        for i, new_t in enumerate(clean):
+            if i >= len(old_tables):
+                break
+            old_name = old_tables[i]["name"]
+            if old_name and old_name != new_t["name"]:
+                # 类型名字符串即标识（规格 §5）：不级联的话，存量账户会从按钮里凭空消失。
+                db.execute("UPDATE tt_accounts SET account_type=? WHERE account_type=?",
+                           (new_t["name"], old_name))
+        conf[platform] = {
+            "spreadsheet_id": _conf_text(spreadsheet_id),
+            "tables": clean,
+        }
     db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                (CONFIG_KEY.format(uid=user_id), json.dumps(conf, ensure_ascii=False)))
     db.commit()
+
+
+def group_rows_by_sheet(db, user_id: int, platform: str, rows: list):
+    """把待写行按「户类型 → worksheet」分组。
+
+    返回 `(groups, skipped)`：`groups` 是 `[(sheet_name, rows)]`（按配置顺序），
+    `skipped` 是「在配置里查不到工作表的类型名」列表。
+
+    查不到就**跳过**，绝不退回写第一张表 —— 那正是多表之后要消除的「填错表」。
+    gg/fb 的类型恒为空串且配置里恰好有一个空名条目 ⇒ 只有一组，与改动前等价。
+    """
+    tables = get_platform_tables(db, user_id, platform)
+    buckets = {}
+    for r in rows:
+        buckets.setdefault(r.get("account_type") or "", []).append(r)
+    groups, skipped = [], []
+    for t in tables:
+        name = t["name"]
+        if name in buckets:
+            groups.append((t["sheet_name"], buckets.pop(name)))
+    for leftover, leftover_rows in buckets.items():
+        if leftover:
+            skipped.append(leftover)
+        elif tables:
+            groups.append((tables[0]["sheet_name"], leftover_rows))
+    return groups, skipped
 
 
 # ---------- 子项目 ③：同步撤回的快照原语 ----------
