@@ -1765,7 +1765,8 @@ def push_remark_to_operator_dashboard(owner_id: int, account_id: str, value: str
     与 push_rows 的区别：push_rows 面向**户管看板**（配置来自 huguan_dashboard_{uid}），
     本函数面向**投手看板**（配置来自 tags.tt_sheet_id + tt_sheet_mappings）。
 
-    投手未配看板 / 全局未配 tt_sheet_id → 静默返回。
+    全局未配 tt_sheet_id → 静默返回（保留：不保留会让未配置的实例每次改备注都凭空
+    产生一条 retry_failed 行 —— 二期修复轮 1 的同一类坑）。
     绝不抛异常（与 writeback_rows 同契约：回写失败不得影响主流程）。
     """
     try:
@@ -1775,22 +1776,28 @@ def push_remark_to_operator_dashboard(owner_id: int, account_id: str, value: str
             sheet_id = (row["value"] if row and row["value"] else "").strip()
             if not sheet_id:
                 return
-            sheet_name = _operator_dashboard_name(db, owner_id)
         finally:
             db.close()
 
-        rows = [{"account_id": account_id, "cells": {"J": value}}]
-
-        def _do():
-            import google_sheets_service as gs
-            from main import _GOOGLE_SHEETS_CONFIG
-            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-            # 投手看板的账户ID在 D 列（户管看板在 C 列），故必须显式传 key_col。
-            gs.update_rows_by_account_id(service, sheet_id, sheet_name, rows, key_col="D")
-
-        from main import _sync_sheets_background
-        _sync_sheets_background(
-            _do, lambda s, e: log.warning("投手看板备注回写失败: %s", e) if e else None)
+        import sheet_write
+        # ⚠️ 备注原文（value）进 payload：写表与重试都从它取 J 列的值。
+        # **不**回读 `tt_accounts.remark` —— 本函数有一条调用路径
+        # （`routes/tt_accounts_routes.py::update_account`）是「先推投手看板、后 commit」，
+        # 另建连接读不到本次尚未提交的 UPDATE，回读会把**旧备注**写进 J 列。
+        # 值随 payload 落 `sheet_write_log.payload_json`，重试端点据此复现同一串。
+        _payload = {"kind": "remark", "value": value}
+        _db = _open_db()
+        try:
+            sheet_write.run_write(
+                # ⚠️ user_id 传 **owner_id**（表主人），不是操作者 —— 本期唯一真正的第三方，
+                # 规格 §3.5。日志行记在表主人名下，他才能看到并重试。
+                _db, user_id=owner_id, platform="tt", target="operator_dashboard_remark",
+                business_key=account_id,
+                sync_fn=sheet_write.build_sync("operator_dashboard_remark", owner_id,
+                                               account_id, _payload),
+                payload=_payload)
+        finally:
+            _db.close()
     except Exception as e:
         log.warning("投手看板备注回写触发失败: %s", e)
 
@@ -1816,6 +1823,10 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=No
     """户管在系统里改了归属 → 把新归属写进表里的变更通道列（规格 §7.2 规则 3①）。
 
     GG 写 H「重新分配」，TT 写 L「换绑情况」。绝不抛异常（理由同 writeback_rows）。
+
+    写表值随 payload 交给 target：TT 是「旧转新月.日」整串、GG 是解析出的新归属名。
+    **不**让 rebuild 回读 DB 重算 —— TT 的「旧归属人」是 reassign 端点才知道的信息，
+    rebuild 从 `tt_accounts.owner_change_note` 读回会丢掉它；且调用方未必已 commit。
     """
     try:
         db = _open_db()
@@ -1833,21 +1844,20 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=No
         if not name and text is None:
             return
         # text 为 None 时写解析出的新归属名 —— GG 走这条路，行为与改动前逐字节一致。
-        # TT 由调用方传入完整的换绑记录文本（「旧转新月.日」）：文本里含「变更前归属人」，
-        # 那是 reassign 端点才知道的信息，在本函数里重新推断会引入第二次查询与不一致风险。
         value = text if text is not None else name
-        rows = owner_channel_cells([{"account_id": account_id}], platform, value)
 
-        def _do():
-            import google_sheets_service as gs
-            from main import _GOOGLE_SHEETS_CONFIG
-            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-            gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                         conf["sheet_name"], rows)
-
-        from main import _sync_sheets_background
-        _sync_sheets_background(
-            _do, lambda s, e: log.warning("归属变更通道列回写失败: %s", e) if e else None)
+        import sheet_write
+        _payload = {"platform": platform, "mode": "owner", "value": value}
+        _db = _open_db()
+        try:
+            sheet_write.run_write(
+                _db, user_id=user_id, platform=platform, target="huguan_owner_channel",
+                business_key=account_id,
+                sync_fn=sheet_write.build_sync("huguan_owner_channel", user_id,
+                                               account_id, _payload),
+                payload=_payload)
+        finally:
+            _db.close()
     except Exception as e:
         log.warning("归属变更通道列回写触发失败: %s", e)
 
@@ -1860,6 +1870,8 @@ def writeback_fb_acceptor(user_id, platform, account_id, note):
     （它不含 fb 键，硬塞会 KeyError）。
 
     绝不抛异常（理由同 `writeback_rows`）。
+
+    写表值（「旧转新」整串）随 payload 交给 target，不回读 `fb_accounts.acceptor`。
     """
     try:
         db = _open_db()
@@ -1871,20 +1883,18 @@ def writeback_fb_acceptor(user_id, platform, account_id, note):
             db.close()
         if not (note or "").strip():
             return
-        rows = _fb_acceptor_cells([{"account_id": account_id}], note)
 
-        def _do():
-            import google_sheets_service as gs
-            from main import _GOOGLE_SHEETS_CONFIG
-            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-            # 定位列必须按平台取：写入器默认 "C"（GG/TT 的账户ID列），而 FB 的
-            # 账户ID在 **D** 列（C 是「账户名称」）—— 不传就按错误的列定位、写空。
-            gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                         conf["sheet_name"], rows,
-                                         key_col=KEY_COL[platform])
-
-        from main import _sync_sheets_background
-        _sync_sheets_background(
-            _do, lambda s, e: log.warning("FB 接户运营回写失败: %s", e) if e else None)
+        import sheet_write
+        _payload = {"platform": platform, "value": note}
+        _db = _open_db()
+        try:
+            sheet_write.run_write(
+                _db, user_id=user_id, platform=platform, target="huguan_fb_acceptor",
+                business_key=account_id,
+                sync_fn=sheet_write.build_sync("huguan_fb_acceptor", user_id,
+                                               account_id, _payload),
+                payload=_payload)
+        finally:
+            _db.close()
     except Exception as e:
         log.warning("FB 接户运营回写触发失败: %s", e)

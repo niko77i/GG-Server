@@ -97,10 +97,12 @@ def _huguan_owner_channel_rebuild(user_id, business_key, payload):
     """`payload` 需带 `platform` 与 `mode`：
 
       * mode="clear" → 清空该格（点位 #5 的 :165）
-      * mode="owner" → 从 DB 读回该账户的归属留痕（点位 #3）
-          - gg：`accounts.owner_id` → `users` 的名字（**可重算**）
-          - tt：`tt_accounts.owner_change_note`（**读回**——旧归属名与「月.日」无法从
-            当前 DB 重算，但该串在写表前已落库；注意它是**单值列**，会被后续换绑覆盖）
+      * mode="owner" → 写该账户的归属留痕（点位 #3）
+          - 优先取 `payload["value"]`（调用方写表前已算好：TT 的「旧转新月.日」整串
+            含「旧归属人」，是从当前 DB **重算不出来**的）
+          - 老路径（payload 未带 value）才回读 DB：
+              · gg：`accounts.owner_id` → `users` 的名字（**可重算**）
+              · tt：`tt_accounts.owner_change_note`（**读回**——单值列，会被后续换绑覆盖）
     """
     p = payload or {}
     platform = p.get("platform")
@@ -112,22 +114,25 @@ def _huguan_owner_channel_rebuild(user_id, business_key, payload):
         if mode == "clear":
             huguan_owner_channel_sync(user_id, platform, business_key, "")
             return
-        import database
-        db = database.get_db()
-        try:
-            if platform == "tt":
-                r = db.execute(
-                    "SELECT owner_change_note FROM tt_accounts WHERE advertiser_id=?",
-                    (business_key,)).fetchone()
-                value = (r["owner_change_note"] if r else "") or ""
-            else:
-                r = db.execute(
-                    "SELECT COALESCE(NULLIF(u.display_name, ''), u.username, '') AS n "
-                    "FROM accounts a LEFT JOIN users u ON a.owner_id = u.id "
-                    "WHERE a.account_id = ?", (business_key,)).fetchone()
-                value = (r["n"] if r else "") or ""
-        finally:
-            db.close()
+        if "value" in p:
+            value = p.get("value") or ""
+        else:
+            import database
+            db = database.get_db()
+            try:
+                if platform == "tt":
+                    r = db.execute(
+                        "SELECT owner_change_note FROM tt_accounts WHERE advertiser_id=?",
+                        (business_key,)).fetchone()
+                    value = (r["owner_change_note"] if r else "") or ""
+                else:
+                    r = db.execute(
+                        "SELECT COALESCE(NULLIF(u.display_name, ''), u.username, '') AS n "
+                        "FROM accounts a LEFT JOIN users u ON a.owner_id = u.id "
+                        "WHERE a.account_id = ?", (business_key,)).fetchone()
+                    value = (r["n"] if r else "") or ""
+            finally:
+                db.close()
         huguan_owner_channel_sync(user_id, platform, business_key, value)
 
     return _sync
@@ -159,16 +164,29 @@ def operator_dashboard_remark_sync(owner_id, account_id, value):
 
 
 def _operator_dashboard_remark_rebuild(user_id, business_key, payload):
-    """重建：J 列内容 = `tt_accounts.remark`（两条调用路径都在写表前落库）。"""
+    """重建：J 列内容**优先取 `payload["value"]`**（触发时的备注原文）。
+
+    为什么不回读 `tt_accounts.remark`：本 target 有一条调用路径
+    （`routes/tt_accounts_routes.py::update_account`）在 `db.commit()` **之前**就发起写表；
+    重建若另起连接回读该列，读不到尚未提交的 UPDATE ⇒ 会把**旧备注**写进 J 列
+    （Task 2 复核发现的遗留缺陷）。触发值既已在写表前算好，随 payload 落库最稳。
+
+    兼容未带 value 的旧路径（如 `sheet_write.build_sync(..., {})`）：回读该列，
+    此时调用方要么已提交、要么本就走的是读数路径。
+    """
     def _sync():
-        import database
-        db = database.get_db()
-        try:
-            r = db.execute("SELECT remark FROM tt_accounts WHERE advertiser_id=?",
-                           (business_key,)).fetchone()
-            value = (r["remark"] if r else "") or ""
-        finally:
-            db.close()
+        p = payload or {}
+        if "value" in p:
+            value = p.get("value") or ""
+        else:
+            import database
+            db = database.get_db()
+            try:
+                r = db.execute("SELECT remark FROM tt_accounts WHERE advertiser_id=?",
+                               (business_key,)).fetchone()
+                value = (r["remark"] if r else "") or ""
+            finally:
+                db.close()
         operator_dashboard_remark_sync(user_id, business_key, value)
 
     return _sync
@@ -200,16 +218,21 @@ def huguan_fb_acceptor_sync(user_id, platform, account_id, note):
 
 
 def _huguan_fb_acceptor_rebuild(user_id, business_key, payload):
-    """重建：I 列内容 = `fb_accounts.acceptor`（三条路径都在写表前落库）。"""
+    """重建：I 列内容优先取 `payload["value"]`（触发时的「旧转新」整串）；
+    未带 value 的老路径回读 `fb_accounts.acceptor`。"""
     def _sync():
-        import database
-        db = database.get_db()
-        try:
-            r = db.execute("SELECT acceptor FROM fb_accounts WHERE account_id=?",
-                           (business_key,)).fetchone()
-            note = (r["acceptor"] if r else "") or ""
-        finally:
-            db.close()
+        p = payload or {}
+        if "value" in p:
+            note = p.get("value") or ""
+        else:
+            import database
+            db = database.get_db()
+            try:
+                r = db.execute("SELECT acceptor FROM fb_accounts WHERE account_id=?",
+                               (business_key,)).fetchone()
+                note = (r["acceptor"] if r else "") or ""
+            finally:
+                db.close()
         if not note:
             return          # 与原实现一致：note 为空时早退（不写）
         huguan_fb_acceptor_sync(user_id, "fb", business_key, note)

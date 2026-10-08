@@ -226,3 +226,53 @@ def test_write_background_routes_fb_acceptor_column_to_its_target(client, monkey
     db.close()
     assert r is not None, "FB I 列（换绑记录）必须登记 huguan_fb_acceptor"
     assert r["status"] == "synced"
+
+
+def test_writeback_owner_channel_registers_and_rebuilds(client, monkeypatch):
+    """点位 #3：必须登记 huguan_owner_channel，且重试能把通道列写回去。"""
+    import google_sheets_service as gs
+    import huguan_dashboard as hd
+    written = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id",
+                        lambda svc, sid, name, rows, key_col=None: written.extend(rows))
+
+    h, uid = _tt_huguan(client, "_hg_p3")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) "
+               "VALUES ('hg_p3_a','hg_p3_a',?)", (uid,))
+    db.commit()
+    db.close()
+
+    hd.writeback_owner_channel(uid, "tt", "hg_p3_a", uid, text="旧转新10.8")
+
+    db = database.get_db()
+    r = _settle(db, uid, "huguan_owner_channel", "hg_p3_a")
+    db.close()
+    assert r is not None, "必须登记 huguan_owner_channel"
+    assert r["status"] == "synced"
+    assert any("L" in (x.get("cells") or {}) for x in written), f"应写 TT 通道列 L：{written}"
+
+
+def test_writeback_fb_acceptor_registers(client, monkeypatch):
+    """点位 #4：必须登记 huguan_fb_acceptor。"""
+    import google_sheets_service as gs
+    import huguan_dashboard as hd
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
+
+    h, uid = _tt_huguan(client, "_hg_p4")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid, "fb")
+    db.execute("INSERT INTO fb_accounts (name, account_id, owner_id, acceptor) "
+               "VALUES ('fb_a','fb_a',?, '张三转李四10.8')", (uid,))
+    db.commit()
+    db.close()
+
+    hd.writeback_fb_acceptor(uid, "fb", "fb_a", "张三转李四10.8")
+
+    db = database.get_db()
+    r = _settle(db, uid, "huguan_fb_acceptor", "fb_a")
+    db.close()
+    assert r is not None, "必须登记 huguan_fb_acceptor"
