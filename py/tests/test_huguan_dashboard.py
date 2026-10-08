@@ -743,7 +743,9 @@ class TestDashboardConfig:
         db.close()
         got = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
         assert got["gg"] == {"spreadsheet_id": "", "sheet_name": ""}
-        assert got["tt"] == {"spreadsheet_id": "", "sheet_name": ""}
+        # tt 自 2026-10-08 多账户表设计起**恒**带 tables（未配置时为空数组）——
+        # 落在路由层合并（spec §4.7）。归属归一化本身的意图不变，只是形状多一项。
+        assert got["tt"] == {"spreadsheet_id": "", "sheet_name": "", "tables": []}
 
 
 # ---------- Task 6: 差异比对 ----------
@@ -4679,3 +4681,40 @@ class TestGroupRowsBySheet:
         groups, skipped = hd.group_rows_by_sheet(db, 7, "gg", rows)
         assert groups == [("看板", rows)] and skipped == []
         db.close()
+
+
+# ---------- Task 3: 配置 HTTP 多表 ----------
+
+class TestDashboardConfigMultiTable:
+    def test_get_tt_carries_tables_and_legacy_sheet_name(self, client):
+        hg, _ = _create_user(client, "_mt_cfg1", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "tt", "spreadsheet_id": "T1",
+            "tables": [{"name": "加白户", "sheet_name": "总户-加白"},
+                       {"name": "企业户", "sheet_name": "总户-企业"}]})
+        assert resp.status_code == 200
+        tt = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["tt"]
+        assert [t["name"] for t in tt["tables"]] == ["加白户", "企业户"]
+        assert tt["sheet_name"] == "总户-加白", "老前端读 sheet_name 必须仍拿到值"
+
+    def test_gg_get_shape_unchanged(self, client):
+        hg, _ = _create_user(client, "_mt_cfg2", role="huguan")
+        client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "gg", "spreadsheet_id": "G1", "sheet_name": "看板"})
+        gg = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["gg"]
+        assert gg == {"spreadsheet_id": "G1", "sheet_name": "看板"}
+
+    @pytest.mark.parametrize("tables", [
+        [{"name": "", "sheet_name": "X"}],                       # 空类型名
+        [{"name": "加白户", "sheet_name": ""}],                   # 空工作表名
+        [{"name": "加白户", "sheet_name": "X"},
+         {"name": "加白户", "sheet_name": "Y"}],                  # 类型名重复
+        [{"name": "加白户", "sheet_name": "X"},
+         {"name": "企业户", "sheet_name": "X"}],                  # 工作表重复
+        [],                                                       # 空清单
+    ])
+    def test_post_rejects_bad_tables(self, client, tables):
+        hg, _ = _create_user(client, "_mt_cfg3", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "tt", "spreadsheet_id": "T1", "tables": tables})
+        assert resp.status_code == 400

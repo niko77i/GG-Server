@@ -34,7 +34,18 @@ def dashboard_config_get():
     db = database.get_db()
     try:
         uid = get_uid()
-        conf = {p: hd.get_platform_config(db, uid, p) for p in hd.PLATFORMS}
+        conf = {}
+        for p in hd.PLATFORMS:
+            entry = hd.get_platform_config(db, uid, p)
+            if p == "tt":
+                # tt 额外带 tables，但**保留 sheet_name**（= tables[0].sheet_name）——
+                # 老前端只认 sheet_name，去掉它等于把它们打成空配置。
+                # get_platform_config 自身的签名/返回值不动（gg/fb 与既有测试依赖它）。
+                tables = hd.get_platform_tables(db, uid, "tt")
+                entry["tables"] = tables
+                if tables and tables[0]["sheet_name"]:
+                    entry["sheet_name"] = tables[0]["sheet_name"]
+            conf[p] = entry
     finally:
         db.close()
     return ok({"config": conf})
@@ -57,9 +68,37 @@ def dashboard_config_save():
     ss_id = _parse_sheet_id(str(data.get("spreadsheet_id") or "").strip())
     sheet_name = str(data.get("sheet_name") or "").strip()
 
+    # tables 可选：给了就走多表（仅 tt），没给走旧单表路径（gg/fb 与老前端）。
+    raw_tables = data.get("tables")
+    tables = None
+    if raw_tables is not None:
+        if platform != "tt":
+            return err("多账户表只支持 tt", 400)
+        if not isinstance(raw_tables, list) or not raw_tables:
+            return err("tables 必须是非空数组", 400)
+        tables = []
+        seen_names, seen_sheets = set(), set()
+        for t in raw_tables:
+            if not isinstance(t, dict):
+                return err("tables 的每一项必须是对象", 400)
+            name = str(t.get("name") or "").strip()
+            sheet = str(t.get("sheet_name") or "").strip()
+            if not name:
+                return err("每个户类型都需要「类型名」", 400)
+            if not sheet:
+                return err(f"户类型「{name}」缺少工作表名", 400)
+            # 重名会让按钮和回写路由产生歧义；同一 worksheet 挂两个类型则回写会打两次架。
+            if name in seen_names:
+                return err(f"户类型「{name}」重复", 400)
+            if sheet in seen_sheets:
+                return err(f"工作表「{sheet}」被两个户类型共用", 400)
+            seen_names.add(name)
+            seen_sheets.add(sheet)
+            tables.append({"name": name, "sheet_name": sheet})
+
     db = database.get_db()
     try:
-        hd.save_config(db, get_uid(), platform, ss_id, sheet_name)
+        hd.save_config(db, get_uid(), platform, ss_id, sheet_name, tables=tables)
     finally:
         db.close()
     return ok({"message": "配置已保存"})
