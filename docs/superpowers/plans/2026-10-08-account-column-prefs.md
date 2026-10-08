@@ -1717,7 +1717,8 @@ export const FB_ADS_COLUMNS = [
 在 `<script setup>` 加：
 
 ```js
-import { PANEL_KEYS, GG_ADS_COLUMNS, indexByKey } from '@/constants/accountColumns'
+import { PANEL_KEYS, GG_ADS_COLUMNS } from '@/constants/accountColumns'
+import { indexByKey } from '@/utils/columnPrefsLogic.mjs'
 import ColumnSettings from '@/components/ColumnSettings.vue'
 import { useColumnPrefsStore } from '@/stores/columnPrefs'
 ```
@@ -1858,7 +1859,8 @@ cd "D:/server/cc/GG-Server" && git add frontend/src/constants/accountColumns.js 
 `<script setup>` 的 import 区追加：
 
 ```js
-import { PANEL_KEYS, TT_ADS_COLUMNS, indexByKey } from '@/constants/accountColumns'
+import { PANEL_KEYS, TT_ADS_COLUMNS } from '@/constants/accountColumns'
+import { indexByKey } from '@/utils/columnPrefsLogic.mjs'
 import ColumnSettings from '@/components/ColumnSettings.vue'
 import { useColumnPrefsStore } from '@/stores/columnPrefs'
 ```
@@ -1971,7 +1973,8 @@ FB 没有共享单元格，10 个数据列里有 6 个是简单内联表达式�
 - [ ] **Step 1: 加 import 与常量**
 
 ```js
-import { PANEL_KEYS, FB_ADS_COLUMNS, indexByKey } from '@/constants/accountColumns'
+import { PANEL_KEYS, FB_ADS_COLUMNS } from '@/constants/accountColumns'
+import { indexByKey } from '@/utils/columnPrefsLogic.mjs'
 import ColumnSettings from '@/components/ColumnSettings.vue'
 import { useColumnPrefsStore } from '@/stores/columnPrefs'
 ```
