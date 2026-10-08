@@ -362,17 +362,28 @@ def update_account(aid):
 
     # 备注改动要推到两张表（2026-10-06 规格）。在 editable 循环之后取一次值：
     # 循环里可能已 strip 过，或本次并未带 remark，故以「data 里是否给了 remark」为准。
+    #
+    # ⚠️ 值在这里取，推送**延到 db.commit() 之后**（函数尾部）。这不是风格问题，
+    # 是实测过的 SQLite 死锁：循环里的 UPDATE 到此处尚未提交，本连接正握着唯一
+    # 的写者位；而 push_remark_to_operator_dashboard 经 run_write，第一步
+    # record_pending 会在**另一条连接**上 INSERT+COMMIT
+    # （database.get_db() 每次新连接、`sqlite3.connect(timeout=30)`）。
+    # ⇒ 新连接等满 30s 后抛 "database is locked"，被 run_write 的 except 吞掉，
+    # 后果是请求线程白冻 30 秒、且 sheet_write_log **一行都不登记**
+    # ——这次失败从此看不见、也重试不了。回归用例：
+    # tests/test_huguan_dashboard.py::TestUpdateAccountPushesRemark::test_remark_push_registers_log_row
+    _push_remark = None
     if "remark" in data and data["remark"] is not None:
         _remark_value = str(data["remark"]).strip()
         _adv = row["advertiser_id"]
         _owner_for_push = row["owner_id"]
         # 户管看板的 M 列（产品信息/remark）回写**不在此处**：函数尾部既有的
         # hd.writeback_rows(uid, "tt", [row["advertiser_id"]]) 已覆盖（cells_for_row
-        # 会写 M）。此处刻意不再单独回写一次 —— 一是重复，二是它落在 db.commit()
+        # 会写 M）。此处刻意不再单独回写一次 —— 一是重复，二是它若落在 db.commit()
         # 之前，push_rows 走独立连接读不到本次未提交的新值，会拿旧 remark 并发写同一行。
         # 投手看板：推给**账户的归属人**，不是调用者 —— 户管可能代改别人名下的户。
         if _owner_for_push is not None:
-            hd.push_remark_to_operator_dashboard(_owner_for_push, _adv, _remark_value)
+            _push_remark = (_owner_for_push, _adv, _remark_value)
 
     # agent/status 文本回退
     if "agent" in data or "agent_id" in data:
@@ -421,6 +432,11 @@ def update_account(aid):
     # 它**同时承担 remark 改动时的 M 列回写**（cells_for_row 会写 M，即「产品信息」），
     # 且此处 post-commit、数据新鲜 —— 故 remark 分支不必再单独回写一次。
     hd.writeback_rows(uid, "tt", [row["advertiser_id"]])
+    # 投手看板 J 列：remark 分支取好的值，**必须 post-commit 推**。
+    # run_write 会在另一条连接上登记 sheet_write_log；若此时本连接还握着未提交的
+    # 写事务，SQLite 的单写者约束会让它等满 timeout=30 后失败（详见 remark 分支的说明）。
+    if _push_remark is not None:
+        hd.push_remark_to_operator_dashboard(*_push_remark)
     return ok()
 
 

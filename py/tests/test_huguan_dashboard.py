@@ -7,6 +7,10 @@ import json
 import logging
 import re
 import sqlite3
+# 轮询用**模块顶层**捕获的真 sleep：本文件有用例 monkeypatch 全局 time.sleep
+# （跳过 30s 重试窗口），轮询循环若在被 patch 之后才 import sleep 会拿到桩函数
+# ⇒ 主线程不让出 GIL、断言早于后台线程 ⇒ 恒失败（一期三次、二期两次都栽在这）。
+from time import sleep as _poll_sleep
 
 import pytest
 
@@ -4506,6 +4510,63 @@ class TestUpdateAccountPushesRemark:
         cells = [c for cap in captured for c in cap["rows"]]
         assert any(r["cells"].get("M") == "新备注" for r in cells), "应推户管看板 M 列"
         assert any(r["cells"].get("J") == "新备注" for r in cells), "应推投手看板 J 列"
+
+    def test_remark_push_registers_log_row(self, client, monkeypatch):
+        """备注推送必须**登记**到 sheet_write_log —— 且不得在请求线程里撞未提交的写事务。
+
+        根因（2026-10-08 实测）：endpoint 的 editable 循环在 :360 就执行了
+        `UPDATE tt_accounts SET remark=…`，但要到函数尾部 :419 才 commit；
+        而 `push_remark_to_operator_dashboard` 经 `sheet_write.run_write`，第一步
+        `record_pending` 会在**请求线程**的**另一条连接**上 INSERT+COMMIT
+        （`database.get_db()` → `sqlite3.connect(db_path, timeout=30)`，每次新连接）。
+        SQLite 同时只允许一个写者 ⇒ 新连接拿不到锁，等满 30s 后抛
+        "database is locked"，被 `run_write` 的 except 吞掉。后果两条：
+          a) 请求线程被阻塞 30s —— 违反「业务端点响应不得因写表阻塞」
+          b) sheet_write_log **一行都没登记** ⇒ 该失败永远看不见、也重试不了
+
+        本用例断言 (b)：确定性、与耗时无关，正是「静默失败」的直接症状。
+        把 push 挪回 `db.commit()` 之前 ⇒ 本用例红（实测：查不到行，且该用例耗时 32.7s）。
+
+        刻意**不** patch `_sync_sheets_background`：这里要的就是真实登记路径。
+        那不冲突 —— `record_pending` 在调 `_sync_sheets_background` **之前**执行，
+        且 mocked 的 Sheets 层会让后台写快速成功，不会走到 30s 重试。
+        """
+        import google_sheets_service as gs
+        op, op_uid = _create_user(client, "_uapr_op3", role="user", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{op_uid}",
+                    json.dumps({"tt": {"spreadsheet_id": "HG-SS", "sheet_name": "S"}})))
+        db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','OP-SS')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"tt_sheet_mappings_{op_uid}", json.dumps({"my_dashboard": "投手看板"})))
+        aid = _seed_tt(db, "UAPR-9", op_uid)
+        db.commit()
+        db.close()
+
+        monkeypatch.setattr(gs, "build_service", lambda path: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: {"updated": 1, "not_found": []})
+
+        resp = client.put(f"/api/tt/accounts/{aid}", headers=op, json={"remark": "新备注"})
+        assert resp.status_code == 200
+
+        row = None
+        for _ in range(300):
+            _db = database.get_db()
+            row = _db.execute(
+                "SELECT status FROM sheet_write_log WHERE user_id=? AND target=? "
+                "AND business_key=?",
+                (op_uid, "operator_dashboard_remark", "UAPR-9")).fetchone()
+            _db.close()
+            if row is not None:
+                break
+            _poll_sleep(0.02)
+        assert row is not None, (
+            "备注推送必须登记 sheet_write_log —— 查不到就说明 record_pending 被"
+            "本请求未提交的写事务挡住、抛了 database is locked 又被 run_write 吞掉"
+            "（该次失败将永远看不见，也无法重试）"
+        )
 
     def test_updating_other_fields_does_not_push_remark(self, client, monkeypatch):
         """回归护栏：**只有**带 remark 的更新才推投手看板 J 列。
