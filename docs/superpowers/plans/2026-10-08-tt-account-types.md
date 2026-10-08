@@ -2094,7 +2094,7 @@ const visibleSheetKeys = computed(() => {
 })
 ```
 
-- [ ] **Step 2: 改卡片可见性 + `sheet_id` 只读**
+- [ ] **Step 2: 改卡片可见性 + header 提示**
 
 `:121` 的 `<el-card v-if="!authStore.isHuguan" ...>` 改为：
 
@@ -2102,12 +2102,8 @@ const visibleSheetKeys = computed(() => {
           <el-card shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
 ```
 
-表格 ID 那一行改为（户管只读）：
-
-```vue
-                <el-input v-model="form.sheet_id" placeholder="粘贴表格链接或直接输入 spreadsheet ID" style="flex:1;" :disabled="!isAdmin" />
-```
-保持不变 —— 它已经是 `:disabled="!isAdmin"`，而户管不是 admin ⇒ 天然只读。**在它上方那行提示文案**里把「仅管理员可改」的 tag 保留即可，无需改动。
+**表格 ID 输入框那一行不动** —— 它已经是 `:disabled="!isAdmin"`，而户管不是 admin ⇒ 天然只读，无需改。
+（「📋 读取工作表」按钮不 disabled，户管仍能加载下拉候选，这是要的。）
 
 把 header 里的「仅管理员」tag 改为按权限显示：
 
