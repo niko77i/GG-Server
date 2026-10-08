@@ -20,6 +20,7 @@ import { computed, onMounted, onUnmounted, watch, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { useTaskStore } from './stores/taskRunner'
+import { useColumnPrefsStore } from '@/stores/columnPrefs'
 import AppSidebar from './components/AppSidebar.vue'
 import GlobalTaskPanel from './components/GlobalTaskPanel.vue'
 import { productsApi } from './api/products'
@@ -30,6 +31,7 @@ import { MSG, broadcast, onMessage } from './utils/broadcast'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const columnPrefs = useColumnPrefsStore()
 const taskStore = useTaskStore()
 
 const isAuthPage = computed(() => ['/login', '/register'].includes(route.path))
@@ -43,6 +45,19 @@ onMounted(async () => {
   taskStore.init()
   taskStore.startPolling()
 })
+
+// ---------- 账户看板列配置：跟着登录态预拉一次 ----------
+// 跟着登录态走，而不是只在 onMounted 调一次。两个理由：
+//   ① onMounted 那一刻用户可能还没登录（先落在 /login），裸调会 401 且永不重试
+//   ② stores/auth.js:77-84 的 logout() **不刷新页面**（fetchMe 失败时也会走它，
+//      见 stores/auth.js:68）。同浏览器换号时 store 还留着上一个人的 prefs，
+//      而 ensureLoaded 有 `if (ready.value) return` 守卫，不会重拉 —— B 会看到 A 的列。
+// 同类写法先例见 composables/useOwnerPicker.js:35-38。
+watch(
+  () => auth.user?.id,
+  (uid) => { uid ? columnPrefs.ensureLoaded() : columnPrefs.clear() },
+  { immediate: true },
+)
 
 // ---------- 全局掉包通知轮询（GG + TT 双平台，所有页面生效） ----------
 let _delistTimer = null
