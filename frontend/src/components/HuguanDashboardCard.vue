@@ -79,6 +79,33 @@
         </el-tooltip>
       </div>
 
+      <!-- 写表失败汇总（三期）。只有户管能看见这张卡，而户管正是这些写表点的表主人
+           —— 失败原先只落服务端日志，户管在这里才能看到并重试。
+           有失败才渲染：无失败时连占位都没有（计划 §Task 6 的硬要求）。
+
+           视觉：3px 琥珀左脊柱，与卡片自身「仅户管」的紫色左脊柱同一语法 —— 在卡片
+           自己的视觉语法里声明「需要你处理」。用 warning 而非 danger：本期 4 个 target
+           全部零回滚，retry_failed 的含义是「系统改动已生效、只是没写进表」，
+           报红会把「表旧了」夸大成「数据坏了」。 -->
+      <div v-if="hdSwFailures.length"
+           style="background:var(--el-color-warning-light-9);border-left:3px solid var(--el-color-warning);border-radius:8px;padding:10px 12px;margin-top:12px;">
+        <div style="font-weight:600;font-size:13px;color:#92400e;margin-bottom:6px;">
+          ⚠️ {{ hdSwFailures.length }} 个账户没写进表
+        </div>
+        <div v-for="(f, i) in hdSwFailures" :key="f.target + '|' + f.business_key"
+             :style="{ display:'flex', alignItems:'baseline', gap:'8px', padding:'5px 0',
+                       borderTop: i ? '1px solid var(--el-color-warning-light-7)' : 'none' }">
+          <!-- 全句文案挂在 ID 上：那里是用户识别这条记录时视线落点，
+               且复用 sheetWriteUi 的唯一文案源（不要在这里另写一份失败说明）。 -->
+          <el-tooltip placement="top" :content="sheetWriteHint(f)">
+            <span style="font-family:monospace;font-size:12px;color:#374151;flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.business_key }}</span>
+          </el-tooltip>
+          <span style="font-size:12px;color:#6b7280;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.error_msg || '未知原因' }}</span>
+          <el-button link size="small" :type="sheetWriteTone(f.status)"
+                     @click="retryHdSw(f)">重试</el-button>
+        </div>
+      </div>
+
       <el-alert v-if="hdHint.text" :title="hdHint.text" :type="hdHint.type" show-icon closable
                 style="margin-top:12px;" @close="hdHintClosed = true" />
     </div>
@@ -481,11 +508,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, onMounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { huguanApi } from '@/api/huguan'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api/client'
+import { sheetWriteApi } from '@/api/sheetWrite'
+import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 
 const authStore = useAuthStore()
 
@@ -904,6 +933,10 @@ async function doPushHd() {
       ElMessage.success(`已刷新到看板：写入 ${r.updated} 行。`)
       setHdHint(`已刷新到看板：写入 ${r.updated} 行。`, 'success')
     }
+    // push 走的就是点位 #1 的 writeback_rows 链路（写表是异步的）：
+    // 成功分支刷一次 + 起有界轮询，失败路径不跟（见 onUnmounted 注释同理）。
+    loadHdSwFailures()
+    startHdSwPoll()
   } catch (e) {
     // 单次 values().batchUpdate 是原子的：要么全成、要么全不成，不存在「写了一半」。
     // 因此失败即整批未写入，直接重试是安全的，无需打开表格核对。
@@ -983,6 +1016,9 @@ async function applySync() {
     const r = syncResult.value
     const line = `已同步：新增 ${r.created} 个账户，更新 ${r.updated} 处，归属变更 ${r.owner_changed} 个。`
     ElMessage.success(line)
+    // 打勾落库会触发 #2/#3/#4（含归属变更通道列）：同样刷一次 + 起有界轮询。
+    loadHdSwFailures()
+    startHdSwPoll()
     if ((r.not_applied || []).length) {
       setHdHint(`${line}有 ${r.not_applied.length} 项没有落库。`, 'warning')
     } else {
@@ -998,9 +1034,81 @@ async function applySync() {
   }
 }
 
+// ===========================================================================
+// 写表失败治理（三期：户管看板域）
+//
+// 规格 §5：户管是本期 4 个 target 里 3 个的**表主人**（sheet_write_log.user_id 记的
+// 就是表主人）。原先写表失败只落服务端日志 —— 户管在自己的卡片里看不到、也无法重试。
+// 这里是本期唯一的新增 UI。
+// ===========================================================================
+const HD_SW_POLL_MS = 3000
+const HD_SW_POLL_MAX = 15               // ~45s，覆盖 30s 重试窗口
+
+// 本看板下、**属于户管自己**的 target。不含 operator_dashboard_remark ——
+// 那是投手看板（表主人是投手），已在 TT 账户表行上标记，不在这里汇总。
+//
+// fb 没有「归属变更通道列」（OWNER_CHANNEL_COL['fb'] is None），但建号/编辑/换绑
+// 会写 huguan_fb_acceptor；而 FB 账户表面板只过滤 huguan_dashboard（T5 核实），
+// 那类失败在行上**没有任何标记** —— 汇总在这里，它的表主人（户管）才有地方看到、重试。
+const HD_SW_TARGETS = HD_PLATFORM === 'fb'
+  ? ['huguan_dashboard', 'huguan_fb_acceptor']
+  : ['huguan_dashboard', 'huguan_owner_channel']
+
+const hdSwFailures = ref([])            // [{target, business_key, status, error_msg, updated_at}]
+let hdSwTimer = null
+
+/** 拉失败汇总。按 target **分别**拉（三期新加的 /status target 参数）—— 不带 target
+ *  会把别的 target 的行也混进来（同一 account_id 跨 target 是正常现象）。静默失败。 */
+async function loadHdSwFailures() {
+  if (!authStore.isHuguan) return
+  try {
+    const res = await Promise.all(HD_SW_TARGETS.map(t =>
+      sheetWriteApi.status({ platform: HD_PLATFORM, target: t })))
+    const items = res.flatMap(r => r.items || [])
+    // 两次请求各按 updated_at DESC 回来，合并后要重排，否则列表顺序会随
+    // Promise 完成顺序漂移 —— 用户点重试时行会跳。
+    items.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))
+    hdSwFailures.value = items
+  } catch { /* 汇总拉不到不该打扰用户，保持上一次的结果 */ }
+}
+
+/** 写表是异步的：push / 打勾落库 / 重试 之后都要在 30s 重试窗口内跟一段时间。
+ *  有界（HD_SW_POLL_MAX 次）自终止，与二期 TT / FB 面板同形。 */
+function startHdSwPoll() {
+  if (hdSwTimer) clearTimeout(hdSwTimer)
+  let attempts = 0
+  const tick = async () => {
+    if (attempts >= HD_SW_POLL_MAX) { hdSwTimer = null; return }
+    attempts++
+    await loadHdSwFailures()
+    hdSwTimer = setTimeout(tick, HD_SW_POLL_MS)
+  }
+  hdSwTimer = setTimeout(tick, HD_SW_POLL_MS)
+}
+
+/** 重试一条。retry 只回「已受理」，结果要轮询才知道 —— 所以刷一次 + 起轮询。 */
+async function retryHdSw(f) {
+  try {
+    await sheetWriteApi.retry({ platform: HD_PLATFORM, target: f.target,
+                                businessKey: f.business_key })
+    ElMessage.success('已重新提交，请稍后查看结果')
+    await loadHdSwFailures()
+    startHdSwPoll()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '重试失败')
+  }
+}
+
 onMounted(() => {
   // 并行拉一次：配置与「有没有可撤的快照」互不依赖。
   loadHdConfig()
   loadHdUndo()
+  loadHdSwFailures()
+})
+
+onUnmounted(() => {
+  // 有界自终止，但组件在 45s 窗口内被卸载（切页/切平台）时要立刻停，
+  // 别让定时器打在已卸载的组件上。
+  if (hdSwTimer) clearTimeout(hdSwTimer)
 })
 </script>
