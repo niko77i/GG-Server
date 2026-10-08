@@ -1828,3 +1828,68 @@ class TestFbDeletedAccountsSearch:
         got = [a["id"] for a in body["items"]]
         # 有 tiebreaker ⇒ 同时间戳行的顺序是确定的，所以这里可以断言顺序。
         assert got == sorted(ids, reverse=True), "同时间戳行必须按 id DESC 稳定排序"
+
+    def test_search_name_leg_does_not_leak_other_users_deleted(self, client):
+        """**name 腿的归属隔离（承重括号守卫）。**
+
+        服务端把搜索组拼成**一整组带括号的 OR**：
+        `... AND a.owner_id = ? AND (account_id LIKE ? OR name LIKE ? OR EXISTS(...))`。
+        那对括号是承重的 —— 去掉后 AND/OR 优先级会变成
+        `... AND owner = ? AND account_id LIKE ? OR name LIKE ? OR EXISTS(...)`，
+        于是 **name 腿与 BM 腿失去 owner 约束、泄漏他人已删除账户**。
+
+        `test_search_does_not_leak_other_users_deleted` 只让搜索词命中 `account_id`
+        那条腿，而该腿**即使没有括号也仍被 `AND owner = ?` 约束住** ⇒ 去括号打不红它。
+        本用例把搜索词**只放在他人的 `name` 腿**上：去括号后他人的行会从这一腿漏出来，
+        断言随即变红。同时自己的账户两条腿都不命中，排除己方行对断言的干扰。
+        """
+        a_hdr, a_id = _fb_user(client, "t_ds_nl_a")
+        _, b_id = _fb_user(client, "t_ds_nl_b")
+        db = database.get_db()
+        # A 自己的已删账户：account_id / name 两腿都不含搜索词。
+        _mk_deleted_fb_account(db, a_id, "azl0001", "A的普通名")
+        # B 的已删账户：**只有 name 腿**含搜索词，account_id 不含。
+        _mk_deleted_fb_account(db, b_id, "bzl0001", "泄漏候选zx9q")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?search=zx9q", headers=a_hdr).get_json()
+        assert body["total"] == 0
+        assert body["items"] == []
+
+    def test_search_bm_leg_does_not_leak_other_users_deleted(self, client):
+        """**BM 名腿的归属隔离（承重括号守卫）。**
+
+        同 `test_search_name_leg_does_not_leak_other_users_deleted`，但命中点在
+        `EXISTS(... b.name LIKE ?)` 这条腿。`test_search_by_bm_name` 只在自己户上造
+        BM，去括号后仍受 `AND owner = ?` 约束 ⇒ 打不红。本用例让**他人的**已删账户
+        所挂 BM 的名字含搜索词，而该账户的 account_id / name 都不含 ⇒ 去括号即泄漏。
+        """
+        a_hdr, a_id = _fb_user(client, "t_ds_bml_a")
+        _, b_id = _fb_user(client, "t_ds_bml_b")
+        db = database.get_db()
+        # A 自己的已删账户：三腿（account_id / name / 其 BM 名）都不含搜索词。
+        _mk_deleted_fb_account(db, a_id, "abm0001", "A的普通名")
+        # B 的已删账户：account_id / name 都不含搜索词，仅其 BM 名含。
+        bm = _mk_fb_bm(db, b_id, "T-DS-LEAK-BM", "泄漏BMzx9q")
+        pk = _mk_fb_account(db, b_id, "bbm0001", "B的普通名", bm_pk=bm)
+        db.execute("UPDATE fb_accounts SET deleted_at=datetime('now','localtime') WHERE id=?",
+                   (pk,))
+        db.commit()
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?search=zx9q", headers=a_hdr).get_json()
+        assert body["total"] == 0
+        assert body["items"] == []
+
+    def test_search_own_name_leg_still_matches(self, client):
+        """**对照组（防「一律搜不到」的过度收口变异）。**
+
+        隔离正确不等于把 search 收成空结果：**自己**的已删账户在 `name` 腿命中时
+        必须搜得到。若有人把搜索条件整个短路（或误把 owner 过滤加到 name 腿上），
+        本用例变红。
+        """
+        hdr, uid = _fb_user(client, "t_ds_own_name")
+        db = database.get_db()
+        _mk_deleted_fb_account(db, uid, "aown001", "自己的户zx9q")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?search=zx9q", headers=hdr).get_json()
+        assert body["total"] == 1
+        assert body["items"][0]["account_id"] == "aown001"
