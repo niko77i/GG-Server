@@ -739,7 +739,14 @@ def delete_account(aid):
 @jwt_required()
 @fb_required
 def list_deleted_accounts():
-    """返回已删除账户列表"""
+    """返回已删除账户列表（**分页** + 服务端搜索）。
+
+    `search` 走服务端：分页之后前端手里只有当前页，「当前页内过滤」会漏掉
+    其余页的匹配结果，表现为「搜得到但显示不全」。口径照 GG 的
+    `/api/accounts/deleted` / TT 的 `/api/tt/accounts/deleted`（同名端点），
+    但要与前端原来的客户端过滤逐字对齐 —— 除了账户ID / 名称，FB 还搜索**所属 BM 名**。
+    不传 `search` 时 where / params 与加该参数前完全一致（纯增量）。
+    """
     db = get_db()
     page, size = parse_pagination(default=50)
     offset = (page - 1) * size
@@ -759,6 +766,18 @@ def list_deleted_accounts():
     else:
         where.append("a.owner_id = ?")
         params.append(uid)
+
+    search = request.args.get('search', '').strip()
+    if search:
+        # 三个字段与前端原来的客户端过滤口径对齐：账户ID / 名称 / 所属BM名。
+        # BM 用 EXISTS 子查询而非 JOIN：JOIN 会让「一个户挂多个 BM」匹配时行重复，
+        # total 与实际可翻页数就对不上了。
+        where.append(
+            "(a.account_id LIKE ? OR a.name LIKE ? OR EXISTS ("
+            "  SELECT 1 FROM fb_account_bm ab JOIN fb_bms b ON ab.bm_id = b.id"
+            "  WHERE ab.account_id = a.id AND b.name LIKE ?))")
+        like = f"%{search}%"
+        params += [like, like, like]
 
     where_clause = " AND ".join(where)
     total = db.execute(f"SELECT COUNT(*) FROM fb_accounts a WHERE {where_clause}", params).fetchone()[0]

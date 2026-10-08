@@ -133,6 +133,14 @@
               </el-form-item>
             </el-col>
           </el-row>
+          <el-row :gutter="10">
+            <el-col :span="12">
+              <el-form-item label="到手时间" style="margin-bottom:0;">
+                <el-date-picker v-model="newAccountEdits[newEditingId].acquired_date" type="date" size="small"
+                  style="width:100%;" value-format="YYYY-MM-DD" />
+              </el-form-item>
+            </el-col>
+          </el-row>
         </div>
 
         <!-- 共用默认值（折叠） -->
@@ -174,6 +182,9 @@
                 </el-form-item>
               </el-col>
             </el-row>
+            <el-form-item label="到手时间" style="margin-bottom:0;">
+              <el-date-picker v-model="form.acquired_date" type="date" size="small" style="width:200px;" value-format="YYYY-MM-DD" />
+            </el-form-item>
           </el-collapse-item>
         </el-collapse>
       </template>
@@ -296,6 +307,7 @@ const form = reactive({
   timezone: '',
   status_id: null,
   primary_bm_id: null,
+  acquired_date: '',
 })
 
 // ===== 新账户逐行编辑 =====
@@ -311,6 +323,7 @@ function getDefaultValues(aid) {
     timezone: form.timezone,
     status_id: form.status_id,
     primary_bm_id: form.primary_bm_id,
+    acquired_date: form.acquired_date,
   }
 }
 
@@ -335,6 +348,7 @@ function isNewDirty(aid) {
     || cur.timezone !== baseline.timezone
     || cur.status_id !== baseline.status_id
     || cur.primary_bm_id !== baseline.primary_bm_id
+    || cur.acquired_date !== baseline.acquired_date
 }
 
 function toggleNewEdit(aid) {
@@ -434,11 +448,14 @@ async function init() {
   } catch (e) {
     ElMessage.error('加载选项失败: ' + (e.response?.data?.error || e.message))
   }
+  const d = new Date()
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   const defaultStatusId = statusOptions.value.find(s => s.name === '存活')?.id ?? null
   form.name_prefix = ''
   form.timezone = ''
   form.status_id = defaultStatusId
   form.primary_bm_id = null
+  form.acquired_date = today
   idText.value = ''
   allFound.value = []
   claimSelection.value = []
@@ -470,6 +487,7 @@ async function submit() {
     if (cur.timezone !== def.timezone) diff.timezone = cur.timezone
     if (cur.status_id !== def.status_id) diff.status_id = cur.status_id
     if (cur.primary_bm_id !== def.primary_bm_id) diff.primary_bm_id = cur.primary_bm_id
+    if (cur.acquired_date !== def.acquired_date) diff.acquired_date = cur.acquired_date
     if (Object.keys(diff).length) overrides[aid] = diff
   }
 
@@ -482,6 +500,7 @@ async function submit() {
         timezone: form.timezone,
         status_id: form.status_id,
         primary_bm_id: form.primary_bm_id,
+        acquired_date: form.acquired_date,
         overrides: Object.keys(overrides).length ? overrides : undefined,
       })
       created = res.created || 0

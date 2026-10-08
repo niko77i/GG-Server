@@ -1,20 +1,12 @@
 <template>
   <el-dialog :model-value="visible" @update:model-value="$emit('update:visible', $event)"
     title="🗑 已删除账户" width="820px" @open="init">
-    <div v-if="allAccounts.length" style="margin-bottom:12px;">
-      <div style="display:flex;gap:8px;align-items:center;">
-        <el-input v-model="searchText" placeholder="🔍 搜索账户ID / 名称 / 所属BM..." clearable style="flex:1;" />
-        <span style="color:#888;font-size:12px;white-space:nowrap;">{{ filteredAccounts.length }} / {{ allAccounts.length }} 条</span>
-      </div>
-      <!-- 诚实提示：本弹窗为分页端点，本地搜索只能过滤当前页。仅当确实不止一页
-           （total > size）时显示；单页时本地过滤即全量，此提示是噪音，故隐藏。
-           服务端搜索（把 search 下推到 /api/fb/accounts/deleted）列为 follow-up，
-           本次不引入后端改动。 -->
-      <div v-if="total > size" style="color:#e6a23c;font-size:12px;margin-top:6px;line-height:1.5;">
-        搜索仅覆盖当前页：本页 {{ allAccounts.length }} 条，共 {{ total }} 条已删除账户；查找其余账户请先翻页。
-      </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+      <el-input v-model="searchText" @input="onSearchInput"
+        placeholder="🔍 搜索账户ID / 名称 / 所属BM..." clearable style="flex:1;" />
+      <span style="color:#888;font-size:12px;white-space:nowrap;">共 {{ total }} 条</span>
     </div>
-    <el-table :data="filteredAccounts" size="small" border stripe v-if="filteredAccounts.length">
+    <el-table :data="allAccounts" size="small" border stripe v-if="allAccounts.length">
       <el-table-column prop="account_id" label="账户ID" min-width="130" show-overflow-tooltip />
       <el-table-column prop="name" label="账户名称" min-width="110">
         <template #default="{ row }">
@@ -42,7 +34,7 @@
         </template>
       </el-table-column>
     </el-table>
-    <el-empty v-else :description="allAccounts.length ? '无匹配结果' : '暂无已删除账户'" :image-size="50" />
+    <el-empty v-else :description="searchText ? '无匹配结果' : '暂无已删除账户'" :image-size="50" />
 
     <div v-if="total > size" style="display:flex;justify-content:flex-end;margin-top:12px;">
       <el-pagination v-model:current-page="page" :page-size="size" :total="total"
@@ -56,7 +48,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { fbApi } from '@/api/fb'
 import client from '@/api/client'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -79,15 +71,7 @@ const total = ref(0)
 // （读 `/statuses/list` 到本地再查表），避免为此改后端查询。
 const statusOptions = ref([])
 
-const filteredAccounts = computed(() => {
-  const q = searchText.value.toLowerCase().trim()
-  if (!q) return allAccounts.value
-  return allAccounts.value.filter(a =>
-    (a.account_id || '').toLowerCase().includes(q) ||
-    (a.name || '').toLowerCase().includes(q) ||
-    (a.bms || []).some(b => (b.name || '').toLowerCase().includes(q))
-  )
-})
+let searchTimer = null
 
 function optName(id) {
   if (id === null || id === undefined || id === '') return ''
@@ -104,18 +88,28 @@ async function loadStatusOptions() {
 
 async function load() {
   try {
-    const res = await fbApi.listDeleted({ page: page.value, size: size.value })
+    const res = await fbApi.listDeleted({
+      page: page.value, size: size.value, search: searchText.value,
+    })
     allAccounts.value = res.items || []
     total.value = res.total || 0
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '加载失败')
   }
-  searchText.value = ''
 }
 
-// 每次打开重置到第 1 页并重取状态表（状态表可能在别处被改过）
+// 搜索走服务端：分页后前端只有当前页，本地过滤会漏掉其余页的匹配项。
+// 必须重置到第 1 页 —— 否则搜完停在第 5 页可能落在空页、看不到结果。
+function onSearchInput() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => { page.value = 1; load() }, 300)
+}
+
+// 每次打开重置到第 1 页、清空搜索并重取状态表（状态表可能在别处被改过）
 function init() {
+  clearTimeout(searchTimer)
   page.value = 1
+  searchText.value = ''
   loadStatusOptions()
   load()
 }
@@ -125,6 +119,9 @@ function init() {
 // 例外：当前页被删空且不在第一页时，回退一页重取，避免停在空白页。
 async function afterRowRemoved() {
   emit('changed')
+  // 本页是局部移除（不重取），total 是服务端真值快照，得同步减一，
+  // 否则「共 N 条」与表里实际行数对不上。回退页时 load() 会刷成新值。
+  total.value = Math.max(0, total.value - 1)
   if (!allAccounts.value.length && page.value > 1) {
     page.value -= 1
     await load()

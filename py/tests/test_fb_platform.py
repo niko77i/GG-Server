@@ -1640,3 +1640,157 @@ class TestFbBatchCreate:
         assert data["created"] == 1
         assert data["errors"] == []
         assert _fb_accounts_by_ids(["9100018"])[0]["name"] == "123 9100018"
+
+
+def _fb_acquired_by_ids(account_ids):
+    """按 account_id 读回 fb_accounts.acquired_date（断言必须查库）。"""
+    db = database.get_db()
+    ph = ",".join(["?"] * len(account_ids))
+    rows = db.execute(
+        f"SELECT account_id, acquired_date FROM fb_accounts WHERE account_id IN ({ph})",
+        list(account_ids)).fetchall()
+    db.close()
+    return {r["account_id"]: r["acquired_date"] for r in rows}
+
+
+class TestFbBatchCreateAcquiredDate:
+    """到手时间（`acquired_date`）—— 共用默认值 + 逐行 overrides 两条路径都落库。
+
+    后端本已支持该字段（`batch_create_accounts` 的 common 与 override 分支），
+    本类钉住前端依赖的契约：格式 `YYYY-MM-DD` 原样存文本；空串（用户清空日期）
+    存空串而不是 None / 报错。
+    """
+
+    def test_common_acquired_date_lands(self, client):
+        hdr, _ = _fb_user(client, "t_bc_acq")
+        data = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100020", "9100021"], "acquired_date": "2026-01-02",
+        }, headers=hdr).get_json()
+        assert data["created"] == 2
+        assert set(_fb_acquired_by_ids(["9100020", "9100021"]).values()) == {"2026-01-02"}
+
+    def test_override_acquired_date_wins(self, client):
+        hdr, _ = _fb_user(client, "t_bc_acqov")
+        client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100022", "9100023"], "acquired_date": "2026-01-02",
+            "overrides": {"9100022": {"acquired_date": "2025-12-31"}},
+        }, headers=hdr)
+        got = _fb_acquired_by_ids(["9100022", "9100023"])
+        assert got["9100022"] == "2025-12-31"     # override 生效
+        assert got["9100023"] == "2026-01-02"     # 未覆盖的走共用值
+
+    def test_empty_acquired_date_is_empty_string(self, client):
+        """用户清空日期 ⇒ 前端传空串 ⇒ 落库为空串（不是 None、不是报错）。"""
+        hdr, _ = _fb_user(client, "t_bc_acqempty")
+        data = client.post("/api/fb/accounts/batch-create", json={
+            "account_ids": ["9100024"], "acquired_date": "",
+        }, headers=hdr).get_json()
+        assert data["created"] == 1
+        assert _fb_acquired_by_ids(["9100024"])["9100024"] == ""
+
+
+def _mk_deleted_fb_account(db, owner_id, account_id, name="已删账户"):
+    """建一条**已软删**的 FB 账户，用于回收站列表/搜索用例。"""
+    db.execute(
+        "INSERT INTO fb_accounts(name, account_id, owner_id, deleted_at) "
+        "VALUES(?,?,?,datetime('now','localtime'))", (name, account_id, owner_id))
+    db.commit()
+    return db.execute("SELECT id FROM fb_accounts WHERE account_id=?",
+                      (account_id,)).fetchone()["id"]
+
+
+class TestFbDeletedAccountsSearch:
+    """GET /api/fb/accounts/deleted —— 服务端搜索（分页端点）。
+
+    形状照 `py/tests/test_deleted_pagination.py` 的 GG/TT 同名端点用例：
+    搜索下推到服务端，前端不再做「只过滤当前页」的本地过滤。
+    """
+
+    @staticmethod
+    def _seed(user_id, n, prefix):
+        db = database.get_db()
+        for i in range(n):
+            _mk_deleted_fb_account(db, user_id, f"{prefix}{i:04d}", f"{prefix}名称{i}")
+        db.close()
+
+    def test_search_by_account_id(self, client):
+        hdr, uid = _fb_user(client, "t_ds_id")
+        self._seed(uid, 3, "seed")
+        db = database.get_db()
+        _mk_deleted_fb_account(db, uid, "FINDME_FB", "普通名")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?search=FINDME_FB", headers=hdr).get_json()
+        assert body["total"] == 1
+        assert body["items"][0]["account_id"] == "FINDME_FB"
+
+    def test_search_by_name(self, client):
+        hdr, uid = _fb_user(client, "t_ds_name")
+        self._seed(uid, 3, "seed")
+        db = database.get_db()
+        _mk_deleted_fb_account(db, uid, "dsname001", "独特名称")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?search=独特名称", headers=hdr).get_json()
+        assert body["total"] == 1
+        assert body["items"][0]["account_id"] == "dsname001"
+
+    def test_search_by_bm_name(self, client):
+        """所属 BM 名也能搜到 —— 与前端原来的客户端过滤口径一致（回归守卫）。"""
+        hdr, uid = _fb_user(client, "t_ds_bm")
+        db = database.get_db()
+        bm = _mk_fb_bm(db, uid, "T-DS-BM", "独特BM名")
+        pk = _mk_fb_account(db, uid, "dsbm001", "带BM的户", bm_pk=bm)
+        db.execute("UPDATE fb_accounts SET deleted_at=datetime('now','localtime') WHERE id=?",
+                   (pk,))
+        db.commit()
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?search=独特BM名", headers=hdr).get_json()
+        assert body["total"] == 1
+        assert body["items"][0]["account_id"] == "dsbm001"
+
+    def test_search_does_not_leak_other_users_deleted(self, client):
+        """**归属隔离在搜索路径上仍成立（本任务最重要的腿）。**
+
+        别人的已删账户即使 account_id 完全匹配，也不得出现在我的搜索结果里。
+        去掉 where 里的 owner 过滤本用例变红。
+        """
+        a_hdr, _ = _fb_user(client, "t_ds_iso_a")
+        _, b_id = _fb_user(client, "t_ds_iso_b")
+        db = database.get_db()
+        _mk_deleted_fb_account(db, b_id, "FINDME_SHARED", "B的户")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?search=FINDME_SHARED",
+                          headers=a_hdr).get_json()
+        assert body["total"] == 0
+        assert body["items"] == []
+
+    def test_cross_user_role_can_search_others(self, client):
+        """**对照腿**：跨用户角色能搜到别人的（防「一律看不见」的过度收口）。"""
+        _, b_id = _fb_user(client, "t_ds_x_b")
+        dev_hdr, _ = _fb_user(client, "t_ds_x_dev", role="developer", platform="fb")
+        db = database.get_db()
+        _mk_deleted_fb_account(db, b_id, "FINDME_XUSER", "B的户")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?search=FINDME_XUSER",
+                          headers=dev_hdr).get_json()
+        assert body["total"] == 1
+        assert body["items"][0]["account_id"] == "FINDME_XUSER"
+
+    def test_no_search_matches_adding_param(self, client):
+        """**纯增量对照**：不传 `search` 时结果与加参数前一致。
+
+        判据独立于实现：先按库里的实际已删行数校验 total / 条目集合，
+        再确认「显式传空 search」与「不传」逐项（含顺序）相同。
+        """
+        hdr, uid = _fb_user(client, "t_ds_plain")
+        self._seed(uid, 5, "plain")
+        db = database.get_db()
+        # 混入一条未删除的：回收站不得包含它（证明 deleted_at 过滤未被搜索改动波及）
+        _mk_fb_account(db, uid, "PLAINLIVE", "活的")
+        db.close()
+        body = client.get("/api/fb/accounts/deleted?size=200", headers=hdr).get_json()
+        assert body["total"] == 5
+        assert body["page"] == 1 and body["size"] == 200
+        assert {a["account_id"] for a in body["items"]} == {f"plain{i:04d}" for i in range(5)}
+
+        empty = client.get("/api/fb/accounts/deleted?size=200&search=", headers=hdr).get_json()
+        assert [a["id"] for a in empty["items"]] == [a["id"] for a in body["items"]]
