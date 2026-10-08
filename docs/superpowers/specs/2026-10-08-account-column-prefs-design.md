@@ -453,6 +453,18 @@ const getColumnElIndex = (children, child) => Array.prototype.indexOf.call(child
 - **验证未覆盖**：列宽像素级与改造前的一致性（注册表宽度已逐值核对过，风险低）；
   FB 编辑/删除按钮的实际提交行为（操作列是锁定列、markup 逐字未动）。
 
+**已补齐的验证（2026-10-08 追加）**：T7-T9 当时只验了「内联编辑按钮*存在*」，而 `el-select + @change`
+与被验过的「改名」（`el-input + @keyup.enter`）**结构不同** —— 是表格被 `v-for` 包裹后最可能断的地方。
+已用无头 Chromium 补测三类并**直接查库核对落库**：
+
+| 编辑 | 类型 | 结果 |
+|---|---|---|
+| 时区 | `el-select` + `allow-create` | 单元格更新 + 刷新后仍为 `Europe/Berlin` ✓ |
+| 代理 | `el-select` + `@change` | 单元格更新 + 刷新后仍为「探针代理」 ✓ |
+| 状态 | `el-select` + `@change` | 单元格更新为「验证」；库中 `status_id` 已变 ✓ |
+
+（状态那条改完会被面板默认的「存活」过滤筛掉，故落库判据走数据库而非界面。）
+
 ### 9.4 顺带发现的**既存缺陷**（非本功能引入，不在本功能范围）
 
 `frontend/src/views/fb/FbBmPanel.vue:248` 的 `res.data.migrated_accounts` 与「响应已被
