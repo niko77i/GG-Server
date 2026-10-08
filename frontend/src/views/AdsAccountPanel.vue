@@ -215,7 +215,6 @@ import ColumnSettings from '@/components/ColumnSettings.vue'
 import { PANEL_KEYS, GG_ADS_COLUMNS } from '@/constants/accountColumns'
 import { indexByKey } from '@/utils/columnPrefsLogic.mjs'
 import { useColumnPrefsStore } from '@/stores/columnPrefs'
-import { useAuthStore } from '@/stores/auth'
 import { useOwnerPicker } from '@/composables/useOwnerPicker'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
@@ -659,8 +658,8 @@ async function retrySheetWrite(row) {
 // ===== 「户归属」列（仅户管可见可编辑）=====
 // 视觉规格：docs/superpowers/specs/2026-09-24-huguan-frontend-visual-design.md §5
 // 状态 / 水合时机的惰性加载 / 乐观更新均封装在 useOwnerPicker（GG 与 TT 逐字同构，只差 reassign 实现）。
-// authStore 留给列上的 v-if="authStore.isHuguan"（§5.2：非户管整个字段不渲染）。
-const authStore = useAuthStore()
+// 角色闸门（§5.2：非户管整个字段不渲染）已上移到列注册表 accountColumns.js 的
+// `available: (auth) => auth.isHuguan`，模板与脚本均无 v-if 依赖，此处不再引入 authStore。
 const {
   ownerOptions,
   ownerOptionsLoaded,

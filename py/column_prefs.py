@@ -86,7 +86,12 @@ def load_prefs(db, user_id: int) -> dict:
         return {}
     try:
         loaded = json.loads(row["value"])
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
+        # RecursionError 必须单列：它是 RuntimeError 的子类，**不属于**
+        # ValueError/TypeError 族，光靠这两个接不住。超深嵌套 JSON（约 >1000 层）
+        # 会让解析器爆栈，这是「任何畸形存量值都不许打成 500」这条不变量唯一
+        # 没盖住的口子。触发需往共享 config 表写入病态深度，无合法路径可达
+        # （写入端只落 ≤64 项扁平常量），纯防御。
         return {}
     if not isinstance(loaded, dict):
         return {}

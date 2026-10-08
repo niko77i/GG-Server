@@ -72,6 +72,27 @@ def test_load_prefs_degrades_on_garbage(app, raw):
     assert prefs == {}, f"畸形值 {raw!r} 未被降级：{prefs}"
 
 
+def test_load_prefs_survives_deeply_nested_json(app):
+    """超深嵌套 JSON 触发 RecursionError，必须被兜住返回 {}，不许打成 500。
+
+    RecursionError 是 RuntimeError 的子类，不在 `(ValueError, TypeError)` 族里，
+    是「任何畸形存量值都不许抛异常」这条不变量的最后一道口子（设计 §4.4）。
+    写入端只落 ≤64 项扁平常量，病态深度无合法路径可达，故纯防御。
+    """
+    deep = "[" * 2000 + "]" * 2000
+    # 先钉住前提：这份输入确实会爆栈。少了这一步，一旦日后 CPython 改了默认
+    # 递归上限，本用例会退化成「输入根本没触发 RecursionError」的空转通过。
+    with pytest.raises(RecursionError):
+        json.loads(deep)
+    _put_raw(9994, deep)
+    db = database.get_db()
+    try:
+        prefs = cp.load_prefs(db, 9994)
+    finally:
+        db.close()
+    assert prefs == {}
+
+
 @pytest.mark.parametrize("bad_hidden", [5, "x", None, {"a": 1}])
 def test_load_prefs_hidden_garbage_degrades_field_only(app, bad_hidden):
     """hidden 坏掉只降级该字段，order 原样保留（设计 §4.4「该字段降级」）。
