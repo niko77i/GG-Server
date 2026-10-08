@@ -31,6 +31,11 @@ def sheet_write_status():
     带 `business_key` → 回该项（含 pending/failed 中间态），供前端轮询；
     不带           → 只回需要提示的终态，供列表标记。
 
+    带 `target`（三期新增）→ 把结果限定在该写表目标上。多个 target 的 `business_key`
+    常常是同一个 `account_id`（三期的 4 个 target 全是），不过滤就只能看到 `updated_at`
+    最新的一行 —— 一个 target 的行会遮住另一个，静默漏报。**不传时行为与加该参数前
+    完全一致**，故一期 TT / 二期 GG 的既有前端不受影响。
+
     隔离约束写在 SQL 的 `WHERE user_id=?` 里，不在 Python 侧过滤。
     """
     db = get_db()

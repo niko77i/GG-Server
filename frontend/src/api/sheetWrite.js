@@ -2,7 +2,9 @@
 import client from './client'
 
 export const sheetWriteApi = {
-  // 带 business_key 供轮询单条；不带则只回需要提示的终态，供列表标记
+  // 带 business_key 供轮询单条；不带则只回需要提示的终态，供列表标记。
+  // 带 target 则限定该写表目标 —— 多个 target 常用同一个 account_id 作键，
+  // 不传就只回最新一行，会互相遮蔽。
   status({ platform, target, businessKey } = {}) {
     const params = { platform }
     if (target) params.target = target

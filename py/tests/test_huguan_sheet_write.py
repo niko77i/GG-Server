@@ -55,6 +55,32 @@ def test_all_four_targets_registered():
         assert t in sheet_write.TARGETS, f"target 未注册: {t}"
 
 
+def test_huguan_targets_register_no_rollback():
+    """零回滚是本期的**设计裁定**，不是实现细节 —— 四个 target 一律不得注册 rollback。
+
+    看板表是系统状态的投影（全镜像类），写表失败时回滚业务数据没有意义。
+    而 `_apply_final` 的分支完全由 `rollback` 是否为 None 决定：
+
+        rollback is None            → retry_failed        （镜像类：业务变更仍生效，用户自己处理）
+        rollback 返回 True          → rolled_back
+        rollback 返回 False / 抛异常 → rollback_abandoned
+
+    也就是说，一旦给任一 target 注册了 rollback，该 target 的最终失败**就不再落
+    retry_failed** —— 用户看到的文案（`sheetWriteHint` 按 status 分三套）、是否可重试、
+    以及 T6 卡片「N 项没写进表 + 用 warning 色调」的前提全部随之失效。
+
+    上面那条只断言了成员**存在**；这条钉住注册时的**取值**。
+    去掉 register_target 的 rollback=None 默认、或给任一 target 传了 rollback ⇒ 本用例红。
+    """
+    import routes.huguan_sheet_targets  # noqa: F401
+    for t in ("huguan_dashboard", "huguan_owner_channel",
+              "operator_dashboard_remark", "huguan_fb_acceptor"):
+        assert sheet_write.TARGETS[t]["rollback"] is None, (
+            f"{t} 是全镜像类，不得注册 rollback —— 注册后最终失败会落 "
+            f"rolled_back / rollback_abandoned 而非 retry_failed"
+        )
+
+
 def test_huguan_dashboard_sync_writes_all_n(client, monkeypatch):
     """整行刷新：N 户都要被写进表（守卫「只写第一户」那类静默漏写）。"""
     import google_sheets_service as gs

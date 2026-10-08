@@ -789,8 +789,8 @@ async function loadSheetWriteFailures() {
     const res = await sheetWriteApi.status({ platform: 'tt' })
     const map = {}
     for (const it of res.items || []) {
-      // 三期新增了 tt 平台的两个 target（huguan_dashboard / operator_dashboard_remark）；
-      // 不过滤会把它们的失败当成回收清单的失败标在账户行上（标错）。
+      // 三期给 tt 平台新增了三个 target（huguan_dashboard / huguan_owner_channel /
+      // operator_dashboard_remark）；不过滤会把它们的失败当成回收清单的失败标在账户行上（标错）。
       if (it.target !== RECYCLE_TARGET) continue
       map[it.business_key] = it
     }
