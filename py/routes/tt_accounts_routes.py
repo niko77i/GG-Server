@@ -222,6 +222,9 @@ def list_accounts():
     # 户类型可多选：**用重复查询参数**（?account_types=A&account_types=B），
     # 不用逗号分隔 —— 类型名是用户自己起的，完全可能含逗号，切开会静默筛不到任何行。
     account_types = [t.strip() for t in request.args.getlist("account_types") if t.strip()]
+    # 默认户类型（空 account_type 行的归属桶）在这里先算出来：筛选与 type_counts
+    # 必须走同一个 COALESCE 口径，两处都用它，故不能在 type_counts 那里才算。
+    default_type = _default_account_type_tt(db, uid)
 
     where = ["a.deleted_at IS NULL"]
     params = []
@@ -272,7 +275,12 @@ def list_accounts():
             params.append(status_id)
     if account_types:
         marks = ",".join("?" for _ in account_types)
-        where.append(f"a.account_type IN ({marks})")
+        # 口径必须与 type_counts 的 COALESCE 一致：空 account_type 的行在计数里被折进
+        # 默认类型那个桶，筛选也必须能筛出来，否则就是本文件在 status_id 上修过的
+        # 同一类缺陷 ——「按钮上写着 N、点下去对不上」。
+        where.append(f"COALESCE(NULLIF(a.account_type, ''), ?) IN ({marks})")
+        # ⚠️ 顺序：COALESCE 的 ? 在 IN 的 ? 之前，必须先 append default_type。
+        params.append(default_type)
         params += account_types
     if timezone:
         where.append("a.timezone = ?"); params.append(timezone)
@@ -332,7 +340,7 @@ def list_accounts():
     # 各户类型计数。口径与 status_counts **完全同底**：都基于 sc_where2
     # （含 search/bc/agent/timezone/owner，不含 status 与 account_types 自身）——
     # 两排按钮的数字必须能对上同一批账户，否则户管看到「两排加起来不等于总数」会怀疑数据。
-    default_type = _default_account_type_tt(db, uid)
+    # default_type 已在函数前段（account_types 取参之后）算好，此处复用，不再算第二遍。
     type_counts = {}
     for r in db.execute(
         "SELECT COALESCE(NULLIF(a.account_type, ''), ?) AS atype, COUNT(*) AS cnt "

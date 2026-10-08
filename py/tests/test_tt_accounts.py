@@ -1271,6 +1271,35 @@ def test_type_counts_ignores_type_filter_but_respects_search(client, tt_headers)
 
 
 def test_list_extra_blank_account_types_ignored(client, tt_headers):
-    data = client.get("/api/tt/accounts/list?account_types=&account_types=",
+    """空串 / 纯空白参数必须被忽略，不得被当成筛选值。"""
+    db = database.get_db()
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'a','6301','加白户', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'b','6302','企业户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+    data = client.get("/api/tt/accounts/list?account_types=&account_types=&account_types=%20",
                       headers=tt_headers).get_json()
     assert data["success"] is True
+    # 真的断言：空串/空白若被当成筛选值，会命中 0 行（COALESCE 口径下空串永不匹配）
+    assert data["total"] == 2, "空串/纯空白参数不得被当成筛选值"
+
+
+def test_type_filter_includes_blank_account_type_as_default(client, tt_headers):
+    """筛选口径必须与 type_counts 的 COALESCE 一致：空 account_type 的行在计数里
+    被折进默认类型「加白户」那个桶，筛选也必须能一并筛出来 —— 否则就是本文件在
+    status_id 上修过的同一类缺陷（按钮上写着 N、点下去对不上）。"""
+    db = database.get_db()
+    # account_type='' —— 三处 INSERT 目前不写该列，空类型行确实存在
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'blank','6401','', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'explicit','6402','加白户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+    data = client.get("/api/tt/accounts/list?account_types=加白户",
+                      headers=tt_headers).get_json()
+    assert data["type_counts"].get("加白户") == 2, "空类型行计入默认类型桶"
+    assert data["total"] == 2, "筛选口径必须与计数一致，空类型行也要能筛出来"
+    assert {i["advertiser_id"] for i in data["items"]} == {"6401", "6402"}
