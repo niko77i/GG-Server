@@ -43,6 +43,7 @@
         </el-select>
         <OwnerFilterSelect v-model="ownerId" @change="onOwnerChange" />
         <el-button @click="loadData">刷新</el-button>
+        <ColumnSettings :panel-key="PANEL_KEYS.FB_ADS" :registry="FB_ADS_COLUMNS" />
       </div>
     </el-card>
 
@@ -51,31 +52,32 @@
       <template #header>
         <span class="table-card__header-text">共 {{ total }} 个账户</span>
       </template>
-      <el-table :data="items" stripe border v-loading="loading" @selection-change="val => selected = val">
+      <el-table v-if="columnPrefs.ready" :data="items" stripe border v-loading="loading" @selection-change="val => selected = val">
         <el-table-column type="selection" width="45" />
-        <el-table-column prop="name" label="账户名" min-width="120" />
-        <el-table-column prop="account_id" label="账户ID" width="160" />
-        <el-table-column label="所属BM" min-width="140">
-          <template #default="{ row }">{{ row.bms?.map(b=>b.name).join(', ') }}</template>
-        </el-table-column>
-        <el-table-column label="位置" min-width="120">
-          <template #default="{ row }">
-            <span v-if="row.primary_bm_name">{{ row.primary_bm_name }}</span>
-            <span v-else style="color:#c0c4cc;">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="所属渠道" width="110">
-          <template #default="{ row }">{{ optName(channelOptions, row.channel_id) }}</template>
-        </el-table-column>
-        <el-table-column label="资产类型" width="110">
-          <template #default="{ row }">{{ optName(assetTypeOptions, row.asset_type_id) }}</template>
-        </el-table-column>
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">{{ optName(statusOptions, row.status_id) }}</template>
-        </el-table-column>
-        <el-table-column prop="operator" label="操作人" width="100" />
-        <el-table-column prop="timezone" label="时区" width="100" />
-        <el-table-column prop="acquired_date" label="到手时间" width="110" />
+        <!-- 自定义列：顺序与显隐来自 columnPrefs store（缺省走 FB_ADS_COLUMNS 默认顺序）。
+             各列内部 markup 逐字沿用改造前模板，仅搬进 v-for 并加分支条件。
+             纯 prop 列（name/account_id/operator/timezone/acquired_date）走 v-else 兜底。 -->
+        <template v-for="key in visibleOrder" :key="key">
+          <el-table-column v-if="key === 'bms'" v-bind="COL_ATTRS.bms">
+            <template #default="{ row }">{{ row.bms?.map(b=>b.name).join(', ') }}</template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'location'" v-bind="COL_ATTRS.location">
+            <template #default="{ row }">
+              <span v-if="row.primary_bm_name">{{ row.primary_bm_name }}</span>
+              <span v-else style="color:#c0c4cc;">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'channel'" v-bind="COL_ATTRS.channel">
+            <template #default="{ row }">{{ optName(channelOptions, row.channel_id) }}</template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'asset_type'" v-bind="COL_ATTRS.asset_type">
+            <template #default="{ row }">{{ optName(assetTypeOptions, row.asset_type_id) }}</template>
+          </el-table-column>
+          <el-table-column v-else-if="key === 'status'" v-bind="COL_ATTRS.status">
+            <template #default="{ row }">{{ optName(statusOptions, row.status_id) }}</template>
+          </el-table-column>
+          <el-table-column v-else v-bind="COL_ATTRS[key]" />
+        </template>
         <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
@@ -167,14 +169,24 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import client from '../../api/client'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
+import ColumnSettings from '@/components/ColumnSettings.vue'
 import FbAccountBatchImportModal from '@/components/fb/FbAccountBatchImportModal.vue'
 import FbAccountBatchLookupModal from '@/components/fb/FbAccountBatchLookupModal.vue'
 import FbAccountDeletedModal from '@/components/fb/FbAccountDeletedModal.vue'
+import { PANEL_KEYS, FB_ADS_COLUMNS } from '@/constants/accountColumns'
+import { indexByKey } from '@/utils/columnPrefsLogic.mjs'
+import { useColumnPrefsStore } from '@/stores/columnPrefs'
+
+// 自定义列：可见列顺序来自 columnPrefs store（缺省走注册表默认顺序）。
+// COL_ATTRS 是 key → 可 v-bind 列属性的索引，供各 v-if 分支取用。
+const columnPrefs = useColumnPrefsStore()
+const COL_ATTRS = indexByKey(FB_ADS_COLUMNS)
+const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.FB_ADS, FB_ADS_COLUMNS))
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
 const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selected = ref([])
