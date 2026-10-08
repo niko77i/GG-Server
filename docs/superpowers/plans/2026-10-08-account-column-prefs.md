@@ -1990,7 +1990,7 @@ const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.FB_ADS, 
 - [ ] **Step 2: 改造 `<el-table>` 区块**
 
 ```html
-      <el-table v-if="columnPrefs.ready" :data="items" stripe border v-loading="loading" @selection-change="onSelect">
+      <el-table v-if="columnPrefs.ready" :data="items" stripe border v-loading="loading" @selection-change="val => selected = val">
         <el-table-column type="selection" width="45" />
         <template v-for="key in visibleOrder" :key="key">
           <el-table-column v-if="key === 'bms'" v-bind="COL_ATTRS.bms">
