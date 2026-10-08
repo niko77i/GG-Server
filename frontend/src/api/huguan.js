@@ -1,10 +1,14 @@
 import api from './client'
 
 export const huguanApi = {
-  /** 当前户管的看板配置（GG / TT 两份） */
+  /** 当前户管的看板配置（GG / TT / FB 各一份）。tt 条目额外带
+   *  `tables: [{name, sheet_name}]`（多张账户表），并保留 `sheet_name`
+   *  （= tables[0].sheet_name）供老前端；gg/fb 不返回 tables。 */
   getConfig: () => api.get('/huguan/dashboard'),
 
-  /** 保存某平台的看板配置（platform: 'gg' | 'tt'） */
+  /** 保存某平台的看板配置（platform: 'gg' | 'tt' | 'fb'）。
+   *  tt 传 `tables: [{name, sheet_name}]`（非空、类型名与工作表名互不重复）；
+   *  gg/fb 传单个 `sheet_name`。 */
   saveConfig: (body) => api.post('/huguan/dashboard', body),
 
   /** 系统 → 表：全量刷新（body 由封装补 platform） */
