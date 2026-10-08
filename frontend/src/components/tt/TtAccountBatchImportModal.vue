@@ -158,24 +158,32 @@
               </el-col>
             </el-row>
             <el-row :gutter="12">
-              <el-col :span="8">
+              <el-col :span="6">
                 <el-form-item label="时区" style="margin-bottom:8px;">
                   <el-select v-model="form.timezone" size="small" filterable clearable placeholder="选择时区" style="width:100%;">
                     <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
                   </el-select>
                 </el-form-item>
               </el-col>
-              <el-col :span="8">
+              <el-col :span="6">
                 <el-form-item label="代理" required style="margin-bottom:8px;">
                   <el-select v-model="form.agent" size="small" filterable placeholder="选择代理" style="width:100%;">
                     <el-option v-for="a in agentOptions" :key="a.id" :label="a.name" :value="a.id" />
                   </el-select>
                 </el-form-item>
               </el-col>
-              <el-col :span="8">
+              <el-col :span="6">
                 <el-form-item label="状态" style="margin-bottom:8px;">
                   <el-select v-model="form.status" size="small" style="width:100%;" filterable>
                     <el-option v-for="s in statusOptions" :key="s.id" :label="s.name" :value="s.id" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="户类型" style="margin-bottom:8px;">
+                  <el-select v-model="form.account_type" size="small" style="width:100%;"
+                             filterable allow-create placeholder="选择户类型">
+                    <el-option v-for="t in typeOptions" :key="t" :label="t" :value="t" />
                   </el-select>
                 </el-form-item>
               </el-col>
@@ -222,7 +230,11 @@ import { ttApi, ttAccountsApi } from '@/api/tt'
 import client from '@/api/client'
 import { ElMessage } from 'element-plus'
 
-const props = defineProps({ visible: Boolean })
+const props = defineProps({
+  visible: Boolean,
+  // 户类型候选由 TtAccountPanel 传入（弹窗自己不请求，理由见 TtAccountModal）
+  typeOptions: { type: Array, default: () => [] },
+})
 const emit = defineEmits(['update:visible', 'saved'])
 const auth = useAuthStore()
 const saving = ref(false)
@@ -300,6 +312,7 @@ const form = reactive({
   agent: null,
   status: null,
   acquired_date: '',
+  account_type: '加白户',
 })
 
 // ===== 新账户逐行编辑 =====
@@ -460,6 +473,7 @@ async function init() {
   form.agent = null
   form.status = defaultStatusId
   form.acquired_date = today
+  form.account_type = '加白户'
   idText.value = ''
   allFound.value = []
   claimSelection.value = []
@@ -512,6 +526,7 @@ async function submit() {
         agent_id: form.agent,
         status_id: form.status,
         acquired_date: form.acquired_date,
+        account_type: form.account_type,
         overrides: Object.keys(overrides).length ? overrides : undefined,
       })
       created = res.created || 0

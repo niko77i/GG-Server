@@ -29,6 +29,12 @@
           <el-option v-for="s in statusOptions" :key="s.id" :label="s.name" :value="s.id" />
         </el-select>
       </el-form-item>
+      <el-form-item label="户类型">
+        <el-select v-model="form.account_type" style="width:100%;" filterable allow-create
+                   placeholder="选择或输入户类型">
+          <el-option v-for="t in typeOptions" :key="t" :label="t" :value="t" />
+        </el-select>
+      </el-form-item>
       <el-form-item label="国家">
         <el-input v-model="form.country" />
       </el-form-item>
@@ -54,7 +60,13 @@ import { ttApi, ttAccountsApi } from '@/api/tt'
 import client from '@/api/client'
 import { ElMessage } from 'element-plus'
 
-const props = defineProps({ visible: Boolean, editAccount: { type: Object, default: null } })
+const props = defineProps({
+  visible: Boolean,
+  editAccount: { type: Object, default: null },
+  // 户类型候选由 TtAccountPanel 传入（弹窗自己不请求：类型清单只有户管知道，
+  // 投手/管理员读不到户管配置，由面板统一算一份给三个弹窗共用）。
+  typeOptions: { type: Array, default: () => [] },
+})
 const emit = defineEmits(['update:visible', 'saved'])
 const saving = ref(false)
 const bcOptions = ref([])
@@ -64,6 +76,7 @@ const accountIdError = ref('')
 const form = reactive({
   name: '', advertiser_id: '', bc_id: '', timezone: '',
   agent: null, status: null, acquired_date: '', country: '', consumption: '',
+  account_type: '加白户',
 })
 
 function buildTimezoneOptions() {
@@ -116,6 +129,7 @@ async function init() {
       timezone: a.timezone || '', agent: matchedAgent ? matchedAgent.id : null,
       status: matchedStatus ? matchedStatus.id : null,
       acquired_date: a.acquired_date || '', country: a.country || '', consumption: a.consumption || '',
+      account_type: a.account_type || '加白户',
     })
   } else {
     const d = new Date()
@@ -124,6 +138,7 @@ async function init() {
     Object.assign(form, {
       name: '', advertiser_id: '', bc_id: '', timezone: '', agent: null,
       status: defaultStatusId, acquired_date: today, country: '', consumption: '',
+      account_type: '加白户',
     })
   }
 }
@@ -139,6 +154,7 @@ async function submit() {
       name: form.name, bc_id: form.bc_id || null, timezone: form.timezone,
       agent_id: form.agent, status_id: form.status,
       acquired_date: form.acquired_date, country: form.country, consumption: form.consumption,
+      account_type: form.account_type,
     }
     if (props.editAccount) {
       await ttAccountsApi.update(props.editAccount.id, body)

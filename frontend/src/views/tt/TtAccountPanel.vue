@@ -25,6 +25,17 @@
         <el-button v-if="selected.length" @click="batchDelete" style="margin-left:auto;">🗑 批量删除</el-button>
       </div>
 
+      <!-- 户类型按钮（多选）：候选集来自实际数据（type_counts） -->
+      <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center;">
+        <el-button v-for="t in availableTypes" :key="t"
+                   :type="accountTypes.includes(t) ? 'primary' : 'default'"
+                   size="small" @click="toggleType(t)" style="font-weight:600;">
+          {{ t }} {{ typeCounts[t] || 0 }}
+        </el-button>
+        <el-button v-if="accountTypes.length" size="small" type="info" plain
+                   @click="clearTypes">展示全部</el-button>
+      </div>
+
       <!-- 状态按钮 -->
       <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center;">
         <el-button v-for="s in availableStatuses" :key="s" :type="isStatusActive(s) ? 'primary' : 'default'" size="small" @click="toggleStatus(s)" style="font-weight:600;">{{ s }} {{ statusCounts[s] || 0 }}</el-button>
@@ -196,6 +207,14 @@
                 @change="(v) => changeOwner(row, v)" />
             </template>
           </el-table-column>
+          <!-- 户类型。空值兜底成「加白户」—— 与后端 COALESCE 的默认桶逐字一致，
+               否则历史行（account_type 为空串）会显示成空白。
+               分支位置**必须在 v-if/v-else-if 链里**（而不是靠下面的纯 prop 兜底）：
+               否则哪天给它加个插槽会静默走兜底、插槽无声丢失。 -->
+          <el-table-column v-else-if="key === 'account_type'" prop="account_type" label="户类型"
+                           min-width="110" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.account_type || '加白户' }}</template>
+          </el-table-column>
           <!-- 纯 prop 列兜底（当前覆盖：advertiser_id / owner_change_note / acquired_date）。
                ⚠️ 新增**带自定义插槽**的列时，必须在上方补显式 v-if/v-else-if 分支，
                否则它会静默走这里、被渲染成纯 prop 列，插槽（含 #header，如「户归属 ⓘ」）
@@ -222,14 +241,16 @@
       </div>
     </div>
 
-    <TtAccountModal v-model:visible="acModalVisible" :edit-account="acEditAccount" @saved="load" />
+    <TtAccountModal v-model:visible="acModalVisible" :edit-account="acEditAccount"
+                    :type-options="typeOptions" @saved="load" />
     <TtAccountDetailModal v-model:visible="detailVisible" :account="detailAccount" />
     <TtAccountDeletedModal v-model:visible="deletedVisible" @restored="load" />
-    <TtAccountBatchImportModal v-model:visible="importVisible" @saved="load" />
+    <TtAccountBatchImportModal v-model:visible="importVisible"
+                               :type-options="typeOptions" @saved="load" />
     <TtAccountBatchLookupModal v-model:visible="lookupVisible" />
     <TtRechargeModal v-model:visible="rechargeVisible" :default-account-id="rechargeDefaultAccountId" @saved="load" />
     <TtRechargeBatchModal v-model:visible="rechargeBatchVisible" :accounts="selected" @saved="load" />
-    <TtAccountSyncModal v-model:visible="syncVisible" @synced="load" />
+    <TtAccountSyncModal v-model:visible="syncVisible" :type-options="typeOptions" @synced="load" />
     <TtRecycleReasonModal v-model:visible="recycleVisible" :mode="recycleTarget?.mode" :account="recycleTarget?.account" :accounts="recycleTarget?.accounts" :status-id="recycleTarget?.statusId" :status-name="recycleTarget?.statusName" @saved="onRecycleSaved" />
   </div>
 </template>
@@ -277,6 +298,8 @@ const agentId = ref('')
 const statusId = ref('')
 const timezone = ref('')
 const statusCounts = ref({})
+const accountTypes = ref([])        // 多选：空数组 = 不加类型条件
+const typeCounts = ref({})          // 后端给的「户类型 → 数量」，口径同 statusCounts
 
 const selected = ref([])
 const bcOptions = ref([])
@@ -380,11 +403,22 @@ async function load() {
   if (statusId.value) params.status_id = statusId.value
   if (timezone.value) params.timezone = timezone.value
   if (ownerId.value) params.owner_id = ownerId.value
+  // 户类型多选。**不要**自己 join 成逗号分隔的串 —— 类型名是用户起的，完全可能含逗号，
+  // 切开会静默筛不到任何行。这里要的是重复查询参数 `?account_types=A&account_types=B`，
+  // 而 axios 默认把数组展开成 `account_types[]=A&account_types[]=B`（键名带 `[]`），
+  // 后端 `request.args.getlist("account_types")` 读不到 ⇒ 必须显式指定 indexes:null。
+  if (accountTypes.value.length) params.account_types = accountTypes.value
   try {
-    const res = await ttAccountsApi.list(params)
+    const res = await client.get('/tt/accounts/list', {
+      params, paramsSerializer: { indexes: null },
+    })
     items.value = res.items || []
     total.value = res.total || 0
     statusCounts.value = res.status_counts || {}
+    typeCounts.value = res.type_counts || {}
+    // 首次加载拿到计数后才知道库里有哪些类型，此时才谈得上「默认勾哪个」。
+    // 勾上了就重查一次列表（只在打开面板时发生一次）。
+    if (!defaultTypeApplied.value) { applyDefaultType(); if (accountTypes.value.length) return load() }
     loadSheetWriteFailures()
   } catch (e) {
     ElMessage.error('加载失败: ' + (e.response?.data?.error || e.message))
@@ -413,6 +447,53 @@ function toggleStatus(name) {
   load()
 }
 function clearStatus() { statusId.value = ''; page.value = 1; load() }
+
+// 户类型候选集 = 库里实际出现过的类型（计数 > 0），**不是**配置清单 ——
+// 配置被清空时按钮也不该凭空消失。
+// 顺序：按计数从多到少。为什么不用「配置清单顺序」：类型清单只存在于户管自己的
+// `huguan_dashboard_<uid>` 配置里，`GET /api/tt/settings` 拿不到它，而按钮要对
+// 投手 / admin 也一致可见 —— 用一个所有人都能算出来的稳定顺序，比给不同角色不同
+// 顺序更不容易出错。真正需要确定的只有**默认勾选哪一项**，见 applyDefaultType。
+const availableTypes = computed(() => {
+  const counted = Object.keys(typeCounts.value).filter(t => (typeCounts.value[t] || 0) > 0)
+  return counted.sort((a, b) => (typeCounts.value[b] || 0) - (typeCounts.value[a] || 0))
+})
+
+function toggleType(name) {
+  const i = accountTypes.value.indexOf(name)
+  if (i >= 0) accountTypes.value.splice(i, 1)
+  else accountTypes.value.push(name)
+  page.value = 1
+  load()
+}
+
+const defaultTypeApplied = ref(false)
+/** 首次加载完成后自动勾选默认类型（`加白户`；若库里没有该类型则勾计数最多的那个）。 */
+function applyDefaultType() {
+  if (defaultTypeApplied.value) return
+  const counted = Object.keys(typeCounts.value).filter(t => (typeCounts.value[t] || 0) > 0)
+  if (!counted.length) return                      // 一个新账户都没有 → 不加类型条件
+  // 兜底取**计数最多**的那个，与按钮的排序（availableTypes）同一口径。
+  // 不用 `counted[0]`：它只是 SQL GROUP BY 的返回序（按类型名升序），不是「最主要的类型」。
+  const preferred = counted.includes('加白户') ? '加白户' : availableTypes.value[0]
+  accountTypes.value = [preferred]
+  defaultTypeApplied.value = true
+}
+
+function clearTypes() {
+  accountTypes.value = []
+  defaultTypeApplied.value = true   // 用户显式清了，别再自动勾回去
+  page.value = 1
+  load()
+}
+
+// 弹窗下拉的候选：库里已出现过的类型 + 两个内置默认值（「加白户」是后端空值兜底，
+// 「企业户」是本次需求引入的第二种）。弹窗不自己发请求，一律由本面板传进去。
+const typeOptions = computed(() => {
+  const s = new Set(['加白户', '企业户'])
+  for (const k of Object.keys(typeCounts.value)) s.add(k)
+  return [...s]
+})
 
 // BC 分组：相邻相同 BC 归一组，奇偶交替着色
 const bcGroupIndex = computed(() => {

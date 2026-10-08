@@ -187,6 +187,12 @@
           <el-table ref="ownerTblRef" :data="hdOwnerChanges" size="small" row-key="account_id"
                     border @selection-change="v => selOwner = v">
             <el-table-column type="selection" width="42" />
+            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="表行" width="86">
               <template #default="{ row }">
                 <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -220,6 +226,12 @@
             <div style="font-size:12px;">表里这些列是空的，同步后系统里对应的值会被清掉。</div>
           </el-alert>
           <el-table :data="hdClearingShown" size="small" border style="margin-top:8px;">
+            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="表行" width="86">
               <template #default="{ row }">
                 <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -246,6 +258,12 @@
           <el-table ref="createTblRef" :data="hdCreate" size="small" row-key="account_id"
                     border @selection-change="v => selCreate = v">
             <el-table-column type="selection" width="42" />
+            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="表行" width="86">
               <template #default="{ row }">
                 <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -289,6 +307,12 @@
                 </el-table>
               </template>
             </el-table-column>
+            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="表行" width="86">
               <template #default="{ row }">
                 <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -317,6 +341,12 @@
               <span style="margin-left:12px;font-size:12px;color:#6b7280;">系统里已删除的账户，本次不动。</span>
             </template>
             <el-table :data="hdSkip" size="small" border>
+              <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                  <span v-else>—</span>
+                </template>
+              </el-table-column>
               <el-table-column label="表行" width="86">
                 <template #default="{ row }">
                   <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -336,6 +366,12 @@
               <span style="margin-left:12px;font-size:12px;color:#6b7280;">这些行没能同步，需要你去表里改。</span>
             </template>
             <el-table :data="hdWarnings" size="small" border>
+              <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                  <span v-else>—</span>
+                </template>
+              </el-table-column>
               <el-table-column label="表行" width="86">
                 <template #default="{ row }">
                   <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
