@@ -11,6 +11,7 @@ import sqlite3
 import pytest
 
 import database
+import huguan_dashboard as hd
 from huguan_dashboard import apply_diff
 
 
@@ -4557,3 +4558,112 @@ class TestUpdateAccountPushesRemark:
         assert resp.status_code == 200
         assert not any(c["key_col"] == "D" for c in captured), \
             "不带 remark 的更新不得触发投手看板备注推送"
+
+
+# ---------- Task 2: 多账户表配置 ----------
+
+class TestPlatformTables:
+    def _db(self):
+        return database.get_db()
+
+    def test_legacy_single_sheet_reads_as_one_table_named_白户(self, client):
+        """存量 tt:{spreadsheet_id, sheet_name} → 单条「加白户」，且**不写盘**。"""
+        db = self._db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_9', ?)",
+                   (json.dumps({"tt": {"spreadsheet_id": "SS", "sheet_name": "总户"}}),))
+        db.commit()
+        tables = hd.get_platform_tables(db, 9, "tt")
+        assert tables == [{"name": "加白户", "sheet_name": "总户"}]
+        raw = db.execute("SELECT value FROM config WHERE key='huguan_dashboard_9'").fetchone()[0]
+        assert json.loads(raw)["tt"] == {"spreadsheet_id": "SS", "sheet_name": "总户"}, \
+            "读路径不许改写磁盘"
+        db.close()
+
+    def test_multi_table_read(self, client):
+        db = self._db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_9', ?)",
+                   (json.dumps({"tt": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "总户-加白"},
+                       {"name": "企业户", "sheet_name": "总户-企业"}]}}),))
+        db.commit()
+        assert [t["name"] for t in hd.get_platform_tables(db, 9, "tt")] == ["加白户", "企业户"]
+        db.close()
+
+    def test_gg_and_fb_stay_single_element(self, client):
+        db = self._db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_9', ?)",
+                   (json.dumps({"gg": {"spreadsheet_id": "G", "sheet_name": "看板G"}}),))
+        db.commit()
+        assert hd.get_platform_tables(db, 9, "gg") == [{"name": "", "sheet_name": "看板G"}]
+        assert hd.get_platform_config(db, 9, "gg") == {
+            "spreadsheet_id": "G", "sheet_name": "看板G"}
+        db.close()
+
+    def test_save_legacy_signature_unchanged(self, client):
+        """tables=None 时必须逐字节保持旧行为（gg/fb 走这条路）。"""
+        db = self._db()
+        hd.save_config(db, 9, "gg", "G1", "看板1")
+        db.commit()
+        assert hd.get_platform_config(db, 9, "gg") == {
+            "spreadsheet_id": "G1", "sheet_name": "看板1"}
+        db.close()
+
+    def test_save_tables_writes_new_shape(self, client):
+        db = self._db()
+        hd.save_config(db, 9, "tt", "T1", "", tables=[
+            {"name": "加白户", "sheet_name": "总户-加白"},
+            {"name": "企业户", "sheet_name": "总户-企业"}])
+        db.commit()
+        assert [t["name"] for t in hd.get_platform_tables(db, 9, "tt")] == ["加白户", "企业户"]
+        db.close()
+
+    def test_save_tables_renames_and_cascades_to_accounts(self, client):
+        """改名必须级联回填 tt_accounts.account_type，否则存量账户从按钮里消失。"""
+        db = self._db()
+        db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type) "
+                   "VALUES('a','111','加白户')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_9', ?)",
+                   (json.dumps({"tt": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "总户-加白"}]}}),))
+        db.commit()
+        hd.save_config(db, 9, "tt", "SS", "", tables=[
+            {"name": "白户", "sheet_name": "总户-加白"}])
+        db.commit()
+        got = db.execute("SELECT account_type FROM tt_accounts WHERE advertiser_id='111'").fetchone()[0]
+        assert got == "白户"
+        db.close()
+
+    def test_default_account_type_prefers_first_configured(self, client):
+        db = self._db()
+        assert hd._default_account_type(db, 9) == hd.TT_DEFAULT_ACCOUNT_TYPE
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_9', ?)",
+                   (json.dumps({"tt": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "企业户", "sheet_name": "X"}]}}),))
+        db.commit()
+        assert hd._default_account_type(db, 9) == "企业户"
+        db.close()
+
+
+class TestGroupRowsBySheet:
+    def test_tt_splits_by_type_and_skips_unknown(self, client):
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_7', ?)",
+                   (json.dumps({"tt": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "总户-加白"}]}}),))
+        db.commit()
+        rows = [{"account_id": "1", "account_type": "加白户", "cells": {"A": "x"}},
+                {"account_id": "2", "account_type": "企业户", "cells": {"A": "y"}}]
+        groups, skipped = hd.group_rows_by_sheet(db, 7, "tt", rows)
+        assert [(s, [r["account_id"] for r in rs]) for s, rs in groups] == [("总户-加白", ["1"])]
+        assert skipped == ["企业户"], "查不到工作表的类型要报出来，绝不能落到第一张表"
+        db.close()
+
+    def test_gg_single_group(self, client):
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_7', ?)",
+                   (json.dumps({"gg": {"spreadsheet_id": "S", "sheet_name": "看板"}}),))
+        db.commit()
+        rows = [{"account_id": "1", "cells": {"A": "x"}}]
+        groups, skipped = hd.group_rows_by_sheet(db, 7, "gg", rows)
+        assert groups == [("看板", rows)] and skipped == []
+        db.close()

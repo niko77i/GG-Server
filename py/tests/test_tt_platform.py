@@ -111,12 +111,34 @@ def test_add_column_if_missing_returns_whether_added():
         conn, "tt_accounts", "account_type", "account_type TEXT DEFAULT ''") is False
     assert database._add_column_if_missing(
         conn, "tt_accounts", "_tmp_probe", "_tmp_probe TEXT DEFAULT ''") is True
+    # 表不存在 ⇒ 跳过、返回 False（不抛异常）
+    assert database._add_column_if_missing(
+        conn, "_no_such_table", "x", "x TEXT DEFAULT ''") is False
     conn.close()
     os.unlink(db_path)
 
 
-def test_account_type_backfill_happens_once():
-    """存量行回填成加白户；**列已存在时不再覆盖**（否则户管改名会被打回）。"""
+def test_backfill_rewrites_existing_rows_to_加白户():
+    """模拟 2026-10-08 之前的存量库（无 account_type 列）：列迁移应把存量行**回填**成加白户。
+
+    这是回填 UPDATE 的正向分支——删掉那条 UPDATE，本测试必须变红。
+    """
+    conn, db_path = _fresh_schema_conn()
+    # 退回「无 account_type 列」的存量表结构（SQLite 3.35+ 支持 DROP COLUMN）
+    conn.execute("ALTER TABLE tt_accounts DROP COLUMN account_type")
+    conn.execute("INSERT INTO tt_accounts(name, advertiser_id) VALUES('a','111')")
+    conn.commit()
+    # 列不存在 ⇒ _ensure_columns 补列并跑一次性回填
+    database._ensure_columns(conn)
+    got = conn.execute(
+        "SELECT account_type FROM tt_accounts WHERE advertiser_id='111'").fetchone()[0]
+    assert got == "加白户", f"存量行应回填成加白户，实际={got!r}"
+    conn.close()
+    os.unlink(db_path)
+
+
+def test_backfill_not_reapplied_when_column_exists():
+    """负向分支：列已存在时**不再覆盖**（否则户管改名会被打回）。"""
     conn, db_path = _fresh_schema_conn()
     conn.execute("INSERT INTO tt_accounts(name, advertiser_id) VALUES('a','111')")
     conn.execute("UPDATE tt_accounts SET account_type='' WHERE advertiser_id='111'")
