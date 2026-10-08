@@ -89,8 +89,12 @@
            报红会把「表旧了」夸大成「数据坏了」。 -->
       <div v-if="hdSwFailures.length"
            style="background:var(--el-color-warning-light-9);border-left:3px solid var(--el-color-warning);border-radius:8px;padding:10px 12px;margin-top:12px;">
+        <!-- 量词用「项」不用「账户」：hdSwFailures 的粒度是 (target, business_key) 一行，
+             一次换绑会同时产生 huguan_dashboard + huguan_owner_channel 两条
+             （FB 编辑则为 huguan_dashboard + huguan_fb_acceptor）—— 按「账户」数会把
+             一个账户显示成「2 个账户」。与卡片既有词汇一致（applySync 写的是「有 N 项没有落库」）。 -->
         <div style="font-weight:600;font-size:13px;color:#92400e;margin-bottom:6px;">
-          ⚠️ {{ hdSwFailures.length }} 个账户没写进表
+          ⚠️ {{ hdSwFailures.length }} 项没写进表
         </div>
         <div v-for="(f, i) in hdSwFailures" :key="f.target + '|' + f.business_key"
              :style="{ display:'flex', alignItems:'baseline', gap:'8px', padding:'5px 0',
@@ -508,7 +512,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { huguanApi } from '@/api/huguan'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -1072,10 +1076,15 @@ async function loadHdSwFailures() {
   } catch { /* 汇总拉不到不该打扰用户，保持上一次的结果 */ }
 }
 
+/** 停掉轮询。离开页面 / 组件卸载 / 起新链之前都要先清旧的。 */
+function stopHdSwPoll() {
+  if (hdSwTimer) { clearTimeout(hdSwTimer); hdSwTimer = null }
+}
+
 /** 写表是异步的：push / 打勾落库 / 重试 之后都要在 30s 重试窗口内跟一段时间。
  *  有界（HD_SW_POLL_MAX 次）自终止，与二期 TT / FB 面板同形。 */
 function startHdSwPoll() {
-  if (hdSwTimer) clearTimeout(hdSwTimer)
+  stopHdSwPoll()
   let attempts = 0
   const tick = async () => {
     if (attempts >= HD_SW_POLL_MAX) { hdSwTimer = null; return }
@@ -1103,12 +1112,22 @@ onMounted(() => {
   // 并行拉一次：配置与「有没有可撤的快照」互不依赖。
   loadHdConfig()
   loadHdUndo()
-  loadHdSwFailures()
 })
 
-onUnmounted(() => {
-  // 有界自终止，但组件在 45s 窗口内被卸载（切页/切平台）时要立刻停，
-  // 别让定时器打在已卸载的组件上。
-  if (hdSwTimer) clearTimeout(hdSwTimer)
+// keep-alive（App.vue:8-12，GG/TT 设置页自身还各套了一层 —— AccountsView.vue:14-18 /
+// TtView.vue:13-17，FB 的 /fb/settings 是顶层路由、被 App 那层缓存）只 deactivate、
+// 不 unmount ⇒ onMounted 只在首次进入时跑一次。触发本卡片写表的动作（改状态 / 换绑 /
+// 编辑账户）全发生在**别的面板**，所以「回到设置页」必须自己重拉一次，否则汇总区永远
+// 停在首次进入时的空快照上 —— 计划 Step 4 人工清单第 1 条就会失败。
+//
+// 首次挂载后 onActivated 也会触发，故不要与 onMounted 并存（会重复请求两次）。
+onActivated(() => {
+  loadHdSwFailures()
+  // 也在途的写表（刚在账户面板触发的）会在 30s 重试窗口内收敛，跟一段才有结果。
+  startHdSwPoll()
 })
+// 离开页面就停轮询，别在别的页面继续打请求。
+onDeactivated(stopHdSwPoll)
+// 兜底：组件被真正销毁时（onDeactivated 不覆盖这条路径）也要停。
+onUnmounted(stopHdSwPoll)
 </script>
