@@ -115,7 +115,10 @@ function onDragOver(i) {
 function onDrop(i) {
   const from = dragIndex.value
   if (from > -1 && from !== i) {
-    store.move(props.panelKey, props.registry, from, i)
+    // 指示条恒画在「第 i 行上方」。向上拖（from > i）时 i 之前的元素没位移，
+    // 落点就是 i；向下拖（from < i）时移除操作让目标行前移一格，故落点是 i - 1。
+    // 不区分方向的话，向下拖的实际落点会比指示条低一行。
+    store.move(props.panelKey, props.registry, from, from < i ? i - 1 : i)
   }
   onDragEnd()
 }
