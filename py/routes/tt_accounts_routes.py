@@ -133,6 +133,11 @@ def create_account():
              (data.get("acquired_date") or None), (data.get("remark") or "").strip(),
              uid, now, now))
     except sqlite3.IntegrityError:
+        # 失败即回滚（同 batch_create_accounts 的死锁教训）：约束冲突不会自动结束
+        # 隐式事务，而本连接缓存在 flask.g 上、没有 teardown 关闭它 —— 悬着的写锁
+        # 要等请求上下文弹出、对象被回收才释放。本处紧接着就 return，暂时不会引发
+        # 阻塞，但补齐它是为了不把同一形态留给下一个人在它后面加调用。
+        db.rollback()
         return err("该广告账户已存在", 409)
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     _record_bc_change(db, new_id, bc_id, uid, "create")
@@ -494,8 +499,21 @@ def batch_create_accounts():
             db.commit()
             created.append(aid)
         except sqlite3.IntegrityError:
+            # ⚠️ 必须 rollback：sqlite3 为这次 INSERT 开了隐式事务，而约束冲突
+            # **不会**自动结束它。若失败的正是**最后一条**，循环里再没有 commit 来
+            # 清理 ⇒ 本连接一直握着写锁，到下面 hd.writeback_rows(...) 时，run_write
+            # 会在**另一条连接**上 record_pending ⇒ 等满 timeout=30 抛
+            # "database is locked" 并被吞掉：请求冻结 30s，且 sheet_write_log
+            # 一行不落（这次失败从此看不见、也无法重试）。
+            # 触发条件正是「冲突在最后一条」—— 冲突在中间时，后面那条成功后的
+            # commit 会顺手清掉悬着的事务，所以只在特定顺序下复现。
+            # 回归用例：tests/test_huguan_sheet_write.py::
+            #   test_batch_create_conflict_last_still_registers_sheet_write_log
+            db.rollback()
             skipped.append({"advertiser_id": aid, "reason": "已存在"})
         except Exception as e:
+            # 同上：异常路径一律先把事务收干净再继续循环。
+            db.rollback()
             err_msg = str(e).lower()
             if "advertiser_id" in err_msg or "unique" in err_msg:
                 skipped.append({"advertiser_id": aid, "reason": "已存在"})
@@ -1133,6 +1151,8 @@ def recycle_reason_create():
         db.commit()
     except sqlite3.IntegrityError:
         # 并发下撞 name 唯一索引
+        # 失败即回滚（同 batch_create_accounts 的死锁教训）：冲突不会自动结束隐式事务。
+        db.rollback()
         return err(f"回收原因「{name}」已存在", 409)
     return ok({"id": db.execute("SELECT last_insert_rowid()").fetchone()[0]})
 
@@ -1160,6 +1180,8 @@ def recycle_reason_rename(rid):
         db.execute("UPDATE tt_recycle_reasons SET name=? WHERE id=?", (name, rid))
         db.commit()
     except sqlite3.IntegrityError:
+        # 失败即回滚（同 batch_create_accounts 的死锁教训）：冲突不会自动结束隐式事务。
+        db.rollback()
         return err(f"回收原因「{name}」已存在", 409)
     return ok()
 

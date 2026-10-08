@@ -302,3 +302,52 @@ def test_writeback_fb_acceptor_registers(client, monkeypatch):
     r = _settle(db, uid, "huguan_fb_acceptor", "fb_a")
     db.close()
     assert r is not None, "必须登记 huguan_fb_acceptor"
+
+
+def test_batch_create_conflict_last_still_registers_sheet_write_log(client, monkeypatch):
+    """批量建户里**最后一条**撞唯一约束时，也必须登记 sheet_write_log。
+
+    根因（2026-10-08，与 test_remark_push_registers_log_row 同批发现）：
+    `batch_create_accounts` 的 `except sqlite3.IntegrityError` 分支**没有 db.rollback()**。
+    sqlite3 会为那次 INSERT 开一个隐式事务，而约束冲突**不会**自动结束它；
+    若失败的正是**最后一条**，循环里再没有后续 commit 来清理 ⇒ 本请求连接一直
+    握着写锁，紧接着的 `hd.writeback_rows(...)` 经 run_write 在**另一条连接**上
+    record_pending ⇒ 等满 `timeout=30` 抛 "database is locked"，被 run_write 的
+    except 吞掉：请求线程白冻 30 秒，且 sheet_write_log **一行都不落**
+    （这次失败从此看不见、也无法重试）。
+
+    触发条件正是「冲突在最后一条」—— 冲突在中间时，后面那条成功后的 commit
+    会顺手把悬着的事务清掉，所以这个 bug 只在特定顺序下出现（易漏测）。
+    去掉 `:496` 的 `db.rollback()` ⇒ 本用例红（实测 32.25s 且查不到行，
+    调换顺序 `[DUP, NEW]` 或只传 `[NEW]` 则 0.03s 通过 —— 对照见 fix-deadlock-review.md）。
+    """
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
+
+    h, uid = _tt_huguan(client, "_hg_bc")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    NEW, DUP = "770001", "770002"
+    db.execute("DELETE FROM tt_accounts WHERE advertiser_id IN (?,?)", (NEW, DUP))
+    # 让**最后一条**撞唯一约束：DUP 先入库，请求里放在 NEW 之后
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) VALUES (?,?,?)",
+               (DUP, DUP, uid))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/batch-create", headers=h,
+                       json={"account_ids": [NEW, DUP]})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+    body = resp.get_json()
+    assert NEW in (body["created_ids"] or []), f"应先建成 NEW：{body}"
+    assert DUP in [s["advertiser_id"] for s in (body["skipped"] or [])], f"末条应被跳过：{body}"
+
+    db = database.get_db()
+    r = _settle(db, uid, "huguan_dashboard", NEW)
+    db.close()
+    assert r is not None, (
+        "批量建户成功后必须登记 huguan_dashboard —— 查不到就说明最后一条撞唯一约束"
+        "留下的未提交写事务把 record_pending 挡到 database is locked 并被吞掉了"
+    )
+    assert r["status"] == "synced", f"应同步成功，实际 {r['status']}"
