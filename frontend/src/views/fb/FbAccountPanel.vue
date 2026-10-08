@@ -3,7 +3,13 @@
     <!-- 页面头部 -->
     <div class="panel-header">
       <h2 class="panel-title">FB账户管理</h2>
-      <el-button type="primary" @click="openCreate">新增账户</el-button>
+      <div class="header-actions">
+        <el-button type="primary" @click="openCreate">新增账户</el-button>
+        <el-button @click="batchImportVisible = true">📥 批量导入</el-button>
+        <el-button @click="lookupVisible = true">🔍 批量查户</el-button>
+        <el-button @click="deletedVisible = true">🗑 回收站</el-button>
+        <el-button v-if="selected.length" @click="batchDelete" style="margin-left:auto;">🗑 批量删除</el-button>
+      </div>
     </div>
 
     <!-- 统计卡片 -->
@@ -37,9 +43,6 @@
         </el-select>
         <OwnerFilterSelect v-model="ownerId" @change="onOwnerChange" />
         <el-button @click="loadData">刷新</el-button>
-        <el-button type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">
-          批量删除({{ selectedIds.length }})
-        </el-button>
       </div>
     </el-card>
 
@@ -48,7 +51,7 @@
       <template #header>
         <span class="table-card__header-text">共 {{ total }} 个账户</span>
       </template>
-      <el-table :data="items" stripe border v-loading="loading" @selection-change="onSelect">
+      <el-table :data="items" stripe border v-loading="loading" @selection-change="val => selected = val">
         <el-table-column type="selection" width="45" />
         <el-table-column prop="name" label="账户名" min-width="120" />
         <el-table-column prop="account_id" label="账户ID" width="160" />
@@ -87,6 +90,10 @@
     </el-card>
 
     <!-- 弹窗 -->
+    <FbAccountBatchImportModal v-model:visible="batchImportVisible" @imported="loadData" />
+    <FbAccountBatchLookupModal v-model:visible="lookupVisible" />
+    <FbAccountDeletedModal v-model:visible="deletedVisible" @changed="loadData" />
+
     <el-dialog v-model="dialogVisible" :title="editingId?'编辑账户':'新增账户'" width="520px" class="account-dialog">
       <el-form :model="form" label-width="90px" class="account-form">
         <el-form-item label="账户名" required>
@@ -162,12 +169,16 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { fbApi } from '../../api/fb'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import client from '../../api/client'
 import OwnerFilterSelect from '@/components/OwnerFilterSelect.vue'
+import FbAccountBatchImportModal from '@/components/fb/FbAccountBatchImportModal.vue'
+import FbAccountBatchLookupModal from '@/components/fb/FbAccountBatchLookupModal.vue'
+import FbAccountDeletedModal from '@/components/fb/FbAccountDeletedModal.vue'
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
-const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selectedIds = ref([])
+const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selected = ref([])
+const lookupVisible = ref(false); const batchImportVisible = ref(false); const deletedVisible = ref(false)
 const bmOptions = ref([]); const statusOptions = ref([]); const dialogVisible = ref(false)
 const channelOptions = ref([]); const assetTypeOptions = ref([]); const fbUsers = ref([])
 const editingId = ref(null); const saving = ref(false)
@@ -192,7 +203,6 @@ const form = reactive({
 
 let searchTimer = null
 function onSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(loadData, 300) }
-function onSelect(v) { selectedIds.value = v.map(r=>r.id) }
 
 async function loadData() {
   loading.value = true
@@ -257,9 +267,19 @@ async function handleSave() {
   finally { saving.value = false }
 }
 async function handleDelete(id) { await fbApi.deleteAccount(id); ElMessage.success('已删除'); loadData() }
-async function handleBatchDelete() {
-  for (const id of selectedIds.value) { await fbApi.deleteAccount(id) }
-  ElMessage.success(`已删除${selectedIds.value.length}个`); loadData()
+async function batchDelete() {
+  if (!selected.value.length) return
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${selected.value.length} 个账户？`, '确认', { type: 'warning' })
+  } catch { return }
+  try {
+    await fbApi.batchDelete({ ids: selected.value.map(s => s.id) })
+    ElMessage.success('已删除')
+    selected.value = []
+    loadData()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '删除失败')
+  }
 }
 onMounted(() => { loadOptions(); loadData() })
 </script>
@@ -278,6 +298,12 @@ onMounted(() => { loadOptions(); loadData() })
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .panel-title {

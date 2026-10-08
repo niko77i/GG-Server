@@ -29,6 +29,38 @@ def _is_unique_conflict(e):
     return isinstance(e, sqlite3.IntegrityError) and "unique" in str(e).lower()
 
 
+def _valid_pk_int64(raw):
+    """主键/外键候选值的闸门 —— 口径与 GG 的 `main._valid_pk_int64` 完全一致。
+
+    合法 = `str(raw).strip()` 后是纯 ASCII 十进制数字串（无正负号、无小数点 ⇒ 天然 ≥ 0），
+    且数值 ≤ 2**63-1（SQLite INTEGER 是 64 位有符号）。非法（含 bool）返回 None。
+
+    为什么必须有：这些值随后原样交给 sqlite3 参数绑定。超上界时 Python 的 int() 能解析，
+    但绑定处会抛 OverflowError（内建，非 sqlite3.OverflowError）⇒ 500 + 英文异常原文。
+    本文件不 import main（会循环），故自带一份。
+    """
+    s = str(raw).strip()
+    if not (s.isascii() and s.isdigit()):
+        return None
+    try:
+        v = int(s)
+    except (ValueError, OverflowError):
+        return None
+    if v > 2**63 - 1:
+        return None
+    return v
+
+
+def _fb_text(value) -> str:
+    """请求体里的文本字段一律归一为去空白的字符串。
+
+    不能写 `(value or '').strip()` —— 请求体是用户可控的 JSON，字段可能是**真值非 str**
+    （数字 / 列表 / 对象），`.strip()` 会直接 `AttributeError` 炸成 500。
+    同类兜底先例见 `huguan_dashboard._conf_text`（同一形状）。
+    """
+    return '' if value is None else str(value).strip()
+
+
 # ==================== BM 管理 ====================
 
 @fb_bp.route('/api/fb/bms/list', methods=['GET'])
@@ -356,6 +388,208 @@ def list_accounts():
     return ok({'items': result_items, 'total': total, 'page': page, 'size': size})
 
 
+@fb_bp.route('/api/fb/accounts/batch-lookup', methods=['POST'])
+@jwt_required()
+@fb_required
+def batch_lookup_accounts():
+    """批量查询多个资产UID是否已存在（单次 SQL IN 查询）。
+
+    ⚠️ **归属隔离**：GG 的同名端点在 main.py 里没有 owner 条件（越权，见遗留清单 A8），
+    本端点**不复制该缺陷** —— 非跨用户角色只查得到自己的行。
+    """
+    db = get_db()
+    data = parse_body()
+    if not isinstance(data, dict):
+        return err('请求体格式错误', 400)
+    account_ids = data.get('account_ids') or []
+    if not account_ids or not isinstance(account_ids, list):
+        return err('请提供 account_ids 列表', 400)
+
+    clean_ids = [str(a).strip() for a in account_ids if str(a).strip()]
+    if not clean_ids:
+        return ok({'found': [], 'not_found': []})
+
+    uid = get_uid()
+    cross_user = _get_role(db, uid) in CROSS_USER_ROLES
+    placeholders = ",".join(["?"] * len(clean_ids))
+    where = [f"a.account_id IN ({placeholders})"]
+    params = list(clean_ids)
+    if not cross_user:
+        where.append("a.owner_id = ?")
+        params.append(uid)
+
+    rows = db.execute(
+        "SELECT a.account_id, a.name, a.owner_id, a.timezone, "
+        "       u.display_name AS owner_display, u.username AS owner_username, "
+        "       st.name AS status_name, b.name AS bm_name "
+        "FROM fb_accounts a "
+        "LEFT JOIN users u ON a.owner_id = u.id "
+        "LEFT JOIN account_statuses st ON a.status_id = st.id "
+        "LEFT JOIN fb_account_bm ab ON ab.account_id = a.id AND ab.is_primary = 1 "
+        "LEFT JOIN fb_bms b ON b.id = ab.bm_id "
+        "WHERE " + " AND ".join(where) + " AND a.deleted_at IS NULL",
+        params
+    ).fetchall()
+
+    found = [{
+        'account_id': r['account_id'],
+        'name': r['name'],
+        'owner_id': r['owner_id'],
+        'owner_name': r['owner_display'] or r['owner_username'] or '',
+        'status': r['status_name'] or '',
+        'timezone': r['timezone'] or '',
+        'bm_name': r['bm_name'] or '',
+    } for r in rows]
+    found_ids = {f['account_id'] for f in found}
+    return ok({'found': found, 'not_found': [a for a in clean_ids if a not in found_ids]})
+
+
+@fb_bp.route('/api/fb/accounts/batch-delete', methods=['POST'])
+@jwt_required()
+@fb_required
+def batch_delete_accounts():
+    """批量软删账户。非跨用户角色只能删自己的；删不到的 id 进 not_found。
+
+    **归属隔离**：「不存在」与「无权」都归入 not_found，故用逐条 UPDATE + rowcount
+    （一条 `IN` 区分不了这两种情况）。`AND deleted_at IS NULL` 保证已软删的 id
+    再次提交时进 not_found，不会把 deleted 计数刷虚。
+    """
+    db = get_db()
+    data = parse_body()
+    if not isinstance(data, dict):
+        return err('请求体格式错误', 400)
+    ids = data.get('ids') or []
+    if not ids or not isinstance(ids, list):
+        return err('未选择账户', 400)
+    # ids 元素闸门：非法 / 超 int64 的元素必须回 400，而不是被静默吞掉。
+    # 下面绑定的是 `_valid_pk_int64(aid)` 的**返回值**（非法已归一为 None），
+    # 原始值到不了绑定处 ⇒ 本端点没有 OverflowError 路径；不挡的话会
+    # 落成 `id = NULL`，匹配不到任何行 ⇒ 进 not_found 并回 200。
+    # （GG `main.py` 的同名端点绑的是裸 `aid`，那边的注释才谈 OverflowError。）
+    for _i in ids:
+        if _valid_pk_int64(_i) is None:
+            return err('ids 不合法', 400)
+
+    uid = get_uid()
+    cross_user = _get_role(db, uid) in CROSS_USER_ROLES
+    owner_clause = "" if cross_user else " AND owner_id = ?"
+    deleted, not_found = 0, []
+    for aid in ids:
+        params = (_valid_pk_int64(aid),) if cross_user else (_valid_pk_int64(aid), uid)
+        cur = db.execute(
+            "UPDATE fb_accounts SET deleted_at = datetime('now','localtime'), "
+            "       updated_at = datetime('now','localtime') "
+            f"WHERE id = ?{owner_clause} AND deleted_at IS NULL", params)
+        if cur.rowcount:
+            deleted += 1
+        else:
+            not_found.append(_valid_pk_int64(aid))
+    db.commit()
+    return ok({'deleted': deleted, 'not_found': not_found})
+
+
+@fb_bp.route('/api/fb/accounts/batch-create', methods=['POST'])
+@jwt_required()
+@fb_required
+def batch_create_accounts():
+    """批量创建 FB 账户：共用默认值 + 逐账户 overrides。
+
+    字段形状照本文件的 `create_account`（FB 没有 MCC/代理，且 status_id 由前端直接给数值）。
+    `operator` 是**冻结字段**（规格 6.1）—— 服务端填创建者名字快照，请求体同名键一律忽略。
+    名称：`overrides[<id>].name` 直接当**完整**名称；否则 `name_prefix + ' ' + 账户ID`
+    （name_prefix 为空就直接用账户ID）。账户ID 仍照 `create_account` 的既有校验要求**纯数字**。
+
+    **有意的取舍（不是漏校验）：`status_id` / `primary_bm_id` 过 `_valid_pk_int64` 归一，
+    非法值（非 ASCII 数字串 / 超 int64 上界）静默变成 `None`（＝该条不设状态 / 不挂主 BM），
+    而不是 400 拒绝整批。** 理由：批量建户是「尽量多建几条」的语义（单条失败进 `errors`
+    而不中断整批），一个字段格式不对不该让整批失败；归一同时也拦掉超 int64 上界，
+    免得漏到 sqlite 绑定处抛 OverflowError ⇒ 500 + 英文异常原文。
+
+    逐条独立 try/except：一条失败进 `errors`、不中断整批。撞 `fb_accounts.account_id`
+    的 UNIQUE ⇒ 「已存在」；其余异常（含 FK / NOT NULL）⇒ 固定文案 + 服务端日志。
+    """
+    db = get_db()
+    data = parse_body()
+    if not isinstance(data, dict):
+        return err('请求体格式错误', 400)
+    account_ids = data.get('account_ids') or []
+    if not account_ids or not isinstance(account_ids, list):
+        return err('请提供 account_ids 列表', 400)
+
+    common = {
+        'name_prefix': _fb_text(data.get('name_prefix')),
+        'timezone': _fb_text(data.get('timezone')),
+        'status_id': _valid_pk_int64(data['status_id']) if data.get('status_id') is not None else None,
+        'primary_bm_id': _valid_pk_int64(data['primary_bm_id']) if data.get('primary_bm_id') is not None else None,
+        'acquired_date': _fb_text(data.get('acquired_date')),
+    }
+    overrides = data.get('overrides') or {}
+    if not isinstance(overrides, dict):
+        return err('overrides 必须是对象', 400)
+
+    uid = get_uid()
+    # operator 是**冻结字段**（规格 6.1），理由同 `create_account`。
+    operator = _display_name(db, uid)
+    created, skipped, errors = [], [], []
+    written_ids = []          # 仅用于最后一次性回写看板
+
+    for raw_aid in account_ids:
+        aid = str(raw_aid).strip()
+        if not aid:
+            skipped.append(aid)
+            continue
+        ov = overrides.get(aid)
+        if ov is None:
+            ov = {}
+        elif not isinstance(ov, dict):
+            # 一条坏的 override 若被静默忽略，会让用户以为「设置生效了」、实际是默认值 ——
+            # 建出一行属性不对的数据，比不建并明确报错更糟。故落进本端点已有的 per-row errors。
+            errors.append({'account_id': aid, 'error': 'override 格式错误，应为对象'})
+            continue
+        # 名称：overrides.name 直接用作完整名称；否则 name_prefix + ID
+        name = _fb_text(ov.get('name')) or \
+               ((common['name_prefix'] + ' ' + aid).strip() if common['name_prefix'] else aid)
+        timezone = _fb_text(ov['timezone']) if 'timezone' in ov else common['timezone']
+        status_id = (_valid_pk_int64(ov['status_id'])
+                     if 'status_id' in ov and ov['status_id'] is not None else common['status_id'])
+        primary_bm_id = (_valid_pk_int64(ov['primary_bm_id'])
+                         if 'primary_bm_id' in ov and ov['primary_bm_id'] is not None
+                         else common['primary_bm_id'])
+        acquired_date = _fb_text(ov['acquired_date']) if 'acquired_date' in ov else common['acquired_date']
+
+        if not aid.isdigit():
+            errors.append({'account_id': aid, 'error': '账户ID必须是纯数字'})
+            continue
+        try:
+            db.execute(
+                "INSERT INTO fb_accounts (name, account_id, timezone, status_id, "
+                "       acquired_date, owner_id, operator) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, aid, timezone, status_id, acquired_date, uid, operator))
+            acc_pk = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            if primary_bm_id:
+                _set_primary_bm(db, acc_pk, primary_bm_id)
+            db.commit()
+            created.append(aid)
+            written_ids.append(aid)
+        except Exception as e:
+            # 必须 rollback：本条账户行的 INSERT 此刻只是**待提交**状态（commit 在后面），
+            # 不回滚的话，**下一条**成功条目的 commit() 会把它一并提交 ⇒
+            # 「报错却在库里」——`created`/看板回写与库内容对不上。
+            db.rollback()
+            log.exception("FB 批量建户失败 account_id=%s", aid)
+            if _is_unique_conflict(e):
+                errors.append({'account_id': aid, 'error': f"账户 ID「{aid}」已存在"})
+            else:
+                errors.append({'account_id': aid, 'error': _FB_DB_FAILED_MSG})
+
+    if written_ids:
+        hd.writeback_rows(uid, "fb", written_ids)
+
+    return ok({'created': len(created), 'created_ids': created,
+               'skipped': skipped, 'errors': errors})
+
+
 @fb_bp.route('/api/fb/accounts/create', methods=['POST'])
 @jwt_required()
 @fb_required
@@ -425,6 +659,12 @@ def create_account():
 def update_account(aid):
     db = get_db()
     uid = get_uid()
+    # 归属校验（口径同同文件 pixel-bms 族 / reassign_account）：非跨用户角色只能改
+    # **自己名下**的账户。少了这道闸，任何 FB 用户按内部 id 就能改别人账户的任意字段。
+    # 行不存在时不拦（existing 为 None）—— 保持既有「UPDATE 0 行仍返回 200」的行为。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     data = parse_body()
     name = data.get('name', '').strip()
     timezone = data.get('timezone', '')
@@ -482,6 +722,12 @@ def update_account(aid):
 @fb_required
 def delete_account(aid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验：非跨用户角色只能软删自己的账户（否则按 id 可软删他人账户）。
+    # 行不存在时不拦，保持既有 200。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     db.execute("UPDATE fb_accounts SET deleted_at=datetime('now','localtime') WHERE id=?", (aid,))
     db.commit()
     return ok()
@@ -637,6 +883,12 @@ def reassign_account(aid):
 @fb_required
 def restore_account(aid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验：非跨用户角色只能恢复自己的账户（否则按 id 可恢复他人账户）。
+    # 行不存在时不拦，保持既有 200。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     db.execute("UPDATE fb_accounts SET deleted_at=NULL WHERE id=?", (aid,))
     db.commit()
     return ok()
@@ -647,6 +899,17 @@ def restore_account(aid):
 @fb_required
 def permanent_delete_account(aid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验：非跨用户角色只能永久删自己的账户（否则按 id 可**不可逆**删他人账户）。
+    # 校验放在三条 DELETE 之前，别让他人的关联行先被清掉。行不存在时不拦，保持既有 200。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
+    # 先删 BM 变更史：`fb_account_bm_history.account_id` 的外键**没有** ON DELETE
+    # CASCADE（`account_mcc_history` / `tt_account_bc_history` 有），而连接开着
+    # `PRAGMA foreign_keys=ON` ⇒ 不显式清掉，最后删账户那步会被外键挡下（500）。
+    # 口径同 `huguan_dashboard.undo_sync` 删新建 FB 账户处。顺序：历史 → 关联 → 账户。
+    db.execute("DELETE FROM fb_account_bm_history WHERE account_id=?", (aid,))
     db.execute("DELETE FROM fb_account_bm WHERE account_id=?", (aid,))
     db.execute("DELETE FROM fb_accounts WHERE id=?", (aid,))
     db.commit()
@@ -658,6 +921,12 @@ def permanent_delete_account(aid):
 @fb_required
 def account_bm_history(aid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验：非跨用户角色只能读自己账户的 BM 变更史（否则按 id 可读他人历史）。
+    # 账户不存在时不拦，落回既有空列表（不是 403）。
+    existing = db.execute("SELECT owner_id FROM fb_accounts WHERE id=?", (aid,)).fetchone()
+    if existing and _get_role(db, uid) not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     rows = db.execute(
         "SELECT h.*, ob.name as old_bm_name, nb.name as new_bm_name "
         "FROM fb_account_bm_history h "
@@ -1742,6 +2011,13 @@ def list_reports():
 @fb_required
 def update_report(rid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验（隔离轴是 `user_id`，非 owner_id —— 口径同 list_reports / reports_stats
+    # 的 `WHERE user_id = ?`）：非跨用户角色只能改**自己**的做表数据。
+    # 行不存在时不拦，保持既有「UPDATE 0 行仍返回 200」的行为。
+    row = db.execute("SELECT user_id FROM fb_ad_reports WHERE id=?", (rid,)).fetchone()
+    if row and _get_role(db, uid) not in CROSS_USER_ROLES and row["user_id"] != uid:
+        return err("无权限", 403)
     data = parse_body()
     updates = []
     params = []
@@ -1763,6 +2039,12 @@ def update_report(rid):
 @fb_required
 def delete_report(rid):
     db = get_db()
+    uid = get_uid()
+    # 归属校验（`user_id` 轴，同 update_report）：非跨用户角色只能删自己的做表数据。
+    # 行不存在时不拦，保持既有 200。
+    row = db.execute("SELECT user_id FROM fb_ad_reports WHERE id=?", (rid,)).fetchone()
+    if row and _get_role(db, uid) not in CROSS_USER_ROLES and row["user_id"] != uid:
+        return err("无权限", 403)
     db.execute("DELETE FROM fb_ad_reports WHERE id=?", (rid,))
     db.commit()
     return ok()
@@ -1772,14 +2054,49 @@ def delete_report(rid):
 @jwt_required()
 @fb_required
 def batch_delete_reports():
+    """批量硬删做表数据。非跨用户角色只删**自己 user_id**的行；别人的行留下。
+
+    **ids 闸门**（口径照同文件 `batch_delete_accounts`）：`ids` 必须是列表，且每个
+    元素过 `_valid_pk_int64`，否则回 400。**只有空列表（与缺键）保留既有 200 契约。**
+
+    为什么必须有（以下都是**实跑核对过**的旧行为，见报告）：
+      - `ids = None / 5 / True` ⇒ `if ids:` 后取 `len(ids)` 抛 TypeError ⇒ 500；
+      - `ids = {"0": 1}` 且调用者是跨用户角色 ⇒ sqlite3 对位置占位符收到 dict ⇒
+        `ProgrammingError: Binding 1 has no name…` ⇒ 500；
+      - `ids = {"0": 1}` 且非跨角色 ⇒ 绑定的是 dict 的 **keys**，回一个假 200；
+      - `ids = "1,2,3"` ⇒ 字符串被当字符序列绑定，同样回假 200（`deleted` 报字符数）。
+    闸门把这些一律收敛成 400。
+
+    ⚠️ **不是**「占位符个数对不上导致的 500 回归」：非跨角色分支的 SQL 自带一个
+    `AND user_id = ?`，故占位符数 = `len(ids)` + 1 = `len(list(ids) + [uid])`，
+    **数目是配平的** —— 字符串路径旧行为是 200（假成功），不是 500。别按「回归」复述。
+    """
     db = get_db()
+    uid = get_uid()
     data = parse_body()
+    # 缺键 ⇒ 空列表（既有 200 契约）；显式传 None / 字符串等非列表 ⇒ 400（见下）。
     ids = data.get('ids', [])
-    if ids:
-        placeholders = ','.join(['?'] * len(ids))
-        db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders})", ids)
-        db.commit()
-    return ok({'deleted': len(ids)})
+    if not isinstance(ids, list):
+        return err('ids 不合法', 400)
+    for _i in ids:
+        if _valid_pk_int64(_i) is None:
+            return err('ids 不合法', 400)
+    if not ids:
+        return ok({'deleted': 0})
+    placeholders = ','.join(['?'] * len(ids))
+    # 归属过滤（`user_id` 轴，同 list_reports）：非跨用户角色只删**属于自己**的行，
+    # 别人的行留下 —— 保持「尽量多删自己的」语义，**不整批 403**。跨用户角色不限
+    # （既有行为：可删全部）。
+    # `deleted` 取 `cursor.rowcount`（实际删掉的行数），不取 `len(ids)`：后者恒等于
+    # 请求条数，被归属过滤掉的他人行也会计入 ⇒ 非跨角色用户请求 3 条只删到 1 条时谎报 3。
+    if _get_role(db, uid) in CROSS_USER_ROLES:
+        cur = db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders})", ids)
+    else:
+        cur = db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders}) "
+                         f"AND user_id = ?", list(ids) + [uid])
+    deleted = cur.rowcount
+    db.commit()
+    return ok({'deleted': deleted})
 
 
 @fb_bp.route('/api/fb/reports/stats', methods=['GET'])
