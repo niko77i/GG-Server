@@ -3921,7 +3921,13 @@ class TestSyncChannelClearPlatformSplit:
     def test_tt_sync_does_not_clear_change_note(self, client, monkeypatch):
         hg, uid, target = self._wire(client, "tt")
         db = database.get_db()
-        _seed_tt_account(db, "CLR-TT", uid)   # 归属起手是户管自己，表里 G 列写「李四」→ 触发变更
+        # 归属起手是户管自己，表里 G 列写「李四」→ 触发变更。
+        # `account_type` 必填：本用例的配置是**旧的单表形态**（只有 sheet_name，无 tables），
+        # `get_platform_tables` 会把它归一成一条 name = TT_DEFAULT_ACCOUNT_TYPE 的表。
+        # 而「空户类型不退回第一张表」上线后（本设计核心：不填错表），空类型的账户会被
+        # `group_rows_by_sheet` **跳过** ⇒ 下面那条「正向对照：G 列确实被写回」恒假，
+        # 负向断言（不写 L 列）就成了空跑。显式给出与该表同名的类型，正是迁移后存量账户的形状。
+        _seed_tt_account(db, "CLR-TT", uid, account_type=hd.TT_DEFAULT_ACCOUNT_TYPE)
         db.commit()
         db.close()
         import google_sheets_service as gs
@@ -4684,6 +4690,23 @@ class TestGroupRowsBySheet:
         assert skipped == ["企业户"], "查不到工作表的类型要报出来，绝不能落到第一张表"
         db.close()
 
+    def test_tt_empty_type_is_skipped_not_written_to_first_table(self, client):
+        """空户类型的行必须跳过，**绝不能**退回写第一张表（设计核心：不填错表）。"""
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_7', ?)",
+                   (json.dumps({"tt": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "总户-加白"},
+                       {"name": "企业户", "sheet_name": "总户-企业"}]}}),))
+        db.commit()
+        rows = [{"account_id": "1", "account_type": "加白户", "cells": {"A": "x"}},
+                {"account_id": "2", "account_type": "企业户", "cells": {"A": "y"}},
+                {"account_id": "3", "account_type": "", "cells": {"A": "z"}}]
+        groups, skipped = hd.group_rows_by_sheet(db, 7, "tt", rows)
+        db.close()
+        written = [r["account_id"] for _sn, rs in groups for r in rs]
+        assert written == ["1", "2"], f"只有有类型的行能被写，实际={written}"
+        assert len(skipped) == 1 and "未设置户类型" in skipped[0]
+
     def test_gg_single_group(self, client):
         db = database.get_db()
         db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_7', ?)",
@@ -4877,6 +4900,28 @@ class TestMultiTableSync:
                                      [{"account_id": "8010", "cells": {"G": "张三"}}])
         db.close()
         assert calls == [("总户-企业", ["8010"])]
+
+    def test_route_writeback_skips_account_without_type(self, client, monkeypatch):
+        """回归：账户没有户类型时，定向回写必须跳过，不得写进第一张表。"""
+        _create_user(client, "_mts5", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type) "
+                   "VALUES('a','8020','')")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_mts5')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "总户-加白"},
+                           {"name": "企业户", "sheet_name": "总户-企业"}]}})))
+        db.commit()
+
+        import routes.huguan_dashboard_routes as hdr
+        calls = []
+        monkeypatch.setattr(hdr, "_write_background",
+                            lambda conf, rows, platform: calls.append(conf["sheet_name"]))
+        hdr._write_background_tables(db, _uid_of('_mts5'), "tt",
+                                     [{"account_id": "8020", "cells": {"G": "张三"}}])
+        db.close()
+        assert calls == [], f"无户类型的账户不该被写进任何表，实际写到={calls}"
 
     def test_cross_table_duplicate_first_table_wins_with_warning(self, client, monkeypatch):
         hg, _ = _create_user(client, "_mts2", role="huguan")

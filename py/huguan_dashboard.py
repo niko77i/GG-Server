@@ -318,6 +318,8 @@ def group_rows_by_sheet(db, user_id: int, platform: str, rows: list):
 
     查不到就**跳过**，绝不退回写第一张表 —— 那正是多表之后要消除的「填错表」。
     gg/fb 的类型恒为空串且配置里恰好有一个空名条目 ⇒ 只有一组，与改动前等价。
+    tt 的空类型（账户行没类型 / 查不到）**跳过**，不退回第一张表：宁可漏写
+    （日志里看得见）也不能写错 —— 写错表会把甲类账户的内容覆盖进乙类的 worksheet。
     """
     tables = get_platform_tables(db, user_id, platform)
     buckets = {}
@@ -331,8 +333,15 @@ def group_rows_by_sheet(db, user_id: int, platform: str, rows: list):
     for leftover, leftover_rows in buckets.items():
         if leftover:
             skipped.append(leftover)
-        elif tables:
+        elif platform != "tt" and tables:
+            # gg/fb 的类型恒为空串，其配置条目也恰好是空名 ⇒ 正常已被上面的循环取走。
+            # 保留这一支只为兼容「配置条目缺失」这种历史态，行为与改动前等价。
             groups.append((tables[0]["sheet_name"], leftover_rows))
+        else:
+            # tt：类型为空 ⇒ 查不到对应工作表。**绝不退回写第一张表** —— 那正是本设计
+            # 要消除的「填错表」。宁可漏写（日志里看得见）也不能写错：写错表会把甲类
+            # 账户的内容覆盖进乙类的 worksheet，而漏写只是少刷新几行。
+            skipped.append(leftover or "（未设置户类型）")
     return groups, skipped
 
 

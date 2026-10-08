@@ -498,9 +498,11 @@ def _write_background_tables(db, uid: int, platform: str, rows) -> None:
     绝不退回写第一张表 —— 那正是本次要消除的「填错表」。
 
     ⚠️ 本函数的入参 rows 是 `[{"account_id", "cells"}]` 形状，**不带 `account_type`**
-      —— 它不经过 `collect_rows_for_push`（那条路才带类型）。必须在这里按账户 ID
-      现查一次类型补上，否则每一行都会落进「无类型」桶、被 `group_rows_by_sheet`
-      当成「查不到工作表」整批跳过：表现是**归属变更静默不回写**，不报错、不抛异常。
+      —— 它不经过 `collect_rows_for_push`（那条路才带类型）。tt 必须在这里按账户 ID
+      现查一次类型补上：tt 的 `group_rows_by_sheet` 对空类型一律**跳过**（绝不退回
+      第一张表，见该函数），不补的话每一行都会落进「无类型」桶而被整批跳过 ——
+      表现是**归属变更静默不回写**，不报错、不抛异常。
+      （gg/fb 的类型恒为空串且只有一张表，补不补都落到那一张 —— 上面这段只对 tt 成立。）
     """
     rows = [dict(r) for r in rows]
     if platform == "tt" and rows:
