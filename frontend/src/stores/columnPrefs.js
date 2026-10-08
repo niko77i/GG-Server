@@ -17,6 +17,7 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
 
   let loadPromise = null          // 启动预拉的单例，避免多个面板各拉一次
   const saveTimers = {}           // panelKey -> timer
+  const saveGen = {}              // panelKey -> 代际号：每次本地变更 +1（见 scheduleSave）
 
   // 没有配置的面板用空 pref，纯函数会走注册表默认顺序
   function prefOf(panelKey) {
@@ -59,9 +60,10 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
     loadPromise = (async () => {
       try {
         const resp = await columnPrefsApi.get()
-        // 注意：client.js 的响应拦截器已把 axios response 拆成响应体本身
-        // （`return resp.data`），后端 `ok({"prefs": ...})` 又把 dict 平铺，
-        // 故这里直接取 `resp.prefs`，**不是** `resp.data.prefs`。
+        // 取 resp.prefs，**不是** resp.data.prefs —— client.js:34 的响应拦截器是
+        // `return resp.data`，已经把响应体解包了；后端 ok({"prefs": ...}) 又把 dict
+        // 平铺，所以这里 resp 就是 {success, prefs}。写成 resp.data?.prefs 会恒为
+        // undefined，用户配置永远读不回来（功能整个失效，且静态检查抓不到）。
         prefs.value = resp.prefs ?? {}
         lastConfirmed = JSON.parse(JSON.stringify(prefs.value))
       } catch (e) {
@@ -77,15 +79,25 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
 
   function scheduleSave(panelKey, registry) {
     clearTimeout(saveTimers[panelKey])
+    const gen = saveGen[panelKey] ?? 0     // 这次保存属于哪一代
     saveTimers[panelKey] = setTimeout(() => {
       const pref = prefOf(panelKey) ?? { order: registryKeys(registry), hidden: [] }
       columnPrefsApi.save(panelKey, pref.order, pref.hidden).then((resp) => {
-        // 以服务端回写的完整 prefs 为准，并更新「已确认」快照 —— 不回写的话
-        // 「连续改两次、第二次失败」会回滚到很久以前的陈旧状态。
-        // 同 ensureLoaded：响应体已平铺，取 resp.prefs（非 resp.data.prefs）。
+        // **代际守卫**：只有在途期间该面板没有更新的本地改动（也没换过账号）时，
+        // 才应用响应。少了这道守卫会静默丢改动：
+        //   t=0   勾 A → 本地 {hidden:[A]}，排定 t=400 保存
+        //   t=400 防抖到期，PUT 发出（内容 [A]）
+        //   t=450 勾 B → 本地 {hidden:[A,B]}，排定 t=850 保存
+        //   t=451 A 的响应回来 → 无条件回写会把 B 悄悄抹掉
+        //   t=850 保存发出，内容是 [A] → B 在服务端也丢了
+        // 窗口 = 防抖触发后一个往返。clear() 也会 bump 代际，
+        // 于是上一个用户的在途响应回来时同样被丢弃（跨账号串写一并关闭）。
+        if ((saveGen[panelKey] ?? 0) !== gen) return
         prefs.value = resp.prefs ?? prefs.value
         lastConfirmed = JSON.parse(JSON.stringify(prefs.value))
       }).catch(() => {
+        // 同上：新一代已接管，别用陈旧快照去回滚它的状态
+        if ((saveGen[panelKey] ?? 0) !== gen) return
         // 失败回滚到上次服务端确认的状态，不留「界面显示已保存、其实没存上」的假象
         ElMessage.error('列配置保存失败，已还原')
         prefs.value = JSON.parse(JSON.stringify(lastConfirmed))
@@ -94,6 +106,7 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
   }
 
   function commit(panelKey, registry, next) {
+    saveGen[panelKey] = (saveGen[panelKey] ?? 0) + 1
     prefs.value = { ...prefs.value, [panelKey]: next }
     scheduleSave(panelKey, registry)
   }
@@ -124,12 +137,16 @@ export const useColumnPrefsStore = defineStore('columnPrefs', () => {
    *   - loadPromise：否则 B 拿到的是 A 那次请求的 promise
    *   - 未落地的防抖定时器：**最隐蔽的一样**。A 改完列 400ms 内登出、B 立刻登录，
    *     那个定时器会带着 B 的新 token 把 A 的配置写进 B 的 key。
+   *   - **代际号**：定时器只能取消「还没发出」的保存；**已经在途**的 PUT 取消不了，
+   *     它的响应回来时若不带守卫就会把 A 的 prefs 写进已清空的 store。
+   *     故这里 bump 所有已知面板的代际，让那些在途响应被丢弃。
    */
   function clear() {
     for (const key of Object.keys(saveTimers)) {
       clearTimeout(saveTimers[key])
       delete saveTimers[key]
     }
+    for (const key of Object.keys(saveGen)) saveGen[key] = (saveGen[key] ?? 0) + 1
     prefs.value = {}
     lastConfirmed = {}
     ready.value = false
