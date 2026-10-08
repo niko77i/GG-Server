@@ -1839,8 +1839,8 @@ cd "D:/server/cc/GG-Server" && git add frontend/src/constants/accountColumns.js 
 表头宽度逐字沿用原模板值，零配置时视觉与改造前一致。
 
 表格外包 <template v-for> + v-if 分派，单元格 markup 逐字不动，
-只增加包裹与缩进。v-if=columnPrefs.ready 是必须的：列序按 DOM 顺序
-在 onMounted 注册，先挂载后到配置可能不生效。"
+只增加包裹与缩进。v-if=columnPrefs.ready 用于避免表格先按默认顺序
+渲染一帧再跳变（设计 §8.1 担心的「列序不跟随更新」已实测否定）。"
 ```
 
 ---
