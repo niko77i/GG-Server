@@ -3501,7 +3501,6 @@ class TestGGTriggerPoints:
             ["运营", "账户ID", "所属渠道", "国家", "时区", "备注", "是否封户", "是否解绑"],
             ["户管甲", "GGTRIG-SYNC-1", "", "", "", "", "否", ""],
         ])
-        monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: {"updated": 1})
         captured = []
         _stub_sheets(monkeypatch, captured)
 

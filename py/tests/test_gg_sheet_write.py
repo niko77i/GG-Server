@@ -285,6 +285,40 @@ def test_dashboard_write_rebuilds_from_accounts(client, monkeypatch):
     assert ("gg_adv_4", "解绑", 7) in writes, f"H 列应写「解绑」，实际 {writes}"
 
 
+def test_dashboard_write_f_col_writes_status_name(client, monkeypatch):
+    """F 列必须写该账户的**状态名**（status_name or "存活"）—— 与改前逐字相同。
+
+    批量改造后 F 列从未被任何用例断言（上面各条只断言 H），于是实现若把 F 写死成
+    "存活"、或误填账户ID / H 的值，全套照样绿。这里锚两条分支：
+
+    (1) 有状态名时 F = 该名 —— 刻意用**非** "存活" 的名字「死亡」，以区别于回落值；
+        写死 "存活" 或写成 H 的值都会在此处变红。
+    (2) status_id 为 NULL（LEFT JOIN 出 NULL status_name）时回落 "存活"。
+    """
+    writes, _key_cols = _record_cell_writes(monkeypatch)
+
+    h, uid = _gg_user(client, "_gg_fcol")
+    db = database.get_db()
+    _setup_sheets(db)
+    dead = _status_id(db, "死亡")
+    a_named = _mk_account(db, uid, "gg_fcol_named", dead)    # 状态名「死亡」
+    a_null = _mk_account(db, uid, "gg_fcol_null", None)      # status_id NULL ⇒ 回落
+    db.close()
+
+    # 删户点位触发看板写（写 F=状态名、H="解绑"），不改状态值
+    assert client.delete(f"/api/accounts/{a_named}", headers=h).status_code == 200
+    assert client.delete(f"/api/accounts/{a_null}", headers=h).status_code == 200
+
+    _wait_until(lambda: ("gg_fcol_named", "解绑", 7) in writes
+                and ("gg_fcol_null", "解绑", 7) in writes,
+                f"两户删户都必须触发看板写，实际 {writes}")
+
+    assert ("gg_fcol_named", "死亡", 5) in writes, \
+        f"F 列(col 5) 必须写该账户的状态名「死亡」（写死 '存活' 会在此变红），实际 {writes}"
+    assert ("gg_fcol_null", "存活", 5) in writes, \
+        f"status_name 为 NULL 时 F 列(col 5) 应回落 '存活'，实际 {writes}"
+
+
 # ---------------------------------------------------------------------------
 # 身份维度：五个点位各自「写谁的看板」
 #
