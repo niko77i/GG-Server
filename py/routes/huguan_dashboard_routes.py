@@ -94,9 +94,9 @@ def dashboard_config_save():
                 return err(f"工作表「{sheet}」被两个户类型共用", 400)
             seen_names.add(name)
             seen_sheets.add(sheet)
-            # `columns` 可选的**手工覆盖** `{表头名: 字段key}`（设计 §4.2）。校验口径
-            # 必须与 `resolve_column_map` 一致（可覆盖目标 = 真字段，不含空串哨兵），
-            # 否则存进去的覆盖到读/写时会静默失效（resolve_column_map 当它是未采集）。
+            # `columns` 可选的**手工覆盖** `{表头名: 字段key}`（设计 §4.2）。合法覆盖目标
+            # = **真字段 + 空串**（空串 = 刻意不采集，§3.3），与 `resolve_column_map`
+            # 同口径、两层一致。此二者之外的目标一律拒绝：存进去也会在读/写时静默失效。
             cols = t.get("columns")
             if cols is not None:
                 if not isinstance(cols, dict):

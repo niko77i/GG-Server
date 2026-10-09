@@ -5393,6 +5393,42 @@ class TestResolveColumnMap:
         assert "acquired_date" not in m, "覆盖空串应压过别名"
         assert "B" not in m.values()
 
+
+class TestDescribeHeaderColumns:
+    """列映射 UI 的数据源：逐列摊开「认成了什么 + 怎么认的」。"""
+
+    ENTERPRISE = ["日期", "是否回收", "账户ID", "主体名称", "账户名称", "BC",
+                  "国家", "所属渠道", "接户运营", "时区", "下户链接"]
+
+    def _describe(self, headers, overrides):
+        m, unmatched = hd.resolve_column_map(headers, overrides)
+        return hd.describe_header_columns(headers, overrides, m, unmatched), unmatched
+
+    def test_alias_and_ignored_and_none_are_distinguished(self):
+        rows, _u = self._describe(["账户ID", "位置", "备注二"], {})
+        assert rows == [
+            {"header": "账户ID", "field": "advertiser_id", "via": "alias"},
+            {"header": "位置", "field": "", "via": "ignored"},
+            {"header": "备注二", "field": None, "via": "none"},
+        ]
+
+    def test_override_and_empty_override_are_reported_as_override(self):
+        rows, _u = self._describe(["账户ID", "负责人", "备注二"],
+                                  {"负责人": "owner_name", "备注二": ""})
+        assert rows[1] == {"header": "负责人", "field": "owner_name", "via": "override"}
+        assert rows[2] == {"header": "备注二", "field": "", "via": "ignored"}
+
+    def test_blank_headers_are_skipped(self):
+        rows, _u = self._describe(["账户ID", "", "  "], {})
+        assert [r["header"] for r in rows] == ["账户ID"]
+
+    def test_enterprise_table_is_fully_describable(self):
+        rows, unmatched = self._describe(self.ENTERPRISE, {})
+        assert unmatched == []
+        assert [r["via"] for r in rows] == ["alias"] * len(self.ENTERPRISE)
+        assert [r["field"] for r in rows][:3] == ["acquired_date", "_dead_flag", "advertiser_id"]
+
+
 # ---------- Task 3: 表级 col_map 的读写 ----------
 
 class TestColMapReadWrite:

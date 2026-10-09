@@ -134,10 +134,13 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
     - 表头文本 strip() 后匹配；空表头跳过。
     - 多列命中同一字段 ⇒ 取**最左**那列，其余记入未采集（不静默）。
     - 覆盖指向的字段key 非法 ⇒ 忽略该条并记入未采集（校验已在 HTTP 层拦，这里是纵深防御）。
+    - **覆盖值可以是空串**：= 用户显式「刻意不采集」（设计 §3.3），占用该列但既不映射
+      也不上报 —— 与目录里的空串哨兵同档，只是由覆盖手工指定。
     返回的未采集列表保留表头原文（strip 后），供前端逐条显示与指派。
     """
     # 只把**真正的字段**当合法覆盖目标：空串字段key 是「认识但刻意不采集」的哨兵
-    # （见 TT_FIELD_CATALOG），不是字段，故不能作为手工覆盖的落点。
+    # （见 TT_FIELD_CATALOG），不是字段，故不能作为覆盖**指向的字段**。
+    # （覆盖**值**取空串是另一回事：那合法，见下方第一轮。）
     catalog_fields = {f for f, _l, _a, _d, _k, _s in TT_FIELD_CATALOG if f}
     out, unmatched, taken = {}, [], set()
 
@@ -193,6 +196,45 @@ def _col_letter(i: int) -> str:
     return chr(ord("A") + i // 26 - 1) + chr(ord("A") + i % 26)
 
 
+def describe_header_columns(headers: list, overrides: dict,
+                            col_map: dict, unmatched: list) -> list:
+    """把一次表头解析的结果摊成「逐列一行」，供前端列映射 UI 显示（设计 §3.1）。
+
+    每项：{"header": strip 后的表头原文, "field": 字段key | "" | None, "via": 四档}
+
+      via = "override" 该表手工指派 / "alias" 别名自动认出 /
+            "ignored" 认识但刻意不采集（目录哨兵「位置」，或覆盖值为空串）/ "none" 完全不认识
+      field = "" 只与 "ignored" 同现；field = None 只与 "none" 同现。
+
+    **不重新解析**：全部从 resolve_column_map 的三个产出（col_map / unmatched / overrides）
+    反推，避免第二套「认列」逻辑（那是本批最容易漂的地方）。空表头列不列出
+    —— 与 resolve_column_map 的跳过口径一致。
+    """
+    field_by_letter = {col: field for field, col in col_map.items()}
+    ov = overrides or {}
+    unknown = set(unmatched)
+    rows = []
+    for i, raw in enumerate(headers):
+        name = ("" if raw is None else str(raw)).strip()
+        if not name:
+            continue
+        if name in ov and ov[name] == "":
+            # 覆盖空串：认识但刻意不采集（占用该列，不在 col_map 里）
+            rows.append({"header": name, "field": "", "via": "ignored"})
+            continue
+        field = field_by_letter.get(_col_letter(i))
+        if field is None:
+            # 该列没进 col_map：要么根本不认识（在 unmatched 里），要么是目录哨兵那一档
+            if name in unknown:
+                rows.append({"header": name, "field": None, "via": "none"})
+            else:
+                rows.append({"header": name, "field": "", "via": "ignored"})
+            continue
+        via = "override" if ov.get(name) == field else "alias"
+        rows.append({"header": name, "field": field, "via": via})
+    return rows
+
+
 def field_spec(platform: str) -> dict:
     """字段key → {writable, readable, key, skip_empty_write}。
 
@@ -220,9 +262,10 @@ def field_spec(platform: str) -> dict:
 # 必须与 `resolve_column_map` 认定的可覆盖目标**同一口径** —— 后者用
 # `{f for f, ... in TT_FIELD_CATALOG if f}`（剔掉空串哨兵）。若这里直接
 # `{f for f, *_ in TT_FIELD_CATALOG}`，就会把「认识但刻意不采集」的空串哨兵
-# （中文名「位置」）算成合法字段 ⇒ POST 放行 `columns: {"位置": ""}`，而
-# `resolve_column_map` 又当它是无效覆盖 —— 两边对「什么合法」打架。
+# （中文名「位置」）**当成一个字段**混进来：用户把某列覆盖成这个字段会被放行，
+# 而 `resolve_column_map` 里根本没有这个字段可认 —— 两边对「什么是字段」打架。
 # 故取 `field_spec("tt")` 这个**终裁字段集**（哨兵已在函数内部排除）。
+# 至于覆盖**值**取空串（= 刻意不采集），那是另一回事，合法且两层一致，不经本集合。
 _TT_CATALOG_FIELDS = set(field_spec("tt"))
 
 
