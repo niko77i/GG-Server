@@ -684,6 +684,11 @@ class TestE11FbSheetsSyncLogSink:
             db.close()
             assert row is not None, "重试必须登记 fb_report"
             assert row["status"] == "retry_failed", f"实际 {row['status']}"
+            # 脱敏不变量钉在**落库点**：读端点今天是裸 SELECT 透传，日后若有人在端点层
+            # 加脱敏，DB 列里的异常原文就会被上面那几句**只读端点**的断言放过
+            # （而 `sheet_write_log.error_msg` 还会被重试路径读走）。
+            assert row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+                f"落库点也必须脱敏，实际 {row['error_msg']!r}")
 
             st = client.get("/api/sheet-write/status", headers=hdr,
                             query_string={"platform": "fb", "target": "fb_report",
@@ -731,6 +736,9 @@ class TestE11FbSheetsSyncLogSink:
                 db.close()
                 assert row is not None and row["status"] == "retry_failed", \
                     (key, row and row["status"])
+                # 落库点也必须脱敏（见单条用例的说明）
+                assert row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+                    f"落库点也必须脱敏，{key} 实际 {row['error_msg']!r}")
 
                 st = client.get("/api/sheet-write/status", headers=hdr,
                                 query_string={"platform": "fb", "target": "fb_report",
@@ -773,6 +781,9 @@ class TestE11FbSheetsSyncLogSink:
             db.close()
             assert row is not None, "提取保存必须登记 fb_report"
             assert row["status"] == "retry_failed", f"实际 {row['status']}"
+            # 落库点也必须脱敏（见单条用例的说明）
+            assert row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+                f"落库点也必须脱敏，实际 {row['error_msg']!r}")
 
             st = client.get("/api/sheet-write/status", headers=hdr,
                             query_string={"platform": "fb", "target": "fb_report",

@@ -1735,10 +1735,10 @@ def extract_save():
                  rec.get('account_name', ''), rec.get('account_id', ''),
                  rec.get('cost', 0), rec.get('impressions', 0), rec.get('clicks', 0),
                  rec.get('registrations', 0), rec.get('purchases', 0), rec.get('cost_per_purchase', 0)))
-        # ⚠️ 这个 commit 必须保留、且必须在登记**之前**：登记会用同一个连接
-        # `record_pending` → `commit`；若此处还握着未提交的写事务，另一条连接拿不到
-        # SQLite 写锁 ⇒ 等满 timeout=30 抛 `database is locked`，请求线程白冻 30 秒
-        # 且登记失败（三期在 tt_accounts_routes 修过两处同族缺陷）。
+        # 保留此 commit 并置于登记**之前**。登记走 `helpers.get_db()`，它是 `flask.g`
+        # 请求级缓存 ⇒ 与这里的 `db` 是**同一条连接**；先落干净事务再登记，语义清晰、
+        # 也不在此连接上累积未提交写事务。真正另起连接的是**后台写表线程**
+        # （`sheet_write.run_write` → `database.get_db()` 新建连接）。
         db.commit()
 
         # 登记一次写表（四期：接入统一治理）。响应里给出 business_key 供前端精确轮询；
