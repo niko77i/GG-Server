@@ -1945,80 +1945,83 @@ def _rebuild_fb_records(db, user_id, product_name, line_name, report_date):
 @jwt_required()
 @fb_required
 def fb_retry_sheets_sync():
-    """重试失败的 Sheet 同步。"""
+    """把该组（或多组）重新排一次写表。
+
+    **登记前先重建一次**（纯 DB 读、不碰 Sheets）：重建失败就当场回**可操作**原因、
+    **不登记** —— 因为 `sheet_write_log.error_msg` 会被统一换成固定文案（防泄露），
+    可操作的原因到了那里就没了（design §4.2）。
+
+    两种入参（**刻意不接受**客户端自己拆 `产品|线|日期` —— 名字含 `|` 会拆错）：
+      单/多组：`{"groups": [[产品,线,日期], …]}`
+      按既有失败行重试：`{"business_keys": [...]}` —— 三元组从该行的 `payload_json` 取
+        （数据管理页汇总区的「重试全部失败的」走这条）
+    """
+    import json
+
     db = get_db()
+    uid = get_uid()
     data = parse_body()
-    log_id = data.get('id', None)
-    user_id = get_uid()
 
-    if log_id:
-        log_row = db.execute(
-            "SELECT * FROM sheets_sync_log WHERE id=? AND user_id=?", (log_id, user_id)
-        ).fetchone()
-        if not log_row:
-            return err('记录不存在', 404)
-        records, why = _rebuild_fb_records(db, user_id,
-                                           log_row['product_name'],
-                                           log_row['line_name'],
-                                           log_row['report_date'])
-        if records is None:
-            return err(why, 400)
-        try:
-            import google_sheets_service as gs
-            # 线名必须带上：upsert_fb_reports 把它当渠道号写进 J 列，原来写死 '' 会让
-            # 重试行丢渠道号
-            gs.upsert_fb_reports(db, user_id, log_row['product_name'],
-                                 (log_row['line_name'] or '').strip(),
-                                 (log_row['report_date'] or '').strip(), records)
-            db.execute("DELETE FROM sheets_sync_log WHERE id=?", (log_id,))
-            db.commit()
-            return ok({'retried': 1})
-        except Exception:
-            # 同一处既是落库点（error_msg 会被 sync-status 读回）又是直出点（response.error）
-            # ⇒ 两处都用固定文案，原文进日志。
-            log.exception("FB 重试写表失败 log_id=%s", log_id)
-            db.execute(
-                "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
-                "updated_at=datetime('now','localtime') WHERE id=?",
-                (_FB_SHEETS_FAILED_MSG, log_id))
-            db.commit()
-            return err('重试失败，详情见服务端日志', 500)
+    triples = []
+    if data.get("business_keys"):
+        keys_in = list(data["business_keys"])
+        marks = ",".join("?" for _ in keys_in)
+        rows = db.execute(
+            f"SELECT business_key, payload_json FROM sheet_write_log WHERE user_id=? "
+            f"AND target='fb_report' AND business_key IN ({marks})",
+            (uid, *keys_in)).fetchall()
+        for r in rows:
+            p = json.loads(r["payload_json"] or "{}")
+            # ⚠️ 两种 payload 形状都要认：单组登记是扁平三要素；批量登记
+            # （`run_write_many` 只收**一个** payload）是 {business_key: [产品,线,日期]} 映射。
+            # 只认前者 ⇒ 批量失败的行永远重试不了（自审时抓到的坑）。
+            tri = (p.get("groups") or {}).get(r["business_key"])
+            if tri:
+                triples.append(tuple(tri))
+            elif p.get("product_name"):
+                triples.append((p["product_name"], p.get("line_name"), p.get("report_date")))
+    elif data.get("groups"):
+        triples = [tuple(g) for g in data["groups"]]
 
-    # 批量重试
-    rows = db.execute(
-        "SELECT * FROM sheets_sync_log WHERE user_id=? ORDER BY created_at DESC LIMIT 20",
-        (user_id,)
-    ).fetchall()
-    retried = 0
-    failed = []
-    for r in rows:
-        records, why = _rebuild_fb_records(db, user_id,
-                                           r['product_name'],
-                                           r['line_name'],
-                                           r['report_date'])
+    triples = [(p, l, d) for p, l, d in triples if p]
+    if not triples:
+        return err('缺少 groups 或 business_keys', 400)
+
+    # 重建前置：不可重建的当场回原因，不进日志
+    ok_groups, failed = [], []
+    for p, l, d in triples:
+        records, why = _rebuild_fb_records(db, uid, p, l, d)
         if records is None:
-            # 无法重建的原因必须回传前端：原来是裸 except 吞掉，用户只看到
-            # `retried: 0`，永远不知道哪条没成功、为什么 —— 正是「静默失败」
-            failed.append({'id': r['id'], 'product_name': r['product_name'], 'error': why})
+            failed.append({'product_name': p, 'line_name': l, 'report_date': d, 'error': why})
             continue
-        try:
-            import google_sheets_service as gs
-            gs.upsert_fb_reports(db, user_id, r['product_name'],
-                                 (r['line_name'] or '').strip(),
-                                 (r['report_date'] or '').strip(), records)
-            db.execute("DELETE FROM sheets_sync_log WHERE id=?", (r['id'],))
-            retried += 1
-        except Exception:
-            # `failed[].error` 直接进响应体、同一文案也落进 error_msg ⇒ 固定文案 + 日志。
-            log.exception("FB 批量重试写表失败 log_id=%s", r['id'])
-            db.execute(
-                "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
-                "updated_at=datetime('now','localtime') WHERE id=?",
-                (_FB_SHEETS_FAILED_MSG, r['id']))
-            failed.append({'id': r['id'], 'product_name': r['product_name'],
-                           'error': _FB_SHEETS_FAILED_MSG})
-    db.commit()
-    return ok({'retried': retried, 'failed': failed})
+        ok_groups.append((p, l, d))
+
+    if not ok_groups:
+        # 单组形态沿用原来的「400 + 原因」，多组形态回 200 + failed[]（形状与改前一致）
+        if len(triples) == 1:
+            return err(failed[0]['error'], 400)
+        return ok({'accepted': 0, 'failed': failed})
+
+    import sheet_write
+    import routes.fb_sheet_targets as _fbt
+
+    keys = [_fbt.fb_report_key(p, l, d) for p, l, d in ok_groups]
+    if len(ok_groups) == 1:
+        p, l, d = ok_groups[0]
+        payload = {"product_name": p, "line_name": l, "report_date": d}
+        sheet_write.run_write(
+            db, user_id=uid, platform="fb", target="fb_report", business_key=keys[0],
+            sync_fn=sheet_write.build_sync("fb_report", uid, keys[0], payload),
+            payload=payload)
+    else:
+        # `run_write_many` 只收**一个** payload ⇒ 三元组按 key 做成映射（design §Task 2）
+        payload = {"groups": {_fbt.fb_report_key(p, l, d): [p, l, d]
+                              for p, l, d in ok_groups}}
+        sheet_write.run_write_many(
+            db, user_id=uid, platform="fb", target="fb_report", business_keys=keys,
+            sync_fn=_fbt.fb_report_many_sync(uid, ok_groups), payload=payload)
+
+    return ok({'accepted': len(ok_groups), 'failed': failed})
 
 
 # ==================== 数据管理 ====================

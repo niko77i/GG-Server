@@ -183,3 +183,139 @@ def test_fb_report_rebuild_writes_the_payload_triple(client, monkeypatch):
 
     assert written == [("产品丙", "线C", "2031-12-31", ["acc_payload"])], \
         f"重建必须用 payload 里的三元组，实际 {written}"
+
+
+# ---------- 四期 Task 2：重试单条 / 批量改走统一入口 ----------
+
+def test_retry_single_registers_and_rebuild_failure_does_not(client, monkeypatch):
+    """重试单条：可重建 ⇒ 登记 fb_report；不可重建 ⇒ 400 + 可操作原因、**零行登记**。"""
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "upsert_fb_reports", lambda *a, **k: None)
+
+    hdr, uid = _fb_user(client, "_fbsw_r1")
+    db = database.get_db()
+    _seed_report(db, uid, product="产品甲", line="线A", date="2026-10-01")
+    db.close()
+
+    body = {"groups": [["产品甲", "线A", "2026-10-01"]]}
+    resp = client.post("/api/fb/reports/retry-sync", headers=hdr, json=body)
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+    assert resp.get_json()["accepted"] == 1, resp.get_json()
+
+    key = __import__("routes.fb_sheet_targets", fromlist=["x"]).fb_report_key(
+        "产品甲", "线A", "2026-10-01")
+    db = database.get_db()
+    r = _settle(db, uid, key)
+    db.close()
+    assert r is not None, "重试必须登记 fb_report"
+    assert r["status"] == "synced", f"实际 {r['status']}"
+
+    # 不可重建（单组）：400 + 可操作原因，且没有任何行被登记
+    resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                       json={"groups": [["产品乙", "线B", "2099-01-01"]]})
+    assert resp.status_code == 400, resp.get_data(as_text=True)[:200]
+    assert "找不到对应的原始数据" in resp.get_json()["error"], resp.get_json()
+    db = database.get_db()
+    n = db.execute("SELECT COUNT(*) FROM sheet_write_log WHERE target='fb_report' "
+                   "AND business_key LIKE '产品乙%'").fetchone()[0]
+    db.close()
+    assert n == 0, f"重建失败不得登记，实际 {n} 行"
+
+
+def test_retry_by_business_keys_reads_payload(client, monkeypatch):
+    """汇总区重试：只回传 business_key 列表，端点从该行 payload_json 取三元组。
+
+    这条挡住「客户端自己拆 `产品|线|日期`」那条路 —— 名字含 `|` 会拆错。
+    """
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append((p, l, d)))
+
+    hdr, uid = _fb_user(client, "_fbsw_bk")
+    db = database.get_db()
+    _seed_report(db, uid, product="甲|乙", line="L1", date="2026-10-01", acc="a1")
+    key = __import__("routes.fb_sheet_targets", fromlist=["x"]).fb_report_key(
+        "甲|乙", "L1", "2026-10-01")
+    # 直接造一条失败的既有行（不起线程，确定且快）—— 端点要能从它的 payload_json 取三元组
+    db.execute(
+        "INSERT INTO sheet_write_log (user_id, platform, target, business_key, status, "
+        "payload_json) VALUES (?, 'fb', 'fb_report', ?, 'retry_failed', ?)",
+        (uid, key, json.dumps({"product_name": "甲|乙", "line_name": "L1",
+                               "report_date": "2026-10-01"}, ensure_ascii=False)))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                       json={"business_keys": [key]})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+    assert resp.get_json()["accepted"] == 1, resp.get_json()
+    for _ in range(300):
+        if written:
+            break
+        _poll_sleep(0.02)
+    assert written == [("甲|乙", "L1", "2026-10-01")], \
+        f"名字含 `|` 也必须按 payload 取对三元组，实际 {written}"
+
+
+def test_retry_by_business_keys_reads_mapped_payload(client, monkeypatch):
+    """**批量登记**留下的行：payload 是 {business_key: [产品,线,日期]} 映射，也要认。
+
+    自审时抓到的坑：只认扁平 payload ⇒ 批量失败的行永远重试不了。
+    """
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append((p, l, d)))
+
+    hdr, uid = _fb_user(client, "_fbsw_bkmap")
+    db = database.get_db()
+    _seed_report(db, uid, product="甲", line="L1", date="2026-10-01", acc="a1")
+    key = __import__("routes.fb_sheet_targets", fromlist=["x"]).fb_report_key(
+        "甲", "L1", "2026-10-01")
+    db.execute(
+        "INSERT INTO sheet_write_log (user_id, platform, target, business_key, status, "
+        "payload_json) VALUES (?, 'fb', 'fb_report', ?, 'retry_failed', ?)",
+        (uid, key, json.dumps({"groups": {key: ["甲", "L1", "2026-10-01"]}},
+                              ensure_ascii=False)))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                       json={"business_keys": [key]})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+    assert resp.get_json()["accepted"] == 1, resp.get_json()
+    for _ in range(300):
+        if written:
+            break
+        _poll_sleep(0.02)
+    assert written == [("甲", "L1", "2026-10-01")], f"映射形状的 payload 也要认，实际 {written}"
+
+
+def test_retry_batch_covers_every_group(client, monkeypatch):
+    """批量重试必须覆盖**每一组**（单组工厂会漏写，二期踩过）。"""
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append((p, l, d)))
+
+    hdr, uid = _fb_user(client, "_fbsw_rb")
+    db = database.get_db()
+    _seed_report(db, uid, product="甲", line="L1", date="2026-10-01", acc="a1")
+    _seed_report(db, uid, product="乙", line="L2", date="2026-10-02", acc="a2")
+    _seed_report(db, uid, product="丙", line="L3", date="2026-10-03", acc="a3")
+    db.close()
+
+    resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                       json={"groups": [["甲", "L1", "2026-10-01"],
+                                        ["乙", "L2", "2026-10-02"],
+                                        ["丙", "L3", "2026-10-03"]]})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+    assert resp.get_json()["accepted"] == 3, resp.get_json()
+
+    for _ in range(300):
+        if len(written) >= 3:
+            break
+        _poll_sleep(0.02)
+    assert sorted(written) == [("丙", "L3", "2026-10-03"), ("乙", "L2", "2026-10-02"),
+                               ("甲", "L1", "2026-10-01")], f"三组都要写，实际 {written}"
