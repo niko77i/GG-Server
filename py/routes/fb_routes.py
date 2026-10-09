@@ -1962,8 +1962,14 @@ def fb_retry_sheets_sync():
     uid = get_uid()
     data = parse_body()
 
+    # 入参闸门（口径照同文件其它收列表的端点，如 batch_delete_accounts /
+    # accounts_batch_lookup 的 `isinstance(..., list)`）：请求体是用户可控 JSON，
+    # 畸形形状若漏到解包处会抛 ValueError / 绑定点会抛 InterfaceError ⇒ 500。
     triples = []
     if data.get("business_keys"):
+        if not isinstance(data["business_keys"], list) or not all(
+                isinstance(k, str) for k in data["business_keys"]):
+            return err('business_keys 格式不正确', 400)
         keys_in = list(data["business_keys"])
         marks = ",".join("?" for _ in keys_in)
         rows = db.execute(
@@ -1981,7 +1987,11 @@ def fb_retry_sheets_sync():
             elif p.get("product_name"):
                 triples.append((p["product_name"], p.get("line_name"), p.get("report_date")))
     elif data.get("groups"):
-        triples = [tuple(g) for g in data["groups"]]
+        groups = data["groups"]
+        if not isinstance(groups, list) or not all(
+                isinstance(g, (list, tuple)) and len(g) == 3 for g in groups):
+            return err('groups 格式不正确', 400)
+        triples = [tuple(g) for g in groups]
 
     triples = [(p, l, d) for p, l, d in triples if p]
     if not triples:

@@ -319,3 +319,22 @@ def test_retry_batch_covers_every_group(client, monkeypatch):
         _poll_sleep(0.02)
     assert sorted(written) == [("丙", "L3", "2026-10-03"), ("乙", "L2", "2026-10-02"),
                                ("甲", "L1", "2026-10-01")], f"三组都要写，实际 {written}"
+
+
+def test_retry_malformed_input_returns_400_not_500(client):
+    """畸形入参必须 400 —— 请求体是用户可控 JSON，不得在解包/绑定处打成 500。
+
+    无闸门时 `[["a"]]` 会在 `for p, l, d in triples` 抛 ValueError（500）；
+    `business_keys` 非列表时 `list("abc")` 会退化成逐字符、非 str 元素会在
+    sqlite 绑定点抛 InterfaceError（500）。
+    """
+    hdr, _ = _fb_user(client, "_fbsw_badgrp")
+    for body in ({"groups": [["a"]]},
+                 {"groups": [["a", "b", "c", "d"]]},
+                 {"groups": "abc"},
+                 {"business_keys": "abc"},
+                 {"business_keys": [{"k": 1}]}):
+        resp = client.post("/api/fb/reports/retry-sync", headers=hdr, json=body)
+        assert resp.status_code == 400, \
+            f"{body} 应回 400，实际 {resp.status_code}：{resp.get_data(as_text=True)[:200]}"
+        assert resp.get_json()["success"] is False, resp.get_json()
