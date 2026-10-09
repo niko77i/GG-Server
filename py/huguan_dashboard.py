@@ -112,8 +112,11 @@ TT_FIELD_CATALOG = [
     ("owner_change_note", "换绑情况", ("换绑情况",),        "r",  False, False),
 ]
 
-# tt 的解析结果里，定位键的字段名恒为 "account_id"（与 COLUMN_SPEC 的既有约定一致：
-# 解析结果用 account_id，拼 SQL / 写库用 ACCOUNT_KEY_FIELD[platform]，两个命名空间勿混）。
+# TT 的定位键在**三个命名空间**里各有名字，勿混：
+#   - 字段目录 / `resolve_column_map` 产出的 col_map 键名 → "advertiser_id"（TT_FIELD_CATALOG 里那个 key）
+#   - **解析结果**（parse_row 的产出）的键名恒为 → TT_KEY_FIELD，即下面的 "account_id"
+#   - 拼 SQL / 写库用的 DB 列名 → ACCOUNT_KEY_FIELD["tt"]（也是 "advertiser_id"）
+# 注意：`col_map[TT_KEY_FIELD]` 对 tt 会 KeyError —— col_map 里没有 "account_id" 这个键。
 TT_KEY_FIELD = "account_id"
 
 # 别名 → 字段key（同名字段只取最先出现的那个别名条目）
@@ -161,9 +164,10 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
             continue
         field = _TT_ALIAS_TO_FIELD.get(name)
         if field is None:
-            # 完全不认识 ⇒ 报出来（设计 §4.3）
+            # 完全不认识 ⇒ 报出来（设计 §4.3）；同一个未知表头只报一次
             if name not in (overrides or {}):
-                unmatched.append(name)
+                if name not in unmatched:
+                    unmatched.append(name)
             continue
         if field == "":
             # 认识、但刻意不采集（如「位置」）：既不映射也不上报

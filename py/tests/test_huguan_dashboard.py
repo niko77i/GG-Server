@@ -5301,3 +5301,9 @@ class TestResolveColumnMap:
         m, unmatched = hd.resolve_column_map(["账户ID", "位置"], {})
         assert unmatched == []
         assert "B" not in m.values(), "「位置」不该被映射到任何字段"
+
+    def test_repeated_unknown_header_reported_once(self):
+        """同一个未知表头出现两次 ⇒ 未采集列表里只报一次（否则前端的逐列清单会出现重复项）。"""
+        m, unmatched = hd.resolve_column_map(["账户ID", "备注二", "备注二"], {})
+        assert unmatched == ["备注二"], f"应只报一次，实际={unmatched}"
+        assert "remark" not in m
