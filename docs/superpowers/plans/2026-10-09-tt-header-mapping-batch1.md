@@ -77,8 +77,11 @@ class TestResolveColumnMap:
         m, unmatched = hd.resolve_column_map(self.JIABAI, {})
         assert unmatched == []
         legacy = {f: c for c, _h, f, _w, _r in hd.COLUMN_SPEC["tt"] if f}
-        # 规格里 K「位置」的 field 是 None（不采集），故从 legacy 侧剔除后逐个比
-        assert {k: v for k, v in m.items() if k != "account_id"} == \
+        # 定位键两套命名并存（设计 §4.1/§4.4）：m 用目录名 advertiser_id，legacy 用
+        # 表列名 account_id，故两侧各自剔除**自己**的键名后再逐字段比。
+        # （规格里 K「位置」field=None 不采集；本走 B 后「位置」由目录的忽略条目吞掉，
+        #  既不进 m、也不进未采集。）
+        assert {k: v for k, v in m.items() if k != "advertiser_id"} == \
                {k: v for k, v in legacy.items() if k != "account_id"}
 
     def test_unknown_header_is_reported_not_silently_dropped(self):
@@ -185,7 +188,9 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
     - 覆盖指向的字段key 非法 ⇒ 忽略该条并记入未采集（校验已在 HTTP 层拦，这里是纵深防御）。
     返回的未采集列表保留表头原文（strip 后），供前端逐条显示与指派。
     """
-    catalog_fields = {f for f, _l, _a, _d, _k, _s in TT_FIELD_CATALOG}
+    # 只把**真正的字段**当合法覆盖目标：空串字段key 是「认识但刻意不采集」的哨兵
+    # （见 TT_FIELD_CATALOG），不是字段，故不能作为手工覆盖的落点。
+    catalog_fields = {f for f, _l, _a, _d, _k, _s in TT_FIELD_CATALOG if f}
     out, unmatched, taken = {}, [], set()
 
     def _claim(field, col_letter):
@@ -243,6 +248,8 @@ def field_spec(platform: str) -> dict:
     spec = {}
     if platform == "tt":
         for f, _l, _a, d, is_key, skip in TT_FIELD_CATALOG:
+            if not f:
+                continue          # 「认识但刻意不采集」的条目不是字段
             spec[f] = {"writable": d == "rw", "readable": True,
                        "key": is_key, "skip_empty_write": skip}
         return spec
