@@ -5431,7 +5431,26 @@ class TestColMapOwnerColumns:
         got = hd.owner_channel_cells([{"account_id": "7001"}], "tt", "张三", cm)
         assert got == [{"account_id": "7001", "cells": {"B": "张三"}}]
 
+    def test_owner_sheet_from_skips_absent_field(self):
+        """这张表没有归属列（未采集）⇒ 跳过该列、一个字不碰（空 dict）。
+
+        钉住 `if target is None: continue` 守卫：去掉它，缺失字段会被塞进
+        `out[None]`（`{None: "张三"}`），撤回时就会往一个不存在的列写字。
+        """
+        cm, _u = hd.resolve_column_map(["账户ID"], {})
+        got = hd._owner_sheet_from(
+            {"account_id": "7001", "owner_name": "张三"}, "tt", cm)
+        assert got == {}
+
     def test_defaults_unchanged(self):
+        """`col_map=None` 时的字母必须仍是既有固定列（不因新增映射而漂一列）。
+
+        gg 通道列 = H（`OWNER_CHANNEL_COL["gg"]`，与 `spec_column_map("gg")
+        ["_owner_channel"]` 一致）；tt = L（`OWNER_CHANNEL_COL["tt"]`，即
+        `COLUMN_SPEC["tt"]` 的 L=owner_change_note）。期望写**字面值**，
+        不再用 `f(x) == f(x, spec_column_map(p))` 这种自比（恒真，验不出回归）。
+        """
         assert hd.owner_channel_cells([{"account_id": "7001"}], "tt", "张三") == \
-               hd.owner_channel_cells([{"account_id": "7001"}], "tt", "张三",
-                                      hd.spec_column_map("tt"))
+               [{"account_id": "7001", "cells": {"L": "张三"}}]
+        assert hd.owner_channel_cells([{"account_id": "7001"}], "gg", "张三") == \
+               [{"account_id": "7001", "cells": {"H": "张三"}}]
