@@ -392,8 +392,10 @@ class TestColMapReadWrite:
                                  "tt", cm)
         assert cells["F"] == "BC-9"            # BC 在 F 列（企业户表）
         assert cells["E"] == "甲"              # 账户名称在 E 列
-        assert "A" not in cells                # acquired_date 未给值 → 写空串仍应产出？
-        # ⚠️ 语义：其余可写列照旧产出（含空串），与改动前一致；只有 skip_empty_write 的字段才跳过。
+        # 语义（Global Constraints「其余字段保持照库里值写（含空串）」）：row 里没给值的
+        # **可写**列照旧产出空串（等于清掉表里那格）；只有 skip_empty_write 的字段才跳过。
+        assert cells["A"] == ""                # acquired_date：映射到 A，未给值 ⇒ 写空串
+        assert cm["landing_url"] not in cells  # landing_url：空值跳过回写（见下一条测试）
 
     def test_cells_for_row_skips_unmapped_columns_entirely(self):
         """未采集的列**一个字不碰** —— 产出里不得含它的列字母。"""
@@ -589,16 +591,8 @@ git commit -m "feat(huguan): 归属/通道列也走表级 col_map"
 
 ```python
 class TestHeaderMappingSync:
-    def _setup(self, client, username, tables, tabs):
-        hg, _uid = _create_user(client, username, role="huguan")
-        db = database.get_db()
-        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
-                   (f"huguan_dashboard_{_uid_of(username)}", json.dumps(
-                       {"tt": {"spreadsheet_id": "SS", "tables": tables}})))
-        db.commit(); db.close()
-        import google_sheets_service as gs
-        monkeypatch_target = gs
-        return hg, tabs, monkeypatch_target
+    # 注意：三个用例各自内联建 config（不共用一个 setUp helper）—— 每个用例的表配置
+    # 不同（企业户 / 怪表 / 企业户），共用一个 helper 反而要传参绕。
 
     def test_enterprise_header_reads_correctly(self, client, monkeypatch):
         """企业户表头 → 按表头名读，不再串列（BC 不该读成「主体名称」的值）。"""
@@ -621,8 +615,11 @@ class TestHeaderMappingSync:
                            json={"platform": "tt", "dry_run": True}).get_json()["diff"]
         create = diff["to_create"][0]
         assert create["account_id"] == "7009"
-        assert create["db_values"]["bc_id"] is not None or True   # BC 值经解析落库
         assert diff.get("unmatched_columns") == []
+        # 本用例只钉路由层两件事：表头解析全中（无未采集）+ 账户ID 读对。
+        # 「BC 不再读成主体名称的值」由 Task 3 的 parse_row 用例钉（那里能直接断言
+        # bc_name == "BC-1"）；这里钉不了 —— BC 名要经 bc 表解析成 bc_id，而临时库里
+        # 没有这个 BC，_collect_updates 只会记一条「无法唯一匹配」的 warning。
 
     def test_missing_key_column_rejects_the_whole_sync(self, client, monkeypatch):
         """账户ID 认不出 ⇒ 拒同步（设计 §4.3 第 2 条）。"""
@@ -749,7 +746,6 @@ def test_tt_write_uses_header_key_column(client, monkeypatch):
     # 直接调共享 helper，断言它解析出的定位列
     cm = hd.resolve_table_col_map(object(), "SS", "企业户", "tt")
     assert cm["advertiser_id"] == "A", f"应按表头定为 A 列，实际={cm}"
-    assert "C" not in cm.values() or True    # 仅说明：不再假设 C
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
