@@ -832,12 +832,19 @@ fb.js 里对应三个包装（含零调用的 lastSyncStatus）一并删除。
 
 把 `pollSyncStatus(syncLogId, attempt)` 改为按 **business_key** 轮询统一端点：
 
+> **勘误（实现时改，2026-10-09）**：本段下面的 `MAX_ATTEMPTS = 15` **已改为 `40`**。
+> 原因：换源后后端是「首次失败 → 中间态 `failed` → 睡 30s → 重试 → 终态」的状态机，
+> **终态 `retry_failed` 最早 ~30s 才落库**；15s 会让「走了后端重试」的写表终态在本页
+> **永不可观测**（旧代码 15s 够用，是因为旧后端把 `failed` 当**终态**当场弹）。
+> 教训记于账本：**换掉一个「上游何时给终态」的数据源时，必须重估所有依赖该时序的常量**。
+> 另同时**恢复**了被本段连带删掉的耗尽提示（「写表结果未返回，请稍后到「数据管理」页查看或重试」）。
+
 ```js
-// 轮询本次写表结果：pending 则 1 秒后再查，最多 15 次。
+// 轮询本次写表结果：pending 则 1 秒后再查（**上限 40 次**，见上方勘误 —— 必须 > 后端 30s 重试窗口）。
 // 四期起数据源换成统一的 /api/sheet-write/status（带 target 过滤，
 // 防与同期其它 target 互相遮蔽）；终态文案复用全仓唯一文案源。
 async function pollWriteStatus(businessKey, attempt = 0) {
-  const MAX_ATTEMPTS = 15
+  const MAX_ATTEMPTS = 40
   try {
     const r = await sheetWriteApi.status({
       platform: 'fb', target: 'fb_report', businessKey,
