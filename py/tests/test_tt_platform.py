@@ -150,3 +150,14 @@ def test_backfill_not_reapplied_when_column_exists():
     assert got == "", f"列已存在时不该覆盖，实际={got!r}"
     conn.close()
     os.unlink(db_path)
+
+
+def test_tt_accounts_has_subject_name_and_landing_url():
+    conn, db_path = _fresh_schema_conn()
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tt_accounts)").fetchall()}
+        assert "subject_name" in cols, f"缺 subject_name。现有列: {sorted(cols)}"
+        assert "landing_url" in cols, f"缺 landing_url。现有列: {sorted(cols)}"
+    finally:
+        conn.close()
+        os.unlink(db_path)

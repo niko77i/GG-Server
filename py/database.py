@@ -227,6 +227,13 @@ def _ensure_columns(conn: sqlite3.Connection):
                               "account_type TEXT DEFAULT ''"):
         conn.execute("UPDATE tt_accounts SET account_type='加白户' "
                      "WHERE account_type IS NULL OR account_type=''")
+    # TT 表头映射新增字段（2026-10-09 设计 §4.6）：
+    #   主体名称 —— 企业户表有这一列；下户链接 —— 非必填的 URL。
+    # 与 account_type 一样，建表语句与迁移区**两处都要有**。
+    _add_column_if_missing(conn, "tt_accounts", "subject_name",
+                           "subject_name TEXT DEFAULT ''")
+    _add_column_if_missing(conn, "tt_accounts", "landing_url",
+                           "landing_url TEXT DEFAULT ''")
     # 主 BM 标记（「位置」列的存储，规格 4.3）。部分唯一索引保证
     # 「同一账户至多一个主 BM」——**不阻止换 BM**，换法是同一事务内先清后设。
     _add_column_if_missing(conn, "fb_account_bm", "is_primary",
@@ -1033,6 +1040,8 @@ def _ensure_schema(conn: sqlite3.Connection):
             remark TEXT DEFAULT '',
             owner_change_note TEXT DEFAULT '',
             account_type TEXT DEFAULT '',
+            subject_name TEXT DEFAULT '',
+            landing_url TEXT DEFAULT '',
             owner_id INTEGER REFERENCES users(id),
             deleted_at TEXT DEFAULT NULL,
             created_at TEXT DEFAULT (datetime('now','localtime')),
