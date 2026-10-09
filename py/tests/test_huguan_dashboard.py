@@ -5414,3 +5414,24 @@ class TestColMapReadWrite:
         cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
         cells = hd.cells_for_row({"account_id": "0"}, "tt", cm)
         assert cells[cm["advertiser_id"]] == "'0"
+
+
+# ---------- Task 4: 归属/通道列也走表级 col_map ----------
+
+class TestColMapOwnerColumns:
+    def test_owner_sheet_from_uses_col_map(self):
+        """撤回快照的表侧原值，列字母必须来自这张表的映射。"""
+        cm, _u = hd.resolve_column_map(["账户ID", "接户运营"], {})
+        parsed = {"account_id": "7001", "owner_name": "张三", "_owner_channel": ""}
+        got = hd._owner_sheet_from(parsed, "tt", cm)
+        assert got == {"B": "张三"}          # 接户运营在 B 列（这张表里）
+
+    def test_owner_channel_cells_uses_col_map(self):
+        cm, _u = hd.resolve_column_map(["账户ID", "换绑情况"], {})
+        got = hd.owner_channel_cells([{"account_id": "7001"}], "tt", "张三", cm)
+        assert got == [{"account_id": "7001", "cells": {"B": "张三"}}]
+
+    def test_defaults_unchanged(self):
+        assert hd.owner_channel_cells([{"account_id": "7001"}], "tt", "张三") == \
+               hd.owner_channel_cells([{"account_id": "7001"}], "tt", "张三",
+                                      hd.spec_column_map("tt"))

@@ -742,7 +742,7 @@ def _parseable_fields(platform: str) -> tuple:
 _OWNER_SHEET_COLS = {"gg": ("G", "H"), "tt": ("G",), "fb": ("J", "I")}
 
 
-def _owner_sheet_from(parsed: dict, platform: str) -> dict:
+def _owner_sheet_from(parsed: dict, platform: str, col_map: dict | None = None) -> dict:
     """取「归属变更会碰的那几列」在**表里的原值**：{列字母: 单元格值}。
 
     撤回时要用它把表侧盖回原样（规格 §5.2 的 `sheet_back`）。记的是**真实原值**，
@@ -752,13 +752,23 @@ def _owner_sheet_from(parsed: dict, platform: str) -> dict:
     值取自 `parse_row` 的结果：这几列在 `COLUMN_SPEC` 里都是 `readable=True`
     （GG 的 G/H = owner_name/_owner_channel，TT 的 G = owner_name，
     FB 的 J/I = owner_name/acceptor），解析结果里必然有对应字段，无需回读原始 values。
+
+    `col_map` 是**这张表**的 {字段key: 列字母}；`None` ⇒ 用既有固定规格合成的
+    （gg/fb 与既有调用点零改动，逐字节等价）。给了 col_map 时方向翻转：字段集合
+    仍由既有来源（`_OWNER_SHEET_COLS` × `COLUMN_SPEC`）推导，但列字母改为到这张
+    表的映射里查该字段的落点；**这张表没有该列（未采集）⇒ 跳过，一个字不碰**。
     """
+    cm = spec_column_map(platform) if col_map is None else col_map
     field_by_col = {c[0]: c[2] for c in COLUMN_SPEC[platform]}
     out = {}
     for col in _OWNER_SHEET_COLS[platform]:
         field = field_by_col.get(col)
-        if field:
-            out[col] = "" if parsed.get(field) is None else str(parsed.get(field))
+        if not field:
+            continue
+        target = cm.get(field)
+        if target is None:
+            continue
+        out[target] = "" if parsed.get(field) is None else str(parsed.get(field))
     return out
 
 
@@ -1039,13 +1049,26 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
         return True
     return str(cur if cur is not None else "") == str(value if value is not None else "")
 
-def owner_channel_cells(rows: list, platform: str, value: str) -> list:
+def owner_channel_cells(rows: list, platform: str, value: str,
+                        col_map: dict | None = None) -> list:
     """构造只写归属变更通道列的 rows（规格 §7.2 规则 3②）。
 
     刻意只含这一列 —— 收尾写入若顺手带上别的列，就会把户管在表里的
     其他手工改动一起冲掉。
+
+    `col_map` 是**这张表**的 {字段key: 列字母}；`None` ⇒ 用既有固定规格合成的
+    （gg/tt 与既有调用点零改动，逐字节等价）。
+
+    通道列在**两个命名空间**里名字不同，两种都要查：
+      - 合成 map（`col_map=None`）走的是既有 `COLUMN_SPEC`，字段名是 `_owner_channel`（gg H）；
+      - tt 的真实表头映射（`resolve_column_map`）里没有 `_owner_channel`，那一列叫
+        `owner_change_note`（tt L）。只查一个名字会在另一种来源下漏掉整列。
+    两种都没有 ⇒ 这张表没这一列（未采集）⇒ 不产出该格的 cell，一个字不碰。
     """
-    col = OWNER_CHANNEL_COL[platform]
+    cm = spec_column_map(platform) if col_map is None else col_map
+    col = cm.get("_owner_channel") or cm.get("owner_change_note")
+    if col is None:
+        return [{"account_id": r["account_id"], "cells": {}} for r in rows]
     return [{"account_id": r["account_id"], "cells": {col: value}} for r in rows]
 
 
