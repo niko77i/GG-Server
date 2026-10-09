@@ -1827,6 +1827,9 @@ class TestCrossTableDuplicateSheetBack:
         tabs = {"总户-加白": [hdr, _tt_row("8003", "张三")],
                 "总户-企业": [hdr, _tt_row("8003", "李四")]}
         monkeypatch.setattr(gs, "read_sheet_values", lambda svc, sid, name, rng: tabs[name])
+        # 写表前的「表头行读取」（Task 6）走 huguan_dashboard 模块顶层的 read_sheet_values，
+        # 与 `snapshot_push_targets` 同源 —— sync 收尾的定向回写要按表头定位列/行。
+        monkeypatch.setattr(hd, "read_sheet_values", lambda svc, sid, name, rng: tabs[name])
         monkeypatch.setattr(gs, "build_service", lambda p: object())
         writes = []
 

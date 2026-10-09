@@ -20,6 +20,19 @@ import sheet_write
 # —— 不带就整批被跳过，什么也写不进去（且失败会表现为「户类型查不到工作表」）。
 _TT_TYPE = hd.TT_DEFAULT_ACCOUNT_TYPE
 
+# 标准「加白户」表头（由 COLUMN_SPEC["tt"] 的列头推出，与固定列逐列等价）。
+_TT_STD_HEADER = [c[1] for c in hd.COLUMN_SPEC["tt"]]
+
+
+def _stub_header_read(monkeypatch):
+    """桩掉写表前的「表头行读取」（`A1:ZZ1`，Task 6 写表前解析 col_map 用）。
+
+    回标准加白户表头 ⇒ 解析出的 col_map 与固定列规格等价，各用例按列字母的断言不变。
+    """
+    monkeypatch.setattr(hd, "read_sheet_values",
+                        lambda svc, sid, name, rng: [list(_TT_STD_HEADER)]
+                        if rng == "A1:ZZ1" else [])
+
 
 def _tt_huguan(client, username):
     client.post("/api/auth/register", json={"username": username, "password": "test123"})
@@ -96,6 +109,7 @@ def test_huguan_dashboard_sync_writes_all_n(client, monkeypatch):
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "update_rows_by_account_id",
                         lambda svc, sid, name, rows, key_col=None: written.extend(rows))
+    _stub_header_read(monkeypatch)
 
     h, uid = _tt_huguan(client, "_hg_many")
     db = database.get_db()
@@ -185,6 +199,7 @@ def test_writeback_rows_registers_huguan_dashboard(client, monkeypatch):
     import huguan_dashboard as hd
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
+    _stub_header_read(monkeypatch)
 
     h, uid = _tt_huguan(client, "_hg_p1")
     db = database.get_db()
@@ -282,6 +297,7 @@ def test_write_background_routes_owner_column_to_single_cell(client, monkeypatch
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "update_rows_by_account_id",
                         lambda svc, sid, sheet_name, rows, key_col=None: written.extend(rows))
+    _stub_header_read(monkeypatch)
     # 刻意**不** patch `_sync_sheets_background`：走真实后台线程（Sheets 层已 mock，
     # 很快），`_settle` 才能等到终态。若 patch 成不回调 on_result 的桩，日志行会停在
     # pending、`_settle` 白转满 300 轮。
@@ -315,6 +331,7 @@ def test_writeback_owner_channel_registers_and_rebuilds(client, monkeypatch):
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "update_rows_by_account_id",
                         lambda svc, sid, name, rows, key_col=None: written.extend(rows))
+    _stub_header_read(monkeypatch)
 
     h, uid = _tt_huguan(client, "_hg_p3")
     db = database.get_db()
@@ -377,6 +394,7 @@ def test_batch_create_conflict_last_still_registers_sheet_write_log(client, monk
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
+    _stub_header_read(monkeypatch)
 
     h, uid = _tt_huguan(client, "_hg_bc")
     db = database.get_db()
@@ -404,3 +422,121 @@ def test_batch_create_conflict_last_still_registers_sheet_write_log(client, monk
         "留下的未提交写事务把 record_pending 挡到 database is locked 并被吞掉了"
     )
     assert r["status"] == "synced", f"应同步成功，实际 {r['status']}"
+
+
+# ========== Task 6a: 写侧按表头映射定位行（key_col 来自该表 col_map） ==========
+
+
+def test_tt_resolve_table_col_map_reads_header_key_column(monkeypatch):
+    """TT 表的账户ID不在 C 列时，写表前解析的 col_map 必须按表头定为那一列
+    —— 否则整批静默写空。"""
+    reads = []
+
+    def _fake_read(svc, spreadsheet_id, sheet_name, range_str):
+        reads.append((spreadsheet_id, sheet_name, range_str))
+        return [["账户ID", "产品信息"]]          # 账户ID 在 **A 列**
+
+    # resolve_table_col_map 走 huguan_dashboard 模块顶层的 read_sheet_values
+    # （与 snapshot_push_targets 同源），故在此打桩。
+    monkeypatch.setattr(hd, "read_sheet_values", _fake_read)
+    cm = hd.resolve_table_col_map(object(), "SS", "企业户", "tt")
+    assert cm["advertiser_id"] == "A", f"应按表头定为 A 列，实际={cm}"
+    assert reads == [("SS", "企业户", "A1:ZZ1")], f"表头读取必须恰为 A1:ZZ1 一次：{reads}"
+
+
+def test_resolve_table_col_map_gg_fb_performs_no_read(monkeypatch):
+    """gg/fb 的 col_map 就是合成规格，解析时**零额外读**（行为逐字节不变）。"""
+    def _boom(*a, **k):
+        raise AssertionError("gg/fb 不得发起任何读表")
+
+    monkeypatch.setattr(hd, "read_sheet_values", _boom)
+    assert hd.resolve_table_col_map(object(), "SS", "看板", "gg") == hd.spec_column_map("gg")
+    assert hd.resolve_table_col_map(object(), "SS", "看板", "fb") == hd.spec_column_map("fb")
+
+
+def test_resolve_table_col_map_raises_when_key_column_missing(monkeypatch):
+    """找不到定位键必须抛错 —— 绝不退回任何默认列（那会让整批静默写错行）。"""
+    import pytest
+    monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: [["产品信息", "备注"]])
+    with pytest.raises(ValueError):
+        hd.resolve_table_col_map(object(), "SS", "企业户", "tt")
+
+
+def test_tt_dashboard_sync_writes_with_header_key_column(client, monkeypatch):
+    """整行刷新必须按**该表表头**解析出的定位键列写，且 cells 也按该表 col_map 产出。"""
+    import google_sheets_service as gs
+    import routes.huguan_sheet_targets as tgt
+    captured = []
+
+    def _fake_update(svc, sid, name, rows, key_col=None):
+        captured.append({"sheet_name": name, "key_col": key_col, "rows": rows})
+        return {"updated": len(rows), "not_found": []}
+
+    monkeypatch.setattr(gs, "build_service", lambda p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id", _fake_update)
+    # 账户ID 在 A 列、产品信息在 B 列的表 —— 固定列 C 定位会找不到行
+    monkeypatch.setattr(hd, "read_sheet_values",
+                        lambda svc, sid, name, rng: [["账户ID", "产品信息"]])
+
+    h, uid = _tt_huguan(client, "_hg_keyA")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_keyA_1','hg_keyA_1',?,?)", (uid, _TT_TYPE))
+    db.commit()
+    db.close()
+
+    tgt.huguan_dashboard_sync(uid, "tt", ["hg_keyA_1"])
+    assert len(captured) == 1, captured
+    assert captured[0]["key_col"] == "A", f"应按表头定位键 A 列写：{captured}"
+    assert captured[0]["rows"][0]["cells"].get("A") == "hg_keyA_1", \
+        f"cells 也必须按该表 col_map 产出（账户ID 落在 A）：{captured}"
+
+
+def test_tt_snapshot_uses_col_map_key_column(monkeypatch):
+    """快照必须按该表 col_map 的定位键列找行 —— 账户ID 在 A 列时不能按 C 找。"""
+    grid = [["账户ID", "产品信息"], ["7001", "旧值甲"]]
+    monkeypatch.setattr(hd, "read_sheet_values", lambda svc, sid, name, rng: grid)
+    cm = hd.resolve_table_col_map(object(), "SS", "企业户", "tt")
+    groups = [("企业户", [{"account_id": "7001", "cells": {"A": "7001", "B": ""}}])]
+
+    # 不给 col_maps ⇒ 按 KEY_COL["tt"]="C" 找行，表里第 3 列不存在 ⇒ 一个都命不中
+    empty = hd.snapshot_push_targets(object(), {"spreadsheet_id": "SS"}, "tt", groups)
+    assert empty["sheets"][0]["cells"] == [], empty
+
+    # 给了该表 col_map ⇒ 按 A 列定位，命中并把真正会写到的列原值记下来
+    snap = hd.snapshot_push_targets(object(), {"spreadsheet_id": "SS"}, "tt", groups,
+                                    {"企业户": cm})
+    rec = snap["sheets"][0]["cells"]
+    assert [(c["account_id"], c["cells"]) for c in rec] == \
+        [("7001", {"A": "7001", "B": "旧值甲"})], snap
+
+
+def test_tt_owner_channel_writes_to_mapped_column(client, monkeypatch):
+    """归属单格定向写必须按**该表表头**定位角色列（接户运营不在 G 时不能写死 G）。"""
+    import google_sheets_service as gs
+    import routes.huguan_sheet_targets as tgt
+    written = []
+
+    def _fake_update(svc, sid, name, rows, key_col=None):
+        written.append({"sheet_name": name, "key_col": key_col, "rows": rows})
+        return {"updated": len(rows), "not_found": []}
+
+    monkeypatch.setattr(gs, "build_service", lambda p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id", _fake_update)
+    # 表头：账户ID 在 A、接户运营 在 C（都不在固定字母上）
+    monkeypatch.setattr(hd, "read_sheet_values",
+                        lambda svc, sid, name, rng: [["账户ID", "国家", "接户运营"]])
+
+    h, uid = _tt_huguan(client, "_hg_ocmap")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_ocmap_1','hg_ocmap_1',?,?)", (uid, _TT_TYPE))
+    db.commit()
+    db.close()
+
+    tgt.huguan_owner_channel_sync(uid, "tt", "hg_ocmap_1", "张三", role="owner")
+    assert len(written) == 1, written
+    assert written[0]["key_col"] == "A", written
+    assert written[0]["rows"] == [{"account_id": "hg_ocmap_1", "cells": {"C": "张三"}}], written

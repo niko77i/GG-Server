@@ -1393,6 +1393,19 @@ class TestBuildDiff:
 
 # ---------- Task 7: 同步落库 ----------
 
+# 标准「加白户」表头（A=入库时间 … M=产品信息）。由 COLUMN_SPEC["tt"] 的列头推出
+# ——与固定列规格逐列等价，故按列字母写的断言逐字不变。供 `_stub_sheets` 回给
+# 「表头行读取」（Task 6 写表前解析 col_map 用）。
+_TT_STD_HEADER = [c[1] for c in hd.COLUMN_SPEC["tt"]]
+
+
+def _stub_header_read(monkeypatch):
+    """桩掉写表前的「表头行读取」（Task 6）。未走 `_stub_sheets` 的用例调它。"""
+    monkeypatch.setattr(hd, "read_sheet_values",
+                        lambda svc, sid, name, rng: [list(_TT_STD_HEADER)]
+                        if rng == "A1:ZZ1" else [])
+
+
 def _stub_sheets(monkeypatch, captured):
     """把 update_rows_by_account_id 换成桩，记录调用（同步执行，见下）。"""
     import google_sheets_service as gs
@@ -1413,7 +1426,14 @@ def _stub_sheets(monkeypatch, captured):
     # 快照走的是前者；而用本桩的 sync 用例各自把后者桩成自己那张表，打 gs 那个
     # 会把它们的表冲掉。这里回空表即可 —— `/push` 的用例只断言 HTTP 契约
     # （状态码 / rows 计数），快照内容的断言在 tests/test_huguan_undo.py。
-    monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: [])
+    #
+    # 例外：**表头行读取**（`A1:ZZ1`，Task 6 写表前解析 col_map 用）必须回标准
+    # 「加白户」表头 —— 它解析出的 col_map 与既有固定列规格逐列等价（A=入库时间…
+    # M=产品信息），故各用例按列字母的断言逐字不变；回空表会让每张 tt 表都「找不到
+    # 账户ID列」而写失败。其余范围（整片快照等）仍回空。
+    monkeypatch.setattr(hd, "read_sheet_values",
+                        lambda svc, sid, name, rng: [list(_TT_STD_HEADER)]
+                        if rng == "A1:ZZ1" else [])
     # 端点经 main._sync_sheets_background 起**后台线程**写表。不拦住它，断言就会
     # 和后台线程抢时间 —— 本机快时偶然通过、CI 慢时红，是最难查的一类间歇失败。
     # 换成直接调用，让「后台」在测试里同步发生。端点用的是函数体内
@@ -3111,9 +3131,9 @@ class TestTTTriggerPoints:
         passed_ids = []
         _real_collect = hd.collect_rows_for_push
 
-        def _spy_collect(dbc, platform, account_ids=None):
+        def _spy_collect(dbc, platform, account_ids=None, *args, **kwargs):
             passed_ids.append(None if account_ids is None else list(account_ids))
-            return _real_collect(dbc, platform, account_ids)
+            return _real_collect(dbc, platform, account_ids, *args, **kwargs)
 
         monkeypatch.setattr(hd, "collect_rows_for_push", _spy_collect)
 
@@ -4558,6 +4578,7 @@ class TestUpdateAccountPushesRemark:
         monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
         import main as m
         monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+        _stub_header_read(monkeypatch)
 
         resp = client.put(f"/api/tt/accounts/{aid}", headers=op, json={"remark": "新备注"})
         assert resp.status_code == 200
@@ -5013,6 +5034,7 @@ class TestMultiTableSync:
         # 让治理的后台任务同步执行（与三期其他用例同一手法；`from main import`
         # 在函数体内解析，故 patch `m` 上的属性即生效）。
         monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+        _stub_header_read(monkeypatch)
 
         import routes.huguan_dashboard_routes as hdr
         hdr._write_background_tables(db, _uid_of('_mts4'), "tt",
@@ -5194,6 +5216,7 @@ class TestPushRouting:
 
         monkeypatch.setattr(gs, "update_rows_by_account_id", _fake)
         monkeypatch.setattr(gs, "build_service", lambda path: object())
+        _stub_header_read(monkeypatch)
         deferred = []
         monkeypatch.setattr(m, "_sync_sheets_background",
                             lambda fn, on_fail: deferred.append(fn))

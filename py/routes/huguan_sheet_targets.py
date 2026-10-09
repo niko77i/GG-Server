@@ -18,12 +18,15 @@ import sheet_write
 log = logging.getLogger("gg-server")
 
 
-def _resolve_sheet_name(db, user_id, platform, account_id):
-    """按账户的**户类型**解析它该写哪张 worksheet（多账户表规格 §4.4）。
+def _resolve_account_table(db, user_id, platform, account_id):
+    """按账户的**户类型**解析它该写哪张 worksheet 的配置项（`{name, sheet_name, columns}`）。
 
     解析不到 → 返回 None，由调用方决定「跳过」还是「报失败」。
     gg / fb 的类型恒为空串、配置里恰有一个空名条目 ⇒ 恒命中那唯一一张表，
     行为与改动前（单表）等价；只有 tt 会真正分表。
+
+    返回**整项**而不只是工作表名：写表前要按该表的 `columns`（手工覆盖）解析 col_map，
+    读路径用的是同一份配置（`get_platform_tables` 的同一项），读写必须同源。
     """
     import huguan_dashboard as hd
 
@@ -37,8 +40,14 @@ def _resolve_sheet_name(db, user_id, platform, account_id):
         atype = (r["account_type"] if r else "") or ""
     for t in tables:
         if t["name"] == atype:
-            return t["sheet_name"]
+            return t
     return None
+
+
+def _resolve_sheet_name(db, user_id, platform, account_id):
+    """按账户的**户类型**解析它该写哪张 worksheet 的名字（见 `_resolve_account_table`）。"""
+    t = _resolve_account_table(db, user_id, platform, account_id)
+    return t["sheet_name"] if t else None
 
 
 # ---------- target: huguan_dashboard（整行刷新；覆盖点位 #1 与 #5 的 :159/:171/:180） ----------
@@ -68,7 +77,18 @@ def huguan_dashboard_sync(user_id, platform, account_ids):
         spreadsheet_id = hd.get_platform_config(db, user_id, platform)["spreadsheet_id"]
         if not spreadsheet_id:
             raise RuntimeError("该看板未配置表格 ID")
-        rows = hd.collect_rows_for_push(db, platform, list(account_ids))
+        # 写表前逐表解析 col_map（tt 读一次表头行；gg/fb 零额外读）。用该表配置里的
+        # 手工覆盖 `columns` —— 与读路径（`dashboard_sync` 的 `t.get("columns")`）**同源**，
+        # 否则读写对「哪一列是定位键」认识不一致，写就会落到错行。
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        col_map_by_sheet = {
+            t["sheet_name"]: hd.resolve_table_col_map(
+                service, spreadsheet_id, t["sheet_name"], platform, t.get("columns") or {})
+            for t in tables
+        }
+        # cells 也要按本表的 col_map 产出：tt 表头顺序不一定等于固定列规格。
+        col_maps_by_type = {t["name"]: col_map_by_sheet[t["sheet_name"]] for t in tables}
+        rows = hd.collect_rows_for_push(db, platform, list(account_ids), col_maps_by_type)
         groups, skipped = hd.group_rows_by_sheet(db, user_id, platform, rows)
         for name in skipped:
             log.warning("看板回写跳过：户类型「%s」查不到工作表 user=%s platform=%s",
@@ -83,11 +103,11 @@ def huguan_dashboard_sync(user_id, platform, account_ids):
     if not groups:
         raise RuntimeError("所有账户的户类型都查不到对应工作表，未写入")
 
-    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
     for sheet_name, sheet_rows in groups:
-        # key_col 必须显式传：TT 的账户ID列是 C，FB 是 D，写入器默认 "C"。
+        # key_col 从**本表**的 col_map 取（tt 表头顺序不同时账户ID 不在 C 列）。
+        cm = col_map_by_sheet.get(sheet_name) or hd.spec_column_map(platform)
         gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, sheet_rows,
-                                     key_col=hd.KEY_COL[platform])
+                                     key_col=hd.key_col_of_col_map(cm, platform))
 
 
 def huguan_dashboard_many_sync(user_id, platform, business_keys):
@@ -141,22 +161,28 @@ def huguan_owner_channel_sync(user_id, platform, account_id, value, role="channe
         spreadsheet_id = hd.get_platform_config(db, user_id, platform)["spreadsheet_id"]
         if not spreadsheet_id:
             raise RuntimeError("该看板未配置表格 ID")
-        sheet_name = _resolve_sheet_name(db, user_id, platform, account_id)
-        if not sheet_name:
+        table = _resolve_account_table(db, user_id, platform, account_id)
+        if not table:
             raise RuntimeError("该账户的户类型查不到对应工作表")
-        col = hd.owner_role_col(platform, role)   # 唯一解析点，见 huguan_dashboard.owner_role_col
-        rows = [{"account_id": account_id, "cells": {col: value}}]
+        sheet_name = table["sheet_name"]
+        columns = table.get("columns") or {}
     finally:
         db.close()
-    if not rows:
-        raise RuntimeError("无法构造通道列待写行")
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-    # key_col 必须按平台显式传：写入器默认 "C"（gg/tt 的账户ID列），而 **fb 的账户ID在
-    # D 列**（C 是「账户名称」）—— 不传就按错误的列定位、整批静默写空且不抛异常。
-    # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 对它们是无操作（逐字节不变）。
+    # 写表前按**该表**表头解析 col_map（tt 读一次表头行；gg/fb 零额外读）。定位键列
+    # 与角色列都可能不在固定字母上（tt 表头顺序不同）—— 只改 key_col 而列仍写死，
+    # 等于把归属名写进别的列，冲掉户管在表里的手工内容。
+    cm = hd.resolve_table_col_map(service, spreadsheet_id, sheet_name, platform, columns)
+    # gg/fb 的 col_map 就是固定规格，用 None 走既有固定字母路径（含它们的既有抛错口径，
+    # 逐字节不变）；只有 tt 需要按表头定位角色列。
+    col = hd.owner_role_col(platform, role, cm if platform == "tt" else None)
+    if col is None:
+        # 该表没有这一列（未采集）⇒ 一个字不碰（与 owner_channel_cells 同口径）
+        return
+    rows = [{"account_id": account_id, "cells": {col: value}}]
     gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows,
-                                 key_col=hd.KEY_COL[platform])
+                                 key_col=hd.key_col_of_col_map(cm, platform))
 
 
 def _huguan_owner_channel_rebuild(user_id, business_key, payload):

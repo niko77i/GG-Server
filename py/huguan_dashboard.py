@@ -215,6 +215,46 @@ def spec_column_map(platform: str) -> dict:
     它们继续走固定列规格，结果与改动前逐字节相同（设计 §4.4 的等价性承诺）。"""
     return {field: col for col, _h, field, _w, _r in COLUMN_SPEC[platform] if field}
 
+
+def key_col_of_col_map(col_map: dict, platform: str) -> str:
+    """从一张表的 col_map 里取**定位键**所在列字母。
+
+    tt 的定位键在 col_map 里的字段名是 `advertiser_id`（`ACCOUNT_KEY_FIELD["tt"]`），
+    而解析结果命名空间里叫 `account_id`（`TT_KEY_FIELD`）—— 两个名字都要查，
+    否则漏掉整列。gg/fb 恒为 `account_id`（两名字同形）。
+    两个都没有 ⇒ 抛错：**绝不退回默认列**，那会让整批静默写空。
+    """
+    col = col_map.get(TT_KEY_FIELD) or col_map.get(ACCOUNT_KEY_FIELD[platform])
+    if not col:
+        raise ValueError(f"平台 {platform} 的 col_map 里找不到定位键列: {col_map}")
+    return col
+
+
+def resolve_table_col_map(service, spreadsheet_id: str, sheet_name: str,
+                          platform: str, overrides: dict | None = None) -> dict:
+    """写表前解析**这张表**的 col_map（tt 读一次表头行）。
+
+    - gg / fb：直接返回 `spec_column_map(platform)`，**零额外读**，行为与改动前
+      逐字节相同（它们继续走固定列规格）。
+    - tt：读一次表头行（`A1:ZZ1`）再 `resolve_column_map`。表头顺序与加白户不同
+      （户管每加一张表表头都不同）⇒ 固定列字母会静默串列，必须按表头定位。
+    - 定位键（账户ID）解析不到时**抛错** —— 绝不退回任何默认列：那会让整批
+      静默写到错行（读路径同样拒同步，两侧口径一致）。
+
+    `overrides` 是该表的手工覆盖 `{表头名: 字段key}`，必须与读路径
+    （`dashboard_sync` 的 `t.get("columns")`）**同源** —— 否则同一次同步里读与写
+    对「哪一列是定位键」的认识不一致，写就会落到错行。
+    """
+    if platform != "tt":
+        return spec_column_map(platform)
+    grid = read_sheet_values(service, spreadsheet_id, sheet_name, "A1:ZZ1")
+    headers = grid[0] if grid else []
+    col_map, _unmatched = resolve_column_map(headers, overrides or {})
+    if not (col_map.get("advertiser_id") or col_map.get(TT_KEY_FIELD)):
+        raise ValueError(f"工作表「{sheet_name}」里找不到「账户ID」列，无法写表")
+    return col_map
+
+
 KEY_COL = {"gg": "C", "tt": "C", "fb": "D"}
 OWNER_COL = {"gg": "G", "tt": "G", "fb": "J"}
 OWNER_CHANNEL_COL = {"gg": "H", "tt": "L"}      # 刻意不含 fb，见 spec §6.5
@@ -234,12 +274,31 @@ _OWNER_ROLE_COL = {
 }
 
 
-def owner_role_col(platform: str, role: str) -> str:
+# 角色 → 该角色在 col_map 里对应的字段名（按顺序取第一个命中的）。
+# channel 有两个命名空间的名字：gg 合成 map 用 `_owner_channel`，tt 真实表头映射里
+# 没有它、那一列叫 `owner_change_note`（与 owner_channel_cells 同款双命名）。
+_OWNER_ROLE_FIELDS = {
+    "channel": ("_owner_channel", "owner_change_note"),
+    "owner": ("owner_name",),
+}
+
+
+def owner_role_col(platform: str, role: str, col_map: dict | None = None):
     """角色 → 户管看板上的列字母。未知角色/平台一律抛错 ——
-    绝不静默落到别的列（写错列的后果是冲掉户管在表里的手工内容）。"""
+    绝不静默落到别的列（写错列的后果是冲掉户管在表里的手工内容）。
+
+    `col_map` 给了（这张表的 {字段key: 列字母}）就按其定位该角色应写的列；
+    该表没有这一列（未采集）时返回 None，由调用方「一个字不碰」。没给（None）
+    就走既有固定字母 —— 与改动前逐字节等价（gg/fb 与既有调用点零改动）。
+    """
     table = _OWNER_ROLE_COL.get(role)
     if table is None:
         raise ValueError(f"未知的归属列角色: {role}")
+    if col_map is not None:
+        for field in _OWNER_ROLE_FIELDS[role]:
+            if field in col_map:
+                return col_map[field]
+        return None
     col = table.get(platform)
     if not col:
         raise ValueError(f"平台 {platform} 没有角色 {role} 对应的列")
@@ -1683,7 +1742,8 @@ _TABLE_FOR_PLATFORM = {"gg": "accounts", "tt": "tt_accounts", "fb": "fb_accounts
 _ROW_SQL = {"gg": _GG_ROW_SQL, "tt": _TT_ROW_SQL, "fb": _FB_ROW_SQL}
 
 
-def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
+def collect_rows_for_push(db, platform: str, account_ids=None,
+                          col_maps_by_type=None) -> list:
     """系统 → 表：查出待写账户并转成 update_rows_by_account_id 的入参。
 
     产出里刻意不含归属变更通道列（规格 §7.2 规则 2）。
@@ -1691,6 +1751,11 @@ def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
     两条路径都排除软删账户（`a.deleted_at IS NULL`）：与「从表同步」对软删做
     to_skip 的口径对称，也符合规格 §6.2「软删不触发回写」的意图 —— 软删是用户
     主动从看板撤下的意图，刷新不该把它复活。
+
+    `col_maps_by_type`（可选）是 `{户类型名: 该表的 col_map}`。给了就逐行按该行
+    `account_type` 取到本表的 col_map 再产出 cells（tt 表头顺序不同 ⇒ 固定列字母会
+    串列）；没给（None）⇒ 既有合成 map，gg/fb 与既有调用点零改动、逐字节不变。
+    调用方负责把 col_map 解析好（读表头需要 service，本函数只有 db）。
     """
     sql = _ROW_SQL[platform]
     # 两个基语句都没有 WHERE 子句，故条件先累积成 list 再统一拼 —— 避免
@@ -1713,12 +1778,14 @@ def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
     for q_sql, q_params in queries:
         for r in db.execute(q_sql, q_params).fetchall():
             row = dict(r)
+            atype = row.get("account_type") or ""
+            cm = col_maps_by_type.get(atype) if col_maps_by_type else None
             item = {"account_id": str(row.get("account_id") or "").strip(),
-                    "cells": cells_for_row(row, platform)}
+                    "cells": cells_for_row(row, platform, cm)}
             # 户类型只用于**路由**（决定写哪张 worksheet），不进 cells ——
             # cells 是「表列字母 → 单元格值」，没有类型这一列。
             # gg/fb 的 _ROW_SQL 没有这一列 ⇒ 取到空串，分组时只有一组，行为不变。
-            item["account_type"] = row.get("account_type") or ""
+            item["account_type"] = atype
             out.append(item)
     return [o for o in out if o["account_id"]]
 
@@ -1804,15 +1871,20 @@ def read_operator_remark_map(db, owner_id: int) -> dict:
         return {}
 
 
-def snapshot_push_targets(service, conf: dict, platform: str, groups: list) -> dict:
+def snapshot_push_targets(service, conf: dict, platform: str, groups: list,
+                          col_maps: dict | None = None) -> dict:
     """读每张表，记下「本次刷新将会写到的每个格子」的当前值。
 
     `groups` 是 `group_rows_by_sheet` 的产出：`[(sheet_name, rows)]`。
 
-    只覆盖**真正会被写**的行与列：
-      - 行：`rows` 里在表中命中定位键的那些（表里没有的账户 update_rows_by_account_id
-        会进 not_found、一个字都不写）
-      - 列：该行 `cells_for_row` 会产出的列（即 COLUMN_SPEC 里 writable=True 的）
+    - 行：`rows` 里在表中命中**定位键**的那些（表里没有的账户
+      update_rows_by_account_id 会进 not_found、一个字都不写）
+    - 列：该行 `cells` 会产出的列（即写表器会真正写到的列；tt 表头映射后它就是
+      该表 col_map 里 writable 的那几列，`cells` 已由 col_map 版 `cells_for_row` 产出）
+
+    `col_maps`（可选）是 `{sheet_name: 该表的 col_map}`：给了就用该表 col_map 的
+    定位键列找行，**与写表器用同一列**（tt 表头顺序不同时尤其关键）；没给（None）
+    ⇒ 回落到既有 `KEY_COL[platform]`，gg/fb 与既有调用点零改动、零额外读。
 
     ⚠️ 必须在**写表之前**调用 —— 写完之后原值就没了。
     ⚠️ 返回值从「单表快照」改成**每张表一份**（2026-10-08 多表规格 §4.4）：
@@ -1826,7 +1898,10 @@ def snapshot_push_targets(service, conf: dict, platform: str, groups: list) -> d
         if not rows:
             continue
         grid = read_sheet_values(service, spreadsheets, sheet_name, READ_RANGE[platform])
-        key_i = col_index(KEY_COL[platform])
+        cm = (col_maps or {}).get(sheet_name)
+        key_col = key_col_of_col_map(cm, platform) if isinstance(cm, dict) \
+            else KEY_COL[platform]
+        key_i = col_index(key_col)
 
         where = {}
         for i, values in enumerate(grid[1:], start=2):
