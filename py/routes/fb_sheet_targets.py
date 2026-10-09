@@ -52,7 +52,9 @@ def _payload_triple(payload, business_key):
         return (p.get("product_name"), p.get("line_name"), p.get("report_date"))
     tri = (p.get("groups") or {}).get(business_key)
     if not tri:
-        raise RuntimeError("payload 里找不到这组的 (产品,线,日期)，无法重建")
+        # 错误信息带上 business_key：批量登记时 payload 里装着 N 组，只说「这组」
+        # 定位不到是哪一组（该信息仅供日志/排查，非敏感）。
+        raise RuntimeError(f"payload 里找不到这组「{business_key}」的 (产品,线,日期)，无法重建")
     return tuple(tri)
 
 

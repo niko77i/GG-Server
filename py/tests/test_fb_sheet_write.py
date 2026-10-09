@@ -118,3 +118,68 @@ def test_fb_report_final_failure_lands_retry_failed(client, monkeypatch):
     assert r is not None, "必须登记日志行"
     assert r["status"] == "retry_failed", f"应落 retry_failed，实际 {r['status']}"
     assert r["status"] not in ("rolled_back", "rollback_abandoned"), "镜像类不得回滚"
+
+
+# ---------- 补覆盖轮（协调者裁定：简报 Step 7 的变异不具判别力，补 `_payload_triple`
+#            两条分支 + 一条真正走 rebuild 的用例） ----------
+
+def test_payload_triple_flat_branch():
+    """扁平分支：单组登记的 payload 是三要素平铺。"""
+    import routes.fb_sheet_targets as tgt
+    assert tgt._payload_triple(
+        {"product_name": "P1", "line_name": "L1", "report_date": "D1"}, "任意键") \
+        == ("P1", "L1", "D1")
+
+
+def test_payload_triple_groups_mapping_branch():
+    """映射分支：批量登记只有一个 payload，三元组按 business_key 做成映射。
+
+    这是活路径 —— 通用重试端点 `routes/sheet_write_routes.py` 对批量登记的
+    `fb_report` 行正是以 `build_sync(target, uid, business_key, payload)` 触发 rebuild，
+    此时 payload 是 `{"groups": {business_key: [产品,线,日期], …}}`。
+    """
+    import routes.fb_sheet_targets as tgt
+    payload = {"groups": {"k1": ["P1", "L1", "D1"], "k2": ["P2", "L2", "D2"]}}
+    assert tgt._payload_triple(payload, "k2") == ("P2", "L2", "D2")
+    assert tgt._payload_triple(payload, "k1") == ("P1", "L1", "D1")
+
+
+def test_payload_triple_missing_raises_naming_the_group():
+    """两者都没有 ⇒ 抛 RuntimeError，且信息要点明是**哪一组**（批量时 payload 装着 N 组）。"""
+    import routes.fb_sheet_targets as tgt
+    group = "产品甲|线A|2026-10-01"
+    try:
+        tgt._payload_triple({}, group)
+    except RuntimeError as e:
+        assert group in str(e), f"信息应点明是哪一组，实际 {e}"
+    else:
+        raise AssertionError("payload 里没有该组时必须抛错，不得静默返回")
+
+
+def test_fb_report_rebuild_writes_the_payload_triple(client, monkeypatch):
+    """**真正走 rebuild 的用例**：查 DB / 写表用的三元组必须来自 payload，而非任何写死值。
+
+    钉住简报 Step 7 那处不具判别力的变异：把 `_payload_triple(payload, business_key)`
+    换成写死的 `("产品甲", "线A", "2026-10-01")` ⇒ 本用例必红（payload 用的是另一组值）。
+    """
+    import google_sheets_service as gs
+    import routes.fb_sheet_targets as tgt
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append(
+                            (p, l, d, sorted(r["account_id"] for r in records))))
+
+    _, uid = _fb_user(client, "_fbsw_rebuild")
+    db = database.get_db()
+    # payload 那一组（本用例期望被写出的）
+    _seed_report(db, uid, product="产品丙", line="线C", date="2031-12-31", acc="acc_payload")
+    # 简报写死值对应的那一组：实现若退化成写死值，写出的就是它，断言随即可见
+    _seed_report(db, uid, product="产品甲", line="线A", date="2026-10-01", acc="acc_hardcoded")
+    db.close()
+
+    key = tgt.fb_report_key("产品丙", "线C", "2031-12-31")
+    payload = {"product_name": "产品丙", "line_name": "线C", "report_date": "2031-12-31"}
+    sheet_write.build_sync("fb_report", uid, key, payload)()
+
+    assert written == [("产品丙", "线C", "2031-12-31", ["acc_payload"])], \
+        f"重建必须用 payload 里的三元组，实际 {written}"
