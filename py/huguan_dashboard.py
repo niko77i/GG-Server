@@ -154,6 +154,12 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
         if not name or name not in (overrides or {}):
             continue
         field = (overrides or {})[name]
+        # 覆盖值空串 = 用户显式「刻意不采集」（设计 §3.3）：占用该列，既不映射也不上报。
+        # 与目录里空串哨兵（「位置」）同档 —— 等于「手工把任意列降级为 ignore」。
+        # 必须在目录判定**之前**，因为空串本就不是目录里的字段。
+        if field == "":
+            taken.add(_col_letter(i))
+            continue
         if field not in catalog_fields or not _claim(field, _col_letter(i)):
             unmatched.append(name)
 

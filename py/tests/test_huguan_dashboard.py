@@ -5379,6 +5379,20 @@ class TestResolveColumnMap:
         assert unmatched == ["备注二"], f"应只报一次，实际={unmatched}"
         assert "remark" not in m
 
+    def test_override_empty_string_means_deliberately_ignored(self):
+        """覆盖值空串 = 刻意不采集：既不映射，也不进未采集（用户显式关掉的列不该再报噪音）。"""
+        m, unmatched = hd.resolve_column_map(["账户ID", "备注二"], {"备注二": ""})
+        assert unmatched == [], f"刻意不采集不该再报未采集，实际={unmatched}"
+        assert "B" not in m.values()
+        assert m.get("advertiser_id") == "A"
+
+    def test_override_empty_string_beats_alias(self):
+        """空串也是一种覆盖 ⇒ 优先级最高，压过别名自动匹配。"""
+        m, unmatched = hd.resolve_column_map(["账户ID", "日期"], {"日期": ""})
+        assert unmatched == []
+        assert "acquired_date" not in m, "覆盖空串应压过别名"
+        assert "B" not in m.values()
+
 # ---------- Task 3: 表级 col_map 的读写 ----------
 
 class TestColMapReadWrite:
@@ -6007,17 +6021,13 @@ class TestColumnsConfig:
         tt = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["tt"]
         assert tt["tables"][0]["columns"] == {}
 
-    def test_post_rejects_sentinel_empty_field_key(self, client):
-        """空串字段key（「位置」= 认识但刻意不采集）**不是**合法覆盖目标。
-
-        校验集合必须与 `resolve_column_map` 同口径（它用 `{f ... if f}` 剔掉哨兵）。
-        若取自 `TT_FIELD_CATALOG` 的裸字段并集，这里会 200 放行 `{"位置": ""}`，
-        而读写时该覆盖又被当未采集忽略 ⇒ 存进去的配置与生效口径打架。
-        """
+    def test_post_accepts_empty_string_as_deliberately_ignored(self, client):
+        """覆盖值空串合法（刻意不采集），且允许多列同时指定空串（不去重）。"""
         hg, _ = _create_user(client, "_cc6", role="huguan")
         resp = client.post("/api/huguan/dashboard", headers=hg, json={
             "platform": "tt", "spreadsheet_id": "T1",
             "tables": [{"name": "企业户", "sheet_name": "企业户",
-                        "columns": {"位置": ""}}]})
-        assert resp.status_code == 400
-        assert "位置" in resp.get_json()["error"]
+                        "columns": {"位置2": "", "备注二": "", "负责人": "owner_name"}}]})
+        assert resp.status_code == 200, resp.get_json()
+        tt = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["tt"]
+        assert tt["tables"][0]["columns"] == {"位置2": "", "备注二": "", "负责人": "owner_name"}

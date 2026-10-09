@@ -103,6 +103,10 @@ def dashboard_config_save():
                     return err(f"户类型「{name}」的 columns 必须是对象", 400)
                 seen_fields = set()
                 for header, field in cols.items():
+                    # 空串 = 用户显式「刻意不采集」（设计 §3.3）：合法，且**允许多列同时指定** ——
+                    # 所以它既不查目录，也不进 seen_fields 去重。
+                    if isinstance(field, str) and field == "":
+                        continue
                     # 非字符串字段key 一律按未知处理（否则下面 `not in set` 对 list/dict
                     # 等不可哈希值会抛 TypeError → 500；本层契约是畸形输入 400 而非 500）。
                     if not isinstance(field, str) or field not in hd._TT_CATALOG_FIELDS:
