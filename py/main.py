@@ -5558,6 +5558,11 @@ def accounts_sync_from_sheet():
                 # 但 H 列**不在** push_rows 的可写列里（cells_for_row 刻意排除
                 # _owner_channel）⇒ 必须在这里显式写，否则认领后表里的 H 列不更新，
                 # 与 accounts_reassign 的认领行为不一致。
+                # ⚠️ 顺序说明：此处是在本腿之后的 `db.commit()` **之前**就把 H 列写进
+                # 户管看板（后台线程/新连接），与 `_reassign_owner` 的「先 commit 再回写」
+                # 顺序相反。之所以无碍：写入的是**新归属人**（user_id，取自 users，不依赖
+                # accounts 的当前值），故不存在读到旧归属的问题；若后续 commit 失败，表里 H
+                # 是新归属而库里仍是旧归属，下次同步会把它重新判定为可认领并自愈。
                 hd.writeback_owner_channel(user_id, "gg", acct_id, user_id)
                 claimed_count += 1
             except Exception:
