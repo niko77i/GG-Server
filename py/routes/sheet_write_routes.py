@@ -114,9 +114,13 @@ def sheet_write_retry():
     # 未注册 / 配置错的目标要到 claim **之后**才炸，行已被置为 pending 且无人推进
     # —— pending 不在 ATTENTION 里，标记不显示、轮询静默超时，闸门只放行
     # ATTENTION，该任务永久不可重试（正是本功能要消灭的静默卡住）。
+    # RuntimeError 一并接住：FB 的 rebuild（`_fb_report_rebuild` → `_payload_triple`）
+    # 在 payload 为空/畸形、取不到该 business_key 的三元组时抛 RuntimeError。
+    # 不接就被 Flask 打回 500 —— 而这也**不会**留卡住的行：build_sync 在 claim 之前，
+    # 此行尚未被置 pending。畸形/空 payload 是用户可控数据，回 400 才对。
     try:
         sync_fn = sheet_write.build_sync(target, uid, business_key, payload)
-    except KeyError as e:
+    except (KeyError, RuntimeError) as e:
         db.close()
         log.warning("写表重试：构建同步器失败 target=%s：%s", target, e)
         return err(_BUILD_SYNC_FAILED_MSG, 400)

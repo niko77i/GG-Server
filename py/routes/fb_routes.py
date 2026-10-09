@@ -1849,10 +1849,10 @@ def _rebuild_fb_records(db, user_id, product_name, line_name, report_date):
 
     返回 `(records, None)` 或 `(None, 失败原因)`。
 
-    **刻意不读 `sheets_sync_log.rows_json`**：那个快照在写入时被 `[:10000]` 截断
-    （见 extract_save 的 pending 插入）。每条 record 约 200 字符，超过约 50 条就从
-    中间断开，`json.loads` 必然抛错 —— 所以只把列名从 `row_data` 改对，
-    重试照样是坏的。`fb_ad_reports` 存的是完整原始行，且按
+    **刻意不读 `sheets_sync_log.rows_json`**：历史快照在写入时被 `[:10000]` 截断
+    （该快照列已不可靠），每条 record 约 200 字符，超过约 50 条就从中间断开，
+    `json.loads` 必然抛错 —— 所以只把列名改对，重试照样是坏的。
+    `fb_ad_reports` 存的是完整原始行，且按
     (user_id, product_name, line_name, account_id, report_date) 唯一，重建更可靠。
     """
     report_date = (report_date or '').strip()
@@ -1917,8 +1917,12 @@ def fb_retry_sheets_sync():
                 triples.append((p["product_name"], p.get("line_name"), p.get("report_date")))
     elif data.get("groups"):
         groups = data["groups"]
+        # 元素必须都是 str：下游 `_rebuild_fb_records` 对 report_date/line_name 调
+        # `.strip()` 前不判类型，非 str 元素（如 [[1,"b","c"]]）会抛 AttributeError
+        # ⇒ 500。product_name 非 str 还能逃过下面 `if p` 的真值过滤，故必须在此拦住。
         if not isinstance(groups, list) or not all(
-                isinstance(g, (list, tuple)) and len(g) == 3 for g in groups):
+                isinstance(g, (list, tuple)) and len(g) == 3
+                and all(isinstance(x, str) for x in g) for g in groups):
             return err('groups 格式不正确', 400)
         triples = [tuple(g) for g in groups]
 

@@ -359,6 +359,8 @@ def test_retry_malformed_input_returns_400_not_500(client):
     for body in ({"groups": [["a"]]},
                  {"groups": [["a", "b", "c", "d"]]},
                  {"groups": "abc"},
+                 {"groups": [[1, "b", "c"]]},
+                 {"groups": [["a", "b", 1]]},
                  {"business_keys": "abc"},
                  {"business_keys": [{"k": 1}]}):
         resp = client.post("/api/fb/reports/retry-sync", headers=hdr, json=body)
