@@ -5368,19 +5368,29 @@ class TestColMapReadWrite:
         assert cells2[cm["landing_url"]] == "https://a"
 
     def test_default_col_map_keeps_gg_fb_identical(self):
-        """col_map=None ⇒ 走 spec_column_map，与改动前的取/写列逐字节相同。"""
-        for p, values, row in (
+        """col_map=None ⇒ 走 spec_column_map；**钉死字面产出**（原断言两边都算
+        spec_column_map、自比恒真，防不住 None 分支被接错图）。
+
+        字面期望由 `COLUMN_SPEC[platform]`（writable=True、非 owner_channel、非 field=None）
+        与该 row 的取值推出：gg 可写列 = A,B,C,D,F,G,I,J,K（E/L/M/N 不映射、H 是归属变更
+        通道列，均不产出）；fb 可写列 = A..Q 去掉只读的 I。键列 C/D 的账户ID 非纯数字
+        （"GG-1"/"FB-1"），`_text` 不加 ' 前缀，故为裸串。
+        """
+        for p, values, row, expected_cols, key_letter, key_value in (
             ("gg", ["2026-10-01", "否", "GG-1", "MCC", "US", "渠道", "张三",
                     "重新分配", "UTC+8", "大MCC", "存活", "位置", "消耗", "产品"],
-             {"account_id": "GG-1", "mcc_name": "MCC", "owner_name": "张三"}),
+             {"account_id": "GG-1", "mcc_name": "MCC", "owner_name": "张三"},
+             "ABCDFGIJK", "C", "GG-1"),
             ("fb", ["2026-10-01", "op", "名称", "FB-1", "渠道", "类型", "10", "1",
                     "接户", "在用", "2026-10-02", "2", "UTC+8", "消耗", "存活", "BM", "产品"],
-             {"account_id": "FB-1", "name": "名称", "owner_name": "在用"}),
+             {"account_id": "FB-1", "name": "名称", "owner_name": "在用"},
+             "ABCDEFGHJKLMNOPQ", "D", "FB-1"),
         ):
             parsed = hd.parse_row(values, p)
             assert parsed["account_id"] == row["account_id"]
-            assert hd.cells_for_row(row, p) == \
-                   hd.cells_for_row(row, p, hd.spec_column_map(p))
+            cells = hd.cells_for_row(row, p)
+            assert set(cells) == set(expected_cols)   # 恰好这些列，不多不少
+            assert cells[key_letter] == key_value     # 键格字面值（非纯数字不带 ' 前缀）
 
     def test_cells_for_row_real_tt_col_map_writes_id_cell(self):
         """真实 tt col_map（key=advertiser_id）下，账户ID 格必须按 spec.key 判定：
@@ -5397,3 +5407,10 @@ class TestColMapReadWrite:
         p = hd.parse_row(self._row(), "tt", cm)
         assert "advertiser_id" not in p
         assert p["account_id"] == "7001234567890123456"
+
+    def test_cells_for_row_keeps_falsy_numeric_id(self):
+        """写侧取键值用 `is None` 判定而非 `or` 链：假值但**有效**的 ID "0" 必须存活，
+        不能被吞成空串（那等于把表里的账户ID 清掉）。"""
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cells = hd.cells_for_row({"account_id": "0"}, "tt", cm)
+        assert cells[cm["advertiser_id"]] == "'0"
