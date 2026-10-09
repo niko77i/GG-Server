@@ -101,6 +101,13 @@ class TestResolveColumnMap:
         assert m["acquired_date"] == "B"
         assert unmatched == ["日期"]
 
+    def test_recognized_but_ignored_header_is_not_reported(self):
+        """「位置」是**认识但刻意不采集**的列：既不映射、也不进未采集列表。
+        （这一条最初漏了 —— 没有它，加白户表每次同步都会报「1 列未采集 —— 位置」。）"""
+        m, unmatched = hd.resolve_column_map(["账户ID", "位置"], {})
+        assert unmatched == []
+        assert "B" not in m.values(), "「位置」不该被映射到任何字段"
+
     def test_blank_header_ignored(self):
         m, unmatched = hd.resolve_column_map(["账户ID", "", "  "], {})
         assert unmatched == [] and "B" not in m.values()
@@ -151,6 +158,10 @@ TT_FIELD_CATALOG = [
     ("consumption",       "消耗",     ("消耗",),            "rw", False, False),
     ("remark",            "产品信息", ("产品信息",),        "rw", False, False),
     ("owner_change_note", "换绑情况", ("换绑情况",),        "r",  False, False),
+    # 空串字段key = **认识这个表头、但刻意不采集**（legacy `COLUMN_SPEC["tt"]` 的 K「位置」
+    # 就是 field=None 的同一语义）。它既不入映射、也不进 unmatched —— 否则加白户表每次
+    # 同步都会报「1 列未采集 —— 位置」，把「未采集」这个信号淹成噪音。
+    ("",                  "位置",     ("位置",),            "ignore", False, False),
 ]
 
 # tt 的解析结果里，定位键的字段名恒为 "account_id"（与 COLUMN_SPEC 的既有约定一致：
@@ -200,10 +211,14 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
             continue
         field = _TT_ALIAS_TO_FIELD.get(name)
         if field is None:
+            # 完全不认识 ⇒ 报出来（设计 §4.3）
             if name not in (overrides or {}):
-                # 没覆盖、也认不出 ⇒ 报出来
                 if name not in unmatched:
                     unmatched.append(name)
+            continue
+        if field == "":
+            # 认识、但刻意不采集（如「位置」）：既不映射也不上报
+            taken.add(_col_letter(i))
             continue
         if not _claim(field, _col_letter(i)):
             unmatched.append(name)

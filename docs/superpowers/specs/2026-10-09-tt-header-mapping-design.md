@@ -75,13 +75,18 @@ TT_FIELD_CATALOG = [
     ("consumption",        "消耗",     ("消耗",),                           "rw", False, False),
     ("remark",             "产品信息", ("产品信息",),                       "rw", False, False),
     ("owner_change_note",  "换绑情况", ("换绑情况",),                       "r",  False, False),  # 只读回
+    ("",                   "位置",     ("位置",),                           "ignore", False, False),  # 认识但刻意不采集
 ]
 ```
 
 - **别名表是"自动识别"的全部依据**。目前只放**有实测依据**的别名（`日期` ↔ 入库时间，来自企业户表）。
   以后遇到新叫法，**加一行即可**——因为配置里只存"手工覆盖"，别名表一改，所有表自动受益。
-- `方向` = `rw` 双向 / `r` 只读回（不回写）。
+- `方向` = `rw` 双向 / `r` 只读回（不回写）/ `ignore` 认识但刻意不采集。
 - `空值是否跳过回写` = 见 §4.7，目前只有 `landing_url`。
+- **`ignore` 那一档很重要**：加白户表的 K 列是「位置」，legacy `COLUMN_SPEC["tt"]` 里它的
+  `field` 就是 `None`（系统刻意不采集，留给户管自己用）。若把它算作"未识别"，加白户表
+  **每次同步都会报「1 列未采集 —— 位置」** —— 永久噪音会把「未采集」这个信号训练成被忽略。
+  所以「认识但刻意不采集」与「不认识」必须分开：前者静默，后者上报。
 
 ### 4.2 映射解析
 
@@ -135,6 +140,11 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple[dict, list]:
   ⚠️ 消费点共 4 处：`py/routes/huguan_sheet_targets.py:90, 159, 296` 与
   `py/routes/huguan_dashboard_routes.py:343`（撤回快照的写入）。
 - **撤回快照**（`snapshot_push_targets`）同样按 `col_map` 记「会写到的列」。
+
+> **写侧怎么拿到 `col_map`**：写表在后台线程里跑，而 `col_map` 要读表头行才能解析。
+> 所以每次写表前**多读一次表头行**（`A1:ZZ1`，只一行，代价可忽略 ——
+> 何况 `update_rows_by_account_id` 本来就要整表读一次去定位行）。
+> **gg/fb 不走这条**：它们用 `COLUMN_SPEC` 合成的 map，零额外读。
 
 ### 4.6 新字段与账户名称
 
