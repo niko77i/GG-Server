@@ -819,9 +819,16 @@ gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, sheet_rows,
                              key_col=hd.KEY_COL[platform])
 ```
 
-改为先 `cm = hd.resolve_table_col_map(service, spreadsheet_id, sheet_name, platform)`，
-再 `key_col=cm[定位键]`；`sheet_rows` 的 `cells` 也要由 col_map 版 `cells_for_row` 产出。
-`huguan_dashboard_routes.py:343`（撤回）同样处理。`:296` 是 **FB 专用**，不受影响、保持原样。
+改为先 `cm = hd.resolve_table_col_map(service, spreadsheet_id, sheet_name, platform,
+                                      overrides=t.get("columns") or {})`，再 `key_col=cm[定位键]`；
+`sheet_rows` 的 `cells` 也要由 col_map 版 `cells_for_row` 产出。
+`huguan_dashboard_routes.py:343`（撤回）同样处理 —— ⚠️ **撤回路径也必须带上该表的 `columns` 覆盖**
+（2026-10-10 终审发现的缺口，根子就在这里：本行原文没写覆盖）：
+账户ID 靠手工覆盖映射时，push 按覆盖认列并把快照写好，撤回若只按别名重解析就会找不到定位列
+（`ValueError` 500）或按错列定位写回。**最终实现**：在快照里记录每张表的定位列（push 记 `key_col`、
+sync 记 `sheet_key_cols`），撤回优先用快照值（同时兼治表头漂移），旧快照无该键时回落既有解析
+**并补传覆盖**（否则旧记录仍会 500）。
+`:296` 是 **FB 专用**，不受影响、保持原样。
 
 - [ ] **Step 4: 跑测试确认通过 + 全族回归**
 
@@ -849,6 +856,12 @@ git commit -m "feat(tt): 写表按表头映射定位行（key_col 来自该表 c
 > （`consumption` / `remark` / `country` / `timezone` / `acquired_date` / `owner_change_note`）——
 > 该缺陷是 Task 5 把 tt 从固定合成 map 切到真实表头 map 之后才浮现的。
 > gg/fb 走合成 map ⇒ 门恒真、逐字节不变（已运行时实测 + 短行推理核实）。
+>
+> **同族的第二处（2026-10-10 整批终审发现并修复）**：`_collect_updates` 里的合成键 `_is_dead`
+> 也是**无条件**产出的（`out["_is_dead"] = is_dead(p)`）—— 缺「是否回收/状态」两列的 tt 表同步
+> 已死账户时 `is_dead` 恒 False ⇒ 进 to_update ⇒ 确认后清空 `death_date`，**死账户静默复活**。
+> 修法与上面的文本列门控同源：`_is_dead` 只在行确实带死亡信号（`_dead_flag` 或 `status_name`）时产出；
+> create 分支缺键默认存活、update 分支缺键完全不碰 `death_date`；gg/fb 门恒真。
 
 **Files:**
 - Modify: `py/huguan_dashboard.py`（`_PLAIN_TEXT_FIELDS["tt"]`、`apply_diff` 的 `src["name"]`）
