@@ -105,7 +105,11 @@ def huguan_dashboard_sync(user_id, platform, account_ids):
 
     for sheet_name, sheet_rows in groups:
         # key_col 从**本表**的 col_map 取（tt 表头顺序不同时账户ID 不在 C 列）。
-        cm = col_map_by_sheet.get(sheet_name) or hd.spec_column_map(platform)
+        # **不用 `.get(...) or spec_column_map` 兜底** —— 那会在缺键时静默退回固定列，
+        # 与「绝不退回默认列」的不变量冲突。`col_map_by_sheet` 由全部 `tables` 生成、
+        # `groups` 的表名 ⊆ `tables`（同一个 `get_platform_tables`）⇒ 缺键即不变量破裂，
+        # 宁可 KeyError 显式失败，也不写错列。
+        cm = col_map_by_sheet[sheet_name]
         gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, sheet_rows,
                                      key_col=hd.key_col_of_col_map(cm, platform))
 

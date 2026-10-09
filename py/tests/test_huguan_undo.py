@@ -870,6 +870,10 @@ def _sync_env(monkeypatch, conf=None, calls=None, result=None):
     monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
     monkeypatch.setattr(hd, "get_platform_config",
                         lambda db_, uid, p: conf or {"spreadsheet_id": "", "sheet_name": ""})
+    # 表侧回退前解析 col_map 要读表头行（Task 6）：gg/fb 零读、只有 tt 走这条。
+    # 回标准「加白户」表头 ⇒ 账户ID 在 C 列（与下面断言里的 key_col 一致）。
+    monkeypatch.setattr(hd, "read_sheet_values",
+                        lambda *a, **k: [["入库时间", "是否回收", "账户ID"]])
     calls = [] if calls is None else calls
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "build_service", lambda path: object())
@@ -1700,7 +1704,14 @@ class TestPushRouteSnapshotLifecycle:
         # 快照读表：两张表各命中自己的账户 ⇒ 快照非空，「保留」与「本来就没有」不再同形
         grids = {"总户-加白": [["", "", ""], ["", "", "8001"]],
                  "总户-企业": [["", "", ""], ["", "", "8002"]]}
-        monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: grids[a[2]])
+
+        def _read(svc, sid, name, rng):
+            # 账户ID 在 C 列：写表前解析 col_map 要读表头行（Task 6），此处给标准表头
+            if rng == "A1:ZZ1":
+                return [["入库时间", "是否回收", "账户ID"]]
+            return grids[name]
+
+        monkeypatch.setattr(hd, "read_sheet_values", _read)
         monkeypatch.setattr(gs, "build_service", lambda path: object())
 
         wrote = []
@@ -1915,6 +1926,9 @@ class TestPushUndoAcrossTwoSheets:
 
         calls = []
         monkeypatch.setattr(gs, "build_service", lambda p: object())
+        # 写表前按表头解析 col_map（Task 6）：账户ID 在 C 列 ⇒ 定位键仍是 "C"
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda *a, **k: [["入库时间", "是否回收", "账户ID"]])
         monkeypatch.setattr(gs, "update_rows_by_account_id",
                             lambda svc, sid, name, rows, key_col="C":
                             calls.append((sid, name, rows, key_col))
@@ -1948,4 +1962,69 @@ class TestUndoStatusCountAcrossShapes:
         db.close()
         got = client.get("/api/huguan/dashboard/undo?platform=fb", headers=hg).get_json()
         assert got["push"]["count"] == 3
+
+
+# ---------- Task 6b: 撤回两条表侧回退都按**该表表头**的定位键列找行 ----------
+
+# 企业户式表头：账户ID 在 A（不在固定 C）、接户运营 在 I（不在固定 G）。
+_UNDO_MAPPED_HEADER = ["账户ID", "国家", "所属渠道", "BC", "时区", "状态",
+                       "消耗", "产品信息", "接户运营"]
+
+
+class TestUndoUsesMappedKeyColumn:
+    """tt 表头顺序与固定列规格不同时，撤回若仍按 `KEY_COL["tt"]`（C 列）找行 ⇒ 整批
+    not_found、表侧一个字不撤（快照/写表器却按表头列），撤回形同虚设。"""
+
+    def test_undo_push_uses_mapped_key_column(self, client, monkeypatch):
+        import google_sheets_service as gs
+
+        hg, uid = _huguan_headers(client, "_undo_mapkc", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "sheet_name": "S"}})))
+        hd.save_undo(db, uid, "tt", "push",
+                     {"spreadsheet_id": "SS", "sheets": [
+                         {"sheet_name": "S",
+                          "cells": [{"account_id": "MKC-1", "cells": {"A": "MKC-1"}}]}]})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda *a, **k: [list(_UNDO_MAPPED_HEADER)])
+        calls = []
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, name, rows, key_col="C":
+                            calls.append((name, key_col)) or {"updated": len(rows),
+                                                              "not_found": []})
+        out = hd.undo_push(uid, "tt")
+        assert calls == [("S", "A")], f"撤回必须按该表映射的 A 列定位：{calls}"
+        assert out == {"updated": 1, "not_found": []}
+
+    def test_undo_sync_uses_mapped_key_column(self, client, monkeypatch):
+        import google_sheets_service as gs
+
+        hg, uid = _huguan_headers(client, "_undo_mapkc2", platform="tt")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS", "sheet_name": "S"}})))
+        hd.save_undo(db, uid, "tt", "sync",
+                     {"sheet_back": [{"account_id": "MKC-2", "cells": {"I": "旧运营"}}],
+                      "sheet_back_sheets": {"MKC-2": "S"}})
+        db.commit()
+        db.close()
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda *a, **k: [list(_UNDO_MAPPED_HEADER)])
+        calls = []
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, name, rows, key_col="C":
+                            calls.append((name, key_col, rows))
+                            or {"updated": len(rows), "not_found": []})
+        hd.undo_sync(uid, "tt")
+        assert [(c[0], c[1]) for c in calls] == [("S", "A")], \
+            f"撤回的表侧回退必须按该表映射的 A 列定位：{calls}"
+        assert calls[0][2] == [{"account_id": "MKC-2", "cells": {"I": "旧运营"}}], calls
+
 

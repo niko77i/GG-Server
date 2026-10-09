@@ -540,3 +540,139 @@ def test_tt_owner_channel_writes_to_mapped_column(client, monkeypatch):
     assert len(written) == 1, written
     assert written[0]["key_col"] == "A", written
     assert written[0]["rows"] == [{"account_id": "hg_ocmap_1", "cells": {"C": "张三"}}], written
+
+
+# ========== Task 6b: 路由/撤回/推送写列也走该表 col_map ==========
+
+# 企业户式表头：账户ID 在 A、产品信息 在 H、接户运营 在 I（都与固定列规格不同）。
+_TT_REORDERED_HEADER = ["账户ID", "国家", "所属渠道", "BC", "时区", "状态",
+                        "消耗", "产品信息", "接户运营"]
+
+
+def test_tt_push_writes_mapped_columns_and_key_column(client, monkeypatch):
+    """全量刷新必须按**该表表头**产出 cells 并定位行。
+
+    tt 表头顺序与固定列规格不同时（企业户：账户ID 在 A、接户运营 在 I）：
+      - cells 必须按该表 col_map 产出 —— 固定字母会把账户ID 写进 A（日期）、
+        归属写进 G（消耗）、备注写进 M（表里根本没有）：**整行静默串列**；
+      - 定位键必须取该表 col_map 的账户ID 列（A），否则按固定 C 找行**整批落空**；
+      - 撤回快照也必须按同一列记行，否则快照的行集合与真正被写的对不上。
+    """
+    import google_sheets_service as gs
+
+    h, uid = _tt_huguan(client, "_hg_pushmap")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_pushmap_1','hg_pushmap_1',?,?)", (uid, _TT_TYPE))
+    db.commit()
+    db.close()
+
+    grid = [list(_TT_REORDERED_HEADER), ["hg_pushmap_1"] + [""] * 8]
+    monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: grid)
+    monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: grid)
+    monkeypatch.setattr(gs, "build_service", lambda p: object())
+    captured = []
+
+    def _upd(svc, sid, name, rows, key_col=None):
+        captured.append({"sheet_name": name, "rows": rows, "key_col": key_col})
+        return {"updated": len(rows), "not_found": []}
+
+    monkeypatch.setattr(gs, "update_rows_by_account_id", _upd)
+
+    resp = client.post("/api/huguan/dashboard/push", headers=h, json={"platform": "tt"})
+    assert resp.status_code == 200, resp.get_json()
+    assert captured, "对照：写入器必须被调用过，否则断言无判别力"
+    cells = captured[0]["rows"][0]["cells"]
+    assert captured[0]["key_col"] == "A", f"定位列必须取该表映射的 A 列：{captured}"
+    assert cells.get("A") == "hg_pushmap_1", f"账户ID 必须落在映射列 A：{cells}"
+    assert "M" not in cells, f"M 是固定规格里的备注列，本表没有它：{cells}"
+
+    # 撤回快照按同一列（A）记行 —— 固定 C 会一个都命不中。
+    db = database.get_db()
+    snap = hd.load_undo(db, uid, "tt", "push")
+    db.close()
+    assert snap is not None, "push 必须先写下快照"
+    snap_rows = [c for s in snap["sheets"] for c in s["cells"]]
+    assert [c["account_id"] for c in snap_rows] == ["hg_pushmap_1"], snap
+    assert snap_rows[0]["cells"].get("A") == "hg_pushmap_1", snap
+
+
+def test_tt_write_background_routes_mapped_owner_column_to_single_cell(client, monkeypatch):
+    """企业户表「接户运营」映射到 I（≠ 固定 G）时，归属行仍必须走**单格定向写**。
+
+    固定字母分桶会把这行当「其余」→ `huguan_dashboard` 整行重建 → 这一行其他列被按
+    DB 值覆盖，户管在表里改过、还没同步回来的内容就没了（正是 Task 6 要消除的后果）。
+    判据两条：真实写出的 cells 恰好只有归属那一格；且登记在 `huguan_owner_channel`。
+    """
+    import google_sheets_service as gs
+    import routes.huguan_dashboard_routes as hr
+
+    written = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id",
+                        lambda svc, sid, sheet_name, rows, key_col=None: written.extend(rows))
+    grid = [list(_TT_REORDERED_HEADER)]
+    monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: grid)
+    # 刻意**不** patch `_sync_sheets_background`：走真实后台线程（Sheets 层已 mock），
+    # `_settle` 才能等到终态。
+
+    h, uid = _tt_huguan(client, "_hg_mapbk")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_mapbk_1','hg_mapbk_1',?,?)", (uid, _TT_TYPE))
+    db.commit()
+
+    cm, _ = hd.resolve_column_map(_TT_REORDERED_HEADER, {})
+    assert cm["owner_name"] == "I" and cm["advertiser_id"] == "A", cm
+    hr._write_background_tables(
+        db, uid, "tt",
+        [{"account_id": "hg_mapbk_1", "cells": {"I": "张三"}}],
+        {"hg_mapbk_1": cm})
+    row = _settle(db, uid, "huguan_owner_channel", "hg_mapbk_1")
+    db.close()
+
+    assert written == [{"account_id": "hg_mapbk_1", "cells": {"I": "张三"}}], (
+        f"归属行必须只写映射列这一格 —— 掉进整行重建会写出一整行的库值：{written}")
+    assert row is not None and row["target"] == "huguan_owner_channel", (
+        f"映射列归属行必须登记在单格 target 名下，实际 {row and row['target']}")
+
+
+def test_tt_write_background_gg_fb_key_column_unchanged(client, monkeypatch):
+    """gg/fb 不给映射（col_map=None）时分桶仍按固定字母 —— 逐字节不变的守卫。"""
+    import google_sheets_service as gs
+    import routes.huguan_dashboard_routes as hr
+
+    written = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id",
+                        lambda svc, sid, sheet_name, rows, key_col=None: written.extend(rows))
+    monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: [[]])
+
+    h, uid = _tt_huguan(client, "_hg_mapbk_gg")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid, platform="gg")
+    db.execute("INSERT INTO accounts (account_id, name, owner_id) VALUES('MAPBK-G','MAPBK-G',?)",
+               (uid,))
+    db.commit()
+
+    owner_col = hd.OWNER_COL["gg"]
+    hr._write_background_tables(db, uid, "gg",
+                                [{"account_id": "MAPBK-G", "cells": {owner_col: "张三"}}])
+    row = _settle(db, uid, "huguan_owner_channel", "MAPBK-G")
+    db.close()
+    assert row is not None and row["target"] == "huguan_owner_channel", row
+    assert written == [{"account_id": "MAPBK-G", "cells": {owner_col: "张三"}}], written
+
+
+def test_update_rows_tolerates_row_with_empty_cells(monkeypatch):
+    """Task 4 复审遗留：某 tt 表没有「换绑情况」列时会产出 cells 为空的行 ——
+    写入器不得因此炸掉（无待写区间即跳过 API，updated 仍按定位到的行数计）。"""
+    import google_sheets_service as gs
+
+    grid = [["", "", ""], ["", "", "7001"]]      # 账户ID 在 C（key_col="C"）
+    monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: grid)
+    res = gs.update_rows_by_account_id(object(), "SS", "S",
+                                       [{"account_id": "7001", "cells": {}}], key_col="C")
+    assert res == {"updated": 1, "not_found": []}, res

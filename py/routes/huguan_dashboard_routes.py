@@ -237,6 +237,12 @@ def dashboard_sync():
                 cm = sheet_col_maps.get(p.get("_sheet"))
                 sheet_from.setdefault(aid, hd._owner_sheet_from(p, platform, cm))
                 sheet_back_sheets.setdefault(aid, hd._conf_text(p.get("_sheet")))
+        # 账户 → 该账户所在表的 col_map（tt）。下面的归属/备注回写要按它取**列身份**
+        # （目标列 + 分桶），与读路径/写表器**同源**。gg/fb 的 sheet_col_maps 为空 ⇒ 恒空
+        # ⇒ `.get(...)` 得 None ⇒ 分桶与取列仍走固定字母（逐字节不变）。
+        col_map_by_account = {aid: sheet_col_maps[sheet]
+                              for aid, sheet in sheet_back_sheets.items()
+                              if sheet in sheet_col_maps}
         try:
             result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid,
                                    collect_undo=True, sheet_from=sheet_from)
@@ -267,13 +273,22 @@ def dashboard_sync():
         if applied:
             # 新归属名直接取 item["to"]（apply_diff 已经带上），不再靠行号反查 ——
             # 行号在重新拉表后可能已经位移到别人身上。
-            rows = [{"account_id": item["account_id"],
-                     "cells": {hd.OWNER_COL[platform]: item["to"]}}
-                    for item in applied]
+            # 目标列取**该账户那张表**的「接户运营」映射列（tt 表头顺序不同时不在固定
+            # G）；该表没有这一列（未采集）⇒ 跳过，一个字不碰。
+            rows = []
+            for item in applied:
+                cm = col_map_by_account.get(item["account_id"])
+                col = (hd.owner_role_col(platform, "owner", cm) if cm is not None
+                       else hd.OWNER_COL[platform])
+                if col is None:
+                    continue
+                rows.append({"account_id": item["account_id"], "cells": {col: item["to"]}})
             # 定向回写一律经 `_write_background_tables`（沿用 master 侧的入口）。
             # 「按户类型落到各自 worksheet」由 target 的 rebuild 负责（见该函数），
             # gg / fb 只有一张表，退化回单次写入（行为不变）。
-            _write_background_tables(db, uid, platform, rows)
+            # 传入 per-account col_map：分桶也要按**同一份**映射认列，否则映射列归属行
+            # 会被当成「其余」→ 整行重建 → 冲掉户管在别的列的手工内容。
+            _write_background_tables(db, uid, platform, rows, col_map_by_account)
             # 规则 3② 只对 GG 生效（2026-10-06 规格）：TT 的 L 列已是换绑记录，
             # 同步时清空会抹掉记录，且因读回按表覆盖会连带清掉系统里的值。
             # FB 同理、且更彻底：它根本没有通道列（OWNER_CHANNEL_COL 无 fb 键），
@@ -291,14 +306,22 @@ def dashboard_sync():
                     for r in applied])
 
         # TT 备注首次对齐的两个写回（2026-10-06 规格）。与 applied_owner_rows 同法：
-        # 先从 result 摘掉，再发起后台写回。三期起，M 列经 `huguan_dashboard` target
-        # **整行重建**写回（不再只写单格）；M 是可写列、值已在 apply_diff 里落库，
-        # 故整行重建写出的 M 与这里的 r["value"] 一致。
+        # 先从 result 摘掉，再发起后台写回。三期起，备注列经 `huguan_dashboard` target
+        # **整行重建**写回（不再只写单格）；备注是可写列、值已在 apply_diff 里落库，
+        # 故整行重建写出的备注与这里的 r["value"] 一致。
+        # cells 的列字母取**该账户那张表**的「产品信息」映射列（tt 表头顺序不同时不在
+        # 固定 M）；该表没有这一列（未采集）⇒ 跳过，一个字不碰。
         m_writeback = result.pop("remark_m_writeback", [])
         if m_writeback:
-            _write_background_tables(db, uid, platform, [
-                {"account_id": r["account_id"], "cells": {"M": r["value"]}}
-                for r in m_writeback])
+            rows = []
+            for r in m_writeback:
+                cm = col_map_by_account.get(r["account_id"])
+                col = (cm or {}).get("remark")
+                if col is None:
+                    continue
+                rows.append({"account_id": r["account_id"], "cells": {col: r["value"]}})
+            if rows:
+                _write_background_tables(db, uid, platform, rows, col_map_by_account)
         for r in result.pop("remark_operator_push", []):
             hd.push_remark_to_operator_dashboard(r["owner_id"], r["account_id"], r["value"])
     finally:
@@ -332,16 +355,27 @@ def dashboard_push():
         if (not c["spreadsheet_id"] or not tables
                 or (platform != "tt" and not c["sheet_name"])):
             return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
-        rows = hd.collect_rows_for_push(db, platform)
+
+        import google_sheets_service as gs
+        from main import _GOOGLE_SHEETS_CONFIG
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        # collect / 快照 / 写表三者必须用**同一份**每表 col_map：tt 表头顺序不同时，
+        # 固定列字母会把 cells 产出到错列、定位也会落错列 ⇒ 快照记的行集合与真正被写的
+        # 行集合对不上（静默串列 + 整批落空）。gg/fb 走合成 map、零额外读，行为逐字节不变。
+        col_maps_by_sheet = {
+            t["sheet_name"]: hd.resolve_table_col_map(
+                service, c["spreadsheet_id"], t["sheet_name"], platform,
+                t.get("columns") or {})
+            for t in tables
+        }
+        col_maps_by_type = {t["name"]: col_maps_by_sheet[t["sheet_name"]]
+                            for t in tables}
+        rows = hd.collect_rows_for_push(db, platform, col_maps_by_type=col_maps_by_type)
         groups, skipped = hd.group_rows_by_sheet(db, uid, platform, rows)
     finally:
         db.close()
     for name in skipped:
         log.warning("全量刷新跳过：户类型「%s」查不到工作表", name)
-
-    import google_sheets_service as gs
-    from main import _GOOGLE_SHEETS_CONFIG
-    service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
 
     # 撤回快照（子项目 ③，规格 §6.1）：**写表之前**先把「本次将写到的每个格」的原值
     # 读下来存好 —— 写完原值就没了。上面那条连接已在 finally 里关闭，不可复用；写表是
@@ -352,22 +386,23 @@ def dashboard_push():
     undo_db = database.get_db()
     try:
         hd.save_undo(undo_db, uid, platform, "push",
-                     hd.snapshot_push_targets(service, c, platform, groups))
+                     hd.snapshot_push_targets(service, c, platform, groups,
+                                              col_maps_by_sheet))
         undo_db.commit()
     finally:
         undo_db.close()
 
     total_updated, total_not_found = 0, []
     try:
-        # 定位列必须与快照用的同一列（`hd.KEY_COL[platform]`）：写表按它找行，
-        # 快照也按它找行，两边不一致时快照记的行集合与真正被写的行就对不上。
+        # 定位列必须与快照用的同一列（快照由 `snapshot_push_targets` 按该表 col_map 记）：
+        # 写表按它找行，快照也按它找行，两边不一致时快照记的行集合与真正被写的行就对不上。
         # 写入器的默认值是 "C"（GG/TT 的账户ID列），但 **FB 的账户ID在 D 列**
-        # （C 是「账户名称」），所以 fb 路径不传就会按错误的列定位、写空。
-        # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
+        # （C 是「账户名称」）⇒ 不显式传就按错误的列定位、写空。tt 表头顺序不同时账户ID
+        # 也不在 C 列 ⇒ 逐表取该表 col_map 的定位键（gg/fb 合成 map ⇒ 仍是 C / D）。
         for sheet_name, sheet_rows in groups:
-            res = gs.update_rows_by_account_id(service, c["spreadsheet_id"],
-                                               sheet_name, sheet_rows,
-                                               key_col=hd.KEY_COL[platform])
+            res = gs.update_rows_by_account_id(
+                service, c["spreadsheet_id"], sheet_name, sheet_rows,
+                key_col=hd.key_col_of_col_map(col_maps_by_sheet[sheet_name], platform))
             total_updated += res["updated"]
             total_not_found.extend(res["not_found"])
     except Exception:
@@ -564,7 +599,8 @@ def dashboard_owner_options():
     return ok({"users": [dict(r) for r in rows]})
 
 
-def _write_background_tables(db, uid: int, platform: str, rows) -> None:
+def _write_background_tables(db, uid: int, platform: str, rows,
+                             col_map_by_account=None) -> None:
     """定向写回（归属变更 / 备注 / 清空通道列）：登记 + 后台写 + 失败可查可重试。
 
     签名与四个调用点沿用 master 侧（它取代了旧的 `_write_background(conf, rows, platform)`）。
@@ -589,7 +625,12 @@ def _write_background_tables(db, uid: int, platform: str, rows) -> None:
         其他列会被按 DB 值覆盖 —— 户管在表里改过、还没同步回来的内容就没了。
         这是与 master 语义对齐的修正（master 原先就是定向单格写；
         T3 把它并进了「其余」桶，T3 报告当时就标注「与 item["to"] 是否等价未验证」）。
-      - 其余（TT M 列备注 …）→ `huguan_dashboard`（整行重建）
+      - 其余（TT 备注列 …）→ `huguan_dashboard`（整行重建）
+
+    `col_map_by_account`（可选）是 `{account_id: 该账户所在表的 col_map}`：给了就按该表
+    col_map 取**映射后**的通道/归属列来分桶（tt 表头顺序不同时角色列不在固定字母上 ——
+    固定字母会把映射列归属行当「其余」→ 整行重建）；没给（None）⇒ 既有固定字母路径，
+    逐字节不变（gg/fb 与直接调本函数的既有用例都走这条）。
 
     划分**按身份**逐行归桶，不得用 `r not in channel_rows` 这类写法 ——
     dict 的 `in` / `==` 是**按值比较**，两行内容相同会被一起划进/划出。
@@ -603,17 +644,26 @@ def _write_background_tables(db, uid: int, platform: str, rows) -> None:
     import sheet_write
     import routes.huguan_sheet_targets as _hst
 
-    channel_col = hd.OWNER_CHANNEL_COL.get(platform)
-    owner_col = hd.OWNER_COL.get(platform)
     channel_rows, owner_rows, acceptor_rows, other_rows = [], [], [], []
     for r in rows:
         cells = r.get("cells") or {}
+        cm = (col_map_by_account or {}).get(r.get("account_id"))
+        if cm is not None:
+            # 该表按表头映射：角色列也必须从**同一份** col_map 取（与写表器同一列），
+            # 否则映射列归属行会被当成「其余」→ 整行重建 → 冲掉户管手工内容。
+            # 该表没有这一列（未采集）⇒ 返回 None ⇒ 这一行不落进该桶。
+            channel_col = hd.owner_role_col(platform, "channel", cm)
+            owner_col = hd.owner_role_col(platform, "owner", cm)
+        else:
+            # gg/fb（或调用方未提供映射）：既有固定字母路径，逐字节不变。
+            channel_col = hd.OWNER_CHANNEL_COL.get(platform)
+            owner_col = hd.OWNER_COL.get(platform)
         if channel_col and channel_col in cells:
-            channel_rows.append(r)
+            channel_rows.append((r, channel_col))
         elif platform == "fb" and "I" in cells:
             acceptor_rows.append(r)
         elif owner_col and owner_col in cells:
-            owner_rows.append(r)
+            owner_rows.append((r, owner_col))
         else:
             other_rows.append(r)
 
@@ -629,7 +679,7 @@ def _write_background_tables(db, uid: int, platform: str, rows) -> None:
         # 归属/运营列：**单格定向写**，与通道列同理 —— 若并进上面的整行重建，
         # 这一行的其他列会被按 DB 值覆盖，户管在表里改过、还没同步回来的内容就没了。
         # 值取 `apply_diff` 已落库的 `item["to"]`，随 payload 携带（重试可复现）。
-        for r in owner_rows:
+        for r, owner_col in owner_rows:
             value = (r["cells"] or {}).get(owner_col, "")
             _payload = {"platform": platform, "mode": "owner",
                         "col_role": "owner", "value": value}
@@ -653,7 +703,7 @@ def _write_background_tables(db, uid: int, platform: str, rows) -> None:
                 payload=_payload)
     if channel_rows:
         # 通道列：走自己的 target（该列被 cells_for_row 排除）
-        for r in channel_rows:
+        for r, channel_col in channel_rows:
             value = (r["cells"] or {}).get(channel_col, "")
             _payload = {"platform": platform, "mode": "clear" if value == "" else "owner"}
             sheet_write.run_write(

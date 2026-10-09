@@ -2084,17 +2084,18 @@ def undo_push(user_id: int, platform: str) -> dict:
     # 两者之间用户可能改过配置，撤回要退回到当初写的地方。
     spreadsheet_id = payload.get("spreadsheet_id") or ""
     total_updated, total_not_found = 0, []
-    # 定位列必须与**快照用的同一列**（`KEY_COL[platform]`，见 snapshot_push_targets）：
-    # 写入器默认值是 "C"（GG/TT 的账户ID列），而 **FB 的账户ID在 D 列**
-    # （C 是「账户名称」）—— fb 路径不传就按错误的列定位、整批写空，且不抛异常（静默）。
-    # 必须用字典查表：按平台分流不许二元 else 兜底，缺键就要 KeyError。
-    # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
+    # 定位列必须与**快照用的同一列**（快照由 `snapshot_push_targets` 按该表 col_map 记）：
+    # 写入器默认值是 "C"（GG/TT 的账户ID列），而 **FB 的账户ID在 D 列**（C 是「账户名称」）
+    # —— 不显式传就按错误的列定位、整批写空且不抛异常（静默）。tt 表头顺序与固定列规格
+    # 不同时账户ID 也不在 C 列，故逐表按**该表表头**解析 col_map 再取定位键
+    # （gg/fb 走合成 map、零额外读，与既有行为逐字节一致）。
     for g in groups:
         sheet_name, rows = g["sheet_name"], g["rows"]
         if not rows:
             continue
+        cm = resolve_table_col_map(service, spreadsheet_id, sheet_name, platform)
         res = gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows,
-                                           key_col=KEY_COL[platform])
+                                           key_col=key_col_of_col_map(cm, platform))
         total_updated += res["updated"]
         total_not_found.extend(res["not_found"])
     db = _open_db()
@@ -2156,9 +2157,10 @@ def undo_sync(user_id: int, platform: str) -> dict:
     # ---- 1. 先回退表 ----
     # 空 cells 跳过：没有可回退的表侧内容。未配置看板时这一步不做（快照里那几列
     # 本来也没地方可写），库那步照常走。
-    # **必须显式传 key_col=KEY_COL[platform]**：写入器默认 "C"（GG/TT 的账户ID列），
+    # **必须显式传 key_col**：写入器默认 "C"（GG/TT 的账户ID列），
     # 而 **FB 的账户ID在 D 列**，不传就按错误的列定位、整批静默写空（不抛异常）。
-    # 这是本仓库已修五处的同一缺陷族，对照 push_rows / owner_channel_cells 调用点。
+    # tt 表头顺序不同时账户ID 也不在 C 列 ⇒ 逐表按**该表表头**解析 col_map 再取定位键
+    # （gg/fb 走合成 map、零额外读）。这是本仓库已修五处的同一缺陷族。
     back = [{"account_id": item["account_id"], "cells": dict(item["cells"])}
             for item in payload.get("sheet_back", []) if item.get("cells")]
     table_result = {"updated": 0, "not_found": []}
@@ -2188,9 +2190,12 @@ def undo_sync(user_id: int, platform: str) -> dict:
             from main import _GOOGLE_SHEETS_CONFIG
             service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
             for name, rows in by_sheet.items():
+                # 定位列必须与**快照/写表器用的同一列**：逐表按该表表头解析 col_map
+                # （tt 表头顺序不同时账户ID 不在 C 列；gg/fb 合成 map、零额外读）。
+                cm = resolve_table_col_map(service, conf["spreadsheet_id"], name, platform)
                 res = gs.update_rows_by_account_id(
                     service, conf["spreadsheet_id"], name, rows,
-                    key_col=KEY_COL[platform])
+                    key_col=key_col_of_col_map(cm, platform))
                 table_result["updated"] += res["updated"]
                 table_result["not_found"].extend(res["not_found"])
 
