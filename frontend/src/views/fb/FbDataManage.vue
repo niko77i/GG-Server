@@ -15,7 +15,9 @@
       <el-checkbox v-model="showDetailCols" style="margin-left:8px">显示详情列</el-checkbox>
       <el-button type="primary" @click="loadStats" style="margin-left:auto">📈 查看统计</el-button>
       <el-button type="success" @click="handleExport">📥 导出CSV</el-button>
-      <el-button type="warning" @click="retrySheets">🔄 重试写表</el-button>
+      <!-- 原「🔄 重试写表」按钮已移除：其入口并入下方失败汇总区的「重试全部失败的」。
+           写表改走统一治理后 `/fb/reports/retry-sync` 不再接受空 body，旧的盲重试按钮
+           只会拿到 400（缺少 groups 或 business_keys），故由汇总区内的定向重试取代。 -->
     </div>
 
     <!-- 写表失败汇总（四期）。复用 T6 卡片已 /frontend-design 定稿的视觉语法：
@@ -251,13 +253,6 @@ async function handleBatchDelete() {
   // 非跨用户角色删「自己的 1 条 + 别人的 1 条」时后端只删 1 条，按选中数会谎报 2。
   const res = await fbApi.batchDeleteReports(selectedIds.value)
   ElMessage.success(`已删除${res.deleted}条`); selectedIds.value = []; loadData()
-}
-
-async function retrySheets() {
-  try {
-    const res = await fbApi.retrySheetsSync()
-    ElMessage.success(`重试完成：${res.retried || 0} 条已同步`)
-  } catch(e) { ElMessage.error(e.response?.data?.error || '重试失败') }
 }
 
 async function handleExport() {
