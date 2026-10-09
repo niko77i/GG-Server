@@ -5229,3 +5229,75 @@ class TestPushRouting:
         hd.push_rows(7, "tt")
         assert [c["sheet_name"] for c in captured] == ["总户-加白"]
         assert [r["account_id"] for r in captured[0]["rows"]] == ["7001"]
+
+
+class TestResolveColumnMap:
+    # 实测的企业户表表头（设计 §一）
+    ENTERPRISE = ["日期", "是否回收", "账户ID", "主体名称", "账户名称", "BC",
+                  "国家", "所属渠道", "接户运营", "时区", "下户链接"]
+    # 加白户表表头 = 既有 COLUMN_SPEC["tt"] 的中文名
+    JIABAI = ["入库时间", "是否回收", "账户ID", "BC", "国家", "所属渠道",
+              "接户运营", "时区", "状态", "消耗", "位置", "换绑情况", "产品信息"]
+
+    def test_enterprise_header_resolves_fully_by_alias(self):
+        """企业户表零配置可认全：别名「日期」→ 入库时间，含两个新字段。"""
+        m, unmatched = hd.resolve_column_map(self.ENTERPRISE, {})
+        assert unmatched == [], f"应零未采集，实际={unmatched}"
+        assert m["advertiser_id"] == "C"
+        assert m["acquired_date"] == "A"          # ← 靠别名
+        assert m["subject_name"] == "D"
+        assert m["name"] == "E"
+        assert m["bc_name"] == "F"
+        assert m["landing_url"] == "K"
+
+    def test_jiabai_header_resolves_identically_to_legacy_spec(self):
+        """加白户表：解析结果必须与既有 COLUMN_SPEC 逐字段相同（回归锚）。"""
+        m, unmatched = hd.resolve_column_map(self.JIABAI, {})
+        assert unmatched == []
+        legacy = {f: c for c, _h, f, _w, _r in hd.COLUMN_SPEC["tt"] if f}
+        # 定位键两套命名并存（设计 §4.1/§4.4）：m 用目录名 advertiser_id，legacy 用
+        # 表列名 account_id，故两侧各自剔除自己的键名后再逐字段比。
+        # （规格里 K「位置」field=None 不采集；本走 B 后「位置」由目录的忽略条目吞掉，不入 m 也不入未采集。）
+        assert {k: v for k, v in m.items() if k != "advertiser_id"} == \
+               {k: v for k, v in legacy.items() if k != "account_id"}
+
+    def test_unknown_header_is_reported_not_silently_dropped(self):
+        m, unmatched = hd.resolve_column_map(["账户ID", "备注二"], {})
+        assert unmatched == ["备注二"]
+        assert "remark" not in m          # 没认出来就不许映射到任何字段
+
+    def test_override_beats_alias(self):
+        """手工覆盖优先：把别名表里没有的叫法指到任意字段。"""
+        m, unmatched = hd.resolve_column_map(["账户ID", "负责人"], {"负责人": "owner_name"})
+        assert m["owner_name"] == "B" and unmatched == []
+
+    def test_override_wins_over_alias(self):
+        m, _u = hd.resolve_column_map(["账户ID", "日期"], {"日期": "remark"})
+        assert m["remark"] == "B" and "acquired_date" not in m
+
+    def test_duplicate_field_takes_leftmost_and_reports(self):
+        """两列都叫「日期」→ 取最左，另一个记未采集（不静默）。"""
+        m, unmatched = hd.resolve_column_map(["账户ID", "日期", "日期"], {})
+        assert m["acquired_date"] == "B"
+        assert unmatched == ["日期"]
+
+    def test_blank_header_ignored(self):
+        m, unmatched = hd.resolve_column_map(["账户ID", "", "  "], {})
+        assert unmatched == [] and "B" not in m.values()
+
+    def test_key_field_flag(self):
+        assert hd.field_spec("tt")["advertiser_id"]["key"] is True
+        assert hd.field_spec("tt")["landing_url"]["skip_empty_write"] is True
+        assert hd.field_spec("tt")["remark"]["skip_empty_write"] is False
+
+    def test_spec_column_map_reproduces_legacy_for_gg_fb(self):
+        """gg/fb 合成的 map 必须与 COLUMN_SPEC 逐字节一致（GG/FB 不变的锚）。"""
+        for p in ("gg", "fb"):
+            legacy = {f: c for c, _h, f, _w, _r in hd.COLUMN_SPEC[p] if f}
+            assert hd.spec_column_map(p) == legacy
+
+    def test_recognized_but_ignored_header_is_not_reported(self):
+        """「位置」是**认识但刻意不采集**的列：既不映射、也不进未采集列表。"""
+        m, unmatched = hd.resolve_column_map(["账户ID", "位置"], {})
+        assert unmatched == []
+        assert "B" not in m.values(), "「位置」不该被映射到任何字段"

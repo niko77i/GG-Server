@@ -82,6 +82,135 @@ COLUMN_SPEC = {
     ],
 }
 
+# ---------- TT 表头映射（2026-10-09 设计 §4.1）----------
+#
+# 每项：(字段key, 中文名, 别名元组, 方向, 是否定位键, 空值是否跳过回写)
+#   - 别名是「自动识别」的**全部**依据。目前只放**有实测依据**的叫法（`日期` 来自企业户表）；
+#     以后遇到新叫法加一行即可 —— 因为配置里只存"手工覆盖"，别名表一改、所有表自动受益。
+#   - 方向 "r" = 只读回（表→系统），永不回写。
+#   - 空值跳过回写：见设计 §4.7，目前只有 landing_url（非必填的户管自有链接，不能被系统清掉）。
+#   - 未列在这里的字段（如 fb 的 operator / asset_type_name）不参与 tt 的表头映射。
+TT_FIELD_CATALOG = [
+    ("acquired_date",     "入库时间", ("入库时间", "日期"), "rw", False, False),
+    ("_dead_flag",        "是否回收", ("是否回收",),        "rw", False, False),
+    ("advertiser_id",     "账户ID",   ("账户ID",),          "rw", True,  False),
+    ("subject_name",      "主体名称", ("主体名称",),        "rw", False, False),
+    ("name",              "账户名称", ("账户名称",),        "rw", False, False),
+    ("bc_name",           "BC",       ("BC",),              "rw", False, False),
+    ("country",           "国家",     ("国家",),            "rw", False, False),
+    ("agent_name",        "所属渠道", ("所属渠道",),        "rw", False, False),
+    ("owner_name",        "接户运营", ("接户运营",),        "rw", False, False),
+    ("timezone",          "时区",     ("时区",),            "rw", False, False),
+    ("landing_url",       "下户链接", ("下户链接",),        "rw", False, True),
+    # 空串字段key = **认识这个表头、但刻意不采集**（legacy COLUMN_SPEC["tt"] 的 K「位置」
+    # 就是 field=None 的同一语义）。它既不入映射、也不进 unmatched —— 否则加白户表每次
+    # 同步都会报「1 列未采集 —— 位置」，把「未采集」这个信号淹成噪音。
+    ("", "位置", ("位置",), "ignore", False, False),
+    ("status_name",       "状态",     ("状态",),            "rw", False, False),
+    ("consumption",       "消耗",     ("消耗",),            "rw", False, False),
+    ("remark",            "产品信息", ("产品信息",),        "rw", False, False),
+    ("owner_change_note", "换绑情况", ("换绑情况",),        "r",  False, False),
+]
+
+# tt 的解析结果里，定位键的字段名恒为 "account_id"（与 COLUMN_SPEC 的既有约定一致：
+# 解析结果用 account_id，拼 SQL / 写库用 ACCOUNT_KEY_FIELD[platform]，两个命名空间勿混）。
+TT_KEY_FIELD = "account_id"
+
+# 别名 → 字段key（同名字段只取最先出现的那个别名条目）
+_TT_ALIAS_TO_FIELD = {}
+for _f, _label, _aliases, _dir, _key, _skip in TT_FIELD_CATALOG:
+    for _a in _aliases:
+        _TT_ALIAS_TO_FIELD.setdefault(_a, _f)
+
+
+def resolve_column_map(headers: list, overrides: dict) -> tuple:
+    """表头行 + 手工覆盖 → ({字段key: 列字母}, [未采集的表头名])。
+
+    优先级：**手工覆盖 > 别名自动匹配 > 不采集**（设计 §4.2）。
+
+    - 表头文本 strip() 后匹配；空表头跳过。
+    - 多列命中同一字段 ⇒ 取**最左**那列，其余记入未采集（不静默）。
+    - 覆盖指向的字段key 非法 ⇒ 忽略该条并记入未采集（校验已在 HTTP 层拦，这里是纵深防御）。
+    返回的未采集列表保留表头原文（strip 后），供前端逐条显示与指派。
+    """
+    # 只把**真正的字段**当合法覆盖目标：空串字段key 是「认识但刻意不采集」的哨兵
+    # （见 TT_FIELD_CATALOG），不是字段，故不能作为手工覆盖的落点。
+    catalog_fields = {f for f, _l, _a, _d, _k, _s in TT_FIELD_CATALOG if f}
+    out, unmatched, taken = {}, [], set()
+
+    def _claim(field, col_letter):
+        if field in out:
+            return False
+        out[field] = col_letter
+        taken.add(col_letter)
+        return True
+
+    # 第一轮：手工覆盖
+    for i, raw in enumerate(headers):
+        name = ("" if raw is None else str(raw)).strip()
+        if not name or name not in (overrides or {}):
+            continue
+        field = (overrides or {})[name]
+        if field not in catalog_fields or not _claim(field, _col_letter(i)):
+            unmatched.append(name)
+
+    # 第二轮：别名自动匹配（跳过已被覆盖占用的列）
+    for i, raw in enumerate(headers):
+        name = ("" if raw is None else str(raw)).strip()
+        if not name or _col_letter(i) in taken:
+            continue
+        field = _TT_ALIAS_TO_FIELD.get(name)
+        if field is None:
+            # 完全不认识 ⇒ 报出来（设计 §4.3）
+            if name not in (overrides or {}):
+                unmatched.append(name)
+            continue
+        if field == "":
+            # 认识、但刻意不采集（如「位置」）：既不映射也不上报
+            taken.add(_col_letter(i))
+            continue
+        if not _claim(field, _col_letter(i)):
+            unmatched.append(name)
+    return out, unmatched
+
+
+def _col_letter(i: int) -> str:
+    """0 → "A"。只支持到 ZZ（表头映射够用；超过 702 列的表不在本次范围）。"""
+    if i < 0 or i > 701:
+        raise ValueError(f"列索引超出 A:ZZ 范围: {i}")
+    if i < 26:
+        return chr(ord("A") + i)
+    return chr(ord("A") + i // 26 - 1) + chr(ord("A") + i % 26)
+
+
+def field_spec(platform: str) -> dict:
+    """字段key → {writable, readable, key, skip_empty_write}。
+
+    tt 来自 TT_FIELD_CATALOG；gg/fb 由既有 COLUMN_SPEC 推导（保证行为逐字不变）。
+    `key` 对 gg/fb 恒为 `ACCOUNT_KEY_FIELD` 那个字段名。
+    """
+    spec = {}
+    if platform == "tt":
+        for f, _l, _a, d, is_key, skip in TT_FIELD_CATALOG:
+            if not f:
+                continue          # 「认识但刻意不采集」的条目不是字段
+            spec[f] = {"writable": d == "rw", "readable": True,
+                       "key": is_key, "skip_empty_write": skip}
+        return spec
+    key_field = ACCOUNT_KEY_FIELD[platform]
+    for _col, _header, field, writable, readable in COLUMN_SPEC[platform]:
+        if field is None:
+            continue
+        spec[field] = {"writable": writable, "readable": readable,
+                       "key": field == key_field, "skip_empty_write": False}
+    return spec
+
+
+def spec_column_map(platform: str) -> dict:
+    """由既有 COLUMN_SPEC 合成的 {字段key: 列字母}。**只用于 gg / fb** ——
+    它们继续走固定列规格，结果与改动前逐字节相同（设计 §4.4 的等价性承诺）。"""
+    return {field: col for col, _h, field, _w, _r in COLUMN_SPEC[platform] if field}
+
 KEY_COL = {"gg": "C", "tt": "C", "fb": "D"}
 OWNER_COL = {"gg": "G", "tt": "G", "fb": "J"}
 OWNER_CHANNEL_COL = {"gg": "H", "tt": "L"}      # 刻意不含 fb，见 spec §6.5
