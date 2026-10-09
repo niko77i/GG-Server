@@ -255,11 +255,17 @@ async function doSave() {
   finally { saving.value = false }
 }
 
-// 轮询本次写表结果：pending 则 1 秒后再查，最多 15 次。
+// 轮询本次写表结果：中间态（pending / failed）则 1 秒后再查，最多 40 次。
 // 四期起数据源换成统一的 /api/sheet-write/status（带 target 过滤，
-// 防与同期其它 target 互相遮蔽）；终态文案复用全仓唯一文案源。
+// 防与同期其它 target 互相遮蔽）；终态**失败**文案复用 sheetWriteUi 的唯一文案源，
+// 成功确认是本页自己的一句（成功不属于「失败治理三态语汇」，见 sheetWriteUi.js 自述）。
+//
+// MAX_ATTEMPTS 必须 > 后端 30s 重试窗口，**不能调小**：后端首次失败先落中间态
+// failed → 睡 30s → 重试 → 终态 retry_failed 最早 ~30s 才落库。窗口短于 30s
+// 会把「走过后端重试」的写表终态全部排除在提示之外（旧代码 15s 够用，是因为旧
+// 后端把 failed 当终态当场弹；换源后必须跟着重估）。
 async function pollWriteStatus(businessKey, attempt = 0) {
-  const MAX_ATTEMPTS = 15
+  const MAX_ATTEMPTS = 40
   try {
     const r = await sheetWriteApi.status({
       platform: 'fb', target: 'fb_report', businessKey,
@@ -269,7 +275,10 @@ async function pollWriteStatus(businessKey, attempt = 0) {
     if (it.target !== 'fb_report') return // 被遮蔽时误判成别的 target
     if (it.status === 'synced') return ElMessage.success('✅ 写表成功')
     if (it.status === 'pending' || it.status === 'failed') {
-      if (attempt >= MAX_ATTEMPTS) return
+      if (attempt >= MAX_ATTEMPTS) {
+        // 非「中间态报警」，而是「无法确认结果」的告知：把用户指到能查看/重试的页面
+        return ElMessage.warning('写表结果未返回，请稍后到「数据管理」页查看或重试')
+      }
       return setTimeout(() => pollWriteStatus(businessKey, attempt + 1), 1000)
     }
     // 需提示的终态：文案与汇总区/工具提示同源
