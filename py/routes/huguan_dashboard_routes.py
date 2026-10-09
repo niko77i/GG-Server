@@ -632,6 +632,48 @@ def dashboard_owner_options():
     return ok({"users": [dict(r) for r in rows]})
 
 
+@huguan_dashboard_bp.route("/api/huguan/dashboard/sheet-headers", methods=["GET"])
+@jwt_required()
+@huguan_required
+def dashboard_sheet_headers():
+    """读某张 tt 表的第 1 行，摊成「逐列：表头 → 字段 + 来源」（设计 §3.1）。
+
+    只服务列映射 UI 的显示。**归属门禁与 sync 同款**：表地址一律取自该户管自己的配置，
+    请求体不接受表地址；`sheet_name` 必须是**他自己配置里的某张表**（配置保证工作表名互不重复）
+    —— 否则就等于「对着任意 sheet 读表头」。
+    """
+    platform = str(request.args.get("platform") or "").strip()
+    if platform != "tt":
+        return err("只有 TT 支持表头映射", 400)
+    sheet_name = str(request.args.get("sheet_name") or "").strip()
+    if not sheet_name:
+        return err("缺少 sheet_name", 400)
+
+    uid = get_uid()
+    db = database.get_db()
+    try:
+        spreadsheet_id = _spreadsheet_id(db, uid, platform)
+        if not spreadsheet_id:
+            return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
+        table = next((t for t in hd.get_platform_tables(db, uid, platform)
+                      if t["sheet_name"] == sheet_name), None)
+        if table is None:
+            return err(f"工作表「{sheet_name}」不在你的看板配置里", 400)
+
+        import google_sheets_service as gs
+        from main import _GOOGLE_SHEETS_CONFIG
+        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        # 与写侧同一个读法：只读第 1 行，够用且省流量。
+        grid = gs.read_sheet_values(service, spreadsheet_id, sheet_name, "A1:ZZ1")
+        headers = grid[0] if grid else []
+        overrides = table.get("columns") or {}
+        col_map, unmatched = hd.resolve_column_map(headers, overrides)
+        return ok({"columns": hd.describe_header_columns(headers, overrides, col_map, unmatched),
+                   "unmatched": unmatched})
+    finally:
+        db.close()
+
+
 def _write_background_tables(db, uid: int, platform: str, rows,
                              col_map_by_account=None) -> None:
     """定向写回（归属变更 / 备注 / 清空通道列）：登记 + 后台写 + 失败可查可重试。

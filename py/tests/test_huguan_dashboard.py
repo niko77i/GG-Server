@@ -6101,3 +6101,57 @@ class TestColumnsConfig:
         assert resp.status_code == 200, resp.get_json()
         tt = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["tt"]
         assert tt["tables"][0]["columns"] == {"位置2": "", "备注二": "", "负责人": "owner_name"}
+
+
+# ---------- Task 4（第二批）：读表头端点 ----------
+
+class TestSheetHeadersEndpoint:
+    """列映射 UI 的「读取表头」：把某张表第 1 行摊成逐列来源。"""
+
+    def _conf(self, client, username, tables):
+        hg, _ = _create_user(client, username, role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of(username)}", json.dumps(
+                       {"tt": {"spreadsheet_id": "SS", "tables": tables}})))
+        db.commit(); db.close()
+        return hg
+
+    def test_returns_per_column_provenance(self, client, monkeypatch):
+        import google_sheets_service as gs
+        hg = self._conf(client, "_sh1", [{"name": "企业户", "sheet_name": "企业户",
+                                          "columns": {"备注二": "remark"}}])
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [["账户ID", "备注二", "位置", "陌生列"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        res = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
+                         query_string={"platform": "tt", "sheet_name": "企业户"}).get_json()
+        assert res["columns"] == [
+            {"header": "账户ID", "field": "advertiser_id", "via": "alias"},
+            {"header": "备注二", "field": "remark", "via": "override"},
+            {"header": "位置", "field": "", "via": "ignored"},
+            {"header": "陌生列", "field": None, "via": "none"},
+        ]
+        assert res["unmatched"] == ["陌生列"]
+
+    def test_rejects_a_sheet_outside_the_users_own_config(self, client, monkeypatch):
+        """归属门禁：只能读自己配置里的表，否则等于对着任意 sheet 读表头。"""
+        import google_sheets_service as gs
+        hg = self._conf(client, "_sh2", [{"name": "企业户", "sheet_name": "企业户"}])
+        reads = []
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: reads.append(a) or [[]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
+                          query_string={"platform": "tt", "sheet_name": "别人的表"})
+        assert resp.status_code == 400
+        assert "别人的表" in resp.get_json()["error"]
+        assert reads == [], "不该真的去读那张表"
+
+    def test_rejects_non_tt_and_missing_sheet_name(self, client):
+        hg, _ = _create_user(client, "_sh3", role="huguan")
+        r1 = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
+                        query_string={"platform": "gg", "sheet_name": "企业户"})
+        assert r1.status_code == 400
+        r2 = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
+                        query_string={"platform": "tt"})
+        assert r2.status_code == 400
