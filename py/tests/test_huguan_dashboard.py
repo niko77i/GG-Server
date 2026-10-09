@@ -5809,3 +5809,66 @@ class TestNewFieldsSync:
         db.close()
         assert r["subject_name"] == "", "被采集的列空着必须清库（口径不许被打掉）"
         assert r["landing_url"] == "https://x/y", "被采集且有值的列照常写入"
+
+
+# ---------- Task 8: 配置 tables[].columns 的读取与校验 ----------
+
+class TestColumnsConfig:
+    def test_post_rejects_unknown_field_key(self, client):
+        hg, _ = _create_user(client, "_cc1", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "tt", "spreadsheet_id": "T1",
+            "tables": [{"name": "企业户", "sheet_name": "企业户",
+                        "columns": {"负责人": "不存在的字段"}}]})
+        assert resp.status_code == 400
+        assert "不存在的字段" in resp.get_json()["error"]
+
+    def test_post_rejects_duplicate_field_key(self, client):
+        hg, _ = _create_user(client, "_cc2", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "tt", "spreadsheet_id": "T1",
+            "tables": [{"name": "企业户", "sheet_name": "企业户",
+                        "columns": {"负责人": "owner_name", "运营": "owner_name"}}]})
+        assert resp.status_code == 400
+        assert "owner_name" in resp.get_json()["error"]
+
+    def test_post_rejects_non_object_columns(self, client):
+        hg, _ = _create_user(client, "_cc3", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "tt", "spreadsheet_id": "T1",
+            "tables": [{"name": "企业户", "sheet_name": "企业户",
+                        "columns": ["负责人"]}]})
+        assert resp.status_code == 400
+
+    def test_columns_saved_and_read_back(self, client):
+        hg, _ = _create_user(client, "_cc4", role="huguan")
+        assert client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "tt", "spreadsheet_id": "T1",
+            "tables": [{"name": "企业户", "sheet_name": "企业户",
+                        "columns": {"负责人": "owner_name"}}]}).status_code == 200
+        tt = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["tt"]
+        assert tt["tables"][0]["columns"] == {"负责人": "owner_name"}
+
+    def test_columns_default_empty(self, client):
+        """没配 columns 的表也要带出空 dict（前端据此渲染，不用判 None）。"""
+        hg, _ = _create_user(client, "_cc5", role="huguan")
+        client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "tt", "spreadsheet_id": "T1",
+            "tables": [{"name": "加白户", "sheet_name": "加白户"}]})
+        tt = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["tt"]
+        assert tt["tables"][0]["columns"] == {}
+
+    def test_post_rejects_sentinel_empty_field_key(self, client):
+        """空串字段key（「位置」= 认识但刻意不采集）**不是**合法覆盖目标。
+
+        校验集合必须与 `resolve_column_map` 同口径（它用 `{f ... if f}` 剔掉哨兵）。
+        若取自 `TT_FIELD_CATALOG` 的裸字段并集，这里会 200 放行 `{"位置": ""}`，
+        而读写时该覆盖又被当未采集忽略 ⇒ 存进去的配置与生效口径打架。
+        """
+        hg, _ = _create_user(client, "_cc6", role="huguan")
+        resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "tt", "spreadsheet_id": "T1",
+            "tables": [{"name": "企业户", "sheet_name": "企业户",
+                        "columns": {"位置": ""}}]})
+        assert resp.status_code == 400
+        assert "位置" in resp.get_json()["error"]

@@ -94,7 +94,26 @@ def dashboard_config_save():
                 return err(f"工作表「{sheet}」被两个户类型共用", 400)
             seen_names.add(name)
             seen_sheets.add(sheet)
-            tables.append({"name": name, "sheet_name": sheet})
+            # `columns` 可选的**手工覆盖** `{表头名: 字段key}`（设计 §4.2）。校验口径
+            # 必须与 `resolve_column_map` 一致（可覆盖目标 = 真字段，不含空串哨兵），
+            # 否则存进去的覆盖到读/写时会静默失效（resolve_column_map 当它是未采集）。
+            cols = t.get("columns")
+            if cols is not None:
+                if not isinstance(cols, dict):
+                    return err(f"户类型「{name}」的 columns 必须是对象", 400)
+                seen_fields = set()
+                for header, field in cols.items():
+                    # 非字符串字段key 一律按未知处理（否则下面 `not in set` 对 list/dict
+                    # 等不可哈希值会抛 TypeError → 500；本层契约是畸形输入 400 而非 500）。
+                    if not isinstance(field, str) or field not in hd._TT_CATALOG_FIELDS:
+                        return err(f"列「{header}」指向了未知字段「{field}」", 400)
+                    if field in seen_fields:
+                        return err(f"字段「{field}」被两列同时指定", 400)
+                    seen_fields.add(field)
+            item = {"name": name, "sheet_name": sheet}
+            if isinstance(cols, dict) and cols:
+                item["columns"] = cols
+            tables.append(item)
 
     db = database.get_db()
     try:

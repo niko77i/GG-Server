@@ -210,6 +210,16 @@ def field_spec(platform: str) -> dict:
     return spec
 
 
+# 合法的**可手工覆盖字段**集合，供 POST 层校验 `tables[].columns`（设计 §4.2）。
+# 必须与 `resolve_column_map` 认定的可覆盖目标**同一口径** —— 后者用
+# `{f for f, ... in TT_FIELD_CATALOG if f}`（剔掉空串哨兵）。若这里直接
+# `{f for f, *_ in TT_FIELD_CATALOG}`，就会把「认识但刻意不采集」的空串哨兵
+# （中文名「位置」）算成合法字段 ⇒ POST 放行 `columns: {"位置": ""}`，而
+# `resolve_column_map` 又当它是无效覆盖 —— 两边对「什么合法」打架。
+# 故取 `field_spec("tt")` 这个**终裁字段集**（哨兵已在函数内部排除）。
+_TT_CATALOG_FIELDS = set(field_spec("tt"))
+
+
 def spec_column_map(platform: str) -> dict:
     """由既有 COLUMN_SPEC 合成的 {字段key: 列字母}。**只用于 gg / fb** ——
     它们继续走固定列规格，结果与改动前逐字节相同（设计 §4.4 的等价性承诺）。"""
@@ -470,9 +480,13 @@ def get_platform_tables(db, user_id: int, platform: str) -> list:
     """取某平台的全部账户表：[{"name": 户类型名, "sheet_name": worksheet 名}]。
 
     - tt 配了 `tables` → 原样返回（保持配置顺序，顺序即按钮顺序与跨表去重的优先级）；
+      每项**额外带 `columns`**（手工覆盖 `{表头名: 字段key}`，缺省 `{}`）—— 读路径
+      （`dashboard_sync`）与写路径（`huguan_sheet_targets`）都按 `t.get("columns")`
+      取它，前端也据此渲染，缺省 `{}` 让前端无需判 None。
     - tt 只有旧的 `sheet_name`（2026-10-08 之前的存量配置）→ 当成单条「加白户」。
       **只读不改写磁盘**：写回发生在用户下次点保存时，这样出问题能一眼看出是读的还是写的。
-    - gg / fb → 单元素列表，`name` 为空串。下游按 name 分组时只有一组，行为与改动前等价。
+    - gg / fb → 单元素列表，`name` 为空串，**不带 `columns`**（columns 是 tt 专属概念，
+      gg/fb 走固定列规格，载荷必须逐字节不变）。
     """
     entry = load_config(db, user_id).get(platform)
     if not isinstance(entry, dict):
@@ -487,7 +501,11 @@ def get_platform_tables(db, user_id: int, platform: str) -> list:
                 name = _conf_text(t.get("name"))
                 sheet_name = _conf_text(t.get("sheet_name"))
                 if name and sheet_name:
-                    out.append({"name": name, "sheet_name": sheet_name})
+                    # 原样透出配置里的覆盖，缺省 `{}`。**归一成 dict** 防手工改坏的配置
+                    # （非 dict 真值会让下游 `t.get("columns") or {}` 原样透出、前端迭代炸）。
+                    cols = t.get("columns")
+                    out.append({"name": name, "sheet_name": sheet_name,
+                                "columns": cols if isinstance(cols, dict) else {}})
             if out:
                 return out
         legacy = _conf_text(entry.get("sheet_name"))
@@ -531,7 +549,15 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
             sheet = _conf_text((t or {}).get("sheet_name"))
             if not name or not sheet:
                 raise ValueError("每个户类型都需要「类型名」和「工作表名」")
-            clean.append({"name": name, "sheet_name": sheet})
+            item = {"name": name, "sheet_name": sheet}
+            # 手工覆盖 `columns`（`{表头名: 字段key}`）原样持久化：读路径
+            # （`dashboard_sync`）与写路径（`huguan_sheet_targets`）都按同一份配置取它，
+            # 少存一步就会让「保存后再读回」丢覆盖（读写对定位键认识不一致 → 落错列）。
+            # 空 dict 不落盘（保持未配 columns 时的配置文本与改动前逐字节一致）。
+            cols = (t or {}).get("columns")
+            if isinstance(cols, dict) and cols:
+                item["columns"] = cols
+            clean.append(item)
         # 行身份 = worksheet 名，**不是下标**。下标在「删掉中间一行」时会整体错位：
         # 旧 [加白户→S1, 企业户→S2, 特批户→S3] → 新 [加白户→S1, 特批户→S3] 会把
         # 「企业户」的账户改名成「特批户」（静默并户），与规格 §5「删除类型保留原值」冲突。
