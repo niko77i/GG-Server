@@ -735,6 +735,17 @@ git commit -m "feat(tt): 同步按表头映射读列，定位键缺失拒同步�
 
 ## Task 6: 写侧按 `col_map` 定位行
 
+> **2026-10-10 执行记录（拆成 6a / 6b）**：本任务实作时拆为两趟各自审查。
+> **6a** = `resolve_table_col_map` + `huguan_sheet_targets.py` 两处 `key_col` + `snapshot_push_targets`
+> 按 col_map 记列（commit `f4a002d`）。
+> **6b** = 路由/撤回/推送侧的剩余固定列字母（commit `3d62a68`）：计划点名的撤回写入之外，还接了
+> **计划未点名的三处** —— `dashboard_sync` 的运营格（`OWNER_COL`）与备注回写（硬编码 `"M"`）、
+> `_write_background_tables` 的**分桶判据**；以及 `undo_push` / `undo_sync` 与 `dashboard_push`
+> 的 `snapshot_push_targets` 调用点。
+> **理由（经审查用数据流核实）**：这几处不改时不经 col_map —— 表头顺序一变即**整批串列/落空**
+> （push 与 undo 侧为真断点）。注意 `dashboard_sync` 的运营格/备注键与分桶判据是**同一套内部载体键**，
+> 单独改其中一处才会引入整行重建；两处必须同动。
+
 **Files:**
 - Modify: `py/routes/huguan_sheet_targets.py:90`、`:159`
 - Modify: `py/routes/huguan_dashboard_routes.py:343`（撤回写入）
