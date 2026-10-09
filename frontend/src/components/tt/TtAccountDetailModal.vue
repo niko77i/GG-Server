@@ -49,10 +49,23 @@
         <el-table-column prop="operator" label="运营" width="90" />
         <el-table-column label="表格" width="55" align="center">
           <template #default="{ row }">
-            <el-tooltip v-if="row.sheets_synced === 0" :content="row.sheets_error || '未同步到表格'" placement="top">
+            <!-- 三态，判据是「**终态结果**」，不是「同步了没有」：
+                 ⚠️  只在 `sheets_error` 有文案时出现 —— 那是终态失败（重试也失败了）。
+                 ✅  已同步。
+                 -   未同步且**没有**错误文案：即「首次失败、30s 重试在途」或
+                     「提交时没配表 ⇒ 根本没排写表」。**不报警**（口径：提示只在最终结果
+                     产生时发出），但保留可点重试 —— 未配表那条记录事后配了表要靠它补写。
+                 原实现只按 `sheets_synced === 0` 判：三种情况混在一个 ⚠️ 里 ⇒ 重试窗口内
+                 就报警（三期设计 §7 点名的「首次失败就报警」；后端已改为只在终态落错文案，
+                 这里是 UI 侧的对应修复）。GG 侧充值表列同口径（那边注释：
+                 「未配表 ⇒ 根本没排写表 = 无标记，不是失败」）。 -->
+            <el-tooltip v-if="row.sheets_error" :content="row.sheets_error" placement="top">
               <el-button link size="small" type="warning" @click="retryRechargeSheets(row)" :loading="retryingId === row.id">⚠️</el-button>
             </el-tooltip>
-            <span v-else style="color:#16a34a;font-size:14px;">✅</span>
+            <span v-else-if="row.sheets_synced" style="color:#16a34a;font-size:14px;">✅</span>
+            <el-tooltip v-else content="尚未同步到表格。点击可重试。" placement="top">
+              <el-button link size="small" @click="retryRechargeSheets(row)" :loading="retryingId === row.id">-</el-button>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column prop="created_at" label="时间" min-width="120" />
