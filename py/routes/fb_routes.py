@@ -7,7 +7,6 @@ import huguan_dashboard as hd
 import logging
 import re
 import sqlite3
-import threading
 
 fb_bp = Blueprint('fb', __name__)
 
@@ -15,8 +14,10 @@ log = logging.getLogger("gg-server")
 
 # 落库 / 回响应体共用的固定文案。这些 `except Exception` 捕到的多是 sqlite 的
 # IntegrityError（UNIQUE / NOT NULL / FOREIGN KEY），原文含 schema 列名与英文约束名。
+#
+# 注：FB 写表失败原有自己的 `_FB_SHEETS_FAILED_MSG`，四期接入统一治理后写表失败的
+# error_msg 改由 `sheet_write._WRITE_FAILED_MSG` 统一落库，该常量已无引用、随之删除。
 _FB_DB_FAILED_MSG = "操作失败，详情见服务端日志"
-_FB_SHEETS_FAILED_MSG = "表格同步失败，详情见服务端日志"
 
 
 def _is_unique_conflict(e):
@@ -1734,23 +1735,17 @@ def extract_save():
                  rec.get('account_name', ''), rec.get('account_id', ''),
                  rec.get('cost', 0), rec.get('impressions', 0), rec.get('clicks', 0),
                  rec.get('registrations', 0), rec.get('purchases', 0), rec.get('cost_per_purchase', 0)))
+        # 保留此 commit 并置于登记**之前**。登记走 `helpers.get_db()`，它是 `flask.g`
+        # 请求级缓存 ⇒ 与这里的 `db` 是**同一条连接**；先落干净事务再登记，语义清晰、
+        # 也不在此连接上累积未提交写事务。真正另起连接的是**后台写表线程**
+        # （`sheet_write.run_write` → `database.get_db()` 新建连接）。
         db.commit()
 
-        # 先插入一条 pending 同步日志并拿到 id，供前端精确轮询本次写表结果
-        import json as _json
-        db.execute(
-            "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, rows_json, "
-            "report_date, line_name) "
-            "VALUES (?,?,?,'','pending',?,?,?)",
-            (uid, product_name, '', _json.dumps(records, ensure_ascii=False)[:10000],
-             report_date, line_name))
-        log_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.commit()
+        # 登记一次写表（四期：接入统一治理）。响应里给出 business_key 供前端精确轮询；
+        # 不再插 sheets_sync_log 的 pending 行 —— 该表留给 GG 做表那条线。
+        business_key = _register_fb_report_write(uid, product_name, line_name, report_date)
 
-        # 异步写 Google Sheets（完成后会更新这条日志的状态为 synced/failed）
-        _schedule_fb_sheets_write(uid, product_name, line_name, report_date, records, log_id)
-
-        return ok({'saved': len(records), 'sync_log_id': log_id})
+        return ok({'saved': len(records), 'business_key': business_key})
     except Exception as e:
         db.rollback()
         log.exception("FB 保存提取数据失败 product_name=%s", product_name)
@@ -1795,42 +1790,26 @@ def _get_sheet_config_key(db, user_id):
     return f"google_sheets_fb_{user_id}" if platform == 'fb' else f"google_sheets_{user_id}"
 
 
-def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, records, log_id):
-    """后台线程写 Google Sheets，并更新对应的 sheets_sync_log 状态（synced/failed）。"""
-    def _do_write():
-        import database as _db
-        import json
-        db = _db.get_db()
-        try:
-            import google_sheets_service as gs
-            result = gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
-            log.info("[FB-Sheets] 写入成功: %s", result)
-            # 更新本次同步日志为 synced
-            db.execute(
-                "UPDATE sheets_sync_log SET status='synced', error_msg='', rows_json=?, "
-                "updated_at=datetime('now','localtime') WHERE id=?",
-                (json.dumps(records, ensure_ascii=False)[:10000], log_id))
-            db.commit()
-        except Exception:
-            # `error_msg` 会被 GET /api/fb/reports/sync-status/<id> 与 last-sync
-            # 原样回给客户端 ⇒ 只落固定文案；原文进日志。
-            log.exception("[FB-Sheets] 写入失败 log_id=%s", log_id)
-            try:
-                db.execute(
-                    "UPDATE sheets_sync_log SET status='failed', error_msg=?, rows_json=?, "
-                    "updated_at=datetime('now','localtime') WHERE id=?",
-                    (_FB_SHEETS_FAILED_MSG,
-                     json.dumps(records, ensure_ascii=False)[:10000], log_id))
-                db.commit()
-            except Exception as ex2:
-                log.exception("[FB-Sheets] 日志更新也失败: %s", ex2)
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-    t = threading.Thread(target=_do_write, daemon=True)
-    t.start()
+def _register_fb_report_write(uid, product_name, line_name, report_date):
+    """登记一次 FB 报告写表（四期：接入统一治理）。
+
+    原先这里起一个自建 daemon 线程直写 Sheets，并把结果写进自己的
+    `sheets_sync_log`；现在改为登记到 `sheet_write_log`，由统一机制写表、
+    失败可查可重试。**FB 不再写 `sheets_sync_log`**（该表留给 GG 做表那条线）。
+
+    `db` 用调用方（请求线程）的连接 —— 与三期的四个调用点同形：登记在请求线程
+    完成，前端拿到响应就能查到这条记录。
+    """
+    import sheet_write
+    import routes.fb_sheet_targets as _fbt
+
+    key = _fbt.fb_report_key(product_name, line_name, report_date)
+    payload = {"product_name": product_name, "line_name": line_name,
+               "report_date": report_date}
+    sheet_write.run_write(
+        get_db(), user_id=uid, platform="fb", target="fb_report", business_key=key,
+        sync_fn=sheet_write.build_sync("fb_report", uid, key, payload), payload=payload)
+    return key
 
 
 @fb_bp.route('/api/fb/extract/check-duplicates', methods=['POST'])
@@ -1865,68 +1844,18 @@ def fb_check_duplicates():
     return ok({'duplicates': duplicates})
 
 
-@fb_bp.route('/api/fb/reports/last-sync', methods=['GET'])
-@jwt_required()
-@fb_required
-def fb_last_sync():
-    """获取最近一次 Sheet 同步结果。"""
-    db = get_db()
-    uid = get_uid()
-    row = db.execute(
-        "SELECT * FROM sheets_sync_log WHERE user_id=? ORDER BY created_at DESC LIMIT 1",
-        (uid,)
-    ).fetchone()
-    if not row:
-        return ok({'status': 'none'})
-    result = dict(row)
-    result['rows_json'] = (result.get('rows_json') or '')[:200]  # 截断
-    return ok(result)
-
-
-@fb_bp.route('/api/fb/reports/sync-status/<int:log_id>', methods=['GET'])
-@jwt_required()
-@fb_required
-def fb_sync_status_by_id(log_id):
-    """查询特定同步日志的状态（供前端在保存后精确轮询本次写表结果）。"""
-    db = get_db()
-    uid = get_uid()
-    row = db.execute(
-        "SELECT id, status, error_msg FROM sheets_sync_log WHERE id=? AND user_id=?",
-        (log_id, uid)
-    ).fetchone()
-    if not row:
-        return err('同步记录不存在', 404)
-    return ok({'id': row['id'], 'status': row['status'], 'error_msg': row['error_msg'] or ''})
-
-
-@fb_bp.route('/api/fb/reports/sync-status', methods=['GET'])
-@jwt_required()
-@fb_required
-def fb_sheets_sync_status():
-    """获取 Sheet 同步失败记录。"""
-    db = get_db()
-    user_id = get_uid()
-    product_name = request.args.get('product_name', '')
-    rows = db.execute(
-        "SELECT * FROM sheets_sync_log WHERE user_id=? AND product_name=? "
-        "ORDER BY created_at DESC LIMIT 50",
-        (user_id, product_name)
-    ).fetchall()
-    return ok({'items': [dict(r) for r in rows]})
-
-
-def _rebuild_fb_records(db, user_id, log_row):
-    """按日志行的 (产品名, 线名, 日期) 回查 fb_ad_reports，重建待写 records。
+def _rebuild_fb_records(db, user_id, product_name, line_name, report_date):
+    """按 (产品名, 线名, 日期) 回查 fb_ad_reports，重建待写 records。
 
     返回 `(records, None)` 或 `(None, 失败原因)`。
 
-    **刻意不读 `sheets_sync_log.rows_json`**：那个快照在写入时被 `[:10000]` 截断
-    （见 extract_save 的 pending 插入）。每条 record 约 200 字符，超过约 50 条就从
-    中间断开，`json.loads` 必然抛错 —— 所以只把列名从 `row_data` 改对，
-    重试照样是坏的。`fb_ad_reports` 存的是完整原始行，且按
+    **刻意不读 `sheets_sync_log.rows_json`**：历史快照在写入时被 `[:10000]` 截断
+    （该快照列已不可靠），每条 record 约 200 字符，超过约 50 条就从中间断开，
+    `json.loads` 必然抛错 —— 所以只把列名改对，重试照样是坏的。
+    `fb_ad_reports` 存的是完整原始行，且按
     (user_id, product_name, line_name, account_id, report_date) 唯一，重建更可靠。
     """
-    report_date = (log_row['report_date'] or '').strip()
+    report_date = (report_date or '').strip()
     if not report_date:
         # 这两列是随本次修复才落库的，修复前写入的 pending/failed 行没有它，无从定位
         return None, '这条同步记录缺少日期，无法重建待写数据，请重新保存一次数据'
@@ -1934,8 +1863,7 @@ def _rebuild_fb_records(db, user_id, log_row):
         "SELECT account_name, account_id, cost, impressions, clicks, "
         "registrations, purchases, cost_per_purchase FROM fb_ad_reports "
         "WHERE user_id=? AND product_name=? AND line_name=? AND report_date=?",
-        (user_id, log_row['product_name'],
-         (log_row['line_name'] or '').strip(), report_date)
+        (user_id, product_name, (line_name or '').strip(), report_date)
     ).fetchall()
     if not records:
         return None, '找不到对应的原始数据，无法重建待写数据，请重新保存一次数据'
@@ -1946,74 +1874,97 @@ def _rebuild_fb_records(db, user_id, log_row):
 @jwt_required()
 @fb_required
 def fb_retry_sheets_sync():
-    """重试失败的 Sheet 同步。"""
+    """把该组（或多组）重新排一次写表。
+
+    **登记前先重建一次**（纯 DB 读、不碰 Sheets）：重建失败就当场回**可操作**原因、
+    **不登记** —— 因为 `sheet_write_log.error_msg` 会被统一换成固定文案（防泄露），
+    可操作的原因到了那里就没了（design §4.2）。
+
+    两种入参（**刻意不接受**客户端自己拆 `产品|线|日期` —— 名字含 `|` 会拆错）：
+      单/多组：`{"groups": [[产品,线,日期], …]}`
+      按既有失败行重试：`{"business_keys": [...]}` —— 三元组从该行的 `payload_json` 取
+        （数据管理页汇总区的「重试全部失败的」走这条）
+    """
+    import json
+
     db = get_db()
+    uid = get_uid()
     data = parse_body()
-    log_id = data.get('id', None)
-    user_id = get_uid()
 
-    if log_id:
-        log_row = db.execute(
-            "SELECT * FROM sheets_sync_log WHERE id=? AND user_id=?", (log_id, user_id)
-        ).fetchone()
-        if not log_row:
-            return err('记录不存在', 404)
-        records, why = _rebuild_fb_records(db, user_id, log_row)
-        if records is None:
-            return err(why, 400)
-        try:
-            import google_sheets_service as gs
-            # 线名必须带上：upsert_fb_reports 把它当渠道号写进 J 列，原来写死 '' 会让
-            # 重试行丢渠道号
-            gs.upsert_fb_reports(db, user_id, log_row['product_name'],
-                                 (log_row['line_name'] or '').strip(),
-                                 (log_row['report_date'] or '').strip(), records)
-            db.execute("DELETE FROM sheets_sync_log WHERE id=?", (log_id,))
-            db.commit()
-            return ok({'retried': 1})
-        except Exception:
-            # 同一处既是落库点（error_msg 会被 sync-status 读回）又是直出点（response.error）
-            # ⇒ 两处都用固定文案，原文进日志。
-            log.exception("FB 重试写表失败 log_id=%s", log_id)
-            db.execute(
-                "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
-                "updated_at=datetime('now','localtime') WHERE id=?",
-                (_FB_SHEETS_FAILED_MSG, log_id))
-            db.commit()
-            return err('重试失败，详情见服务端日志', 500)
+    # 入参闸门（口径照同文件其它收列表的端点，如 batch_delete_accounts /
+    # accounts_batch_lookup 的 `isinstance(..., list)`）：请求体是用户可控 JSON，
+    # 畸形形状若漏到解包处会抛 ValueError / 绑定点会抛 InterfaceError ⇒ 500。
+    triples = []
+    if data.get("business_keys"):
+        if not isinstance(data["business_keys"], list) or not all(
+                isinstance(k, str) for k in data["business_keys"]):
+            return err('business_keys 格式不正确', 400)
+        keys_in = list(data["business_keys"])
+        marks = ",".join("?" for _ in keys_in)
+        rows = db.execute(
+            f"SELECT business_key, payload_json FROM sheet_write_log WHERE user_id=? "
+            f"AND target='fb_report' AND business_key IN ({marks})",
+            (uid, *keys_in)).fetchall()
+        for r in rows:
+            p = json.loads(r["payload_json"] or "{}")
+            # ⚠️ 两种 payload 形状都要认：单组登记是扁平三要素；批量登记
+            # （`run_write_many` 只收**一个** payload）是 {business_key: [产品,线,日期]} 映射。
+            # 只认前者 ⇒ 批量失败的行永远重试不了（自审时抓到的坑）。
+            tri = (p.get("groups") or {}).get(r["business_key"])
+            if tri:
+                triples.append(tuple(tri))
+            elif p.get("product_name"):
+                triples.append((p["product_name"], p.get("line_name"), p.get("report_date")))
+    elif data.get("groups"):
+        groups = data["groups"]
+        # 元素必须都是 str：下游 `_rebuild_fb_records` 对 report_date/line_name 调
+        # `.strip()` 前不判类型，非 str 元素（如 [[1,"b","c"]]）会抛 AttributeError
+        # ⇒ 500。product_name 非 str 还能逃过下面 `if p` 的真值过滤，故必须在此拦住。
+        if not isinstance(groups, list) or not all(
+                isinstance(g, (list, tuple)) and len(g) == 3
+                and all(isinstance(x, str) for x in g) for g in groups):
+            return err('groups 格式不正确', 400)
+        triples = [tuple(g) for g in groups]
 
-    # 批量重试
-    rows = db.execute(
-        "SELECT * FROM sheets_sync_log WHERE user_id=? ORDER BY created_at DESC LIMIT 20",
-        (user_id,)
-    ).fetchall()
-    retried = 0
-    failed = []
-    for r in rows:
-        records, why = _rebuild_fb_records(db, user_id, r)
+    triples = [(p, l, d) for p, l, d in triples if p]
+    if not triples:
+        return err('缺少 groups 或 business_keys', 400)
+
+    # 重建前置：不可重建的当场回原因，不进日志
+    ok_groups, failed = [], []
+    for p, l, d in triples:
+        records, why = _rebuild_fb_records(db, uid, p, l, d)
         if records is None:
-            # 无法重建的原因必须回传前端：原来是裸 except 吞掉，用户只看到
-            # `retried: 0`，永远不知道哪条没成功、为什么 —— 正是「静默失败」
-            failed.append({'id': r['id'], 'product_name': r['product_name'], 'error': why})
+            failed.append({'product_name': p, 'line_name': l, 'report_date': d, 'error': why})
             continue
-        try:
-            import google_sheets_service as gs
-            gs.upsert_fb_reports(db, user_id, r['product_name'],
-                                 (r['line_name'] or '').strip(),
-                                 (r['report_date'] or '').strip(), records)
-            db.execute("DELETE FROM sheets_sync_log WHERE id=?", (r['id'],))
-            retried += 1
-        except Exception:
-            # `failed[].error` 直接进响应体、同一文案也落进 error_msg ⇒ 固定文案 + 日志。
-            log.exception("FB 批量重试写表失败 log_id=%s", r['id'])
-            db.execute(
-                "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
-                "updated_at=datetime('now','localtime') WHERE id=?",
-                (_FB_SHEETS_FAILED_MSG, r['id']))
-            failed.append({'id': r['id'], 'product_name': r['product_name'],
-                           'error': _FB_SHEETS_FAILED_MSG})
-    db.commit()
-    return ok({'retried': retried, 'failed': failed})
+        ok_groups.append((p, l, d))
+
+    if not ok_groups:
+        # 单组形态沿用原来的「400 + 原因」，多组形态回 200 + failed[]（形状与改前一致）
+        if len(triples) == 1:
+            return err(failed[0]['error'], 400)
+        return ok({'accepted': 0, 'failed': failed})
+
+    import sheet_write
+    import routes.fb_sheet_targets as _fbt
+
+    keys = [_fbt.fb_report_key(p, l, d) for p, l, d in ok_groups]
+    if len(ok_groups) == 1:
+        p, l, d = ok_groups[0]
+        payload = {"product_name": p, "line_name": l, "report_date": d}
+        sheet_write.run_write(
+            db, user_id=uid, platform="fb", target="fb_report", business_key=keys[0],
+            sync_fn=sheet_write.build_sync("fb_report", uid, keys[0], payload),
+            payload=payload)
+    else:
+        # `run_write_many` 只收**一个** payload ⇒ 三元组按 key 做成映射（design §Task 2）
+        payload = {"groups": {_fbt.fb_report_key(p, l, d): [p, l, d]
+                              for p, l, d in ok_groups}}
+        sheet_write.run_write_many(
+            db, user_id=uid, platform="fb", target="fb_report", business_keys=keys,
+            sync_fn=_fbt.fb_report_many_sync(uid, ok_groups), payload=payload)
+
+    return ok({'accepted': len(ok_groups), 'failed': failed})
 
 
 # ==================== 数据管理 ====================

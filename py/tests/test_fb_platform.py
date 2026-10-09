@@ -11,6 +11,11 @@ if _py_dir not in sys.path:
 
 import database  # noqa: E402
 
+# ⚠️ 轮询必须用**模块顶层**捕获的真 sleep：本文件 E11 用例 monkeypatch 全局
+# `time.sleep`（跳过写表失败的 30s 重试），轮询循环自己也调 sleep —— 在 patch
+# 之后再 `from time import sleep` 会拿到桩函数、主线程不让出 GIL、断言提前开火。
+from time import sleep as _poll_sleep  # noqa: E402
+
 # conftest 的 app fixture 用 15 字节的 "test-secret-key" 作为 JWT 密钥，PyJWT 会为
 # 每一次编解码抛 InsecureKeyLengthWarning。这是测试夹具的既有产物、非本文件引入，
 # 按类精确静音，保持测试输出干净（只屏蔽这一种，别的 warning 仍会显示）。
@@ -506,21 +511,6 @@ def _assert_no_fb_leak(target):
         assert marker not in raw, f"响应体泄露内部细节 {marker!r}: {raw[:300]!r}"
 
 
-class _InlineThread:
-    """把 `threading.Thread(...).start()` 就地跑完（fb 后台写表线程同步化）。"""
-
-    def __init__(self, target=None, daemon=None, args=(), kwargs=None):
-        self._target = target
-        self._args = args
-        self._kwargs = kwargs or {}
-
-    def start(self):
-        self._target(*self._args, **self._kwargs)
-
-    def join(self, timeout=None):
-        pass
-
-
 def _boom_fb_sheets(*_a, **_k):
     import google_sheets_service as gs
     raise gs.GoogleSheetsServiceError(
@@ -629,97 +619,182 @@ class TestE11FbDirectWriteSitesSanitized:
         _assert_no_fb_leak(dup)
 
 
-class TestE11FbSheetsSyncLogSink:
-    """② `sheets_sync_log.error_msg` 是「异常落库 → 读取端点回出」的中间落点。"""
+def _settle_sheet_write(db, uid, key, tries=300):
+    """轮询等 fb_report 任务落终态（写表已异步化，四期起结果落 `sheet_write_log`）。"""
+    import sheet_write
+    r = None
+    for _ in range(tries):
+        r = db.execute(
+            "SELECT * FROM sheet_write_log WHERE user_id=? AND target='fb_report' "
+            "AND business_key=?", (uid, key)).fetchone()
+        if r is not None and r["status"] in sheet_write.TERMINAL:
+            return r
+        _poll_sleep(0.02)
+    return r
 
-    def _seed_log_and_records(self, client, uid, log_id_out=None):
+
+class TestE11FbSheetsSyncLogSink:
+    """② FB 写表失败文案的落点 —— 四期起由 `sheets_sync_log` 换成 `sheet_write_log`。
+
+    写表改为「登记 → 后台写表」后，异常原文经 `sheet_write.run_write` 的 `_on_result`
+    统一换成 `sheet_write._WRITE_FAILED_MSG` 才落库，观察面相应走
+    `/api/sheet-write/status`。`sheets_sync_log` 表与历史保留（GG 做表那条线仍在读写），
+    只是 FB 不再写它 —— 故本组的判据不变：**原文只进日志、不得回出**。
+    """
+
+    def _seed_records(self, uid, product="E11产品", line="E11线", date="2026-01-01",
+                      account_id="111"):
+        """插一行 fb_ad_reports —— 写表 / 重试重建待写数据的数据来源。"""
         db = database.get_db()
-        db.execute(
-            "INSERT INTO sheets_sync_log (user_id, product_name, line_name, report_date, "
-            "spreadsheet_id, status, rows_json) VALUES (?,?,?,?,?,'failed','[]')",
-            (uid, "E11产品", "E11线", "2026-01-01", "FB-SHEET"))
-        log_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.execute(
             "INSERT INTO fb_ad_reports (user_id, product_name, line_name, report_date, "
             "account_name, account_id, cost) VALUES (?,?,?,?,?,?,?)",
-            (uid, "E11产品", "E11线", "2026-01-01", "户A", "111", 1.0))
+            (uid, product, line, date, "户A", account_id, 1.0))
         db.commit()
         db.close()
-        return log_id
 
-    def test_retry_sync_by_id_sanitizes_response_and_db(self, client, monkeypatch, caplog):
+    def test_retry_sync_single_sanitizes_error_msg(self, client, monkeypatch, caplog):
+        """单条重试最终失败：`error_msg` 落**统一固定文案**，原文只进日志、不得回出。
+
+        必须**直接断言 `error_msg` 的值** —— 只断言 `status == retry_failed` 对
+        「落的是固定文案还是异常原文」零判别力。
+        """
         import logging
+        import time as _time
         import google_sheets_service as gs
-        from routes import fb_routes
+        import sheet_write
+        import routes.fb_sheet_targets as _fbt
+
+        # 30s 重试窗口压成 0，让最终失败即时到达（_poll_sleep 是模块顶层抓的真 sleep）
+        monkeypatch.setattr(_time, "sleep", lambda _s: None)
+        monkeypatch.setattr(gs, "upsert_fb_reports", _boom_fb_sheets)
 
         hdr, uid = _fb_user(client, "e11_retry")
-        log_id = self._seed_log_and_records(client, uid)
-        monkeypatch.setattr(gs, "upsert_fb_reports", _boom_fb_sheets)
+        self._seed_records(uid)
+        key = _fbt.fb_report_key("E11产品", "E11线", "2026-01-01")
 
         with caplog.at_level(logging.ERROR, logger="gg-server"):
-            resp = client.post("/api/fb/reports/retry-sync",
-                               json={"id": log_id}, headers=hdr)
+            resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                               json={"groups": [["E11产品", "E11线", "2026-01-01"]]})
+            assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+            assert resp.get_json()["accepted"] == 1, resp.get_json()
 
-        assert resp.status_code == 500
-        assert resp.get_json()["error"] == "重试失败，详情见服务端日志", (
-            f"重试失败仍直出异常原文：{resp.get_json()['error']!r}")
+            db = database.get_db()
+            row = _settle_sheet_write(db, uid, key)
+            db.close()
+            assert row is not None, "重试必须登记 fb_report"
+            assert row["status"] == "retry_failed", f"实际 {row['status']}"
+            # 脱敏不变量钉在**落库点**：读端点今天是裸 SELECT 透传，日后若有人在端点层
+            # 加脱敏，DB 列里的异常原文就会被上面那几句**只读端点**的断言放过
+            # （而 `sheet_write_log.error_msg` 还会被重试路径读走）。
+            assert row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+                f"落库点也必须脱敏，实际 {row['error_msg']!r}")
+
+            st = client.get("/api/sheet-write/status", headers=hdr,
+                            query_string={"platform": "fb", "target": "fb_report",
+                                          "business_key": key})
+
+        item = st.get_json()["item"]
+        assert item is not None, st.get_json()
+        assert item["status"] == "retry_failed", item
+        # 关键：落的是**统一固定文案**，既非异常原文、也非 FB 旧文案
+        assert item["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+            f"error_msg 落进了异常原文或非统一文案：{item['error_msg']!r}")
         _assert_no_fb_leak(resp)
-
-        # 读取端点（sync-status/<id> 与 last-sync）都不得把原文回出来
-        st = client.get(f"/api/fb/reports/sync-status/{log_id}", headers=hdr)
-        assert st.get_json()["error_msg"] == fb_routes._FB_SHEETS_FAILED_MSG, (
-            f"error_msg 落进了异常原文：{st.get_json()['error_msg']!r}")
         _assert_no_fb_leak(st)
-        last = client.get("/api/fb/reports/last-sync", headers=hdr)
-        _assert_no_fb_leak(last)
         assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
 
-    def test_batch_retry_failed_entry_sanitized(self, client, monkeypatch, caplog):
-        """批量重试的 `failed[].error` 直接进响应体 —— 同样必须是固定文案。"""
+    def test_retry_sync_batch_sanitizes_error_msg(self, client, monkeypatch, caplog):
+        """批量重试（`run_write_many`）：**每一组**落库的 error_msg 都是统一固定文案。"""
         import logging
+        import time as _time
         import google_sheets_service as gs
-        from routes import fb_routes
+        import sheet_write
+        import routes.fb_sheet_targets as _fbt
+
+        monkeypatch.setattr(_time, "sleep", lambda _s: None)
+        monkeypatch.setattr(gs, "upsert_fb_reports", _boom_fb_sheets)
 
         hdr, uid = _fb_user(client, "e11_batch")
-        self._seed_log_and_records(client, uid)
-        monkeypatch.setattr(gs, "upsert_fb_reports", _boom_fb_sheets)
+        self._seed_records(uid, product="E11产品", line="E11线", date="2026-01-01",
+                           account_id="111")
+        self._seed_records(uid, product="E11产品2", line="E11线2", date="2026-01-02",
+                           account_id="222")
+        groups = [["E11产品", "E11线", "2026-01-01"],
+                  ["E11产品2", "E11线2", "2026-01-02"]]
 
         with caplog.at_level(logging.ERROR, logger="gg-server"):
-            resp = client.post("/api/fb/reports/retry-sync", json={}, headers=hdr)
+            resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                               json={"groups": groups})
+            assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+            assert resp.get_json()["accepted"] == 2, resp.get_json()
 
-        body = resp.get_json()
-        assert body["retried"] == 0 and body["failed"], f"未走到失败分支：{body!r}"
-        assert body["failed"][0]["error"] == fb_routes._FB_SHEETS_FAILED_MSG, (
-            f"failed[].error 直出异常原文：{body['failed'][0]['error']!r}")
+            for p, l, d in groups:
+                key = _fbt.fb_report_key(p, l, d)
+                db = database.get_db()
+                row = _settle_sheet_write(db, uid, key)
+                db.close()
+                assert row is not None and row["status"] == "retry_failed", \
+                    (key, row and row["status"])
+                # 落库点也必须脱敏（见单条用例的说明）
+                assert row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+                    f"落库点也必须脱敏，{key} 实际 {row['error_msg']!r}")
+
+                st = client.get("/api/sheet-write/status", headers=hdr,
+                                query_string={"platform": "fb", "target": "fb_report",
+                                              "business_key": key})
+                item = st.get_json()["item"]
+                assert item is not None, (key, st.get_json())
+                assert item["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+                    f"批量失败每组都必须落统一固定文案，{key} 实际 {item['error_msg']!r}")
+                _assert_no_fb_leak(st)
+
         _assert_no_fb_leak(resp)
         assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
 
-    def test_async_write_failure_sanitized(self, client, monkeypatch, caplog):
-        """`_schedule_fb_sheets_write` 的后台线程落点（extract/save 起的那条）。"""
-        import logging
-        import main as main_mod
-        import google_sheets_service as gs
-        from routes import fb_routes
+    def test_extract_save_failure_sanitized(self, client, monkeypatch, caplog):
+        """写点 ①（`/api/fb/extract/save`）那条腿：后台写失败同样只落统一固定文案。
 
-        monkeypatch.setattr(fb_routes.threading, "Thread", _InlineThread)
-        monkeypatch.setattr("time.sleep", lambda _s: None)
+        原先观察 `sheets_sync_log`（`sync_log_id` + 按 id 轮询的同步状态端点，
+        该端点已随四期退役）；四期起 FB 不再写那张表，改看 `sheet_write_log`。
+        """
+        import logging
+        import time as _time
+        import google_sheets_service as gs
+        import sheet_write
+
+        monkeypatch.setattr(_time, "sleep", lambda _s: None)
         monkeypatch.setattr(gs, "upsert_fb_reports", _boom_fb_sheets)
 
         hdr, uid = _fb_user(client, "e11_async")
         with caplog.at_level(logging.ERROR, logger="gg-server"):
-            resp = client.post("/api/fb/extract/save",
+            resp = client.post("/api/fb/extract/save", headers=hdr,
                                json={"product_name": "E11异步", "line_name": "线",
                                      "report_date": "2026-02-02",
                                      "records": [{"account_name": "户B", "account_id": "222",
-                                                  "cost": 1.0}]},
-                               headers=hdr)
-        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
-        log_id = resp.get_json()["sync_log_id"]
+                                                  "cost": 1.0}]})
+            assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+            key = resp.get_json()["business_key"]
 
-        st = client.get(f"/api/fb/reports/sync-status/{log_id}", headers=hdr)
-        assert st.get_json()["error_msg"] == fb_routes._FB_SHEETS_FAILED_MSG, (
-            f"后台写失败把异常原文落进了 error_msg：{st.get_json()['error_msg']!r}")
+            db = database.get_db()
+            row = _settle_sheet_write(db, uid, key)
+            db.close()
+            assert row is not None, "提取保存必须登记 fb_report"
+            assert row["status"] == "retry_failed", f"实际 {row['status']}"
+            # 落库点也必须脱敏（见单条用例的说明）
+            assert row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+                f"落库点也必须脱敏，实际 {row['error_msg']!r}")
+
+            st = client.get("/api/sheet-write/status", headers=hdr,
+                            query_string={"platform": "fb", "target": "fb_report",
+                                          "business_key": key})
+
+        item = st.get_json()["item"]
+        assert item is not None, st.get_json()
+        assert item["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+            f"后台写失败把异常原文落进了 error_msg：{item['error_msg']!r}")
         _assert_no_fb_leak(st)
+        _assert_no_fb_leak(resp)
         assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
 
 

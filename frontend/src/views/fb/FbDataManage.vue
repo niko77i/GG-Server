@@ -15,7 +15,32 @@
       <el-checkbox v-model="showDetailCols" style="margin-left:8px">显示详情列</el-checkbox>
       <el-button type="primary" @click="loadStats" style="margin-left:auto">📈 查看统计</el-button>
       <el-button type="success" @click="handleExport">📥 导出CSV</el-button>
-      <el-button type="warning" @click="retrySheets">🔄 重试写表</el-button>
+      <!-- 原「🔄 重试写表」按钮已移除：其入口并入下方失败汇总区的「重试全部失败的」。
+           写表改走统一治理后 `/fb/reports/retry-sync` 不再接受空 body，旧的盲重试按钮
+           只会拿到 400（缺少 groups 或 business_keys），故由汇总区内的定向重试取代。 -->
+    </div>
+
+    <!-- 写表失败汇总（四期）。复用 T6 卡片已 /frontend-design 定稿的视觉语法：
+         3px 琥珀左脊柱 + warning 色调（零回滚 ⇒ 只可能是 retry_failed，
+         「表中未写入」不等于数据坏了）。有失败才渲染，无失败时连占位都没有。 -->
+    <div v-if="fbSwFailures.length"
+         style="background:var(--el-color-warning-light-9);border-left:3px solid var(--el-color-warning);border-radius:8px;padding:10px 12px;margin-bottom:12px;">
+      <div style="font-weight:600;font-size:13px;color:#92400e;margin-bottom:6px;">
+        ⚠️ {{ fbSwFailures.length }} 项没写进表
+      </div>
+      <div v-for="(f, i) in fbSwFailures" :key="f.business_key"
+           :style="{ display:'flex', alignItems:'baseline', gap:'8px', padding:'5px 0',
+                     borderTop: i ? '1px solid var(--el-color-warning-light-7)' : 'none' }">
+        <el-tooltip placement="top" :content="sheetWriteHint(f)">
+          <span style="font-family:monospace;font-size:12px;color:#374151;flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.business_key }}</span>
+        </el-tooltip>
+        <span style="font-size:12px;color:#6b7280;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.error_msg || '未知原因' }}</span>
+        <el-button link size="small" :type="sheetWriteTone(f.status)"
+                   @click="retryOne(f)">重试</el-button>
+      </div>
+      <div style="margin-top:8px;">
+        <el-button size="small" @click="retryAll">重试全部失败的</el-button>
+      </div>
     </div>
 
     <el-table :data="items" stripe border v-loading="loading" @selection-change="onSelect">
@@ -76,9 +101,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
+import { sheetWriteApi } from '../../api/sheetWrite'
+import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
 const filterProduct = ref(''); const filterLine = ref(''); const dateRange = ref(null)
@@ -91,6 +118,82 @@ const editVisible = ref(false); const savingEdit = ref(false)
 const editForm = ref({})
 
 function onSelect(v) { selectedIds.value = v.map(r=>r.id) }
+
+// ---------- 写表失败汇总（四期） ----------
+const FB_TARGET = 'fb_report'
+const fbSwFailures = ref([])
+
+// 重试提交后跟一段**有界轮询**：重试后该行转 `pending`，而 `/api/sheet-write/status`
+// 不带 businessKey 时**只回需要提示的终态** ⇒ 汇总区立刻少一项（看着像成功了）；若重试
+// 再次失败，那一项要等用户手动刷新才回来 —— 用户会以为已经好了。故提交后按固定节奏
+// 刷新汇总区，让「重试又失败」的项自己回来。
+// 3s × 15 ≈ 45s，**必须 > 后端 30s 重试窗口**（不能调小）：后端首次失败先落中间态
+// failed → 睡 30s → 重试 → 终态 retry_failed 最早 ~30s 才落库；窗口短于 30s 会漏掉
+// 走过后端重试的终态。
+const SW_POLL_MS = 3000
+const SW_POLL_MAX = 15
+let swPollTimer = null
+let swPollLeft = 0
+let swPollGen = 0        // 每轮重试 +1：作废上一轮在途的 tick，防两条链并行
+
+onUnmounted(() => {
+  // 卸载即停：作废在途 tick（它会在 await 回来后自行退出），并清掉在途定时器。
+  swPollGen++
+  swPollLeft = 0
+  if (swPollTimer) { clearTimeout(swPollTimer); swPollTimer = null }
+})
+
+/** 汇总区数据源：只取本 target 的终态；拉不到不该打扰用户，保持上一次结果。 */
+async function loadFbSwFailures() {
+  try {
+    const res = await sheetWriteApi.status({ platform: 'fb', target: FB_TARGET })
+    // 显式跳过中间态 **且** 不展示 synced：端点本就只回需要提示的终态，这里再兜一层，
+    // 防「中间态 / 成功态误入汇总区」被当成已落定的失败（本功能反复踩过的坑）。
+    fbSwFailures.value = (res.items || []).filter(
+      f => f.status !== 'pending' && f.status !== 'failed' && f.status !== 'synced')
+  } catch { /* 汇总拉不到不该打扰用户，保持上一次结果 */ }
+}
+
+/** 重试提交后按固定节奏刷新汇总区，有界（15 次后自动停）。
+ *  全程不弹任何提示 —— 中间态与终态都由汇总区自身呈现，避免打断 / 重复提示。 */
+function scheduleSwRefresh() {
+  const gen = ++swPollGen                        // 开新一轮：作废上一轮（连点重试不叠链）
+  if (swPollTimer) { clearTimeout(swPollTimer); swPollTimer = null }
+  swPollLeft = SW_POLL_MAX
+  const tick = async () => {
+    swPollTimer = null
+    if (gen !== swPollGen || swPollLeft <= 0) return   // 已被新一轮取代 / 到顶 / 已卸载即停
+    swPollLeft--
+    await loadFbSwFailures()
+    if (gen !== swPollGen || swPollLeft <= 0) return
+    swPollTimer = setTimeout(tick, SW_POLL_MS)
+  }
+  swPollTimer = setTimeout(tick, SW_POLL_MS)
+}
+
+/** 逐条重试：提交 → 立即刷新 → 起有界轮询跟结果。 */
+async function retryOne(f) {
+  try {
+    await sheetWriteApi.retry({ platform: 'fb', target: FB_TARGET,
+                                businessKey: f.business_key })
+    ElMessage.success('已重新提交，请稍后查看结果')
+    await loadFbSwFailures()
+    scheduleSwRefresh()
+  } catch (e) { ElMessage.error(e.response?.data?.error || '重试失败') }
+}
+
+/** 重试全部失败的：只回传 business_key 列表，**不拆 `产品|线|日期`**（名字含 `|` 会拆错）；
+ *  三元组由端点从各行的 payload_json 取（Task 2 已支持 `{"business_keys": [...]}`）。 */
+async function retryAll() {
+  try {
+    const res = await fbApi.retrySheetsSync({
+      business_keys: fbSwFailures.value.map(f => f.business_key),
+    })
+    ElMessage.success(`已重新提交 ${res.accepted || 0} 项，请稍后查看结果`)
+    await loadFbSwFailures()
+    scheduleSwRefresh()
+  } catch (e) { ElMessage.error(e.response?.data?.error || '重试失败') }
+}
 
 async function loadFilterOptions() {
   try {
@@ -152,13 +255,6 @@ async function handleBatchDelete() {
   ElMessage.success(`已删除${res.deleted}条`); selectedIds.value = []; loadData()
 }
 
-async function retrySheets() {
-  try {
-    const res = await fbApi.retrySheetsSync()
-    ElMessage.success(`重试完成：${res.retried || 0} 条已同步`)
-  } catch(e) { ElMessage.error(e.response?.data?.error || '重试失败') }
-}
-
 async function handleExport() {
   const p = {}
   if (filterProduct.value) p.product_name = filterProduct.value
@@ -180,7 +276,7 @@ async function handleExport() {
   } catch(e) { ElMessage.error('导出失败') }
 }
 
-onMounted(() => { loadFilterOptions(); loadData() })
+onMounted(() => { loadFilterOptions(); loadData(); loadFbSwFailures() })
 </script>
 <style scoped>
 .fb-panel{padding:20px}.panel-header{margin-bottom:16px}.panel-header h2{margin:0;font-size:18px}.filter-bar{display:flex;gap:12px;margin-bottom:16px;align-items:center;flex-wrap:wrap}

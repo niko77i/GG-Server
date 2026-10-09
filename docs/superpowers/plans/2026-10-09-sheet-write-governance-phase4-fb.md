@@ -17,7 +17,12 @@ Task 4（退役端点与 API 包装）**必须在前端换源（Task 5 / 6）之
 ## Global Constraints
 
 - 写表**保持异步**；业务端点的响应不得因写表而阻塞或失败。**重试端点也异步化**（规格 §3.2）。
-- 提示**只在最终结果产生时发出** —— `pending` / `failed` / `synced` 不得触发任何用户可见提示。
+- 提示**只在最终结果产生时发出** —— `pending` / `failed` 不得触发任何用户可见提示；**终态（含 `synced`）可提示**。
+  > **勘误（2026-10-09 终审）**：原文把 `synced` 也列入「不得提示」，与本计划 Task 5 的逐字代码
+  > （`if (it.status === 'synced') return ElMessage.success('✅ 写表成功')`）和 Task 6 人工清单第 1 条
+  > （「提取保存后 → 提取页应弹『✅ 写表成功』」）**直接矛盾**。`synced` 是终态，可提示；
+  > 本页的成功确认是一次**显式用户动作的闭环**（用户点保存 → 轮询到 synced → 弹 ✅），不在禁止之列。
+  > 同步更正规格 §3 第 3 条。
 - 状态值固定 6 个，不得增删。**`fb_report` 不注册 `rollback`**（镜像类），最终失败落 `retry_failed`。
 - `target` 用稳定英文 token：**`fb_report`**。
 - **后台线程内禁止使用请求线程的 SQLite 连接**，一律 `database.get_db()` 新建。
@@ -827,12 +832,19 @@ fb.js 里对应三个包装（含零调用的 lastSyncStatus）一并删除。
 
 把 `pollSyncStatus(syncLogId, attempt)` 改为按 **business_key** 轮询统一端点：
 
+> **勘误（实现时改，2026-10-09）**：本段下面的 `MAX_ATTEMPTS = 15` **已改为 `40`**。
+> 原因：换源后后端是「首次失败 → 中间态 `failed` → 睡 30s → 重试 → 终态」的状态机，
+> **终态 `retry_failed` 最早 ~30s 才落库**；15s 会让「走了后端重试」的写表终态在本页
+> **永不可观测**（旧代码 15s 够用，是因为旧后端把 `failed` 当**终态**当场弹）。
+> 教训记于账本：**换掉一个「上游何时给终态」的数据源时，必须重估所有依赖该时序的常量**。
+> 另同时**恢复**了被本段连带删掉的耗尽提示（「写表结果未返回，请稍后到「数据管理」页查看或重试」）。
+
 ```js
-// 轮询本次写表结果：pending 则 1 秒后再查，最多 15 次。
+// 轮询本次写表结果：pending 则 1 秒后再查（**上限 40 次**，见上方勘误 —— 必须 > 后端 30s 重试窗口）。
 // 四期起数据源换成统一的 /api/sheet-write/status（带 target 过滤，
 // 防与同期其它 target 互相遮蔽）；终态文案复用全仓唯一文案源。
 async function pollWriteStatus(businessKey, attempt = 0) {
-  const MAX_ATTEMPTS = 15
+  const MAX_ATTEMPTS = 40
   try {
     const r = await sheetWriteApi.status({
       platform: 'fb', target: 'fb_report', businessKey,

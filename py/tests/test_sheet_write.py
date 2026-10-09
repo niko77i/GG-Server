@@ -442,6 +442,33 @@ def test_retry_unknown_target_returns_400_not_500(client):
     assert "未注册" in resp.get_json()["error"]
 
 
+def test_retry_fb_empty_payload_returns_400_not_500(client):
+    """通用重试端点：目标 rebuild 抛 RuntimeError 也必须回 400，不得打 500。
+
+    四期把 FB 重试接入统一治理后，`fb_report` 的 rebuild（`_fb_report_rebuild` →
+    `_payload_triple`）在 payload 为空/取不到该 business_key 的三元组时**抛
+    RuntimeError**（不是 KeyError）。端点原只 `except KeyError` ⇒ RuntimeError
+    冒到 Flask ⇒ 500。payload 是用户可控数据，畸形/空不该打成 500 —— 且这也**不会**
+    留卡住的行：build_sync 在原子 claim **之前**，此行尚未被置 pending。
+    `except (KeyError, RuntimeError)` 收窄前本用例红（status_code == 500）。
+    """
+    h, uid = _tt_user(client, "_sw_fb_emptypay")
+    db = database.get_db()
+    # platform 必须与请求一致（端点按 platform 过滤）；payload 空 ⇒ RuntimeError。
+    db.execute(
+        "INSERT INTO sheet_write_log (user_id, platform, target, business_key, status, "
+        "payload_json, snapshot_json) VALUES (?,?,?,?,?,?,?)",
+        (uid, "fb", "fb_report", "产品|线|2026-10-01", "retry_failed", "{}", "{}"))
+    db.commit()
+    db.close()
+    resp = client.post("/api/sheet-write/retry", headers=h,
+                       json={"platform": "fb", "target": "fb_report",
+                             "business_key": "产品|线|2026-10-01"})
+    assert resp.status_code == 400, \
+        f"空 payload 应回 400，实际 {resp.status_code}：{resp.get_data(as_text=True)[:200]}"
+    assert resp.get_json()["success"] is False, resp.get_json()
+
+
 def test_retry_unknown_target_does_not_strand_row_at_pending(client):
     """未注册 target 的重试必须在 claim **之前**就失败，不得把行留在 pending。
 
