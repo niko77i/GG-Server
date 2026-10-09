@@ -281,8 +281,14 @@ def cells_for_row(row: dict, platform: str, col_map: dict | None = None) -> dict
             continue
         if field == "_dead_flag":
             value = "是" if (row.get("death_date") or "").strip() else ""
-        elif field == "account_id":
-            value = _text(row.get("account_id", ""))
+        elif s["key"]:
+            # 定位键列按 spec 的 key 标志判定，**而非字段字面名** —— tt 真实 col_map 的
+            # key 是 advertiser_id，而 row 用**解析结果**命名空间（account_id），字面比对
+            # 会漏掉 `_text` 的 ' 前缀（长数字被 Sheets 按数值处理丢精度），并把该格写成空串。
+            key_val = row.get(TT_KEY_FIELD)
+            if key_val is None:
+                key_val = row.get(ACCOUNT_KEY_FIELD[platform])
+            value = _text("" if key_val is None else key_val)
         else:
             value = "" if row.get(field) is None else str(row.get(field)).strip()
         # 空值跳过回写（设计 §4.7）：非必填、由户管维护的字段，系统没填不代表要清掉表里那格。
@@ -305,7 +311,7 @@ def parse_row(values: list, platform: str, col_map: dict | None = None) -> dict:
     out = {}
     for field, col in cm.items():
         s = spec.get(field)
-        if not s or not s["readable"] or field == "account_id":
+        if not s or not s["readable"] or s["key"]:
             continue
         i = col_index(col)
         raw = values[i] if len(values) > i else ""

@@ -5381,3 +5381,19 @@ class TestColMapReadWrite:
             assert parsed["account_id"] == row["account_id"]
             assert hd.cells_for_row(row, p) == \
                    hd.cells_for_row(row, p, hd.spec_column_map(p))
+
+    def test_cells_for_row_real_tt_col_map_writes_id_cell(self):
+        """真实 tt col_map（key=advertiser_id）下，账户ID 格必须按 spec.key 判定：
+        数字 ID 加 ' 前缀、非数字原样；修前该格被写成空串（写回会清掉表里的 ID）。"""
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cells = hd.cells_for_row({"account_id": "7001"}, "tt", cm)
+        assert cells[cm["advertiser_id"]] == "'7001"
+        cells2 = hd.cells_for_row({"account_id": "ACCT-1"}, "tt", cm)
+        assert cells2[cm["advertiser_id"]] == "ACCT-1"
+
+    def test_parse_row_real_tt_col_map_key_does_not_leak(self):
+        """真实 tt col_map 下定位键列（key=advertiser_id）不得泄漏成独立字段。"""
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        p = hd.parse_row(self._row(), "tt", cm)
+        assert "advertiser_id" not in p
+        assert p["account_id"] == "7001234567890123456"
