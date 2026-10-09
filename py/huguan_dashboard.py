@@ -203,7 +203,8 @@ def describe_header_columns(headers: list, overrides: dict,
     每项：{"header": strip 后的表头原文, "field": 字段key | "" | None, "via": 四档}
 
       via = "override" 该表手工指派 / "alias" 别名自动认出 /
-            "ignored" 认识但刻意不采集（目录哨兵「位置」，或覆盖值为空串）/ "none" 完全不认识
+            "ignored" 认识但刻意不采集（目录哨兵「位置」，或覆盖值为空串）/
+            "none" 该列没被采集到任何字段（完全不认识，**或识别到了但落选**——如同表头重复的后一个）
       field = "" 只与 "ignored" 同现；field = None 只与 "none" 同现。
 
     **不重新解析**：全部从 resolve_column_map 的三个产出（col_map / unmatched / overrides）
@@ -273,6 +274,20 @@ def spec_column_map(platform: str) -> dict:
     """由既有 COLUMN_SPEC 合成的 {字段key: 列字母}。**只用于 gg / fb** ——
     它们继续走固定列规格，结果与改动前逐字节相同（设计 §4.4 的等价性承诺）。"""
     return {field: col for col, _h, field, _w, _r in COLUMN_SPEC[platform] if field}
+
+
+def tt_field_catalog() -> list:
+    """TT 字段目录（供前端「列映射」下拉）：只含**真正的字段**，排除空串哨兵。
+
+    与 POST 校验**同源**（都出自 TT_FIELD_CATALOG / field_spec("tt")）—— 否则会出现
+    「下拉里能选、保存时被 400 拒」这种漂移。`key_col` 给前端把定位键标成必选；
+    `direction == "r"` 的标「只读回」。
+    """
+    spec = field_spec("tt")
+    return [{"key": f, "label": label, "direction": d,
+             "writable": spec[f]["writable"], "readable": spec[f]["readable"],
+             "key_col": spec[f]["key"]}
+            for f, label, _aliases, d, _key, _skip in TT_FIELD_CATALOG if f]
 
 
 def key_col_of_col_map(col_map: dict, platform: str) -> str:

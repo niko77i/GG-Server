@@ -43,6 +43,8 @@ def dashboard_config_get():
                 # get_platform_config 自身的签名/返回值不动（gg/fb 与既有测试依赖它）。
                 tables = hd.get_platform_tables(db, uid, "tt")
                 entry["tables"] = tables
+                # 列映射 UI 的下拉数据源（设计 §3.2）。只加在 tt 分支：gg/fb 载荷形状不变。
+                entry["tt_field_catalog"] = hd.tt_field_catalog()
                 if tables and tables[0]["sheet_name"]:
                     entry["sheet_name"] = tables[0]["sheet_name"]
             conf[p] = entry

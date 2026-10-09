@@ -756,7 +756,9 @@ class TestDashboardConfig:
         assert got["gg"] == {"spreadsheet_id": "", "sheet_name": ""}
         # tt 自 2026-10-08 多账户表设计起**恒**带 tables（未配置时为空数组）——
         # 落在路由层合并（spec §4.7）。归属归一化本身的意图不变，只是形状多一项。
-        assert got["tt"] == {"spreadsheet_id": "", "sheet_name": "", "tables": []}
+        # 又于 2026-10-10（列映射第二批）恒带字段目录（列映射 UI 下拉数据源），同属形状多一项。
+        assert got["tt"] == {"spreadsheet_id": "", "sheet_name": "", "tables": [],
+                             "tt_field_catalog": hd.tt_field_catalog()}
 
 
 # ---------- Task 6: 差异比对 ----------
@@ -5412,11 +5414,18 @@ class TestDescribeHeaderColumns:
             {"header": "备注二", "field": None, "via": "none"},
         ]
 
-    def test_override_and_empty_override_are_reported_as_override(self):
+    def test_override_reported_as_override_and_empty_override_as_ignored(self):
         rows, _u = self._describe(["账户ID", "负责人", "备注二"],
                                   {"负责人": "owner_name", "备注二": ""})
         assert rows[1] == {"header": "负责人", "field": "owner_name", "via": "override"}
         assert rows[2] == {"header": "备注二", "field": "", "via": "ignored"}
+
+    def test_duplicate_header_loser_is_reported_as_none(self):
+        """同表头出现两次：后一个落选 ⇒ 报 none（规范只有四档，没有「落选」档）。"""
+        rows, unmatched = self._describe(["账户ID", "账户ID"], {})
+        assert unmatched == ["账户ID"]
+        assert [r["via"] for r in rows] == ["alias", "none"]
+        assert rows[1]["field"] is None
 
     def test_blank_headers_are_skipped(self):
         rows, _u = self._describe(["账户ID", "", "  "], {})
@@ -5427,6 +5436,31 @@ class TestDescribeHeaderColumns:
         assert unmatched == []
         assert [r["via"] for r in rows] == ["alias"] * len(self.ENTERPRISE)
         assert [r["field"] for r in rows][:3] == ["acquired_date", "_dead_flag", "advertiser_id"]
+
+
+class TestFieldCatalogExposure:
+    def test_catalog_excludes_the_ignore_sentinel(self):
+        """目录是前端下拉的数据源：只含真字段，绝不含空串哨兵（否则前端能选、后端必拒）。"""
+        cat = hd.tt_field_catalog()
+        keys = [c["key"] for c in cat]
+        assert "" not in keys, "空串哨兵不该出现在目录里"
+        assert "advertiser_id" in keys and "subject_name" in keys and "landing_url" in keys
+        assert set(keys) == set(hd.field_spec("tt")), "必须与 POST 校验同源"
+
+    def test_catalog_marks_the_key_column_and_directions(self):
+        by_key = {c["key"]: c for c in hd.tt_field_catalog()}
+        assert by_key["advertiser_id"]["key_col"] is True
+        assert by_key["owner_change_note"]["direction"] == "r"      # 只读回
+        assert by_key["landing_url"]["writable"] is True
+        assert by_key["owner_change_note"]["writable"] is False
+
+    def test_get_config_exposes_catalog_for_tt_only(self, client):
+        hg, _ = _create_user(client, "_fc1", role="huguan")
+        conf = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert isinstance(conf["tt"]["tt_field_catalog"], list)
+        assert conf["tt"]["tt_field_catalog"], "tt 目录不该为空"
+        for p in ("gg", "fb"):
+            assert "tt_field_catalog" not in conf[p], f"{p} 的载荷形状不该变"
 
 
 # ---------- Task 3: 表级 col_map 的读写 ----------
