@@ -34,7 +34,7 @@
 | `py/routes/huguan_dashboard_routes.py` | 户管看板 HTTP 入口 | 新端点 `GET /sheet-headers`；GET 配置的 tt 分支加 `tt_field_catalog`；POST 校验放行空串 |
 | `py/tests/test_huguan_dashboard.py` | 后端测试 | 按各任务扩充 |
 | `frontend/src/api/huguan.js` | 前端 API 封装 | 加 `getSheetHeaders` |
-| `frontend/src/utils/columnMapping.js` | **新**：表头响应 ↔ 下拉行状态的纯换算 | 新建 |
+| `frontend/src/utils/columnMapping.mjs` | **新**：表头响应 ↔ 下拉行状态的纯换算 | 新建（**必须 `.mjs`**：`package.json` 无 `"type": "module"`，`.js` 会被 Node 当 CJS 解析 ⇒ `node --test` 报 ESM 语法错；既有 `columnPrefsLogic.mjs` 同理） |
 | `frontend/tests/columnMappingLogic.test.mjs` | **新**：上面那块的单测 | 新建 |
 | `frontend/src/components/HuguanDashboardCard.vue` | TT 看板卡片（1237 行） | 每表加「列映射」折叠区；差异弹窗加「未采集列」提示与「去指派」跳转 |
 
@@ -493,7 +493,7 @@ git commit -m "feat(tt): 新增读表头端点（逐列返回认列结果与来�
 
 **Files:**
 - Modify: `frontend/src/api/huguan.js`
-- Create: `frontend/src/utils/columnMapping.js`
+- Create: `frontend/src/utils/columnMapping.mjs`
 - Create: `frontend/tests/columnMappingLogic.test.mjs`
 
 **Interfaces:**
@@ -511,7 +511,7 @@ git commit -m "feat(tt): 新增读表头端点（逐列返回认列结果与来�
 ```js
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { rowsFromColumns, columnsFromRows } from '../src/utils/columnMapping.js'
+import { rowsFromColumns, columnsFromRows } from '../src/utils/columnMapping.mjs'
 
 // 三值约定：字段key = 采集 / "" = 刻意不采集 / null = 不写覆盖（未识别列的默认态）
 test('rowsFromColumns: 四档 via 各自映射到正确的显示值与自动值', () => {
@@ -567,11 +567,11 @@ test('columnsFromRows: 已有但已不在表头里的键必须保留（表头以
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cd frontend && npm test`
-Expected: FAIL —— `Cannot find module '../src/utils/columnMapping.js'`
+Expected: FAIL —— `Cannot find module '../src/utils/columnMapping.mjs'`
 
 - [ ] **Step 3: 实现**
 
-新建 `frontend/src/utils/columnMapping.js`：
+新建 `frontend/src/utils/columnMapping.mjs`（**扩展名必须 `.mjs`** —— 见文件结构表里的理由，既有 `columnPrefsLogic.mjs` 同理）：
 
 ```js
 // 「读表头」响应 ↔ 列映射下拉行状态 的纯换算（无 Vue 依赖，供 node --test 覆盖）。
@@ -618,7 +618,7 @@ Expected: PASS（新 6 条 + 既有 `columnPrefsLogic` 全绿）
 - [ ] **Step 5: 提交**
 
 ```bash
-git commit -m "feat(tt-ui): 列映射纯逻辑（三值约定 + 只认碰过的行）+ 读表头 API" -- frontend/src/utils/columnMapping.js frontend/tests/columnMappingLogic.test.mjs frontend/src/api/huguan.js
+git commit -m "feat(tt-ui): 列映射纯逻辑（三值约定 + 只认碰过的行）+ 读表头 API" -- frontend/src/utils/columnMapping.mjs frontend/tests/columnMappingLogic.test.mjs frontend/src/api/huguan.js
 ```
 
 ---
