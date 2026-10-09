@@ -5549,10 +5549,16 @@ def accounts_sync_from_sheet():
                 if not _cross_user_actor(user_id):
                     errors.append({"account_id": acct_id, "error": "无权认领他人账户"})
                     continue
-                # 只改归属：**不 commit、不回写**。本腿跑在执行段 commit（10b 之后）之前，
-                # 认领结果随那次 commit 一起落库；收尾的 `writeback_rows(user_id, "gg", sheet_ids)`
-                # 已含被认领账户（其 owner_id 在 commit 后即为 user_id）⇒ 不必逐条回写。
+                # 只改归属：**不 commit**。本腿跑在执行段 commit（10b 之后）之前，
+                # 认领结果随那次 commit 一起落库；G 列的整行回写由收尾的
+                # `writeback_rows(user_id, "gg", sheet_ids)` 一次覆盖（其已含被认领账户，
+                # 其 owner_id 在 commit 后即为 user_id）⇒ 不必逐条整行回写。
                 _set_owner(db, aid, user_id)
+                # 只补 H 列「重新分配」：G 列的整行回写由本次同步收尾的整体回写覆盖，
+                # 但 H 列**不在** push_rows 的可写列里（cells_for_row 刻意排除
+                # _owner_channel）⇒ 必须在这里显式写，否则认领后表里的 H 列不更新，
+                # 与 accounts_reassign 的认领行为不一致。
+                hd.writeback_owner_channel(user_id, "gg", acct_id, user_id)
                 claimed_count += 1
             except Exception:
                 log.exception("表格同步：认领账户失败")

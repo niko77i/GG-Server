@@ -169,9 +169,12 @@ def test_own_account_unaffected(client, monkeypatch):
 def test_claim_executes_reassign(client, monkeypatch):
     """dry_run=false + confirmed.claim → 账户 owner_id 变为调用者。
 
-    认领**不逐条回写**（省 Google API 配额）：认领结果随执行段的 commit 落库，
-    收尾的整片回写腿（`writeback_rows(user_id, "gg", sheet_ids)`）一次覆盖含被认领账户的
-    全部 sheet_ids，故此处只应看到**一次**整体回写、且认领腿不单独触发通道列回写。
+    认领腿**只省掉冗余的一半**：G 列整行回写由收尾的整片回写腿
+    （`writeback_rows(user_id, "gg", sheet_ids)`）一次覆盖含被认领账户的全部 sheet_ids，
+    故此处只应看到**一次**整体回写（认领腿本身不触发 `writeback_rows`）。
+    但 H 列「重新分配」**不在** `push_rows` 的可写列里（`cells_for_row` 刻意排除
+    `_owner_channel`）⇒ 认领腿必须就地显式写，写的是**新归属人**，与 `accounts_reassign`
+    的认领行为一致。
     """
     h, uid = _user(client, "_cl_exec", role="huguan")
     db = database.get_db()
@@ -197,10 +200,11 @@ def test_claim_executes_reassign(client, monkeypatch):
     assert owner == uid
 
     # 只有收尾的那一次整体回写，且覆盖整片 sheet_ids（含被认领的 CLAIM-1 与陪跑 OWN-2）；
-    # 认领腿不再各自追加一次 batchUpdate。
+    # 认领腿本身不触发 push_rows（整行回写不逐条追加）。
     assert calls["rows"] == [("gg", ["CLAIM-1", "OWN-2"])]
-    # 认领腿也不再单独写「重新分配」通道列（此前每条认领多一次 Sheets 调用）。
-    assert calls["channel"] == []
+    # H 列「重新分配」：认领腿就地显式写一次，写的是**新归属人**（暂存前为拉菲）。
+    # 若不写这行（曾被上一轮误删），此断言变红 —— 表里 H 列不更新，与 accounts_reassign 不一致。
+    assert calls["channel"] == [("gg", "CLAIM-1", uid)]
 
 
 def test_orphan_null_owner_account_goes_to_claim_not_create(client, monkeypatch):
