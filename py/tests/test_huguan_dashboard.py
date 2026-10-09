@@ -5307,3 +5307,77 @@ class TestResolveColumnMap:
         m, unmatched = hd.resolve_column_map(["账户ID", "备注二", "备注二"], {})
         assert unmatched == ["备注二"], f"应只报一次，实际={unmatched}"
         assert "remark" not in m
+
+# ---------- Task 3: 表级 col_map 的读写 ----------
+
+class TestColMapReadWrite:
+    ENTERPRISE = ["日期", "是否回收", "账户ID", "主体名称", "账户名称", "BC",
+                  "国家", "所属渠道", "接户运营", "时区", "下户链接"]
+
+    def _row(self):
+        return ["2026-10-01", "否", "7001234567890123456", "主体A", "账户甲",
+                "BC-1", "US", "渠道X", "张三", "UTC+8", "https://x/y"]
+
+    def test_parse_row_uses_col_map(self):
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        p = hd.parse_row(self._row(), "tt", cm)
+        assert p["account_id"] == "7001234567890123456"
+        assert p["acquired_date"] == "2026-10-01"
+        assert p["subject_name"] == "主体A"
+        assert p["name"] == "账户甲"
+        assert p["bc_name"] == "BC-1"          # ← 改前会读成「主体名称」
+        assert p["agent_name"] == "渠道X"
+        assert p["owner_name"] == "张三"
+        assert p["landing_url"] == "https://x/y"
+        assert p["_dead_flag"] == "否"
+
+    def test_parse_row_omits_unmapped_columns(self):
+        cm, _u = hd.resolve_column_map(["账户ID", "备注二"], {})
+        p = hd.parse_row(["7001", "x"], "tt", cm)
+        # 未采集列不得出现在任何字段里 —— 「位置」「消耗」等也应缺席
+        assert "consumption" not in p and "status_name" not in p
+        assert p["account_id"] == "7001"
+
+    def test_cells_for_row_uses_col_map_letters(self):
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cells = hd.cells_for_row({"account_id": "7001", "bc_name": "BC-9", "name": "甲"},
+                                 "tt", cm)
+        assert cells["F"] == "BC-9"            # BC 在 F 列（企业户表）
+        assert cells["E"] == "甲"              # 账户名称在 E 列
+        # 语义（Global Constraints「其余字段保持照库里值写（含空串）」）：row 里没给值的
+        # **可写**列照旧产出空串（等于清掉表里那格）；只有 skip_empty_write 的字段才跳过。
+        assert cells["A"] == ""                # acquired_date：映射到 A，未给值 ⇒ 写空串
+        assert cm["landing_url"] not in cells  # landing_url：空值跳过回写（见下一条测试）
+
+    def test_cells_for_row_skips_unmapped_columns_entirely(self):
+        """未采集的列**一个字不碰** —— 产出里不得含它的列字母。"""
+        cm, _u = hd.resolve_column_map(["账户ID", "备注二"], {"备注二": "remark"})
+        # 只有 account_id + remark 被采集；其余字段（bc_name 等）不在 map 里
+        cells = hd.cells_for_row({"account_id": "7001", "bc_name": "BC-9", "remark": "R"},
+                                 "tt", cm)
+        assert set(cells) == {cm["advertiser_id"], cm["remark"]}
+        assert cells[cm["remark"]] == "R"
+
+    def test_cells_for_row_skips_empty_landing_url(self):
+        """设计 §4.7：landing_url 库里为空 ⇒ 跳过该格，不清表。"""
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cells = hd.cells_for_row({"account_id": "7001", "landing_url": ""}, "tt", cm)
+        assert cm["landing_url"] not in cells
+        cells2 = hd.cells_for_row({"account_id": "7001", "landing_url": "https://a"},
+                                  "tt", cm)
+        assert cells2[cm["landing_url"]] == "https://a"
+
+    def test_default_col_map_keeps_gg_fb_identical(self):
+        """col_map=None ⇒ 走 spec_column_map，与改动前的取/写列逐字节相同。"""
+        for p, values, row in (
+            ("gg", ["2026-10-01", "否", "GG-1", "MCC", "US", "渠道", "张三",
+                    "重新分配", "UTC+8", "大MCC", "存活", "位置", "消耗", "产品"],
+             {"account_id": "GG-1", "mcc_name": "MCC", "owner_name": "张三"}),
+            ("fb", ["2026-10-01", "op", "名称", "FB-1", "渠道", "类型", "10", "1",
+                    "接户", "在用", "2026-10-02", "2", "UTC+8", "消耗", "存活", "BM", "产品"],
+             {"account_id": "FB-1", "name": "名称", "owner_name": "在用"}),
+        ):
+            parsed = hd.parse_row(values, p)
+            assert parsed["account_id"] == row["account_id"]
+            assert hd.cells_for_row(row, p) == \
+                   hd.cells_for_row(row, p, hd.spec_column_map(p))

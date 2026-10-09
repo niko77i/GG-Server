@@ -255,43 +255,68 @@ def _text(value) -> str:
     return s
 
 
-def cells_for_row(row: dict, platform: str) -> dict:
+def cells_for_row(row: dict, platform: str, col_map: dict | None = None) -> dict:
     """系统 → 表：把一行账户数据转成 {列字母: 待写值}。
 
-    只产出可写列，且**绝不产出归属变更通道列**（规格 §7.2 规则 2）——
-    自动回写若顺手把户管刚填的重新分配清掉，那个变更就被静默吞了。
+    `col_map` 是**这张表**的 {字段key: 列字母}；`None` ⇒ 用既有固定规格合成的
+    （gg/fb 与既有调用点零改动，逐字节等价）。
+
+    只产出「col_map 里映射到可写字段」的列，且**绝不产出归属变更通道列**
+    （规格 §7.2 规则 2）—— 自动回写若顺手把户管刚填的重新分配清掉，那个变更就被静默吞了。
+    **未采集的列一个字不碰**：它不在 col_map 里，自然不会出现在产出里（设计 §4.5）。
     """
+    cm = spec_column_map(platform) if col_map is None else col_map
+    spec = field_spec(platform)
     cells = {}
-    for col, _header, field, writable, _readable in COLUMN_SPEC[platform]:
-        if not writable or field is None or field == "_owner_channel":
+    for field, col in cm.items():
+        s = spec.get(field)
+        # 合成 map（`col_map=None` 的 None 路径）里账户ID 的字段key 恒为
+        # **解析结果命名空间**（TT_KEY_FIELD == "account_id"），而 tt 的 `field_spec`
+        # 用的是**字段目录命名**（ACCOUNT_KEY_FIELD["tt"] == "advertiser_id"）。
+        # 两者对 tt 不一致，缺了这步会把 C 列（账户ID）整个漏掉 —— 只兜这一个字段，
+        # 未知字段仍照旧跳过（绝不误落到别的列）。
+        if s is None and field == TT_KEY_FIELD:
+            s = spec.get(ACCOUNT_KEY_FIELD[platform])
+        if not s or not s["writable"] or field == "_owner_channel":
             continue
         if field == "_dead_flag":
-            cells[col] = "是" if (row.get("death_date") or "").strip() else ""
+            value = "是" if (row.get("death_date") or "").strip() else ""
         elif field == "account_id":
-            cells[col] = _text(row.get("account_id", ""))
+            value = _text(row.get("account_id", ""))
         else:
-            cells[col] = "" if row.get(field) is None else str(row.get(field)).strip()
+            value = "" if row.get(field) is None else str(row.get(field)).strip()
+        # 空值跳过回写（设计 §4.7）：非必填、由户管维护的字段，系统没填不代表要清掉表里那格。
+        if not value and s["skip_empty_write"]:
+            continue
+        cells[col] = value
     return cells
 
 
-def parse_row(values: list, platform: str) -> dict:
+def parse_row(values: list, platform: str, col_map: dict | None = None) -> dict:
     """表 → 系统：把一行原始单元格值转成 {字段名: 字符串值}。
 
-    不可读列（定位键 C、派生列、未映射列）一律不出现在结果里，
-    `_owner_channel` 与 `_dead_flag` 是合成字段，供上层判归属与生死。
+    `col_map` 是**这张表**的 {字段key: 列字母}；`None` ⇒ 用既有固定规格合成的。
+
+    不可读列（未映射列、派生列）一律不出现在结果里；`_owner_channel` 与 `_dead_flag`
+    是合成字段，供上层判归属与生死。**未采集的列不产出任何字段**（设计 §4.4）。
     """
+    cm = spec_column_map(platform) if col_map is None else col_map
+    spec = field_spec(platform)
     out = {}
-    for col, _header, field, _writable, readable in COLUMN_SPEC[platform]:
-        if not readable or field is None:
+    for field, col in cm.items():
+        s = spec.get(field)
+        if not s or not s["readable"] or field == "account_id":
             continue
         i = col_index(col)
         raw = values[i] if len(values) > i else ""
         out[field] = ("" if raw is None else str(raw)).strip()
-    # C 列是定位键，单独取。统一键名恒为 "account_id"（GG 与 TT 一致），
+    # 定位键单独取。统一键名恒为 "account_id"（GG 与 TT 一致），
     # 与 ACCOUNT_KEY_FIELD 里的 DB 列名是两个命名空间：消费解析结果用
     # account_id，拼 SQL / 写库用 ACCOUNT_KEY_FIELD[platform]，勿混用。
     # lstrip("'") 假定该值只带 _text() 加的那一个前缀。
-    key_i = col_index(KEY_COL[platform])
+    key_col = cm.get(TT_KEY_FIELD) or cm.get(ACCOUNT_KEY_FIELD[platform]) \
+        or KEY_COL[platform]
+    key_i = col_index(key_col)
     raw_key = values[key_i] if len(values) > key_i else ""
     out["account_id"] = ("" if raw_key is None else str(raw_key)).strip().lstrip("'").strip()
     return out
