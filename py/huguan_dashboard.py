@@ -218,7 +218,9 @@ def spec_column_map(platform: str) -> dict:
 KEY_COL = {"gg": "C", "tt": "C", "fb": "D"}
 OWNER_COL = {"gg": "G", "tt": "G", "fb": "J"}
 OWNER_CHANNEL_COL = {"gg": "H", "tt": "L"}      # 刻意不含 fb，见 spec §6.5
-READ_RANGE = {"gg": "A:N", "tt": "A:M", "fb": "A:Q"}
+# tt 读 A:ZZ：表头映射后列数不定（户管每加一张表表头都不同，且「认识但刻意不采集」
+# 的列也占位），固定 A:M 会读漏右侧列。gg/fb 仍走各自固定范围（逐字节不变）。
+READ_RANGE = {"gg": "A:N", "tt": "A:ZZ", "fb": "A:Q"}
 
 # 系统里「账户ID」列在两张表下的实际字段名
 ACCOUNT_KEY_FIELD = {"gg": "account_id", "tt": "advertiser_id", "fb": "account_id"}

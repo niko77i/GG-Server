@@ -5454,3 +5454,113 @@ class TestColMapOwnerColumns:
                [{"account_id": "7001", "cells": {"L": "张三"}}]
         assert hd.owner_channel_cells([{"account_id": "7001"}], "gg", "张三") == \
                [{"account_id": "7001", "cells": {"H": "张三"}}]
+
+
+# ---------- Task 5: 同步按表头映射读列（定位键校验 + 未采集上报）----------
+
+class TestHeaderMappingSync:
+    # 注意：三个用例各自内联建 config（不共用一个 setUp helper）—— 每个用例的表配置
+    # 不同（企业户 / 怪表 / 企业户），共用一个 helper 反而要传参绕。
+
+    def test_enterprise_header_reads_correctly(self, client, monkeypatch):
+        """企业户表头 → 按表头名读，不再串列（BC 不该读成「主体名称」的值）。"""
+        hg, _ = _create_user(client, "_hm1", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_hm1')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "企业户", "sheet_name": "企业户"}]}})))
+        db.commit(); db.close()
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["日期", "是否回收", "账户ID", "主体名称", "账户名称", "BC",
+             "国家", "所属渠道", "接户运营", "时区", "下户链接"],
+            ["2026-10-01", "否", "7009", "主体A", "账户甲", "BC-9",
+             "US", "渠道X", "张三", "UTC+8", "https://x/y"],
+        ])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True}).get_json()["diff"]
+        create = diff["to_create"][0]
+        assert create["account_id"] == "7009"
+        assert diff.get("unmatched_columns") == []
+        # 本用例只钉路由层两件事：表头解析全中（无未采集）+ 账户ID 读对。
+        # 「BC 不再读成主体名称的值」由 Task 3 的 parse_row 用例钉（那里能直接断言
+        # bc_name == "BC-1"）；这里钉不了 —— BC 名要经 bc 表解析成 bc_id，而临时库里
+        # 没有这个 BC，_collect_updates 只会记一条「无法唯一匹配」的 warning。
+
+    def test_missing_key_column_rejects_the_whole_sync(self, client, monkeypatch):
+        """账户ID 认不出 ⇒ 拒同步（设计 §4.3 第 2 条）。"""
+        hg, _ = _create_user(client, "_hm2", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_hm2')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "怪表", "sheet_name": "怪表"}]}})))
+        db.commit(); db.close()
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [["日期", "备注"], ["2026-10-01", "x"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True})
+        assert resp.status_code == 400
+        assert "账户ID" in resp.get_json()["error"]
+        assert "怪表" in resp.get_json()["error"]
+
+    def test_unmatched_columns_are_reported(self, client, monkeypatch):
+        hg, _ = _create_user(client, "_hm3", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_hm3')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "企业户", "sheet_name": "企业户"}]}})))
+        db.commit(); db.close()
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["账户ID", "备注二"], ["7009", "x"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True}).get_json()["diff"]
+        assert diff["unmatched_columns"] == [{"sheet": "企业户", "headers": ["备注二"]}]
+
+    def test_undo_snapshot_records_header_mapped_column(self, client, monkeypatch):
+        """撤回快照的表侧列字母必须与读路径同源（这张表的表头映射），否则撤回写错列。
+
+        企业户表里「接户运营」在 H 列（不是固定的 G —— G 在这张表是「国家」）：
+        读路径按表头映射后运营原值取自 H；快照若仍按固定列记 G，撤回就会把运营名
+        写进「国家」列（本批次新引入的串列）。判别力：路由不给 `_owner_sheet_from`
+        传 col_map 时，cells 会变成 {"G": "张三"}，本用例立刻变红。
+        """
+        hg, uid = _create_user(client, "_hm_undo", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_hm_undo')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "企业户", "sheet_name": "企业户"}]}})))
+        li = _seed(db, "_hm_undo_li", "李四")        # 库里 7009 的当前归属
+        _seed(db, "_hm_undo_zhang", "张三")           # 表里要改成的人
+        _seed_tt_account(db, "7009", li, account_type="企业户")
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            ["日期", "是否回收", "账户ID", "主体名称", "账户名称", "BC",
+             "国家", "接户运营"],
+            ["2026-10-01", "否", "7009", "主体A", "账户甲", "BC-1",
+             "US", "张三"]])
+        captured = []
+        _stub_sheets(monkeypatch, captured)
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": False,
+                                 "confirmed": {"owner": ["7009"]}})
+        assert resp.status_code == 200, resp.get_json()
+
+        db = database.get_db()
+        payload = hd.load_undo(db, uid, "tt", "sync")
+        db.close()
+        # 「接户运营」在这张表的 H 列 —— 快照记的列字母必须来自表头映射，不是固定 G
+        assert payload["sheet_back"] == [{"account_id": "7009",
+                                          "cells": {"H": "张三"}}]

@@ -1820,7 +1820,9 @@ class TestCrossTableDuplicateSheetBack:
         db.commit()
         db.close()
 
-        hdr = ["入库时间", "是否回收", "账户ID"]
+        # 表头映射后 tt 按**表头名**取列：`_tt_row` 的运营值落在 G（index 6），
+        # 故表头第 7 格必须是「接户运营」（第 4~6 格空着，被 resolve_column_map 跳过）。
+        hdr = ["入库时间", "是否回收", "账户ID", "", "", "", "接户运营"]
         # 同一账户 8003 在两张表里，且「接户运营」不同：前表=张三（胜出）、后表=李四
         tabs = {"总户-加白": [hdr, _tt_row("8003", "张三")],
                 "总户-企业": [hdr, _tt_row("8003", "李四")]}

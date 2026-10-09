@@ -148,14 +148,33 @@ def dashboard_sync():
         # 归属变更全部沿用既有逻辑，不另写一套。
         # 顺序即优先级：同一账户出现在两张表时，靠前的那张表先出现 ⇒ 现有
         # 「首次出现生效 + warning」规则自然让靠前的表胜出（规格 §4.3 跨表重复）。
-        parsed_rows = []
+        parsed_rows, unmatched_columns = [], []
+        # {sheet_name: col_map}：逐表按表头解析出的映射，供下面的撤回快照按行回查
+        # 自己那张表的列字母。工作表名在同一份配置里互不重复（POST 层校验），但仍用
+        # setdefault 钉「首次出现」—— 与 `sheet_from` / `build_diff` 的去重口径一致。
+        sheet_col_maps = {}
         spreadsheet_id = _spreadsheet_id(db, uid, platform)
         for t in tables:
             grid = gs.read_sheet_values(service, spreadsheet_id,
                                         t["sheet_name"], hd.READ_RANGE[platform])
+            # tt 改按**表头名**解析列（户管每加一张表表头都不同，固定列字母会静默串列）；
+            # gg/fb 仍走合成 map（`col_map=None` ⇒ `COLUMN_SPEC` 固定列，逐字节不变）。
+            col_map = None
+            if platform == "tt":
+                headers = grid[0] if grid else []
+                col_map, unmatched = hd.resolve_column_map(
+                    headers, t.get("columns") or {})
+                # 定位键认不出 ⇒ 整批拒同步（设计 §4.3 第 2 条）：没有账户ID 列，
+                # 读出来的每一行都无法与系统里的账户对应，继续跑只会产出垃圾差异。
+                if not (col_map.get("advertiser_id") or col_map.get("account_id")):
+                    return err(f"工作表「{t['sheet_name']}」里找不到「账户ID」列，无法同步")
+                if unmatched:
+                    unmatched_columns.append({"sheet": t["sheet_name"],
+                                              "headers": unmatched})
+                sheet_col_maps.setdefault(t["sheet_name"], col_map)
             # 第 1 行是表头；不跳任何数据行（户管看板没有「是否解绑」列可用作跳过标记）
             for i, values in enumerate(grid[1:], start=2):
-                parsed = hd.parse_row(values, platform)
+                parsed = hd.parse_row(values, platform, col_map)
                 parsed["row"] = i
                 # 多表后「第 N 行」会撞：带上表名，前端按表分组展示（规格 §4.3 的坑）
                 parsed["_sheet"] = t["sheet_name"]
@@ -168,6 +187,9 @@ def dashboard_sync():
                 parsed_rows.append(parsed)
 
         diff = hd.build_diff(db, parsed_rows, platform)
+        # 未采集列逐表上报（设计 §4.3）：**空列表也要带** —— 前端据它的存在与否渲染
+        # 「N 列未采集」提示。gg/fb 无表头映射 ⇒ 恒为空（行为与改动前一致）。
+        diff["unmatched_columns"] = unmatched_columns
 
         # fail-safe：只有**显式布尔 False** 才落库。缺省 / true / null / "false"
         # (字符串) / 0 全部走只读 dry_run —— 少了这个 is not False，JSON null 会因
@@ -208,7 +230,12 @@ def dashboard_sync():
         for p in parsed_rows:
             aid = p.get("account_id")
             if aid:
-                sheet_from.setdefault(aid, hd._owner_sheet_from(p, platform))
+                # 表侧原值必须按**该行那张表**的表头映射取列 —— 与上面的读路径同源。
+                # 若这里还用合成 map（固定列），tt 表列序不同时快照会记错列字母，
+                # 撤回便把运营名写进别的列（本批次新引入的串列）。gg/fb 的
+                # `sheet_col_maps` 为空 ⇒ 查到 None ⇒ 仍走合成 map，行为不变。
+                cm = sheet_col_maps.get(p.get("_sheet"))
+                sheet_from.setdefault(aid, hd._owner_sheet_from(p, platform, cm))
                 sheet_back_sheets.setdefault(aid, hd._conf_text(p.get("_sheet")))
         try:
             result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid,
