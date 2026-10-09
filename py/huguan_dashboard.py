@@ -770,7 +770,7 @@ def _resolve_field(db, platform: str, field: str, value: str):
 _PLAIN_TEXT_FIELDS = {
     "gg": ("acquired_date", "timezone"),
     "tt": ("acquired_date", "country", "timezone", "consumption", "remark",
-           "owner_change_note"),
+           "owner_change_note", "subject_name", "landing_url"),
     # FB 的文本列。acceptor（I 列「接户运营」）**在这里** —— 它是**双向**列：户管
     # 在表里手填的串原样读回落进 `acceptor`（设计 §3.1），空值照常走「文本列空着=清空」。
     # 它之所以还特殊，只是**批量回写**（系统→表）不写这一列 —— 那是 `COLUMN_SPEC`
@@ -952,6 +952,11 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         fields = _collect_updates(db, platform, p, scope_owner, row_no, warnings,
                                   create_missing=False)
         pending = fields.pop("_pending_status", None)
+        # `_sheet_name` 是 tt 合成键（表里「账户名称」，只给**新建**账户决定 name）。
+        # **必须在这里摘掉**：update 路径不消费它，留着会（a）被 `_same_as_existing`
+        # 拿去比库里的列 → 恒判「变了」→ 每行虚报「将更新」；（b）穿过下面
+        # `sets = [f"{k}=?" ...]` 拼出 `UPDATE tt_accounts SET _sheet_name=?` 直接报错。
+        fields.pop("_sheet_name", None)
         # TT 的 remark 不走「按表覆盖」（2026-10-06 规格）：投手权威永久，
         # 户管看板 M 列的改动不再进系统。空值也因此不会进 clears，
         # 根治了原先「户管 M 列空着就清掉投手备注」的隐患。
@@ -1003,10 +1008,11 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     与下方名称类字段的 `if not value: continue` 不对称是**刻意的**：空串在名称
     命名空间里根本没有可解析的候选，属规格 §8.4 的「命中 0 条」。
 
-    产出里可能带四个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
+    产出里可能带五个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
     `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名、
     `_primary_bm_name`（FB 专有，表里填的主 BM 名）、
-    `_account_type`（TT 专有，由调用方按「这一行读自哪张表」注入的户类型）。
+    `_account_type`（TT 专有，由调用方按「这一行读自哪张表」注入的户类型）、
+    `_sheet_name`（TT 专有，表里「账户名称」列的值，供新建账户决定 `name`）。
 
     create_missing 由 build_diff 传 False（dry_run 只读），落库阶段才用默认 True。
     """
@@ -1053,6 +1059,13 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     # **不放进 _PLAIN_TEXT_FIELDS**：那个集合参与「文本列空着＝清空系统该列」的口径。
     if platform == "tt":
         out["_account_type"] = _conf_text(p.get("_account_type"))
+        # 设计 §4.6：表里「账户名称」列（字段 key 恒为 "name"）的值搬成合成键。
+        # **不能直接把 `name` 放进 `_PLAIN_TEXT_FIELDS["tt"]`** —— 那个集合参与
+        # 「文本列空着＝清空系统该列」的口径，会让每次同步都把已存账户的 `name`
+        # 按表覆盖（乃至用空值清掉）。本批次只让它在**新建**账户时决定 `name`。
+        # 与 `_account_type` 同理无条件产出（未映射时 `p.get("name")` 为 None →
+        # 空串），由 apply_diff 的 create 分支回落账户ID。
+        out["_sheet_name"] = _conf_text(p.get("name"))
     return out
 
 
@@ -1352,7 +1365,10 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                 src[_target_column(platform, "status_name")] = _ensure_status(
                     pending, item.get("owner_id"))
             src[key_field] = item["account_id"]
-            src["name"] = item["account_id"]
+            # 设计 §4.6：表里有「账户名称」列就用它；没有（如加白户表）仍回落账户 ID。
+            # `_sheet_name` 是合成键（不是数据库列），必须先 pop 再拼 INSERT；未映射时
+            # 值为空串 → `or` 回落账户ID（gg/fb 从不产出该键 ⇒ 恒为账户ID，逐字节不变）。
+            src["name"] = (src.pop("_sheet_name", None) or "").strip() or item["account_id"]
             src["owner_id"] = item.get("owner_id")
             if account_type is not None:
                 src["account_type"] = account_type or TT_DEFAULT_ACCOUNT_TYPE

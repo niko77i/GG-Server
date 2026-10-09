@@ -5587,3 +5587,128 @@ class TestHeaderMappingSync:
         # 「接户运营」在这张表的 H 列 —— 快照记的列字母必须来自表头映射，不是固定 G
         assert payload["sheet_back"] == [{"account_id": "7009",
                                           "cells": {"H": "张三"}}]
+
+
+# ---------- Task 7: 新字段落库 + 账户名称 + 空值跳过回写 ----------
+
+class TestNewFieldsSync:
+    """造 config + 打桩读表 + 走 /sync 真落库（dry_run=false + confirmed.create）。"""
+
+    def test_subject_name_and_landing_url_land_in_db(self, client, monkeypatch):
+        import json
+        import database
+        import google_sheets_service as gs
+        hg, _ = _create_user(client, "_nf1", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_nf1')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "企业户", "sheet_name": "企业户"}]}})))
+        db.commit(); db.close()
+        header = ["日期", "是否回收", "账户ID", "主体名称", "账户名称", "BC",
+                  "国家", "所属渠道", "接户运营", "时区", "下户链接"]
+        row = ["2026-10-01", "否", "7101", "主体甲", "账户甲", "BC-1",
+               "US", "渠道X", "张三", "UTC+8", "https://x/y"]
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [header, row])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": False,
+                                 "confirmed": {"create": ["7101"]}})
+        assert resp.status_code == 200
+        db = database.get_db()
+        r = db.execute("SELECT name, subject_name, landing_url FROM tt_accounts "
+                       "WHERE advertiser_id='7101'").fetchone()
+        db.close()
+        assert r is not None, "账户没落库"
+        assert r["subject_name"] == "主体甲"
+        assert r["landing_url"] == "https://x/y"
+
+    def test_name_uses_sheet_account_name_when_mapped(self, client, monkeypatch):
+        """表里有「账户名称」→ 用它当 name（不再拿账户ID）。"""
+        import json
+        import database
+        import google_sheets_service as gs
+        hg, _ = _create_user(client, "_nf2", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_nf2')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "企业户", "sheet_name": "企业户"}]}})))
+        db.commit(); db.close()
+        header = ["账户ID", "账户名称"]
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [header, ["7102", "账户乙"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        assert client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "dry_run": False,
+            "confirmed": {"create": ["7102"]}}).status_code == 200
+        db = database.get_db()
+        got = db.execute("SELECT name FROM tt_accounts WHERE advertiser_id='7102'"
+                         ).fetchone()["name"]
+        db.close()
+        assert got == "账户乙", f"应用表里的账户名称，实际={got!r}"
+
+    def test_name_falls_back_to_account_id_when_not_mapped(self, client, monkeypatch):
+        """加白户表没有「账户名称」列 → name 仍回落账户ID（行为不变）。"""
+        import json
+        import database
+        import google_sheets_service as gs
+        hg, _ = _create_user(client, "_nf3", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_nf3')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "加白户", "sheet_name": "加白户"}]}})))
+        db.commit(); db.close()
+        header = ["入库时间", "是否回收", "账户ID", "BC", "国家", "所属渠道",
+                  "接户运营", "时区", "状态", "消耗", "位置", "换绑情况", "产品信息"]
+        row = ["2026-10-01", "否", "7103", "BC-1", "US", "渠道X", "张三",
+               "UTC+8", "存活", "", "", "", ""]
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [header, row])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        assert client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "dry_run": False,
+            "confirmed": {"create": ["7103"]}}).status_code == 200
+        db = database.get_db()
+        got = db.execute("SELECT name FROM tt_accounts WHERE advertiser_id='7103'"
+                         ).fetchone()["name"]
+        db.close()
+        assert got == "7103", f"无「账户名称」列时应回落账户ID，实际={got!r}"
+
+    def test_update_path_does_not_leak_sheet_name_key(self, client, monkeypatch):
+        """回归守卫（`_sheet_name` 只服务**新建**账户，绝不能漏进 UPDATE）。
+
+        已存账户 + 表里有「账户名称」→ build_diff 的 update 路径必须把合成键
+        `_sheet_name` 摘掉。漏摘的后果：它穿过 `sets = [f"{k}=?" ...]` 拼出
+        `UPDATE tt_accounts SET _sheet_name=?` → 整行更新报错（errors 非空）；
+        同时 `_same_as_existing` 会拿它对库里的列 → 每行虚报「将更新」。
+        本用例钉住：确认 update 后落库无错、且 `name` **不**被表里的账户名称覆盖
+        （设计 §4.6 的边界：只有新建账户才用表里的账户名称）。
+        """
+        import json
+        import database
+        import google_sheets_service as gs
+        hg, uid = _create_user(client, "_nf4", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_nf4')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "企业户", "sheet_name": "企业户"}]}})))
+        _seed_tt_account(db, "7104", uid)          # name 已存在且为 '7104'
+        db.commit(); db.close()
+        header = ["账户ID", "主体名称", "账户名称"]
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [header, ["7104", "主体Z", "账户丙"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "dry_run": False,
+            "confirmed": {"update": ["7104"]}})
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["result"]["errors"] == [], resp.get_json()["result"]["errors"]
+        db = database.get_db()
+        r = db.execute("SELECT name, subject_name FROM tt_accounts "
+                       "WHERE advertiser_id='7104'").fetchone()
+        db.close()
+        assert r["subject_name"] == "主体Z", "对照：update 路径确实跑通了（有真变更）"
+        assert r["name"] == "7104", "update 路径不得用表里的账户名称覆盖 name"
