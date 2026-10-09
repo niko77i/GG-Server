@@ -321,6 +321,33 @@ def test_retry_batch_covers_every_group(client, monkeypatch):
                                ("甲", "L1", "2026-10-01")], f"三组都要写，实际 {written}"
 
 
+# ---------- 四期 Task 3：写点 ①（提取保存）改走统一入口 ----------
+
+def test_extract_save_registers_fb_report_and_stops_writing_sync_log(client, monkeypatch):
+    """提取保存：登记 fb_report，且**不再**写 sheets_sync_log（四期停写该表）。"""
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "upsert_fb_reports", lambda *a, **k: None)
+
+    hdr, uid = _fb_user(client, "_fbsw_ext")
+    resp = client.post("/api/fb/extract/save", headers=hdr, json={
+        "product_name": "产品甲", "line_name": "线A", "report_date": "2026-10-01",
+        "records": [{"account_name": "名", "account_id": "acc_1", "cost": 1,
+                     "impressions": 2, "clicks": 3, "registrations": 4,
+                     "purchases": 5, "cost_per_purchase": 6}]})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    key = resp.get_json()["business_key"]
+    assert key == "产品甲|线A|2026-10-01", resp.get_json()
+
+    db = database.get_db()
+    r = _settle(db, uid, key)
+    n_sync_log = db.execute("SELECT COUNT(*) FROM sheets_sync_log WHERE user_id=?",
+                            (uid,)).fetchone()[0]
+    db.close()
+    assert r is not None, "提取保存必须登记 fb_report"
+    assert r["status"] == "synced", f"实际 {r['status']}"
+    assert n_sync_log == 0, f"FB 不得再写 sheets_sync_log，实际 {n_sync_log} 行"
+
+
 def test_retry_malformed_input_returns_400_not_500(client):
     """畸形入参必须 400 —— 请求体是用户可控 JSON，不得在解包/绑定处打成 500。
 
@@ -353,14 +380,15 @@ def _assert_no_leak(raw):
 def test_retry_sync_failure_reads_sanitized_error_msg(client, monkeypatch, caplog):
     """重试写表**最终失败**：`error_msg` 落**统一固定文案**，异常原文只进日志、不得回出。
 
-    这条是本任务窗口内 FB 重试路径上唯一的「失败文案脱敏」判据：
+    这条是 FB **重试**路径上的「失败文案脱敏」判据（写点 ① 提取保存那条腿由
+    `test_fb_platform.py::TestE11FbSheetsSyncLogSink::test_extract_save_failure_sanitized`
+    覆盖）：
     `test_fb_report_final_failure_lands_retry_failed` 只断言 `status`，
     **抓不住**「落了固定文案还是落了异常原文」—— 故此处必须直接对 `error_msg` 断言。
     """
     import logging
     import time as _time
     import google_sheets_service as gs
-    from routes import fb_routes
 
     # 30s 重试窗口压成 0，让最终失败即时到达（_poll_sleep 是模块顶层抓的真 sleep，不受影响）
     monkeypatch.setattr(_time, "sleep", lambda _s: None)
@@ -402,8 +430,8 @@ def test_retry_sync_failure_reads_sanitized_error_msg(client, monkeypatch, caplo
     # 关键：落的是**统一固定文案**，既不是异常原文，也不是 FB 自己的旧文案
     assert item["error_msg"] == sheet_write._WRITE_FAILED_MSG, \
         f"error_msg 应落统一固定文案，实际 {item['error_msg']!r}"
-    assert item["error_msg"] != fb_routes._FB_SHEETS_FAILED_MSG, \
-        "不该再落 FB 自己的旧固定文案（那是清退对象的常量）"
+    assert item["error_msg"] != "表格同步失败，详情见服务端日志", \
+        "不该再落 FB 自己的旧固定文案（该常量已随四期接入统一治理而删除）"
 
     _assert_no_leak(st)
     _assert_no_leak(resp)

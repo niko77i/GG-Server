@@ -7,7 +7,6 @@ import huguan_dashboard as hd
 import logging
 import re
 import sqlite3
-import threading
 
 fb_bp = Blueprint('fb', __name__)
 
@@ -15,8 +14,10 @@ log = logging.getLogger("gg-server")
 
 # 落库 / 回响应体共用的固定文案。这些 `except Exception` 捕到的多是 sqlite 的
 # IntegrityError（UNIQUE / NOT NULL / FOREIGN KEY），原文含 schema 列名与英文约束名。
+#
+# 注：FB 写表失败原有自己的 `_FB_SHEETS_FAILED_MSG`，四期接入统一治理后写表失败的
+# error_msg 改由 `sheet_write._WRITE_FAILED_MSG` 统一落库，该常量已无引用、随之删除。
 _FB_DB_FAILED_MSG = "操作失败，详情见服务端日志"
-_FB_SHEETS_FAILED_MSG = "表格同步失败，详情见服务端日志"
 
 
 def _is_unique_conflict(e):
@@ -1734,23 +1735,17 @@ def extract_save():
                  rec.get('account_name', ''), rec.get('account_id', ''),
                  rec.get('cost', 0), rec.get('impressions', 0), rec.get('clicks', 0),
                  rec.get('registrations', 0), rec.get('purchases', 0), rec.get('cost_per_purchase', 0)))
+        # ⚠️ 这个 commit 必须保留、且必须在登记**之前**：登记会用同一个连接
+        # `record_pending` → `commit`；若此处还握着未提交的写事务，另一条连接拿不到
+        # SQLite 写锁 ⇒ 等满 timeout=30 抛 `database is locked`，请求线程白冻 30 秒
+        # 且登记失败（三期在 tt_accounts_routes 修过两处同族缺陷）。
         db.commit()
 
-        # 先插入一条 pending 同步日志并拿到 id，供前端精确轮询本次写表结果
-        import json as _json
-        db.execute(
-            "INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, sheet_gid, status, rows_json, "
-            "report_date, line_name) "
-            "VALUES (?,?,?,'','pending',?,?,?)",
-            (uid, product_name, '', _json.dumps(records, ensure_ascii=False)[:10000],
-             report_date, line_name))
-        log_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.commit()
+        # 登记一次写表（四期：接入统一治理）。响应里给出 business_key 供前端精确轮询；
+        # 不再插 sheets_sync_log 的 pending 行 —— 该表留给 GG 做表那条线。
+        business_key = _register_fb_report_write(uid, product_name, line_name, report_date)
 
-        # 异步写 Google Sheets（完成后会更新这条日志的状态为 synced/failed）
-        _schedule_fb_sheets_write(uid, product_name, line_name, report_date, records, log_id)
-
-        return ok({'saved': len(records), 'sync_log_id': log_id})
+        return ok({'saved': len(records), 'business_key': business_key})
     except Exception as e:
         db.rollback()
         log.exception("FB 保存提取数据失败 product_name=%s", product_name)
@@ -1795,42 +1790,26 @@ def _get_sheet_config_key(db, user_id):
     return f"google_sheets_fb_{user_id}" if platform == 'fb' else f"google_sheets_{user_id}"
 
 
-def _schedule_fb_sheets_write(user_id, product_name, line_name, report_date, records, log_id):
-    """后台线程写 Google Sheets，并更新对应的 sheets_sync_log 状态（synced/failed）。"""
-    def _do_write():
-        import database as _db
-        import json
-        db = _db.get_db()
-        try:
-            import google_sheets_service as gs
-            result = gs.upsert_fb_reports(db, user_id, product_name, line_name, report_date, records)
-            log.info("[FB-Sheets] 写入成功: %s", result)
-            # 更新本次同步日志为 synced
-            db.execute(
-                "UPDATE sheets_sync_log SET status='synced', error_msg='', rows_json=?, "
-                "updated_at=datetime('now','localtime') WHERE id=?",
-                (json.dumps(records, ensure_ascii=False)[:10000], log_id))
-            db.commit()
-        except Exception:
-            # `error_msg` 会被 GET /api/fb/reports/sync-status/<id> 与 last-sync
-            # 原样回给客户端 ⇒ 只落固定文案；原文进日志。
-            log.exception("[FB-Sheets] 写入失败 log_id=%s", log_id)
-            try:
-                db.execute(
-                    "UPDATE sheets_sync_log SET status='failed', error_msg=?, rows_json=?, "
-                    "updated_at=datetime('now','localtime') WHERE id=?",
-                    (_FB_SHEETS_FAILED_MSG,
-                     json.dumps(records, ensure_ascii=False)[:10000], log_id))
-                db.commit()
-            except Exception as ex2:
-                log.exception("[FB-Sheets] 日志更新也失败: %s", ex2)
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-    t = threading.Thread(target=_do_write, daemon=True)
-    t.start()
+def _register_fb_report_write(uid, product_name, line_name, report_date):
+    """登记一次 FB 报告写表（四期：接入统一治理）。
+
+    原先这里起一个自建 daemon 线程直写 Sheets，并把结果写进自己的
+    `sheets_sync_log`；现在改为登记到 `sheet_write_log`，由统一机制写表、
+    失败可查可重试。**FB 不再写 `sheets_sync_log`**（该表留给 GG 做表那条线）。
+
+    `db` 用调用方（请求线程）的连接 —— 与三期的四个调用点同形：登记在请求线程
+    完成，前端拿到响应就能查到这条记录。
+    """
+    import sheet_write
+    import routes.fb_sheet_targets as _fbt
+
+    key = _fbt.fb_report_key(product_name, line_name, report_date)
+    payload = {"product_name": product_name, "line_name": line_name,
+               "report_date": report_date}
+    sheet_write.run_write(
+        get_db(), user_id=uid, platform="fb", target="fb_report", business_key=key,
+        sync_fn=sheet_write.build_sync("fb_report", uid, key, payload), payload=payload)
+    return key
 
 
 @fb_bp.route('/api/fb/extract/check-duplicates', methods=['POST'])
