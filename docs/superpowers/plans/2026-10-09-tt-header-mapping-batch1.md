@@ -839,6 +839,17 @@ git commit -m "feat(tt): 写表按表头映射定位行（key_col 来自该表 c
 
 ## Task 7: 新字段落库 + 账户名称 + 空值跳过回写
 
+> **2026-10-10 执行记录（追加一道门控）**：把两个字段加进 `_PLAIN_TEXT_FIELDS["tt"]` 之后，
+> 任务审查发现 `_collect_updates` 的文本循环是**无条件**产出的 —— 它分不清「这张表没采集这一列」
+> 与「这一格空着」，两者都写空串。多表部署下后果是**静默清库**：加白户表没有「主体名称/下户链接」列，
+> 同步它就会洗掉企业户表先前写入的同账户值（且只以「将清空」出现在 dry-run 里）。
+> 这与本计划 Global Constraints「未采集的列一个字不碰（读不取、写不写）」冲突。
+> **修法**：文本循环加 `if f not in p: continue` 门控（判「列是否被采集」，非「值是否为空」），
+> 字段仍留在 `_PLAIN_TEXT_FIELDS` 里。同一道门顺带修掉了**既有** tt 文本列的同类潜伏缺陷
+> （`consumption` / `remark` / `country` / `timezone` / `acquired_date` / `owner_change_note`）——
+> 该缺陷是 Task 5 把 tt 从固定合成 map 切到真实表头 map 之后才浮现的。
+> gg/fb 走合成 map ⇒ 门恒真、逐字节不变（已运行时实测 + 短行推理核实）。
+
 **Files:**
 - Modify: `py/huguan_dashboard.py`（`_PLAIN_TEXT_FIELDS["tt"]`、`apply_diff` 的 `src["name"]`）
 - Test: `py/tests/test_huguan_dashboard.py`
