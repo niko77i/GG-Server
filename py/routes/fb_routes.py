@@ -1915,8 +1915,8 @@ def fb_sheets_sync_status():
     return ok({'items': [dict(r) for r in rows]})
 
 
-def _rebuild_fb_records(db, user_id, log_row):
-    """按日志行的 (产品名, 线名, 日期) 回查 fb_ad_reports，重建待写 records。
+def _rebuild_fb_records(db, user_id, product_name, line_name, report_date):
+    """按 (产品名, 线名, 日期) 回查 fb_ad_reports，重建待写 records。
 
     返回 `(records, None)` 或 `(None, 失败原因)`。
 
@@ -1926,7 +1926,7 @@ def _rebuild_fb_records(db, user_id, log_row):
     重试照样是坏的。`fb_ad_reports` 存的是完整原始行，且按
     (user_id, product_name, line_name, account_id, report_date) 唯一，重建更可靠。
     """
-    report_date = (log_row['report_date'] or '').strip()
+    report_date = (report_date or '').strip()
     if not report_date:
         # 这两列是随本次修复才落库的，修复前写入的 pending/failed 行没有它，无从定位
         return None, '这条同步记录缺少日期，无法重建待写数据，请重新保存一次数据'
@@ -1934,8 +1934,7 @@ def _rebuild_fb_records(db, user_id, log_row):
         "SELECT account_name, account_id, cost, impressions, clicks, "
         "registrations, purchases, cost_per_purchase FROM fb_ad_reports "
         "WHERE user_id=? AND product_name=? AND line_name=? AND report_date=?",
-        (user_id, log_row['product_name'],
-         (log_row['line_name'] or '').strip(), report_date)
+        (user_id, product_name, (line_name or '').strip(), report_date)
     ).fetchall()
     if not records:
         return None, '找不到对应的原始数据，无法重建待写数据，请重新保存一次数据'
@@ -1958,7 +1957,10 @@ def fb_retry_sheets_sync():
         ).fetchone()
         if not log_row:
             return err('记录不存在', 404)
-        records, why = _rebuild_fb_records(db, user_id, log_row)
+        records, why = _rebuild_fb_records(db, user_id,
+                                           log_row['product_name'],
+                                           log_row['line_name'],
+                                           log_row['report_date'])
         if records is None:
             return err(why, 400)
         try:
@@ -1990,7 +1992,10 @@ def fb_retry_sheets_sync():
     retried = 0
     failed = []
     for r in rows:
-        records, why = _rebuild_fb_records(db, user_id, r)
+        records, why = _rebuild_fb_records(db, user_id,
+                                           r['product_name'],
+                                           r['line_name'],
+                                           r['report_date'])
         if records is None:
             # 无法重建的原因必须回传前端：原来是裸 except 吞掉，用户只看到
             # `retried: 0`，永远不知道哪条没成功、为什么 —— 正是「静默失败」
