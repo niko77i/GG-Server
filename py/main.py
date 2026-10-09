@@ -4809,6 +4809,33 @@ def accounts_update(aid):
         db.close()
 
 
+def _set_owner(db, aid: int, target_owner: int) -> None:
+    """只改账户归属（**不 commit、不回写**）。调用方负责 commit 与回写。
+
+    与 `_reassign_owner` 分开，是为了让「同步认领」腿借用外层执行段已有的
+    commit 与收尾整体回写，避免每个认领多打一次 Sheets batchUpdate。
+    """
+    db.execute("UPDATE accounts SET owner_id = ?, updated_at = datetime('now','localtime') "
+               "WHERE id = ?", (target_owner, aid))
+
+
+def _reassign_owner(db, aid: int, target_owner: int, actor_id: int) -> None:
+    """改账户归属 + **本函数内部 commit** + 两次看板回写。
+
+    口径与 accounts_reassign 末尾逐字一致（规格 §6.2 / §7.2 规则 3①）：
+    先 commit 再回写；回写走 actor 自己的户管看板，未配置则静默 no-op。
+    ⚠️ 回写发生在 commit **之后**（回写走独立后台线程/新连接，必须能读到已落库的新归属）。
+    `accounts_reassign` 用本函数（行为逐字不变）；同步认领腿用 `_set_owner`。
+    """
+    _set_owner(db, aid, target_owner)
+    acct = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()
+    db.commit()
+    if not acct:
+        return
+    hd.writeback_rows(actor_id, "gg", [acct["account_id"]])
+    hd.writeback_owner_channel(actor_id, "gg", acct["account_id"], target_owner)
+
+
 @app.route("/api/accounts/<int:aid>/reassign", methods=["PUT"])
 @jwt_required()
 def accounts_reassign(aid):
@@ -4877,12 +4904,6 @@ def accounts_reassign(aid):
 
         old_owner = existing["display_name"] or existing["username"] or "未知"
 
-        # 转移归属权
-        db.execute(
-            "UPDATE accounts SET owner_id = ?, updated_at = datetime('now','localtime') WHERE id = ?",
-            (target_owner, aid)
-        )
-
         # 同时更新其他可编辑字段
         for f in ["name", "timezone", "agent_id", "status_id", "acquired_date"]:
             if f in data and data[f] is not None:
@@ -4899,10 +4920,9 @@ def accounts_reassign(aid):
             _record_mcc_change(db, aid, mcc_val, user_id, "reassign")
             db.execute("UPDATE accounts SET mcc_id = ? WHERE id = ?", (mcc_val, aid))
 
-        db.commit()
-        # 户管看板回写（规格 §6.2 / §7.2 规则 3①）：先刷该行的可写列，再写「重新分配」列。
-        hd.writeback_rows(user_id, "gg", [existing["account_id"]])
-        hd.writeback_owner_channel(user_id, "gg", existing["account_id"], target_owner)
+        # 转移归属权 + 两次回写（口径与改动前逐字一致：先 commit，再刷该行可写列、
+        # 再写「重新分配」列）。字段更新已在上面完成，故此处一并 commit。
+        _reassign_owner(db, aid, target_owner, user_id)
         # 返回文案：代转场景需指名目标用户；target_owner == user_id 时逐字节保持原句不变
         if target_owner == user_id:
             msg = f"账户「{existing['name']}」已从 {old_owner} 转移至当前用户"
@@ -5390,9 +5410,30 @@ def accounts_sync_from_sheet():
         ).fetchall():
             existing_map[r["account_id"]] = dict(r)
 
+    # 这些 ID 里「不属于自己」的行（含软删、含无归属的孤儿）—— 它们是本次的认领候选。
+    # ⚠️ 必须含软删：软删的他人账户既不在 existing_map（owner 不符）、
+    #    若这里再排除掉，它就两边不沾、掉进 to_create 撞 account_id 全局唯一约束。
+    # ⚠️ `OR a.owner_id IS NULL` 不能省：SQLite 里 `NULL != x` 求值为 NULL（非真），
+    #    漏了它，`owner_id IS NULL` 的孤儿行（admin_delete_user 会把手下的账户
+    #    `SET owner_id = NULL`）对两张 map 都不可见 ⇒ 掉进 to_create 撞 account_id 全局唯一约束。
+    #    （这类行 owner_display/owner_username 均为 NULL ⇒ owner_name 落空串，
+    #     前端显示「（未分配）」由前端兜底，后端保持空串。）
+    other_map = {}
+    for part in chunk(sheet_ids):
+        marks = ",".join("?" for _ in part)
+        for r in db.execute(
+            f"""SELECT a.id, a.account_id, a.owner_id, a.deleted_at,
+                       u.display_name AS owner_display, u.username AS owner_username
+                FROM accounts a LEFT JOIN users u ON a.owner_id = u.id
+                WHERE a.account_id IN ({marks}) AND (a.owner_id != ? OR a.owner_id IS NULL)""",
+            tuple(part) + (user_id,)
+        ).fetchall():
+            other_map[r["account_id"]] = dict(r)
+
     # 8. 逐行比对
     to_create = []
     to_update = []
+    to_claim = []
     unchanged = 0
 
     for sa in sheet_accounts:
@@ -5400,6 +5441,18 @@ def accounts_sync_from_sheet():
         existing = existing_map.get(aid)
 
         if existing is None:
+            other = other_map.get(aid)
+            if other is not None:
+                # 系统里已有、但属于别人（或已被别人软删）。**绝不当新增** ——
+                # 那必然撞 account_id 全局 UNIQUE（今天的 bug 根因）。
+                to_claim.append({
+                    "account_id": aid,
+                    "existing_id": other["id"],
+                    "owner_id": other["owner_id"],
+                    "owner_name": (other["owner_display"] or other["owner_username"] or "").strip(),
+                    "deleted": bool(other["deleted_at"]),
+                })
+                continue
             # 系统没有 → 新增
             to_create.append({
                 "account_id": aid,
@@ -5456,6 +5509,7 @@ def accounts_sync_from_sheet():
             "diff": {
                 "to_create": to_create,
                 "to_update": to_update,
+                "to_claim": to_claim,
                 "unchanged": unchanged,
                 "warnings": warnings,
             },
@@ -5463,6 +5517,7 @@ def accounts_sync_from_sheet():
                 "total_in_sheet": len(sheet_accounts),
                 "new_accounts": len(to_create),
                 "status_changes_pending": len(to_update),
+                "claimable": len(to_claim),
                 "unchanged": unchanged,
             }
         })
@@ -5471,6 +5526,7 @@ def accounts_sync_from_sheet():
     confirmed = data.get("confirmed", {})
     created_count = 0
     updated_count = 0
+    claimed_count = 0
     errors = []
 
     try:
@@ -5482,6 +5538,37 @@ def accounts_sync_from_sheet():
             except Exception as e:
                 log.exception("表格同步：创建账户失败")
                 errors.append({"account_id": item.get("account_id", "unknown") if isinstance(item, dict) else str(item), "error": "创建失败，详情见服务端日志"})
+
+        # 10a-2. 认领他人账户（仅跨用户角色）
+        for acct_id in confirmed.get("claim", []):
+            try:
+                target = other_map.get(acct_id) or {}
+                aid = target.get("id")
+                if aid is None:
+                    errors.append({"account_id": acct_id, "error": "账户不存在，无法认领"})
+                    continue
+                if not _cross_user_actor(user_id):
+                    errors.append({"account_id": acct_id, "error": "无权认领他人账户"})
+                    continue
+                # 只改归属：**不 commit**。本腿跑在执行段 commit（10b 之后）之前，
+                # 认领结果随那次 commit 一起落库；G 列的整行回写由收尾的
+                # `writeback_rows(user_id, "gg", sheet_ids)` 一次覆盖（其已含被认领账户，
+                # 其 owner_id 在 commit 后即为 user_id）⇒ 不必逐条整行回写。
+                _set_owner(db, aid, user_id)
+                # 只补 H 列「重新分配」：G 列的整行回写由本次同步收尾的整体回写覆盖，
+                # 但 H 列**不在** push_rows 的可写列里（cells_for_row 刻意排除
+                # _owner_channel）⇒ 必须在这里显式写，否则认领后表里的 H 列不更新，
+                # 与 accounts_reassign 的认领行为不一致。
+                # ⚠️ 顺序说明：此处是在本腿之后的 `db.commit()` **之前**就把 H 列写进
+                # 户管看板（后台线程/新连接），与 `_reassign_owner` 的「先 commit 再回写」
+                # 顺序相反。之所以无碍：写入的是**新归属人**（user_id，取自 users，不依赖
+                # accounts 的当前值），故不存在读到旧归属的问题；若后续 commit 失败，表里 H
+                # 是新归属而库里仍是旧归属，下次同步会把它重新判定为可认领并自愈。
+                hd.writeback_owner_channel(user_id, "gg", acct_id, user_id)
+                claimed_count += 1
+            except Exception:
+                log.exception("表格同步：认领账户失败")
+                errors.append({"account_id": acct_id, "error": "认领失败，详情见服务端日志"})
 
         # 10b. 执行状态更新
         for item in confirmed.get("update", []):
@@ -5566,6 +5653,7 @@ def accounts_sync_from_sheet():
         "result": {
             "created": created_count,
             "updated": updated_count,
+            "claimed": claimed_count,
             "errors": errors,
         },
         # 回写腿涉及的账户（前端靠它们轮询 gg_my_dashboard 的写表结果）
