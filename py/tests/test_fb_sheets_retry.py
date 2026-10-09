@@ -184,6 +184,17 @@ def test_retry_batch_reports_unrebuildable_rows(client, monkeypatch):
     _wait_calls(calls, 1)
     assert len(calls) == 1 and calls[0]["product_name"] == "产品丁", calls
 
+    # 旧版的等价判据：「失败的行留在表里、能重建的行被处理」。
+    # 四期改为：**部分失败时那条失败的三元组必须零登记**，可重建的那组才登记。
+    db = database.get_db()
+    n_bad = db.execute(
+        "SELECT COUNT(*) FROM sheet_write_log WHERE user_id=? AND target='fb_report' "
+        "AND business_key LIKE '产品戊%'", (uid,)).fetchone()[0]
+    ok_row = _fb_row(db, uid, _fbt.fb_report_key("产品丁", "线E", "2026-10-03"))
+    db.close()
+    assert n_bad == 0, f"重建失败的组不得登记，实际 {n_bad} 行"
+    assert ok_row is not None, "可重建的那组必须登记"
+
 
 def test_sheets_sync_log_has_retry_columns(client):
     """迁移必须给 sheets_sync_log 补上 report_date / line_name（重试靠它们定位）。"""

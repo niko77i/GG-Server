@@ -338,3 +338,73 @@ def test_retry_malformed_input_returns_400_not_500(client):
         assert resp.status_code == 400, \
             f"{body} 应回 400，实际 {resp.status_code}：{resp.get_data(as_text=True)[:200]}"
         assert resp.get_json()["success"] is False, resp.get_json()
+
+
+# 上游异常原文里必然出现的可识别标记（照 test_security_hardening.E11_LEAK_MARKERS 的口径）
+_LEAK_MARKERS = ("sheets.googleapis.com", "HttpError", "Traceback")
+
+
+def _assert_no_leak(raw):
+    s = raw if isinstance(raw, str) else raw.get_data(as_text=True)
+    for marker in _LEAK_MARKERS:
+        assert marker not in s, f"响应体泄露异常原文 {marker!r}: {s[:300]!r}"
+
+
+def test_retry_sync_failure_reads_sanitized_error_msg(client, monkeypatch, caplog):
+    """重试写表**最终失败**：`error_msg` 落**统一固定文案**，异常原文只进日志、不得回出。
+
+    这条是本任务窗口内 FB 重试路径上唯一的「失败文案脱敏」判据：
+    `test_fb_report_final_failure_lands_retry_failed` 只断言 `status`，
+    **抓不住**「落了固定文案还是落了异常原文」—— 故此处必须直接对 `error_msg` 断言。
+    """
+    import logging
+    import time as _time
+    import google_sheets_service as gs
+    from routes import fb_routes
+
+    # 30s 重试窗口压成 0，让最终失败即时到达（_poll_sleep 是模块顶层抓的真 sleep，不受影响）
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError(
+            "写表失败 <HttpError 404> https://sheets.googleapis.com/v4/spreadsheets/SHEET-FB")
+
+    monkeypatch.setattr(gs, "upsert_fb_reports", _boom)
+
+    hdr, uid = _fb_user(client, "_fbsw_leak")
+    db = database.get_db()
+    _seed_report(db, uid, product="产品甲", line="线A", date="2026-10-01")
+    db.close()
+
+    key = __import__("routes.fb_sheet_targets", fromlist=["x"]).fb_report_key(
+        "产品甲", "线A", "2026-10-01")
+
+    with caplog.at_level(logging.ERROR, logger="gg-server"):
+        resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                           json={"groups": [["产品甲", "线A", "2026-10-01"]]})
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+        assert resp.get_json()["accepted"] == 1, resp.get_json()
+
+        db = database.get_db()
+        row = _settle(db, uid, key)
+        db.close()
+        assert row is not None, "必须登记 fb_report"
+        assert row["status"] == "retry_failed", f"实际 {row['status']}"
+
+        st = client.get("/api/sheet-write/status", headers=hdr,
+                        query_string={"platform": "fb", "target": "fb_report",
+                                      "business_key": key})
+
+    assert st.status_code == 200, st.get_data(as_text=True)[:200]
+    item = st.get_json()["item"]
+    assert item is not None, st.get_json()
+    assert item["status"] == "retry_failed", item
+    # 关键：落的是**统一固定文案**，既不是异常原文，也不是 FB 自己的旧文案
+    assert item["error_msg"] == sheet_write._WRITE_FAILED_MSG, \
+        f"error_msg 应落统一固定文案，实际 {item['error_msg']!r}"
+    assert item["error_msg"] != fb_routes._FB_SHEETS_FAILED_MSG, \
+        "不该再落 FB 自己的旧固定文案（那是清退对象的常量）"
+
+    _assert_no_leak(st)
+    _assert_no_leak(resp)
+    assert "sheets.googleapis.com" in caplog.text, "异常原文没进日志"
