@@ -110,6 +110,8 @@ import { ref, computed, onMounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '../../utils/clipboard'
+import { sheetWriteApi } from '../../api/sheetWrite'
+import { SHEET_WRITE_TOAST, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 
 const products = ref([]); const selectedProductId = ref(null); const selectedLineId = ref(null)
 const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1)
@@ -247,22 +249,32 @@ async function doSave() {
     })
     ElMessage.success(`已保存 ${parsedData.value.length} 条` + (dupCount.value ? `（覆盖 ${dupCount.value} 条）` : '') + `，后台写表中...`)
     saveDialogVisible.value = false
-    // 用本次保存返回的 sync_log_id 精确轮询写表结果（不再依赖"最新一条"）
-    if (res.sync_log_id) pollSyncStatus(res.sync_log_id)
+    // 用本次保存返回的 business_key 精确轮询写表结果（不再依赖"最新一条"）
+    if (res.business_key) pollWriteStatus(res.business_key)
   } catch (e) { ElMessage.error(e.response?.data?.error || '保存失败') }
   finally { saving.value = false }
 }
 
-// 轮询本次写表结果：pending 则 1 秒后再查，最多 15 次
-async function pollSyncStatus(syncLogId, attempt = 0) {
+// 轮询本次写表结果：pending 则 1 秒后再查，最多 15 次。
+// 四期起数据源换成统一的 /api/sheet-write/status（带 target 过滤，
+// 防与同期其它 target 互相遮蔽）；终态文案复用全仓唯一文案源。
+async function pollWriteStatus(businessKey, attempt = 0) {
   const MAX_ATTEMPTS = 15
   try {
-    const r = await fbApi.getSyncStatus(syncLogId)
-    if (r.status === 'synced') return ElMessage.success('✅ 写表成功')
-    if (r.status === 'failed') return ElMessage.error(`❌ 写表失败: ${r.error_msg || ''}`)
-    if (attempt >= MAX_ATTEMPTS) return ElMessage.warning('写表结果未返回，请稍后到「数据管理」页重试写表')
-    setTimeout(() => pollSyncStatus(syncLogId, attempt + 1), 1000)
-  } catch (e) { /* 查询失败不再打扰用户 */ }
+    const r = await sheetWriteApi.status({
+      platform: 'fb', target: 'fb_report', businessKey,
+    })
+    const it = r.item
+    if (!it) return                       // 无记录 = 这条路径没触发写表
+    if (it.target !== 'fb_report') return // 被遮蔽时误判成别的 target
+    if (it.status === 'synced') return ElMessage.success('✅ 写表成功')
+    if (it.status === 'pending' || it.status === 'failed') {
+      if (attempt >= MAX_ATTEMPTS) return
+      return setTimeout(() => pollWriteStatus(businessKey, attempt + 1), 1000)
+    }
+    // 需提示的终态：文案与汇总区/工具提示同源
+    SHEET_WRITE_TOAST[sheetWriteTone(it.status)](sheetWriteHint(it))
+  } catch { /* 查询失败不再打扰用户 */ }
 }
 
 onMounted(loadProducts)
