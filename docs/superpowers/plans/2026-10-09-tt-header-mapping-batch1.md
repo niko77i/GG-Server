@@ -416,19 +416,30 @@ class TestColMapReadWrite:
         assert cells2[cm["landing_url"]] == "https://a"
 
     def test_default_col_map_keeps_gg_fb_identical(self):
-        """col_map=None ⇒ 走 spec_column_map，与改动前的取/写列逐字节相同。"""
-        for p, values, row in (
+        """col_map=None ⇒ 走 spec_column_map；**钉死字面产出**。
+
+        （原写作 `cells_for_row(row, p) == cells_for_row(row, p, spec_column_map(p))` ——
+        两边都经 `cm = spec_column_map(p) if col_map is None else col_map` 求出、自比恒真，
+        防不住 None 分支被接错图。2026-10-10 任务审查发现后改为字面期望。）
+        字面期望由 `COLUMN_SPEC[platform]`（writable=True、非 _owner_channel、非 field=None）
+        与该 row 的取值推出：gg 可写列 = A,B,C,D,F,G,I,J,K；fb 可写列 = A..Q 去掉只读的 I。
+        键列的账户ID 非纯数字（"GG-1"/"FB-1"），`_text` 不加 ' 前缀，故为裸串。
+        """
+        for p, values, row, expected_cols, key_letter, key_value in (
             ("gg", ["2026-10-01", "否", "GG-1", "MCC", "US", "渠道", "张三",
                     "重新分配", "UTC+8", "大MCC", "存活", "位置", "消耗", "产品"],
-             {"account_id": "GG-1", "mcc_name": "MCC", "owner_name": "张三"}),
+             {"account_id": "GG-1", "mcc_name": "MCC", "owner_name": "张三"},
+             "ABCDFGIJK", "C", "GG-1"),
             ("fb", ["2026-10-01", "op", "名称", "FB-1", "渠道", "类型", "10", "1",
                     "接户", "在用", "2026-10-02", "2", "UTC+8", "消耗", "存活", "BM", "产品"],
-             {"account_id": "FB-1", "name": "名称", "owner_name": "在用"}),
+             {"account_id": "FB-1", "name": "名称", "owner_name": "在用"},
+             "ABCDEFGHJKLMNOPQ", "D", "FB-1"),
         ):
             parsed = hd.parse_row(values, p)
             assert parsed["account_id"] == row["account_id"]
-            assert hd.cells_for_row(row, p) == \
-                   hd.cells_for_row(row, p, hd.spec_column_map(p))
+            cells = hd.cells_for_row(row, p)
+            assert set(cells) == set(expected_cols)   # 恰好这些列，不多不少
+            assert cells[key_letter] == key_value     # 键格字面值（非纯数字不带 ' 前缀）
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
