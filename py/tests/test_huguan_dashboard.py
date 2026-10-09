@@ -5712,3 +5712,100 @@ class TestNewFieldsSync:
         db.close()
         assert r["subject_name"] == "主体Z", "对照：update 路径确实跑通了（有真变更）"
         assert r["name"] == "7104", "update 路径不得用表里的账户名称覆盖 name"
+
+    # ---------- Review-fix pass：未采集的列不得被当成空值清库 ----------
+
+    ENT_HEADER = ["日期", "是否回收", "账户ID", "主体名称", "账户名称", "BC",
+                  "国家", "所属渠道", "接户运营", "时区", "下户链接"]
+    JIABAI_HEADER = ["入库时间", "是否回收", "账户ID", "BC", "国家", "所属渠道",
+                     "接户运营", "时区", "状态", "消耗", "位置", "换绑情况", "产品信息"]
+
+    def test_uncollected_columns_are_not_cleared_by_another_table(self, client, monkeypatch):
+        """多表配置的数据丢失回归（本轮修复的核心）。
+
+        先同步「企业户」（该表采集 主体名称/下户链接）把值落库；再同步「加白户」
+        （该表没有这两列）做一次**真实更新**（消耗 100 让它确实进 to_update）。
+        修复前：`_collect_updates` 无条件按 `_PLAIN_TEXT_FIELDS` 迭代 → 加白户表没采集
+        这两列 ⇒ `p.get(f)` 得 None → "" → 被当成「表里空着」⇒ 把企业户先前落库的
+        `subject_name`/`landing_url` 静默清掉。修复后：未采集的列不产出字段 ⇒ 一字不碰。
+        同时断言 `consumption` 确实被写成了 100 —— 证明这次更新**真的跑了**，
+        「没被清掉」不是因为整行没进 to_update。
+        """
+        import json
+        import database
+        import google_sheets_service as gs
+        hg, uid = _create_user(client, "_nf5", role="huguan")
+
+        def _set_config(tables):
+            db = database.get_db()
+            db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                       (f"huguan_dashboard_{_uid_of('_nf5')}",
+                        json.dumps({"tt": {"spreadsheet_id": "SS", "tables": tables}})))
+            db.commit(); db.close()
+
+        _set_config([{"name": "企业户", "sheet_name": "企业户"}])
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            self.ENT_HEADER,
+            ["2026-10-01", "否", "7201", "主体甲", "账户甲", "BC-1",
+             "US", "渠道X", "张三", "UTC+8", "https://x/y"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        assert client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "dry_run": False,
+            "confirmed": {"create": ["7201"]}}).status_code == 200
+        db = database.get_db()
+        r = db.execute("SELECT subject_name, landing_url FROM tt_accounts "
+                       "WHERE advertiser_id='7201'").fetchone()
+        db.close()
+        assert (r["subject_name"], r["landing_url"]) == ("主体甲", "https://x/y"), \
+            "前提：企业户同步先把两个字段落了库"
+
+        # 切到只配「加白户」（该表无 主体名称/下户链接），同步同一账户做真实更新
+        _set_config([{"name": "加白户", "sheet_name": "加白户"}])
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            self.JIABAI_HEADER,
+            ["2026-10-01", "否", "7201", "BC-1", "US", "渠道X", "张三",
+             "UTC+8", "存活", "100", "", "", ""]])
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "dry_run": False,
+            "confirmed": {"update": ["7201"]}})
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["result"]["errors"] == [], resp.get_json()["result"]
+        db = database.get_db()
+        r = db.execute("SELECT subject_name, landing_url, consumption FROM tt_accounts "
+                       "WHERE advertiser_id='7201'").fetchone()
+        db.close()
+        assert r["consumption"] == "100", "对照：这次同步确实更新了该账户"
+        assert r["subject_name"] == "主体甲", "未采集的列不得被清空（企业户存的值被加白户抹了）"
+        assert r["landing_url"] == "https://x/y", "未采集的列不得被清空"
+
+    def test_collected_blank_cell_still_clears_db_column(self, client, monkeypatch):
+        """对照：**被采集**的列空着仍照常清库（「空着=清空」口径不许被上面的门打掉）。
+
+        企业户表采集「主体名称」；表里该格留空 ⇒ 库里 `subject_name` 必须被清成 ""。
+        判别力：若把门写成 `if not out[f]: continue`（按值判空），本用例变红。
+        """
+        import json
+        import database
+        import google_sheets_service as gs
+        hg, uid = _create_user(client, "_nf6", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_nf6')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "企业户", "sheet_name": "企业户"}]}})))
+        _seed_tt_account(db, "7202", uid, subject_name="主体甲", landing_url="https://a/b")
+        db.commit(); db.close()
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [
+            self.ENT_HEADER,
+            ["2026-10-01", "否", "7202", "", "账户乙", "BC-1",
+             "US", "渠道X", "张三", "UTC+8", "https://x/y"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        assert client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "dry_run": False,
+            "confirmed": {"update": ["7202"]}}).status_code == 200
+        db = database.get_db()
+        r = db.execute("SELECT subject_name, landing_url FROM tt_accounts "
+                       "WHERE advertiser_id='7202'").fetchone()
+        db.close()
+        assert r["subject_name"] == "", "被采集的列空着必须清库（口径不许被打掉）"
+        assert r["landing_url"] == "https://x/y", "被采集且有值的列照常写入"

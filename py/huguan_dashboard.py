@@ -1008,6 +1008,15 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     与下方名称类字段的 `if not value: continue` 不对称是**刻意的**：空串在名称
     命名空间里根本没有可解析的候选，属规格 §8.4 的「命中 0 条」。
 
+    **但「该列被采集、且值为空」与「该列根本没被采集」是两回事**（本轮修复）：
+    下面文本循环的门是 `if f not in p: continue` —— 判的是**这一列在不在该表的
+    col_map 里**（`p` 是 `parse_row` 的产出，只有被映射的列才落键），**不是**值是否
+    为空。二者混淆的后果是静默数据丢失：多表配置（企业户 + 加白户）里，加白户表没有
+    「主体名称/下户链接」列 ⇒ 早先 `p.get(f)` 得 `None` → `""` → 被当成「表里空着」，
+    于是同步加白户会把企业户先前落库的 `subject_name`/`landing_url` **无条件清掉**，
+    违反本批次全局约束「未采集的列一个字不碰（读不取、写不写）」。所以：**被采集的
+    列空着照样产出空串**（上面那段口径不变），**未采集的列一个字段都不产出**。
+
     产出里可能带五个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
     `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名、
     `_primary_bm_name`（FB 专有，表里填的主 BM 名）、
@@ -1018,8 +1027,15 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     """
     out = {}
     for f in _PLAIN_TEXT_FIELDS[platform]:
+        # **门在「这一列有没有被该表采集」上，不在值上**：`p` 是 `parse_row` 的产出，
+        # `f in p` ⇔ 该表的 col_map 映射了这列。未采集的列（如加白户表没有
+        # 主体名称/下户链接）不产出字段 ⇒ 不参与比对、不进 clears、不被清库
+        #（全局约束「未采集的列一个字不碰」）。与下面的值判空**正交**：被采集但空着的
+        # 列仍产出空串并照常清库。gg/fb 的合成 map 覆盖全部文本列 ⇒ 恒 `f in p` ⇒ 无操作。
+        if f not in p:
+            continue
         # `_conf_text` 兜底是因为 p 未必全是 str（同 `_conf_text` 的既有理由）
-        out[f] = _conf_text(p.get(f))
+        out[f] = _conf_text(p[f])
     # FB 的「位置」列：BM 名 → 主 BM。它不是普通外键列（主 BM 存在中间表
     # fb_account_bm 上，见 _set_primary_bm），所以不能走 _resolve_field /
     # _target_column 那条通用路径，改为在这里产出 `_primary_bm_name` 合成键，
