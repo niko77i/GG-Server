@@ -955,13 +955,24 @@ def _append_recharge_background(db, uid, sheet_id, sheet_name, rows, rids):
         if status == "synced":
             for rid in rids:
                 _db.execute("UPDATE tt_recharge_records SET sheets_synced=1, sheets_error='' WHERE id=?", (rid,))
-        else:
+        elif status == "retry_failed":
+            # ⚠️ 只有**终态**失败才落错。`_sync_sheets_background` 首次失败时会先回调一次
+            # 中间态 "failed"（30s 重试在途），失败了才再回调 "retry_failed"。
+            # 原实现用 if/else 两分支，把中间态与终态并进同一个 else ⇒ 首次失败就把失败
+            # 文案写进 sheets_error，而前端 `TtAccountDetailModal.vue` 在
+            # `sheets_synced === 0` 时就用它显示 ⚠️ ⇒ **用户会在重试还没跑完时先看到
+            # 一个可能马上自愈的报错**（三期设计 §7 点名的「首次失败就报警」缺陷）。
+            # GG 侧同源缺陷二期是换数据源修掉的（那边 `sheets_synced/sheets_error`
+            # 已不再写入，UI 改读只回终态的 /api/sheet-write/status）；此处按设计
+            # 「独立 bug 修复」的口径只修报警时机，不把 TT 充值改造成统一治理 target。
+            #
             # `sheets_error` 会被 GET /api/tt/accounts/<aid>/recharge-records 原样回给
             # 客户端（`SELECT r.*` + `dict(r)`）⇒ 写固定文案，异常原文只进日志
             # （_sync_sheets_background 已按 status 落 warning/error）。
             for rid in rids:
                 _db.execute("UPDATE tt_recharge_records SET sheets_error=? WHERE id=?",
                             (_SHEETS_SYNC_FAILED_MSG, rid))
+        # else: status == "failed" —— 中间态、重试在途，**什么都不写**（不报警）
         _db.commit()
         _db.close()
 

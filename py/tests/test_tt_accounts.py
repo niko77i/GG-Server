@@ -1368,3 +1368,60 @@ def test_sync_from_sheet_applies_type_to_new_accounts_only(mock_read, mock_build
     got = {i["advertiser_id"]: i["account_type"] for i in data["items"]}
     assert got["6401"] == "企业户", "新建的落选定类型"
     assert got["6402"] == "加白户", "已存在的账户类型不动"
+
+
+def test_recharge_first_failure_does_not_alert(client, monkeypatch, tt_headers):
+    """首次失败（中间态 "failed"）**不得**写 sheets_error —— 只有终态才报警。
+
+    回归守卫（三期设计 §7 点名的「首次失败就报警」缺陷）：
+    `_sync_sheets_background` 首次失败会先回调一次中间态 "failed"（30s 重试在途），
+    失败了才再回调 "retry_failed"。原实现 `_on_fail` 用 if/else **两分支**，把中间态
+    与终态并进同一个 `else` ⇒ 首次失败就把失败文案落库，而前端
+    `TtAccountDetailModal.vue` 在 `sheets_synced === 0` 时就用它显示 ⚠️
+    ⇒ 用户会在重试还没跑完时先看到一个**可能马上自愈**的报错。
+    （GG 侧同源缺陷二期是换数据源修掉的：那边 `sheets_synced/sheets_error` 已不再写入，
+      UI 改读只回终态的 /api/sheet-write/status。）
+
+    把 `elif status == "retry_failed"` 改回 `else:` ⇒ 本用例红（中间态那步就落错）。
+
+    刻意**直接驱动回调**、不跑真后台线程：这样只验分支语义，与 30s 重试窗口、
+    线程调度都无关。注意既有安全用例 `test_tt_background_on_fail_writes_fixed_text`
+    对本缺陷**没有判别力** —— 它用 `inline_bg` 把两次回调都在断言前跑完，
+    改前改后都绿。
+    """
+    import main as main_mod
+    from routes import tt_accounts_routes as ttr
+
+    resp = _mk_account(client, tt_headers, advertiser_id="1112223334445")
+    assert resp.status_code == 200, resp.get_json()
+    db = database.get_db()
+    db.execute("INSERT INTO tt_recharge_records (account_id, amount, operator, created_by) "
+               "VALUES ('1112223334445', '1000', 'x', "
+               "(SELECT id FROM users WHERE username='ttuser'))")
+    rid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.commit()
+
+    captured = {}
+    monkeypatch.setattr(main_mod, "_sync_sheets_background",
+                        lambda fn, on_fail: captured.update(on_fail=on_fail))
+    ttr._append_recharge_background(db, 1, "SHEET-E11", "充值表", [{"a": 1}], [rid])
+    assert "on_fail" in captured, "应把回调交给 _sync_sheets_background"
+
+    def _state():
+        r = db.execute("SELECT sheets_synced, sheets_error FROM tt_recharge_records "
+                       "WHERE id=?", (rid,)).fetchone()
+        return r["sheets_synced"], r["sheets_error"]
+
+    # ① 中间态（首次失败、30s 重试在途）：什么都不写 ⇒ 界面不会提前报警
+    captured["on_fail"]("failed", "Sheets 挂了")
+    assert _state() == (0, ""), f"中间态不得报警，实际 {_state()}"
+
+    # ② 终态失败：这才落固定文案（异常原文只进日志，见 E11 那条安全用例）
+    captured["on_fail"]("retry_failed", "Sheets 挂了")
+    assert _state() == (0, main_mod._SHEETS_SYNC_FAILED_MSG), \
+        f"终态失败应落固定文案，实际 {_state()}"
+
+    # ③ 成功：置已同步并清空错误
+    captured["on_fail"]("synced", "")
+    assert _state() == (1, ""), f"成功应清空错误，实际 {_state()}"
+    db.close()
