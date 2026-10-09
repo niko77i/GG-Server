@@ -118,10 +118,11 @@
           </el-col>
         </el-row>
 
-          <el-card v-if="!authStore.isHuguan" shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
+          <el-card shadow="never" style="margin-top:20px;border-left:3px solid #0891b2;">
             <template #header>
               <span style="font-weight:600;">📊 Google 表格配置</span>
               <el-tag v-if="isAdmin" size="small" type="warning" style="margin-left:8px;">仅管理员</el-tag>
+              <el-tag v-else-if="authStore.isHuguan" size="small" type="info" style="margin-left:8px;">充值表 / 回收户清单可改</el-tag>
             </template>
 
             <!-- Google Sheets URL（读取对所有用户开放，内容仅管理员可改） -->
@@ -141,7 +142,7 @@
               <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">Sheet 映射</div>
               <div style="background:#f9fafb;border-radius:8px;padding:12px;">
                 <div v-for="key in visibleSheetKeys" :key="key" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                  <span style="white-space:nowrap;font-size:13px;min-width:80px;color:#374151;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}<el-tag v-if="SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].adminOnly" size="small" type="warning" style="margin-left:4px;">仅管理员</el-tag></span>
+                  <span style="white-space:nowrap;font-size:13px;min-width:80px;color:#374151;">{{ (SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].label) || key }}<el-tag v-if="isAdmin && SHEET_MAPPING_META[key] && SHEET_MAPPING_META[key].adminOnly" size="small" type="warning" style="margin-left:4px;">仅管理员</el-tag></span>
                   <el-select
                     v-model="form.sheet_mappings[key]"
                     filterable allow-create default-first-option
@@ -160,8 +161,10 @@
             <span v-if="msg" style="margin-left:8px;font-size:12px;color:#059669;">{{ msg }}</span>
           </el-card>
 
-          <!-- 户管看板配置（子项目 B）。只有户管可见；上面那张 sheet 卡片对户管是
-               v-if="!authStore.isHuguan"，两张互斥，户管只会看到这一张。
+          <!-- 户管看板配置（子项目 B）。只有户管可见（守卫在组件内部）。
+               自 2026-10-08 起上面那张 sheet 卡片对所有人可见，因此两张**不再互斥** ——
+               户管会同时看到「📊 Google 表格配置」（其中只有充值表 / 回收户清单两行可改）
+               与这张户管专用看板卡。
                卡片本体在 components/HuguanDashboardCard.vue（GG / TT 共用），平台由属性传入。 -->
           <HuguanDashboardCard platform="tt" />
       </el-tab-pane>
@@ -283,12 +286,14 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api/client'
 import HuguanDashboardCard from '@/components/HuguanDashboardCard.vue'
 
-// Sheet 映射功能注册表 — 已知 key 的显示名（未知 key 直接显示 key 名）
+// Sheet 映射功能注册表 — 已知 key 的显示名（未知 key 直接显示 key 名）。
+// writableBy 必须与后端 tt_settings_save 的白名单**逐字对齐**：
+// 「界面上能改」与「存得下去」必须同一个集合，否则就是静默丢弃。
 const SHEET_MAPPING_META = {
-  accounts: { label: '账户明细', adminOnly: true },
-  recharge: { label: '充值表', adminOnly: true },
-  my_dashboard: { label: '我的看板', adminOnly: false },
-  recycle: { label: '回收户清单', adminOnly: true },
+  accounts: { label: '账户明细', adminOnly: true, writableBy: ['admin', 'developer'] },
+  recharge: { label: '充值表', adminOnly: true, writableBy: ['admin', 'developer', 'huguan'] },
+  my_dashboard: { label: '我的看板', adminOnly: false, writableBy: ['admin', 'developer', 'user', 'viewer', 'hidden'] },
+  recycle: { label: '回收户清单', adminOnly: true, writableBy: ['admin', 'developer', 'huguan'] },
 }
 
 const authStore = useAuthStore()
@@ -301,10 +306,15 @@ const form = reactive({
   sheet_id: '',
   sheet_mappings: { accounts: '账户明细', recharge: '充值表', my_dashboard: '我的看板', recycle: '回收户清单' },
 })
-// 当前用户可见的 sheet 映射 key：管理员看全部，投手只看「我的看板」
-const visibleSheetKeys = computed(() =>
-  Object.keys(form.sheet_mappings).filter(k => isAdmin.value || !(SHEET_MAPPING_META[k] && SHEET_MAPPING_META[k].adminOnly))
-)
+// 当前用户可见的 sheet 映射 key。
+// ⚠️ 这里**不再**用 `!adminOnly || isHuguan` 那种「给户管开后门放行全部 adminOnly 行」
+// 的写法 —— 那正是「户管看得见 recharge/recycle/accounts、但后端只存 my_dashboard」
+// 静默丢弃的由来。改成按角色的显式白名单，两边一起改才不会漂。
+const visibleSheetKeys = computed(() => {
+  const role = authStore.user?.role || 'user'
+  return Object.keys(SHEET_MAPPING_META)
+    .filter(k => (SHEET_MAPPING_META[k].writableBy || []).includes(role))
+})
 
 // 商务人员
 const salesPersons = ref([])
@@ -526,6 +536,14 @@ async function loadSettings() {
     const res = await ttSettingsApi.getSettings()
     form.sheet_id = res.settings?.sheet_id || ''
     form.sheet_mappings = res.settings?.sheet_mappings || form.sheet_mappings
+    // 只保留当前用户有权写的 key：把无权 key 留在 form 里，保存时它们会被后端静默
+    // 丢弃，而用户以为自己改了 —— 与造成静默丢弃的那个 bug 同源。
+    const allowed = new Set(visibleSheetKeys.value)
+    form.sheet_mappings = Object.fromEntries(
+      Object.entries(form.sheet_mappings).filter(([k]) => allowed.has(k)))
+    for (const k of allowed) {
+      if (!(k in form.sheet_mappings)) form.sheet_mappings[k] = ''
+    }
   } catch (e) { /* 静默失败，保留默认值 */ }
 }
 

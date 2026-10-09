@@ -11,17 +11,49 @@ rebuild 一律**从 DB 重算**，不重放快照。
 线程约束：所有 service 与 DB 连接都在**函数/闭包内**新建 —— 这些代码会在后台线程里跑，
 sqlite 连接与 httplib2 客户端都不可跨线程复用。
 """
+import logging
+
 import sheet_write
+
+log = logging.getLogger("gg-server")
+
+
+def _resolve_sheet_name(db, user_id, platform, account_id):
+    """按账户的**户类型**解析它该写哪张 worksheet（多账户表规格 §4.4）。
+
+    解析不到 → 返回 None，由调用方决定「跳过」还是「报失败」。
+    gg / fb 的类型恒为空串、配置里恰有一个空名条目 ⇒ 恒命中那唯一一张表，
+    行为与改动前（单表）等价；只有 tt 会真正分表。
+    """
+    import huguan_dashboard as hd
+
+    tables = hd.get_platform_tables(db, user_id, platform)
+    if not tables:
+        return None
+    atype = ""
+    if platform == "tt":
+        r = db.execute("SELECT account_type FROM tt_accounts WHERE advertiser_id=?",
+                       (account_id,)).fetchone()
+        atype = (r["account_type"] if r else "") or ""
+    for t in tables:
+        if t["name"] == atype:
+            return t["sheet_name"]
+    return None
 
 
 # ---------- target: huguan_dashboard（整行刷新；覆盖点位 #1 与 #5 的 :159/:171/:180） ----------
 
 def huguan_dashboard_sync(user_id, platform, account_ids):
-    """把这些账户的**整行**刷新到该户管的看板。
+    """把这些账户的**整行**刷新到该户管的看板（tt 多表：按户类型各写各的 worksheet）。
 
     重建走 `collect_rows_for_push` —— 与既有 `push_rows` 同一条路径。
     `cells_for_row` 只产出系统拥有的可写列，**刻意不含**归属变更通道列（规格 §7.2 规则 2），
     故不会碰到户管用公式维护的列。
+
+    **选表在这里做**（而不是在 `push_rows` / `_write_background_tables` 里）：重试路径
+    同样要选表，只有放在写表处才不会出现「首次写对、重试写错表」。口径与 `group_rows_by_sheet`
+    一致：查不到对应工作表的户类型**跳过并记 warning**，绝不退回写第一张表
+    —— 那会把甲类账户的内容覆盖进乙类的 worksheet。
     """
     import database
     import google_sheets_service as gs
@@ -30,18 +62,32 @@ def huguan_dashboard_sync(user_id, platform, account_ids):
 
     db = database.get_db()
     try:
-        conf = hd.get_platform_config(db, user_id, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
-            raise RuntimeError("该看板未配置表格 ID 或工作表名")
+        tables = hd.get_platform_tables(db, user_id, platform)
+        if not tables:
+            raise RuntimeError("该看板未配置账户表")
+        spreadsheet_id = hd.get_platform_config(db, user_id, platform)["spreadsheet_id"]
+        if not spreadsheet_id:
+            raise RuntimeError("该看板未配置表格 ID")
         rows = hd.collect_rows_for_push(db, platform, list(account_ids))
+        groups, skipped = hd.group_rows_by_sheet(db, user_id, platform, rows)
+        for name in skipped:
+            log.warning("看板回写跳过：户类型「%s」查不到工作表 user=%s platform=%s",
+                        name, user_id, platform)
     finally:
         db.close()
     if not rows:
         raise RuntimeError("找不到对应账户，无法重建看板行")
+    # 一组都没有 ⇒ 每一行的户类型都查不到工作表。master 侧对此是静默 no-op，但三期要求
+    # 「失败可见」：仍然不写错表（沿用他们的选择），同时**明确报失败** —— 否则日志行会落
+    # synced 而表里一行没写，那正是本期要消灭的静默形态。
+    if not groups:
+        raise RuntimeError("所有账户的户类型都查不到对应工作表，未写入")
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-    gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                 conf["sheet_name"], rows, key_col=hd.KEY_COL[platform])
+    for sheet_name, sheet_rows in groups:
+        # key_col 必须显式传：TT 的账户ID列是 C，FB 是 D，写入器默认 "C"。
+        gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, sheet_rows,
+                                     key_col=hd.KEY_COL[platform])
 
 
 def huguan_dashboard_many_sync(user_id, platform, business_keys):
@@ -71,8 +117,20 @@ def _huguan_dashboard_rebuild(user_id, business_key, payload):
 
 # ---------- target: huguan_owner_channel（通道列；覆盖点位 #3 与 #5 的 :165） ----------
 
-def huguan_owner_channel_sync(user_id, platform, account_id, value):
-    """写归属变更通道列（GG=H / TT=L）。`value` 为空串即清空该格。"""
+def huguan_owner_channel_sync(user_id, platform, account_id, value, role="channel"):
+    """**单格定向写**归属相关的某一列：
+    `role="channel"` → 归属变更通道列（GG=H / TT=L）；
+    `role="owner"`   → 运营/归属列（gg/tt=G，即 `apply_diff` 的 `item["to"]` 的落点）。
+    `value` 为空串即清空该格。
+
+    刻意**只写这一格**（与 `owner_channel_cells` 同一原则）：顺手带上别的列，就会把
+    户管在表里的其他手工改动一起冲掉 —— 归属变更那一行尤其如此，所以它**不走**
+    `huguan_dashboard` 的整行重建。
+
+    选表按该账户的**户类型**（tt 多表）。这里解析不到就**报失败**、不跳过 ——
+    入口侧已经有「解析不到就早退、不登记」的闸门，能走到这里说明配置是在登记之后
+    才变的（户类型被改名 / 表被删），必须让用户在日志行上看见，而不是静默 no-op。
+    """
     import database
     import google_sheets_service as gs
     import huguan_dashboard as hd
@@ -80,17 +138,25 @@ def huguan_owner_channel_sync(user_id, platform, account_id, value):
 
     db = database.get_db()
     try:
-        conf = hd.get_platform_config(db, user_id, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
-            raise RuntimeError("该看板未配置表格 ID 或工作表名")
-        rows = hd.owner_channel_cells([{"account_id": account_id}], platform, value)
+        spreadsheet_id = hd.get_platform_config(db, user_id, platform)["spreadsheet_id"]
+        if not spreadsheet_id:
+            raise RuntimeError("该看板未配置表格 ID")
+        sheet_name = _resolve_sheet_name(db, user_id, platform, account_id)
+        if not sheet_name:
+            raise RuntimeError("该账户的户类型查不到对应工作表")
+        col = hd.owner_role_col(platform, role)   # 唯一解析点，见 huguan_dashboard.owner_role_col
+        rows = [{"account_id": account_id, "cells": {col: value}}]
     finally:
         db.close()
     if not rows:
         raise RuntimeError("无法构造通道列待写行")
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-    gs.update_rows_by_account_id(service, conf["spreadsheet_id"], conf["sheet_name"], rows)
+    # key_col 必须按平台显式传：写入器默认 "C"（gg/tt 的账户ID列），而 **fb 的账户ID在
+    # D 列**（C 是「账户名称」）—— 不传就按错误的列定位、整批静默写空且不抛异常。
+    # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 对它们是无操作（逐字节不变）。
+    gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows,
+                                 key_col=hd.KEY_COL[platform])
 
 
 def _huguan_owner_channel_rebuild(user_id, business_key, payload):
@@ -103,16 +169,21 @@ def _huguan_owner_channel_rebuild(user_id, business_key, payload):
           - 老路径（payload 未带 value）才回读 DB：
               · gg：`accounts.owner_id` → `users` 的名字（**可重算**）
               · tt：`tt_accounts.owner_change_note`（**读回**——单值列，会被后续换绑覆盖）
+
+    另可带 `col_role`（缺省 "channel"）：写哪一列。`"channel"` = 归属变更通道列
+    （gg=H / tt=L），`"owner"` = 运营/归属列（gg/tt=G，归属变更同步回来的落点）。
+    **老行没有这个键 ⇒ 取缺省 "channel"，行为与改动前逐字一致。**
     """
     p = payload or {}
     platform = p.get("platform")
     mode = p.get("mode")
     if not platform or mode not in ("clear", "owner"):
         raise RuntimeError("payload 需带 platform 与 mode(clear|owner)")
+    col_role = p.get("col_role") or "channel"
 
     def _sync():
         if mode == "clear":
-            huguan_owner_channel_sync(user_id, platform, business_key, "")
+            huguan_owner_channel_sync(user_id, platform, business_key, "", role=col_role)
             return
         if "value" in p:
             value = p.get("value") or ""
@@ -133,7 +204,7 @@ def _huguan_owner_channel_rebuild(user_id, business_key, payload):
                     value = (r["n"] if r else "") or ""
             finally:
                 db.close()
-        huguan_owner_channel_sync(user_id, platform, business_key, value)
+        huguan_owner_channel_sync(user_id, platform, business_key, value, role=col_role)
 
     return _sync
 
@@ -195,7 +266,12 @@ def _operator_dashboard_remark_rebuild(user_id, business_key, payload):
 # ---------- target: huguan_fb_acceptor（点位 #4） ----------
 
 def huguan_fb_acceptor_sync(user_id, platform, account_id, note):
-    """写 FB 接户运营列（I 列）。"""
+    """写 FB 接户运营列（I 列）。
+
+    本 target 只用于 fb（`_huguan_fb_acceptor_rebuild` 里平台是硬编码的 "fb"），
+    而 fb 恒为单表 ⇒ 走 `_resolve_sheet_name` 会命中那个唯一的空名条目，
+    行为与改动前等价；用同一个 helper 只是为了让「选表」只有一处实现。
+    """
     import database
     import google_sheets_service as gs
     import huguan_dashboard as hd
@@ -203,9 +279,12 @@ def huguan_fb_acceptor_sync(user_id, platform, account_id, note):
 
     db = database.get_db()
     try:
-        conf = hd.get_platform_config(db, user_id, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
-            raise RuntimeError("该看板未配置表格 ID 或工作表名")
+        spreadsheet_id = hd.get_platform_config(db, user_id, platform)["spreadsheet_id"]
+        if not spreadsheet_id:
+            raise RuntimeError("该看板未配置表格 ID")
+        sheet_name = _resolve_sheet_name(db, user_id, platform, account_id)
+        if not sheet_name:
+            raise RuntimeError("查不到该看板的工作表")
         rows = hd._fb_acceptor_cells([{"account_id": account_id}], note)
     finally:
         db.close()
@@ -213,7 +292,7 @@ def huguan_fb_acceptor_sync(user_id, platform, account_id, note):
         raise RuntimeError("无法构造 FB 接户运营待写行")
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-    gs.update_rows_by_account_id(service, conf["spreadsheet_id"], conf["sheet_name"], rows,
+    gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows,
                                  key_col=hd.KEY_COL[platform])
 
 

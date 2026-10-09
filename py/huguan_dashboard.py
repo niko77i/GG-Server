@@ -90,6 +90,26 @@ READ_RANGE = {"gg": "A:N", "tt": "A:M", "fb": "A:Q"}
 # 系统里「账户ID」列在两张表下的实际字段名
 ACCOUNT_KEY_FIELD = {"gg": "account_id", "tt": "advertiser_id", "fb": "account_id"}
 
+# 「归属相关的**单格定向写**」用到的列 —— 按**角色**取，不按调用点各自写死字母。
+# 只有这一个解析点：后续「按表头识别 + 手工映射」改造（2026-10-08 另一方向）
+# 落到这里换实现即可，写表目标与调用点都不用动。
+_OWNER_ROLE_COL = {
+    "channel": OWNER_CHANNEL_COL,   # 归属变更通道列（gg=H / tt=L）
+    "owner": OWNER_COL,             # 归属/运营列（gg/tt=G），即 apply_diff 的 item["to"] 落点
+}
+
+
+def owner_role_col(platform: str, role: str) -> str:
+    """角色 → 户管看板上的列字母。未知角色/平台一律抛错 ——
+    绝不静默落到别的列（写错列的后果是冲掉户管在表里的手工内容）。"""
+    table = _OWNER_ROLE_COL.get(role)
+    if table is None:
+        raise ValueError(f"未知的归属列角色: {role}")
+    col = table.get(platform)
+    if not col:
+        raise ValueError(f"平台 {platform} 没有角色 {role} 对应的列")
+    return col
+
 
 def _text(value) -> str:
     """账户ID 等长数字强制文本，避免 Sheets 按数字处理丢精度。
@@ -287,12 +307,16 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
             if not name or not sheet:
                 raise ValueError("每个户类型都需要「类型名」和「工作表名」")
             clean.append({"name": name, "sheet_name": sheet})
-        # 旧类型名 → 新类型名：按**位置**比对（清单是同一个列表，位置即身份）。
-        old_tables = get_platform_tables(db, user_id, "tt")
-        for i, new_t in enumerate(clean):
-            if i >= len(old_tables):
-                break
-            old_name = old_tables[i]["name"]
+        # 行身份 = worksheet 名，**不是下标**。下标在「删掉中间一行」时会整体错位：
+        # 旧 [加白户→S1, 企业户→S2, 特批户→S3] → 新 [加白户→S1, 特批户→S3] 会把
+        # 「企业户」的账户改名成「特批户」（静默并户），与规格 §5「删除类型保留原值」冲突。
+        # worksheet 名可以作为身份，是因为路由层校验了同一次保存内它互不重复
+        # （见 routes/huguan_dashboard_routes.py 的 POST 校验）。
+        # 已知边界：用户同时改「类型名」和「worksheet」时会被当成删+增、不级联，
+        # 该类型账户保留旧名（孤儿）。这是刻意接受的取舍 —— 宁可留孤儿，不可错并户。
+        old_by_sheet = {t["sheet_name"]: t["name"] for t in get_platform_tables(db, user_id, "tt")}
+        for new_t in clean:
+            old_name = old_by_sheet.get(new_t["sheet_name"])
             if old_name and old_name != new_t["name"]:
                 # 类型名字符串即标识（规格 §5）：不级联的话，存量账户会从按钮里凭空消失。
                 db.execute("UPDATE tt_accounts SET account_type=? WHERE account_type=?",
@@ -314,6 +338,8 @@ def group_rows_by_sheet(db, user_id: int, platform: str, rows: list):
 
     查不到就**跳过**，绝不退回写第一张表 —— 那正是多表之后要消除的「填错表」。
     gg/fb 的类型恒为空串且配置里恰好有一个空名条目 ⇒ 只有一组，与改动前等价。
+    tt 的空类型（账户行没类型 / 查不到）**跳过**，不退回第一张表：宁可漏写
+    （日志里看得见）也不能写错 —— 写错表会把甲类账户的内容覆盖进乙类的 worksheet。
     """
     tables = get_platform_tables(db, user_id, platform)
     buckets = {}
@@ -327,8 +353,15 @@ def group_rows_by_sheet(db, user_id: int, platform: str, rows: list):
     for leftover, leftover_rows in buckets.items():
         if leftover:
             skipped.append(leftover)
-        elif tables:
+        elif platform != "tt" and tables:
+            # gg/fb 的类型恒为空串，其配置条目也恰好是空名 ⇒ 正常已被上面的循环取走。
+            # 保留这一支只为兼容「配置条目缺失」这种历史态，行为与改动前等价。
             groups.append((tables[0]["sheet_name"], leftover_rows))
+        else:
+            # tt：类型为空 ⇒ 查不到对应工作表。**绝不退回写第一张表** —— 那正是本设计
+            # 要消除的「填错表」。宁可漏写（日志里看得见）也不能写错：写错表会把甲类
+            # 账户的内容覆盖进乙类的 worksheet，而漏写只是少刷新几行。
+            skipped.append(leftover or "（未设置户类型）")
     return groups, skipped
 
 
@@ -574,6 +607,11 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
     key_field = ACCOUNT_KEY_FIELD[platform]
     sheet_rows = len(parsed_rows)   # 表里数据行总数（**去重前**），供 summary 用
 
+    # 多表同步后「第 N 行」在两张表里会撞（规格 §4.3 的坑）：每个产出项都带表名，
+    # 前端按表分组展示，否则户管会去改错表。
+    def _sheet_of(p):
+        return _conf_text(p.get("_sheet"))
+
     # 四个产出列表必须在去重循环**之前**建好：去重本身会往 warnings 里塞一条
     to_create, to_update, owner_changes, to_skip = [], [], [], []
     warnings = []
@@ -588,7 +626,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             deduped.append(p)
             continue
         if aid in seen_rows:
-            warnings.append({"row": p.get("row"),
+            warnings.append({"row": p.get("row"), "sheet": _sheet_of(p),
                              "message": f"账户ID「{aid}」已在第 {seen_rows[aid]} 行出现，本行跳过"})
             continue
         seen_rows[aid] = p.get("row")
@@ -615,7 +653,8 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         row_no = p.get("row")
         aid = p.get("account_id", "")
         if not aid:
-            warnings.append({"row": row_no, "message": "账户ID为空，跳过"})
+            warnings.append({"row": row_no, "sheet": _sheet_of(p),
+                             "message": "账户ID为空，跳过"})
             continue
 
         want_owner_name = effective_owner_name(p, platform)
@@ -623,7 +662,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         if want_owner_name:
             want_owner_id = resolve_owner_id(db, want_owner_name)
             if want_owner_id is None:
-                warnings.append({"row": row_no,
+                warnings.append({"row": row_no, "sheet": _sheet_of(p),
                                  "message": f"运营「{want_owner_name}」无法识别，已跳过归属变更"})
 
         existing = existing_map.get(aid)
@@ -636,6 +675,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             pending = db_values.pop("_pending_status", None)
             to_create.append({
                 "row": row_no,
+                "sheet": _sheet_of(p),
                 "account_id": aid,
                 "owner_id": want_owner_id,
                 "owner_name": want_owner_name,
@@ -649,7 +689,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             continue
 
         if existing.get("deleted_at"):
-            to_skip.append({"row": row_no, "account_id": aid,
+            to_skip.append({"row": row_no, "sheet": _sheet_of(p), "account_id": aid,
                             "reason": "系统中已逻辑删除，不动"})
             continue
 
@@ -657,6 +697,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         if want_owner_id is not None and int(cur_owner or 0) != int(want_owner_id):
             owner_changes.append({
                 "row": row_no,
+                "sheet": _sheet_of(p),
                 "account_id": aid,
                 "existing_id": existing["id"],
                 "from": existing.get("owner_display") or existing.get("owner_username") or "",
@@ -686,7 +727,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         # pending 也算真实变更：系统里没这个状态名，建出来必然与现状不同。
         # 只比 `changed` 会让「这一行只改了状态」被整行漏掉。
         if changed or pending:
-            to_update.append({"row": row_no, "account_id": aid,
+            to_update.append({"row": row_no, "sheet": _sheet_of(p), "account_id": aid,
                               "existing_id": existing["id"], "fields": changed,
                               "pending_status": pending,
                               # apply_diff 建缺失状态行时用它记 owner（谁先建的）
@@ -727,9 +768,10 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     与下方名称类字段的 `if not value: continue` 不对称是**刻意的**：空串在名称
     命名空间里根本没有可解析的候选，属规格 §8.4 的「命中 0 条」。
 
-    产出里可能带三个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
+    产出里可能带四个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
     `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名、
-    `_primary_bm_name`（FB 专有，表里填的主 BM 名）。
+    `_primary_bm_name`（FB 专有，表里填的主 BM 名）、
+    `_account_type`（TT 专有，由调用方按「这一行读自哪张表」注入的户类型）。
 
     create_missing 由 build_diff 传 False（dry_run 只读），落库阶段才用默认 True。
     """
@@ -765,11 +807,17 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
         if not _known:
             continue
         if resolved is None:
-            warnings.append({"row": row_no,
+            warnings.append({"row": row_no, "sheet": _conf_text(p.get("_sheet")),
                              "message": f"{f}「{value}」无法唯一匹配，已跳过该列"})
             continue
         out[_target_column(platform, f)] = resolved
     out["_is_dead"] = is_dead(p)
+    # 户类型的传递链第 ② 环（规格 §4.3）：`account_type` 不是表里的列，
+    # 所以走合成键，与 `_primary_bm_name` 同形 —— 由调用方（同步路由）按
+    # 「这一行是从哪张表读出来的」注入，这里原样搬运。
+    # **不放进 _PLAIN_TEXT_FIELDS**：那个集合参与「文本列空着＝清空系统该列」的口径。
+    if platform == "tt":
+        out["_account_type"] = _conf_text(p.get("_account_type"))
     return out
 
 
@@ -805,6 +853,11 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
     if key == "_is_dead":
         cur_dead = bool((existing.get("death_date") or "").strip())
         return cur_dead == bool(value)
+    if key == "_account_type":
+        # 合成键：库里对应的是真实列 account_type。不加这一支会落到下面的通用比较，
+        # 拿 existing["_account_type"]（不存在 → None）去比 → 恒判「变了」，
+        # 于是每次同步都把每一行报成「将更新」。
+        return _conf_text(existing.get("account_type")) == _conf_text(value)
     if key == "_primary_bm_name":
         # 合成键：当前主 BM 名不在业务表行上（挂在中间表 fb_account_bm），
         # existing 里取不到，必须现查 —— 否则「表里清空位置」会被误判成「没变」
@@ -1042,6 +1095,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # fb_accounts 的列。**必须在下面 `cols = ", ".join(src)` 之前摘掉**，
             # 否则会拼出 `INSERT INTO fb_accounts(..., _primary_bm_name)` 直接报错。
             fb_bm_name = src.pop("_primary_bm_name", None) if platform == "fb" else None
+            # 户类型（规格 §4.3 第 ④ 环）：合成键必须在拼 SQL 之前摘掉，
+            # 否则会拼出 `INSERT INTO tt_accounts(..., _account_type)` 直接报错。
+            account_type = src.pop("_account_type", None) if platform == "tt" else None
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读）
             pending = item.get("pending_status")
             if pending:
@@ -1050,6 +1106,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             src[key_field] = item["account_id"]
             src["name"] = item["account_id"]
             src["owner_id"] = item.get("owner_id")
+            if account_type is not None:
+                src["account_type"] = account_type or TT_DEFAULT_ACCOUNT_TYPE
             # FB 无 death_date 列（子项目 ① 已确认，设计 §6.1）：生死只由状态列承载，
             # 「apply_diff 不据此写 death_date」。无条件写会让 FB 的 INSERT 直接
             # `no column named death_date` —— 整条 to_create 失败，主 BM（位置列）也就挂不上。
@@ -1094,7 +1152,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 异常详情照旧进日志，排查线索不因脱敏而降级。
             log.exception("户管同步：新建账户落库失败 platform=%s row=%s",
                           platform, item["row"])
-            errors.append({"row": item["row"], "error": "创建失败，详情见服务端日志"})
+            errors.append({"row": item["row"], "sheet": item.get("sheet", ""),
+                           "error": "创建失败，详情见服务端日志"})
 
     for item in diff.get("to_update", []):
         if item["account_id"] not in conf.get("update", []):
@@ -1111,6 +1170,11 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 注意空值语义：表里「位置」空着 → 这里是空串（不是 None），
             # 要落到下面的 else 分支「只清主 BM 标记、不删关联行」（设计 §6.3）。
             new_bm_name = fields.pop("_primary_bm_name", None) if platform == "fb" else None
+            # 同 create：`sets = [f"{k}=?" for k in fields]` 会无条件把每个键拼进 SET，
+            # 漏 pop 就是 `UPDATE tt_accounts SET _account_type=?` 直接报错。
+            account_type = fields.pop("_account_type", None) if platform == "tt" else None
+            if account_type:
+                fields["account_type"] = account_type
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读，规格 §8.3
             # 步骤 7/8）。owner 取该行作用域归属，只记「谁先建的」——不参与查重。
             pending = item.get("pending_status")
@@ -1196,7 +1260,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # result 会被路由整体回出，str(e) 即 CWE-209 泄露）。
             log.exception("户管同步：更新账户落库失败 platform=%s row=%s",
                           platform, item["row"])
-            errors.append({"row": item["row"], "error": "更新失败，详情见服务端日志"})
+            errors.append({"row": item["row"], "sheet": item.get("sheet", ""),
+                           "error": "更新失败，详情见服务端日志"})
 
     for item in diff.get("owner_changes", []):
         if item["account_id"] not in conf.get("owner", []):
@@ -1248,7 +1313,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 同前两处：固定文案回响应体，异常详情进日志（路由整体回出 result）。
             log.exception("户管同步：归属变更落库失败 platform=%s row=%s",
                           platform, item["row"])
-            errors.append({"row": item["row"], "error": "归属变更失败，详情见服务端日志"})
+            errors.append({"row": item["row"], "sheet": item.get("sheet", ""),
+                           "error": "归属变更失败，详情见服务端日志"})
 
     # 「勾了却没作用上」是独立信号，不进 errors —— 差异报告变了不是出错，
     # 但户管必须知道自己的勾选没生效。
@@ -1390,7 +1456,7 @@ LEFT JOIN account_statuses s ON a.status_id = s.id
 """
 
 _TT_ROW_SQL = """
-SELECT a.advertiser_id AS account_id, a.acquired_date, a.death_date, a.country,
+SELECT a.advertiser_id AS account_id, a.account_type, a.acquired_date, a.death_date, a.country,
        a.timezone, a.consumption, a.remark,
        b.name AS bc_name, ag.name AS agent_name,
        COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
@@ -1458,8 +1524,13 @@ def collect_rows_for_push(db, platform: str, account_ids=None) -> list:
     for q_sql, q_params in queries:
         for r in db.execute(q_sql, q_params).fetchall():
             row = dict(r)
-            out.append({"account_id": str(row.get("account_id") or "").strip(),
-                        "cells": cells_for_row(row, platform)})
+            item = {"account_id": str(row.get("account_id") or "").strip(),
+                    "cells": cells_for_row(row, platform)}
+            # 户类型只用于**路由**（决定写哪张 worksheet），不进 cells ——
+            # cells 是「表列字母 → 单元格值」，没有类型这一列。
+            # gg/fb 的 _ROW_SQL 没有这一列 ⇒ 取到空串，分组时只有一组，行为不变。
+            item["account_type"] = row.get("account_type") or ""
+            out.append(item)
     return [o for o in out if o["account_id"]]
 
 
@@ -1544,8 +1615,10 @@ def read_operator_remark_map(db, owner_id: int) -> dict:
         return {}
 
 
-def snapshot_push_targets(service, conf: dict, platform: str, rows: list) -> dict:
-    """读整片表，记下「本次刷新将会写到的每个格子」的当前值。
+def snapshot_push_targets(service, conf: dict, platform: str, groups: list) -> dict:
+    """读每张表，记下「本次刷新将会写到的每个格子」的当前值。
+
+    `groups` 是 `group_rows_by_sheet` 的产出：`[(sheet_name, rows)]`。
 
     只覆盖**真正会被写**的行与列：
       - 行：`rows` 里在表中命中定位键的那些（表里没有的账户 update_rows_by_account_id
@@ -1553,41 +1626,83 @@ def snapshot_push_targets(service, conf: dict, platform: str, rows: list) -> dic
       - 列：该行 `cells_for_row` 会产出的列（即 COLUMN_SPEC 里 writable=True 的）
 
     ⚠️ 必须在**写表之前**调用 —— 写完之后原值就没了。
+    ⚠️ 返回值从「单表快照」改成**每张表一份**（2026-10-08 多表规格 §4.4）：
+       TT 现在一个平台有多张 worksheet，撤回必须逐表还原。
+       兼容性：旧快照 payload 是 `{spreadsheet_id, sheet_name, cells}`，
+       `push_undo_cells` 两种形状都认（见下），所以历史快照仍能撤回一次。
     """
-    sheet_name = conf["sheet_name"]
-    grid = read_sheet_values(service, conf["spreadsheet_id"], sheet_name, READ_RANGE[platform])
-    key_i = col_index(KEY_COL[platform])
-
-    where = {}
-    for i, values in enumerate(grid[1:], start=2):
-        if len(values) <= key_i:
+    spreadsheets = conf.get("spreadsheet_id") or ""
+    out_sheets = []
+    for sheet_name, rows in groups:
+        if not rows:
             continue
-        raw = ("" if values[key_i] is None else str(values[key_i])).strip().lstrip("'").strip()
-        if raw and raw not in where:
-            where[raw] = values
+        grid = read_sheet_values(service, spreadsheets, sheet_name, READ_RANGE[platform])
+        key_i = col_index(KEY_COL[platform])
 
-    out = []
-    for r in rows:
-        aid = r["account_id"]
-        values = where.get(aid)
-        if values is None:
-            continue
-        cells = {}
-        for col in r["cells"]:
-            i = col_index(col)
-            cells[col] = ("" if len(values) <= i or values[i] is None
-                          else str(values[i])).strip()
-        if cells:
-            out.append({"account_id": aid, "cells": cells})
-    return {"spreadsheet_id": conf["spreadsheet_id"],
-            "sheet_name": sheet_name,
-            "cells": out}
+        where = {}
+        for i, values in enumerate(grid[1:], start=2):
+            if len(values) <= key_i:
+                continue
+            raw = ("" if values[key_i] is None else str(values[key_i])).strip().lstrip("'").strip()
+            if raw and raw not in where:
+                where[raw] = values
+
+        cells = []
+        for r in rows:
+            aid = r["account_id"]
+            values = where.get(aid)
+            if values is None:
+                continue
+            row_cells = {}
+            for col in r["cells"]:
+                i = col_index(col)
+                row_cells[col] = ("" if len(values) <= i or values[i] is None
+                                  else str(values[i])).strip()
+            if row_cells:
+                cells.append({"account_id": aid, "cells": row_cells})
+        out_sheets.append({"sheet_name": sheet_name, "cells": cells})
+    return {"spreadsheet_id": spreadsheets, "sheets": out_sheets}
 
 
 def push_undo_cells(payload: dict) -> list:
-    """把 push 快照转成 `update_rows_by_account_id` 的入参形状。"""
-    return [{"account_id": c["account_id"], "cells": dict(c["cells"])}
-            for c in (payload or {}).get("cells", [])]
+    """把 push 快照转成「按表分组」的写表入参：`[{"sheet_name", "rows"}]`。
+
+    兼容两种快照形状：
+      - 新（2026-10-08 起）：`{spreadsheet_id, sheets: [{sheet_name, cells}]}`
+      - 旧（多表之前）：`{spreadsheet_id, sheet_name, cells}`
+    旧快照必须继续认，否则升级那一刻「撤回上次」会静默变成空操作。
+
+    ⚠️ 每项的形状是 `{"sheet_name", "rows"}`（计划里的 Produces 契约行），
+      **不是**元组 —— Task 7 的验收用例按 `c["sheet_name"]` / `c["rows"]` 取值。
+    """
+    payload = payload or {}
+    sheets = payload.get("sheets")
+    if isinstance(sheets, list):
+        return [{"sheet_name": s.get("sheet_name") or "",
+                 "rows": [{"account_id": c["account_id"], "cells": dict(c["cells"])}
+                          for c in (s.get("cells") or [])]}
+                for s in sheets if isinstance(s, dict) and s.get("sheet_name")]
+    legacy_name = payload.get("sheet_name") or ""
+    if not legacy_name:
+        return []
+    return [{"sheet_name": legacy_name,
+             "rows": [{"account_id": c["account_id"], "cells": dict(c["cells"])}
+                      for c in (payload.get("cells") or [])]}]
+
+
+def push_undo_row_count(payload: dict) -> int:
+    """push 快照覆盖的行数（撤回按钮小字「影响 N 行」）。
+
+    三种形状都要数对，否则升级后按钮亮着却显示「影响 0 行」：
+      - 新：`{sheets: [{sheet_name, cells}]}`（各表行数之和）
+      - 旧：`{sheet_name, cells}`
+      - 裸：`{cells}`（历史/既有测试里的最小形状）
+    """
+    payload = payload or {}
+    sheets = payload.get("sheets")
+    if isinstance(sheets, list):
+        return sum(len(s.get("cells") or []) for s in sheets if isinstance(s, dict))
+    return len(payload.get("cells") or [])
 
 
 def push_rows(user_id: int, platform: str, account_ids=None) -> None:
@@ -1598,11 +1713,20 @@ def push_rows(user_id: int, platform: str, account_ids=None) -> None:
     """
     db = _open_db()
     try:
-        conf = get_platform_config(db, user_id, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+        tables = get_platform_tables(db, user_id, platform)
+        spreadsheet_id = get_platform_config(db, user_id, platform)["spreadsheet_id"]
+        # 配置闸门必须在**登记 pending 之前**短路：未配置看板的实例上，写表点要
+        # 静默 no-op。闸门一旦失效，每次改状态都会凭空多一条 retry_failed 行 + ⚠️ 标记
+        # —— 二期踩过这个坑（回归守卫：tests/test_gg_sheet_write.py::
+        # test_status_change_without_sheets_config_registers_nothing）。
+        # ⚠️ gg/fb 的 `get_platform_tables` **即使未配置也返回一个元素**（name 与
+        # sheet_name 都是空串），故 `not tables` 挡不住它们，必须显式查这两个空值；
+        # tt 未配置时返回 []，`not tables` 即可挡住。空表名这一档也不能漏：POST 配置
+        # 端点不校验工作表名非空，能存下「有 spreadsheet_id 但表名为空」的半截配置。
+        if not tables or not spreadsheet_id or not any(t["sheet_name"] for t in tables):
             return
-        # 只取 business_key 列表：**整行重建在 target 内做**，本函数不调
-        # `collect_rows_for_push`。若在这里先查一次 rows、target 内再查一次，
+        # 只取 business_key 列表：**整行重建（含「按户类型分表」）在 target 内做**，
+        # 本函数不调 `collect_rows_for_push`。若在这里先查一次 rows、target 内再查一次，
         # 同一批账户会被查两遍，且把「上游意图」的调用计数守卫打红（三期回归修复）。
         if account_ids is None:
             key_col = ACCOUNT_KEY_FIELD[platform]
@@ -1620,6 +1744,12 @@ def push_rows(user_id: int, platform: str, account_ids=None) -> None:
 
     # 接入统一写表治理（三期）：登记 + 后台写 + 失败可查可重试。
     # business_key 逐账户一行；一次 N 户走 run_write_many（一个线程、N 行日志）。
+    #
+    # ⚠️ 多账户表（tt 按户类型分 worksheet）**不在这里按表发批**。master 侧的写法是
+    # `for sheet_name, rows in groups: _sync_sheets_background(_do, …)` —— 那是直调、
+    # 绕开 run_write，等于把三期的治理（持久记录 / 可见 / 可重试）整个撤销。
+    # 正确的分工：分组与选表下沉到 target 的 rebuild（`huguan_dashboard_sync` 内
+    # 调 `group_rows_by_sheet` 逐表写），入口这一层只负责登记与分派。
     import sheet_write
     import routes.huguan_sheet_targets as _hst
     _payload = {"platform": platform}
@@ -1648,6 +1778,9 @@ def undo_push(user_id: int, platform: str) -> dict:
     把它盖回去即可，不比对表当前值（表在后来的协同里被改过也照盖 —— 那是 spec
     明确接受的口径）。未配置看板或没有快照 → 返回全零。
 
+    **逐表还原**：快照是「每张工作表一份」（2026-10-08 多表规格 §4.4），本函数按
+    `push_undo_cells` 的分组逐张表各写一次；`updated` / `not_found` 是各表之和。
+
     **同步执行**，不挂后台线程：撤回是用户当场点、当场要结果的显式操作，
     要能立刻报出 `updated` / `not_found`（与 push_rows 的「后台、失败只记日志」
     契约相反，故不复用 _sync_sheets_background）。
@@ -1655,7 +1788,13 @@ def undo_push(user_id: int, platform: str) -> dict:
     db = _open_db()
     try:
         conf = get_platform_config(db, user_id, platform)
-        if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+        tables = get_platform_tables(db, user_id, platform)
+        # gg/fb：只有一张表，工作表名仍在 conf 里 —— 判据与改动前逐字等价（表名为空
+        # 时同样返回全零，不碰写入器）。
+        # tt：工作表名在 tables 里。多表配置的 `conf["sheet_name"]` **恒为空串**
+        # （表名存在 `tables` 里），沿用旧判据会让 TT 撤回**静默变成空操作**：
+        # 一个字都不写、快照也不作废，撤回按钮永久亮着。
+        if not conf["spreadsheet_id"] or not tables or (platform != "tt" and not conf["sheet_name"]):
             return {"updated": 0, "not_found": []}
         payload = load_undo(db, user_id, platform, "push")
     finally:
@@ -1663,8 +1802,8 @@ def undo_push(user_id: int, platform: str) -> dict:
     if not payload:
         return {"updated": 0, "not_found": []}
 
-    rows = push_undo_cells(payload)
-    if not rows:
+    groups = push_undo_cells(payload)
+    if not any(g["rows"] for g in groups):
         # 快照存在但覆盖 0 行 ⇒ 没东西可退；作废它，否则撤回按钮永久亮着。
         db = _open_db()
         try:
@@ -1677,21 +1816,30 @@ def undo_push(user_id: int, platform: str) -> dict:
     import google_sheets_service as gs
     from main import _GOOGLE_SHEETS_CONFIG
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+    # 表地址取自**快照自己记的那张**（与它描述的那次写入同源），不取当前配置 ——
+    # 两者之间用户可能改过配置，撤回要退回到当初写的地方。
+    spreadsheet_id = payload.get("spreadsheet_id") or ""
+    total_updated, total_not_found = 0, []
     # 定位列必须与**快照用的同一列**（`KEY_COL[platform]`，见 snapshot_push_targets）：
     # 写入器默认值是 "C"（GG/TT 的账户ID列），而 **FB 的账户ID在 D 列**
     # （C 是「账户名称」）—— fb 路径不传就按错误的列定位、整批写空，且不抛异常（静默）。
     # 必须用字典查表：按平台分流不许二元 else 兜底，缺键就要 KeyError。
     # gg/tt 的 KEY_COL 恰是 "C"，与默认相同 ⇒ 显式传参对它们是无操作。
-    res = gs.update_rows_by_account_id(service, conf["spreadsheet_id"],
-                                       conf["sheet_name"], rows,
-                                       key_col=KEY_COL[platform])
+    for g in groups:
+        sheet_name, rows = g["sheet_name"], g["rows"]
+        if not rows:
+            continue
+        res = gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows,
+                                           key_col=KEY_COL[platform])
+        total_updated += res["updated"]
+        total_not_found.extend(res["not_found"])
     db = _open_db()
     try:
         delete_undo(db, user_id, platform, "push")
         db.commit()
     finally:
         db.close()
-    return {"updated": res["updated"], "not_found": res["not_found"]}
+    return {"updated": total_updated, "not_found": total_not_found}
 
 
 # 「这一项不能撤」的文案：库里的值与本次同步写下去的值不等 ⇒ 同步之后有人改过它。
@@ -1750,13 +1898,37 @@ def undo_sync(user_id: int, platform: str) -> dict:
     back = [{"account_id": item["account_id"], "cells": dict(item["cells"])}
             for item in payload.get("sheet_back", []) if item.get("cells")]
     table_result = {"updated": 0, "not_found": []}
-    if back and conf["spreadsheet_id"] and conf["sheet_name"]:
-        import google_sheets_service as gs
-        from main import _GOOGLE_SHEETS_CONFIG
-        service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        table_result = gs.update_rows_by_account_id(
-            service, conf["spreadsheet_id"], conf["sheet_name"], back,
-            key_col=KEY_COL[platform])
+    # 逐表分组写回（审查修复轮 1 · Finding 1）：tt 多表下 `conf["sheet_name"]` **恒为空串**
+    # （`get_platform_config` 只读顶层 `sheet_name`，而 tt 多表的表名写在 `tables` 里）
+    # ⇒ 沿用旧的单表判据 `... and conf["sheet_name"]` 会**恒假**：库侧 CAS 照做、表侧一个字
+    # 都不写，下次同步立刻判定出归属变更、把撤回重做一遍（正是本函数 docstring 的失败模式）。
+    #
+    # 表名的来源优先级：
+    #   ① 快照里的 `sheet_back_sheets[account_id]`（审查修复轮 1 新增键，多表同步才有）；
+    #   ② 回落到 `conf["sheet_name"]` —— 旧存量快照没有该键，gg/fb 与旧的单表 tt 走这条，
+    #      与改动前**逐字等价**（表名为空时同样一个字不写）。
+    # 两边都没有 ⇒ 跳过该账户并记 warning，**绝不退回写第一张表**（与本批其它任务同一口径：
+    # 宁可漏写也不写错表）。
+    if back and conf["spreadsheet_id"]:
+        sheet_back_sheets = payload.get("sheet_back_sheets") or {}
+        by_sheet = {}
+        for item in back:
+            name = sheet_back_sheets.get(item["account_id"]) or conf["sheet_name"]
+            if not name:
+                log.warning("撤回同步：账户 %s 查不到所在工作表，跳过表侧回退 platform=%s",
+                            item["account_id"], platform)
+                continue
+            by_sheet.setdefault(name, []).append(item)
+        if by_sheet:
+            import google_sheets_service as gs
+            from main import _GOOGLE_SHEETS_CONFIG
+            service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+            for name, rows in by_sheet.items():
+                res = gs.update_rows_by_account_id(
+                    service, conf["spreadsheet_id"], name, rows,
+                    key_col=KEY_COL[platform])
+                table_result["updated"] += res["updated"]
+                table_result["not_found"].extend(res["not_found"])
 
     # ---- 2. 再回退库（单事务）----
     reverted, conflicts, kept = 0, [], []
@@ -1932,8 +2104,29 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=No
     try:
         db = _open_db()
         try:
-            conf = get_platform_config(db, user_id, platform)
-            if not conf["spreadsheet_id"] or not conf["sheet_name"]:
+            tables = get_platform_tables(db, user_id, platform)
+            if not tables:
+                return
+            spreadsheet_id = get_platform_config(db, user_id, platform)["spreadsheet_id"]
+            if not spreadsheet_id:
+                return
+            atype = ""
+            if platform == "tt":
+                r0 = db.execute("SELECT account_type FROM tt_accounts WHERE advertiser_id=?",
+                                (account_id,)).fetchone()
+                atype = (r0["account_type"] if r0 else "") or ""
+            sheet_name = None
+            for t in tables:
+                if t["name"] == atype:
+                    sheet_name = t["sheet_name"]
+                    break
+            if not sheet_name:
+                # 解析不到工作表 → 跳过 + 日志（规格 §4.4）：绝不退回写第一张表。
+                # `not` 而非 `is None`：gg 的历史配置可能是 spreadsheet_id 有值而
+                # sheet_name 为空，改前那句 `if not conf["sheet_name"]: return` 正是
+                # 拦这一档，语义不能缩。
+                log.warning("归属变更通道列回写跳过：户类型「%s」查不到工作表 account=%s",
+                            atype, account_id)
                 return
             r = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username, '') AS n "
                            "FROM users WHERE id=?", (new_owner_id,)).fetchone()
@@ -1947,6 +2140,12 @@ def writeback_owner_channel(user_id, platform, account_id, new_owner_id, text=No
         # text 为 None 时写解析出的新归属名 —— GG 走这条路，行为与改动前逐字节一致。
         value = text if text is not None else name
 
+        # 接入统一治理（三期）：登记 + 后台写 + 失败可查可重试。
+        # 上方 master 的多表守卫（tables / spreadsheet_id / 按 account_type 解析
+        # sheet_name，解析不到就跳过 + 日志）**原样保留** —— 那是入口处的配置闸门，
+        # 与计划「配置未就绪就早退、不凭空产生失败行」的要求一致。
+        # 「按户类型选表」的执行下沉到 target（`huguan_owner_channel_sync` 内重解析，
+        # 重试路径也要用），**不在这里直调 `_sync_sheets_background`** —— 那会绕开治理。
         import sheet_write
         _payload = {"platform": platform, "mode": "owner", "value": value}
         _db = _open_db()

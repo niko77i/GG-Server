@@ -31,6 +31,7 @@ export const GG_ADS_COLUMNS = [
 
 export const TT_ADS_COLUMNS = [
   { key: 'advertiser_id', prop: 'advertiser_id', label: '广告账户 ID', minWidth: 150, showOverflowTooltip: true },
+  { key: 'account_type', prop: 'account_type', label: '户类型', minWidth: 110, showOverflowTooltip: true },
   { key: 'sheet_write', label: '写表', width: 54, align: 'center' },
   { key: 'bc', label: '所属 BC', minWidth: 160 },
   { key: 'timezone', label: '时区', minWidth: 120 },

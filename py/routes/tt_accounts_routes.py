@@ -45,6 +45,11 @@ def _get_tt_sheet_mappings(db):
             "my_dashboard": "我的看板", "recycle": "回收户清单"}
 
 
+def _default_account_type_tt(db, uid):
+    """新建账户未指定类型时的兜底类型名（取该用户自己看板配置的第一条）。"""
+    return hd._default_account_type(db, uid)
+
+
 def _resolve_agent_id(db, agent, agent_id):
     """agent_id 为 None 且有 agent 文本时，按 platform='tt' 查/插 agents。"""
     if agent_id is not None:
@@ -121,17 +126,22 @@ def create_account():
     agent_id = _resolve_agent_id(db, (data.get("agent") or "").strip(), data.get("agent_id"))
     status = (data.get("status") or "").strip() or "存活"
     status_id = _resolve_status_id(db, status, data.get("status_id"))
+    # 户类型：未指定/空白时落默认类型（看板配置第一条，否则常量）。
+    # 服务端不做白名单校验 —— 清单是用户自定义的，硬校验会在「户管刚改名、前端
+    # 还拿着旧清单」的瞬间把建户打断；非法值只会变成待总表同步纠正的孤儿类型。
+    account_type = (data.get("account_type") or "").strip() or hd._default_account_type(db, uid)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         db.execute(
             "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
-            "consumption, status_id, acquired_date, remark, owner_id, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "consumption, status_id, acquired_date, remark, owner_id, account_type, "
+            "created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (name, advertiser_id, bc_id,
              (data.get("country") or "").strip(), agent_id, (data.get("timezone") or "").strip(),
              (data.get("consumption") or "").strip(), status_id,
              (data.get("acquired_date") or None), (data.get("remark") or "").strip(),
-             uid, now, now))
+             uid, account_type, now, now))
     except sqlite3.IntegrityError:
         # 失败即回滚（同 batch_create_accounts 的死锁教训）：约束冲突不会自动结束
         # 隐式事务，而本连接缓存在 flask.g 上、没有 teardown 关闭它 —— 悬着的写锁
@@ -219,6 +229,12 @@ def list_accounts():
     status_id = (request.args.get('status_id') or '').strip()
     timezone = (request.args.get('timezone') or '').strip()
     owner_id = (request.args.get('owner_id') or '').strip()
+    # 户类型可多选：**用重复查询参数**（?account_types=A&account_types=B），
+    # 不用逗号分隔 —— 类型名是用户自己起的，完全可能含逗号，切开会静默筛不到任何行。
+    account_types = [t.strip() for t in request.args.getlist("account_types") if t.strip()]
+    # 默认户类型（空 account_type 行的归属桶）在这里先算出来：筛选与 type_counts
+    # 必须走同一个 COALESCE 口径，两处都用它，故不能在 type_counts 那里才算。
+    default_type = _default_account_type_tt(db, uid)
 
     where = ["a.deleted_at IS NULL"]
     params = []
@@ -267,6 +283,15 @@ def list_accounts():
             # 等值匹配，正常情形恒筛不到（0 行）。绝不退化成「不加条件」，那会返回全部。
             where.append("a.status_id = ?")
             params.append(status_id)
+    if account_types:
+        marks = ",".join("?" for _ in account_types)
+        # 口径必须与 type_counts 的 COALESCE 一致：空 account_type 的行在计数里被折进
+        # 默认类型那个桶，筛选也必须能筛出来，否则就是本文件在 status_id 上修过的
+        # 同一类缺陷 ——「按钮上写着 N、点下去对不上」。
+        where.append(f"COALESCE(NULLIF(a.account_type, ''), ?) IN ({marks})")
+        # ⚠️ 顺序：COALESCE 的 ? 在 IN 的 ? 之前，必须先 append default_type。
+        params.append(default_type)
+        params += account_types
     if timezone:
         where.append("a.timezone = ?"); params.append(timezone)
 
@@ -322,8 +347,21 @@ def list_accounts():
         s = r["status"] or "存活"
         status_counts[s] = status_counts.get(s, 0) + r["cnt"]
 
+    # 各户类型计数。口径与 status_counts **完全同底**：都基于 sc_where2
+    # （含 search/bc/agent/timezone/owner，不含 status 与 account_types 自身）——
+    # 两排按钮的数字必须能对上同一批账户，否则户管看到「两排加起来不等于总数」会怀疑数据。
+    # default_type 已在函数前段（account_types 取参之后）算好，此处复用，不再算第二遍。
+    type_counts = {}
+    for r in db.execute(
+        "SELECT COALESCE(NULLIF(a.account_type, ''), ?) AS atype, COUNT(*) AS cnt "
+        "FROM tt_accounts a WHERE " + " AND ".join(sc_where2) + " GROUP BY atype",
+        [default_type] + sc_params2
+    ).fetchall():
+        t = r["atype"] or default_type
+        type_counts[t] = type_counts.get(t, 0) + r["cnt"]
+
     return ok({'items': items, 'total': total, 'page': page, 'size': size,
-               'status_counts': status_counts})
+               'status_counts': status_counts, 'type_counts': type_counts})
 
 
 @tt_accounts_bp.route('/api/tt/accounts/<int:aid>', methods=['PUT'])
@@ -359,7 +397,12 @@ def update_account(aid):
     }
 
     editable = ["name", "country", "timezone", "consumption",
-                "acquired_date", "death_date", "remark"]
+                "acquired_date", "death_date", "remark", "account_type"]
+    # 该循环对**值非 None** 的字段执行 UPDATE ... SET f=?，所以 account_type 传空串
+    # 会被原样写空。前端下拉不会传空；为稳妥，在循环之前把空串规范成默认类型。
+    if "account_type" in data and data.get("account_type") is not None:
+        _at = str(data["account_type"]).strip()
+        data["account_type"] = _at or hd._default_account_type(db, uid)
     for f in editable:
         if f in data and data[f] is not None:
             db.execute(f"UPDATE tt_accounts SET {f}=? WHERE id=?",
@@ -465,6 +508,7 @@ def batch_create_accounts():
         "status_id": data.get("status_id") or None,
         "country": (data.get("country") or "").strip(),
         "acquired_date": (data.get("acquired_date") or None),
+        "account_type": (data.get("account_type") or "").strip(),
     }
     overrides = data.get("overrides") or {}
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -487,13 +531,15 @@ def batch_create_accounts():
         agent_id = _resolve_agent_id(db, ov.get("agent", common["agent"]), ov.get("agent_id", common["agent_id"]))
         status_id = _resolve_status_id(db, ov.get("status", common["status"]), ov.get("status_id", common["status_id"]))
         acquired_date = ov.get("acquired_date") if "acquired_date" in ov else common["acquired_date"]
+        account_type = (ov.get("account_type") or common["account_type"]).strip() \
+            or hd._default_account_type(db, uid)
         try:
             db.execute(
                 "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
-                "status_id, acquired_date, owner_id, created_at, updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "status_id, acquired_date, owner_id, account_type, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, aid, bc_id, country, agent_id, timezone, status_id,
-                 acquired_date, uid, now, now))
+                 acquired_date, uid, account_type, now, now))
             new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             _record_bc_change(db, new_id, bc_id, uid, "import")
             db.commit()
@@ -1263,6 +1309,10 @@ def sync_from_sheet():
     role = _get_role(db, uid)
     data = parse_body()
     dry_run = bool(data.get("dry_run"))
+    # 投手自选的户类型（2026-10-08 规格 §4.8）：只作用于**本次新建**的账户，
+    # 已存在的账户类型不动（那条通路不做「以表为准」改写，类型最终由户管从总表纠正）。
+    new_account_type = (data.get("account_type") or "").strip() \
+        or hd._default_account_type(db, uid)
     user = db.execute("SELECT display_name, username FROM users WHERE id=?", (uid,)).fetchone()
     if user:
         operator_name = (user["display_name"] or "").strip() or (user["username"] or "")
@@ -1328,9 +1378,11 @@ def sync_from_sheet():
                 death_date = datetime.date.today().strftime("%Y-%m-%d") if sheet_status == "死亡" else ""
                 db.execute(
                     "INSERT INTO tt_accounts(name, advertiser_id, bc_id, country, agent_id, timezone, "
-                    "consumption, status_id, acquired_date, death_date, remark, owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "consumption, status_id, acquired_date, death_date, remark, owner_id, account_type) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (advertiser_id, advertiser_id, bc_id, country, agent_id, timezone,
-                     consumption, status_id, acquired_date or None, death_date, remark, uid))
+                     consumption, status_id, acquired_date or None, death_date, remark, uid,
+                     new_account_type))
                 db.commit()
                 new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
                 _record_bc_change(db, new_id, bc_id, uid, "create")

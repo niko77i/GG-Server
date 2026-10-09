@@ -11,7 +11,14 @@ import json
 from time import sleep as _poll_sleep
 
 import database
+import huguan_dashboard as hd
 import sheet_write
+
+# 多账户表（2026-10-08）之后 tt 的写入要按**户类型**选 worksheet：`group_rows_by_sheet`
+# 对空类型一律跳过（绝不退回写第一张表）。存量单表配置（只有 `sheet_name`）会被
+# `get_platform_tables` 映射成这唯一的类型名，故手工 INSERT 的测试账户必须带上它
+# —— 不带就整批被跳过，什么也写不进去（且失败会表现为「户类型查不到工作表」）。
+_TT_TYPE = hd.TT_DEFAULT_ACCOUNT_TYPE
 
 
 def _tt_huguan(client, username):
@@ -94,8 +101,9 @@ def test_huguan_dashboard_sync_writes_all_n(client, monkeypatch):
     db = database.get_db()
     _mk_huguan_conf(db, uid)
     for i in (1, 2, 3):
-        db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) VALUES (?,?,?)",
-                   (f"hg_adv_{i}", f"hg_adv_{i}", uid))
+        db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+                   "VALUES (?,?,?,?)",
+                   (f"hg_adv_{i}", f"hg_adv_{i}", uid, _TT_TYPE))
     db.commit()
     db.close()
 
@@ -122,8 +130,10 @@ def test_huguan_dashboard_final_failure_lands_retry_failed(client, monkeypatch):
     h, uid = _tt_huguan(client, "_hg_fail")
     db = database.get_db()
     _mk_huguan_conf(db, uid)
-    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) "
-               "VALUES ('hg_f1','hg_f1',?)", (uid,))
+    # 必须带户类型：否则这条会因为「户类型查不到工作表」而 retry_failed，
+    # 用例就变成「因错误的原因通过」—— 它要守的是 Sheets 抛错导致的 retry_failed。
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_f1','hg_f1',?,?)", (uid, _TT_TYPE))
     db.commit()
 
     sync_fn = sheet_write.build_sync("huguan_dashboard", uid, "hg_f1", {"platform": "tt"})
@@ -179,8 +189,8 @@ def test_writeback_rows_registers_huguan_dashboard(client, monkeypatch):
     h, uid = _tt_huguan(client, "_hg_p1")
     db = database.get_db()
     _mk_huguan_conf(db, uid)
-    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) "
-               "VALUES ('hg_p1_a','hg_p1_a',?)", (uid,))
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_p1_a','hg_p1_a',?,?)", (uid, _TT_TYPE))
     db.commit()
     db.close()
 
@@ -207,15 +217,15 @@ def test_write_background_clears_channel_via_owner_channel_target(client, monkey
     h, uid = _tt_huguan(client, "_hg_p5")
     db = database.get_db()
     _mk_huguan_conf(db, uid)
-    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) "
-               "VALUES ('hg_p5_a','hg_p5_a',?)", (uid,))
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_p5_a','hg_p5_a',?,?)", (uid, _TT_TYPE))
     db.commit()
-    conf = __import__("huguan_dashboard").get_platform_config(db, uid, "tt")
-    db.close()
 
-    # 直接调新签名的 _write_background（第 4 个参数是表主人）
+    # 直接调 `_write_background_tables`（签名 (db, uid, platform, rows)；不再收 conf
+    # —— 选表已下沉到 target 内）。传请求线程的 db，与四个真实调用点一致。
     rows = [{"account_id": "hg_p5_a", "cells": {"L": ""}}]
-    hr._write_background(conf, rows, "tt", uid)
+    hr._write_background_tables(db, uid, "tt", rows)
+    db.close()
 
     db = database.get_db()
     r = _settle(db, uid, "huguan_owner_channel", "hg_p5_a")
@@ -241,17 +251,60 @@ def test_write_background_routes_fb_acceptor_column_to_its_target(client, monkey
     db.execute("INSERT INTO fb_accounts (name, account_id, acceptor, owner_id) "
                "VALUES ('fb_p5','hg_p5fb_a','张三转李四',?)", (uid,))
     db.commit()
-    conf = __import__("huguan_dashboard").get_platform_config(db, uid, "fb")
-    db.close()
-
     rows = [{"account_id": "hg_p5fb_a", "cells": {"I": "张三转李四"}}]
-    hr._write_background(conf, rows, "fb", uid)
+    hr._write_background_tables(db, uid, "fb", rows)
+    db.close()
 
     db = database.get_db()
     r = _settle(db, uid, "huguan_fb_acceptor", "hg_p5fb_a")
     db.close()
     assert r is not None, "FB I 列（换绑记录）必须登记 huguan_fb_acceptor"
     assert r["status"] == "synced"
+
+
+def test_write_background_routes_owner_column_to_single_cell(client, monkeypatch):
+    """归属变更的**归属列**（gg/tt = G）必须**单格定向写**，不得并进整行重建。
+
+    这是用户 2026-10-09 的裁定，也是与 master 语义对齐的修正：master 原先就是
+    定向单格写；T3 把它并进了「其余」桶 → 整行重建 → **这一行其他列会被按 DB 值
+    覆盖**，户管在表里改过、还没同步回来的内容就没了。T3 报告当时就标注
+    「整行重建写出的归属名是否与旧代码的 item["to"] 等价 —— 无断言钉住」，本条补上该验证。
+
+    判据（两条，都能独立变红）：
+      1. 真实写出的 cells **恰好**只有归属那一格；
+      2. 这条路登记在 `huguan_owner_channel`（单格 target）名下，不是 `huguan_dashboard`。
+    把 owner_rows 并回 other_rows ⇒ 整行重建 ⇒ 两条同时红（cells 多出 A/B/C/…，
+    target 变成 huguan_dashboard）。
+    """
+    import google_sheets_service as gs
+    import routes.huguan_dashboard_routes as hr
+    written = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id",
+                        lambda svc, sid, sheet_name, rows, key_col=None: written.extend(rows))
+    # 刻意**不** patch `_sync_sheets_background`：走真实后台线程（Sheets 层已 mock，
+    # 很快），`_settle` 才能等到终态。若 patch 成不回调 on_result 的桩，日志行会停在
+    # pending、`_settle` 白转满 300 轮。
+
+    h, uid = _tt_huguan(client, "_hg_ownercol")
+    db = database.get_db()
+    _mk_huguan_conf(db, uid)
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_oc_a','hg_oc_a',?,?)", (uid, _TT_TYPE))
+    db.commit()
+
+    owner_col = hd.OWNER_COL["tt"]
+    hr._write_background_tables(db, uid, "tt",
+                                [{"account_id": "hg_oc_a", "cells": {owner_col: "张三"}}])
+    row = _settle(db, uid, "huguan_owner_channel", "hg_oc_a")
+    db.close()
+
+    assert written == [{"account_id": "hg_oc_a", "cells": {owner_col: "张三"}}], (
+        f"归属列必须只写这一格 —— cells 里多出的每一格都会冲掉户管在表里的手工内容：{written}"
+    )
+    assert row is not None, "归属列单格写必须登记在 huguan_owner_channel（单格 target）名下"
+    assert row["target"] == "huguan_owner_channel", \
+        f"不得并进整行重建的 huguan_dashboard，实际 {row['target']}"
 
 
 def test_writeback_owner_channel_registers_and_rebuilds(client, monkeypatch):
@@ -266,8 +319,8 @@ def test_writeback_owner_channel_registers_and_rebuilds(client, monkeypatch):
     h, uid = _tt_huguan(client, "_hg_p3")
     db = database.get_db()
     _mk_huguan_conf(db, uid)
-    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id) "
-               "VALUES ('hg_p3_a','hg_p3_a',?)", (uid,))
+    db.execute("INSERT INTO tt_accounts (advertiser_id, name, owner_id, account_type) "
+               "VALUES ('hg_p3_a','hg_p3_a',?,?)", (uid, _TT_TYPE))
     db.commit()
     db.close()
 

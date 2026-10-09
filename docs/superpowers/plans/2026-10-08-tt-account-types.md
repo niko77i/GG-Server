@@ -1214,7 +1214,8 @@ git commit -m "feat(huguan): 回写按户类型分组，各写各的 worksheet"
 
 ## Task 7: 撤回快照支持多表
 
-> ⚠️ **本任务必须在 Task 6 之前做**（Task 6 Step 8 已经按多表快照的签名调用）。
+> 依赖说明（2026-10-08 修订）：本任务的 `dashboard_push` 步骤消费 Task 6 的 `group_rows_by_sheet`
+> 产出（`[(sheet_name, rows)]`），所以**必须在 Task 6 之后做**。Task 6 本身不碰快照。
 
 **Files:**
 - Modify: `py/huguan_dashboard.py:1446-1490`（`snapshot_push_targets` / `push_undo_cells`）、`:1529-1579`（`undo_push`）

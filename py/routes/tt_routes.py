@@ -1267,14 +1267,23 @@ def tt_settings_get():
 def tt_settings_save():
     """保存 TT 平台的 Google 表格配置。
 
-    - sheet_id：仅 admin/developer 可写全局 tag
-    - accounts/recharge/recycle 三个内置 key：仅 admin 写全局 tag
-    - my_dashboard：投手私有，所有用户写各自 config
+    写权限按角色分档（2026-10-08 规格 §4.9 决策 9）：
+
+    - `sheet_id`：仅 admin/developer（全局 tag）
+    - `accounts`：仅 admin/developer（它是无人读的历史 key）
+    - `recharge` / `recycle`：admin/developer + **户管**（全局 tag）——
+      充值表与回收户清单与投手是同一张，用户 2026-10-08 裁定给户管全局写权限
+    - `my_dashboard`：所有用户写各自的私有 config（投手各自配看板）
+
+    ⚠️ 前端 `TtSettingsPanel.vue` 的行渲染范围必须与这里逐字对齐。
+       两边不一致就会造出「界面上能改、点保存提示成功、实际什么都没存」的静默丢弃
+       （本次修掉的正是这个 bug）。
     """
     db = get_db()
     uid = get_uid()
     role = _get_role(db, uid)
     is_admin = role in ('admin', 'developer')
+    is_huguan = role == 'huguan'
     data = parse_body()
     if 'sheet_id' in data and is_admin:
         db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
@@ -1284,10 +1293,31 @@ def tt_settings_save():
         if not isinstance(mappings, dict):
             mappings = {}
         if is_admin:
-            global_mappings = {k: mappings[k] for k in _TT_SHEET_MAPPING_KEYS if k in mappings}
-            if global_mappings:
-                db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
-                           ("tt_sheet_mappings", json.dumps(global_mappings, ensure_ascii=False)))
+            allowed = _TT_SHEET_MAPPING_KEYS
+        elif is_huguan:
+            allowed = {"recharge", "recycle"}
+        else:
+            allowed = set()
+        global_mappings = {k: mappings[k] for k in allowed if k in mappings}
+        if global_mappings:
+            # 合并而非覆盖：户管只改 recharge/recycle 时，不要把 admin 配的其他 key 抹掉。
+            merged = {}
+            existing = db.execute(
+                "SELECT value FROM tags WHERE key='tt_sheet_mappings'").fetchone()
+            if existing and existing["value"]:
+                try:
+                    loaded = json.loads(existing["value"])
+                    if isinstance(loaded, dict):
+                        merged.update(loaded)
+                except Exception:
+                    pass
+            merged.update(global_mappings)
+            db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES(?,?)",
+                       ("tt_sheet_mappings", json.dumps(merged, ensure_ascii=False)))
+        if is_huguan:
+            # 户管不拥有投手看板，不写私有 my_dashboard（保持既有语义：投手专属）
+            pass
+        elif is_admin:
             _save_tt_user_sheet_mappings(db, uid, mappings)
         else:
             # 投手只保存自己的「我的看板」sheet 名

@@ -30,7 +30,8 @@
         </div>
       </div>
 
-      <div style="margin-bottom:16px;">
+      <!-- gg / fb：单表（原样保留） -->
+      <div v-if="HD_PLATFORM !== 'tt'" style="margin-bottom:16px;">
         <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">工作表名</div>
         <el-select v-model="hdForm.sheet_name" filterable allow-create default-first-option
                    placeholder="选择或输入工作表名" style="width:100%;" :disabled="hdBusy">
@@ -41,6 +42,31 @@
             </div>
           </template>
         </el-select>
+      </div>
+
+      <!-- tt：多张账户表，每条 = 户类型名（自定义，也是账户页按钮的名字）+ 工作表 -->
+      <div v-else style="margin-bottom:16px;">
+        <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">
+          账户表（户类型 → 工作表）
+        </div>
+        <div style="font-size:12px;color:#6b7280;margin-bottom:8px;line-height:1.6;">
+          每一行是一张账户表。左边的名字就是「户类型」，会出现在账户页的筛选按钮上，
+          也是系统里区分账户的依据；右边选这张表在 Google 表格里对应的工作表。
+        </div>
+        <div v-for="(t, i) in hdForm.tables" :key="i"
+             style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+          <el-input v-model="t.name" placeholder="户类型名，如 加白户" style="width:180px;"
+                    :disabled="hdBusy" />
+          <el-select v-model="t.sheet_name" filterable allow-create default-first-option
+                     placeholder="选择或输入工作表名" style="flex:1;" :disabled="hdBusy">
+            <el-option v-for="name in hdSheets" :key="name" :label="name" :value="name" />
+          </el-select>
+          <el-button :disabled="hdBusy" @click="removeHdTable(i)">删除</el-button>
+        </div>
+        <el-button size="small" :disabled="hdBusy" @click="addHdTable">＋ 新增户类型</el-button>
+        <div v-if="!hdForm.tables.length" style="font-size:12px;color:#e6a23c;margin-top:6px;">
+          还没配任何账户表。至少要有「加白户」一条，否则同步会读不到数据。
+        </div>
       </div>
 
       <div>
@@ -192,6 +218,12 @@
           <el-table ref="ownerTblRef" :data="hdOwnerChanges" size="small" row-key="account_id"
                     border @selection-change="v => selOwner = v">
             <el-table-column type="selection" width="42" />
+            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="表行" width="86">
               <template #default="{ row }">
                 <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -225,6 +257,12 @@
             <div style="font-size:12px;">表里这些列是空的，同步后系统里对应的值会被清掉。</div>
           </el-alert>
           <el-table :data="hdClearingShown" size="small" border style="margin-top:8px;">
+            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="表行" width="86">
               <template #default="{ row }">
                 <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -251,6 +289,12 @@
           <el-table ref="createTblRef" :data="hdCreate" size="small" row-key="account_id"
                     border @selection-change="v => selCreate = v">
             <el-table-column type="selection" width="42" />
+            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="表行" width="86">
               <template #default="{ row }">
                 <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -294,6 +338,12 @@
                 </el-table>
               </template>
             </el-table-column>
+            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="表行" width="86">
               <template #default="{ row }">
                 <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -322,6 +372,12 @@
               <span style="margin-left:12px;font-size:12px;color:#6b7280;">系统里已删除的账户，本次不动。</span>
             </template>
             <el-table :data="hdSkip" size="small" border>
+              <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                  <span v-else>—</span>
+                </template>
+              </el-table-column>
               <el-table-column label="表行" width="86">
                 <template #default="{ row }">
                   <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -341,6 +397,12 @@
               <span style="margin-left:12px;font-size:12px;color:#6b7280;">这些行没能同步，需要你去表里改。</span>
             </template>
             <el-table :data="hdWarnings" size="small" border>
+              <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+                  <span v-else>—</span>
+                </template>
+              </el-table-column>
               <el-table-column label="表行" width="86">
                 <template #default="{ row }">
                   <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -377,6 +439,12 @@
         </el-alert>
         <el-table v-if="(hdResult.errors || []).length" :data="hdResult.errors" size="small"
                   border style="margin-top:8px;">
+          <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">
+              <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
           <el-table-column label="表行" width="86">
             <template #default="{ row }">
               <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
@@ -540,7 +608,9 @@ const props = defineProps({
 const HD_PLATFORM = props.platform
 
 
-const hdForm = ref({ spreadsheet_id: '', sheet_name: '' })
+// tt 用 tables（多张账户表，每条 = 户类型名 + worksheet）；gg/fb 仍用 sheet_name 单表。
+// 两个字段同时保留：切平台时不会因为残留值串味，保存时按平台只发对应的那个。
+const hdForm = ref({ spreadsheet_id: '', sheet_name: '', tables: [] })
 const hdSheets = ref([])
 const hdSheetsLoaded = ref(false)
 const hdLoadingConfig = ref(false)
@@ -580,7 +650,13 @@ const selUpdate = ref([])
 const hdBusy = computed(() =>
   hdReading.value || hdSaving.value || hdPushing.value || hdSyncing.value
   || !!hdUndoing.value || syncDlg.applying)
-const hdConfigured = computed(() => !!(hdForm.value.spreadsheet_id && hdForm.value.sheet_name))
+const hdConfigured = computed(() => {
+  if (!hdForm.value.spreadsheet_id) return false
+  if (HD_PLATFORM === 'tt') {
+    return hdForm.value.tables.some(t => (t.name || '').trim() && (t.sheet_name || '').trim())
+  }
+  return !!hdForm.value.sheet_name
+})
 
 // 提示条三态：显式消息 > 未配置空态 > 无。type 只跟着显式消息走。
 const hdHint = computed(() => {
@@ -629,6 +705,8 @@ const FIELD_LABELS = {
     agent_id: '所属渠道',
     status_id: '状态',
     _is_dead: '是否回收',
+    // 合成键，类型改写时 build_diff 会放进 fields：不映射就会露出 _account_type
+    _account_type: '户类型',
   },
   fb: {
     acquired_date: '日期', name: '账户名称',
@@ -826,6 +904,11 @@ async function loadHdConfig() {
     hdForm.value = {
       spreadsheet_id: conf.spreadsheet_id || '',
       sheet_name: conf.sheet_name || '',
+      // tt 的多表：后端对没有 tables 的存量配置会返回单条「加白户」兜底，
+      // 但 gg/fb 完全不返回 tables ⇒ 这里必须兜成 []
+      tables: Array.isArray(conf.tables)
+        ? conf.tables.map(t => ({ name: t.name || '', sheet_name: t.sheet_name || '' }))
+        : [],
     }
   } catch (e) {
     ElMessage.error(e?.response?.data?.error || '读取看板配置失败')
@@ -902,14 +985,35 @@ async function readHdSheets() {
   }
 }
 
+function addHdTable() {
+  hdForm.value.tables.push({ name: '', sheet_name: '' })
+}
+function removeHdTable(i) {
+  hdForm.value.tables.splice(i, 1)
+}
+
 async function saveHdConfig() {
   hdSaving.value = true
   try {
-    await huguanApi.saveConfig({
+    const body = {
       platform: HD_PLATFORM,
       spreadsheet_id: hdForm.value.spreadsheet_id,
-      sheet_name: hdForm.value.sheet_name,
-    })
+    }
+    if (HD_PLATFORM === 'tt') {
+      // tt 走多表。空行（用户点了「+ 新增」还没填完）在这里被过滤掉 ——
+      // 后端会 400，但用户在填的过程中不该被拦，所以只要有一条完整就发。
+      const tables = hdForm.value.tables
+        .map(t => ({ name: (t.name || '').trim(), sheet_name: (t.sheet_name || '').trim() }))
+        .filter(t => t.name && t.sheet_name)
+      body.tables = tables
+    } else {
+      body.sheet_name = hdForm.value.sheet_name
+    }
+    if (HD_PLATFORM === 'tt' && (!body.tables || !body.tables.length)) {
+      ElMessage.warning('至少要配一张账户表（类型名 + 工作表名）')
+      return
+    }
+    await huguanApi.saveConfig(body)
     ElMessage.success('配置已保存')
     hdSaved.value = true
     clearTimeout(hdSavedTimer)

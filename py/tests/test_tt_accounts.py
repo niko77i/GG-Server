@@ -1231,3 +1231,140 @@ def test_trigger_recycle_on_non_alive_status(app):
 
     assert writer.call_count == 3
     db.close()
+
+
+def test_list_filters_by_account_types(client, tt_headers):
+    db = database.get_db()
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'a','6101','加白户', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'b','6102','企业户', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'c','6103','企业户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+
+    data = client.get("/api/tt/accounts/list?account_types=企业户",
+                      headers=tt_headers).get_json()
+    assert data["total"] == 2
+    assert {i["advertiser_id"] for i in data["items"]} == {"6102", "6103"}
+    assert data["type_counts"] == {"加白户": 1, "企业户": 2}
+
+    data = client.get("/api/tt/accounts/list?account_types=加白户&account_types=企业户",
+                      headers=tt_headers).get_json()
+    assert data["total"] == 3
+
+
+def test_type_counts_ignores_type_filter_but_respects_search(client, tt_headers):
+    """type_counts 与 status_counts 同底：含 search，不含 account_types 自身。"""
+    db = database.get_db()
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'a','6201','加白户', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'b','6202','企业户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+    data = client.get("/api/tt/accounts/list?account_types=加白户&search=6202",
+                      headers=tt_headers).get_json()
+    assert data["total"] == 0
+    assert data["type_counts"] == {"企业户": 1}, "计数要跟着 search 走"
+
+
+def test_list_extra_blank_account_types_ignored(client, tt_headers):
+    """空串 / 纯空白参数必须被忽略，不得被当成筛选值。"""
+    db = database.get_db()
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'a','6301','加白户', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'b','6302','企业户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+    data = client.get("/api/tt/accounts/list?account_types=&account_types=&account_types=%20",
+                      headers=tt_headers).get_json()
+    assert data["success"] is True
+    # 真的断言：空串/空白若被当成筛选值，会命中 0 行（COALESCE 口径下空串永不匹配）
+    assert data["total"] == 2, "空串/纯空白参数不得被当成筛选值"
+
+
+def test_type_filter_includes_blank_account_type_as_default(client, tt_headers):
+    """筛选口径必须与 type_counts 的 COALESCE 一致：空 account_type 的行在计数里
+    被折进默认类型「加白户」那个桶，筛选也必须能一并筛出来 —— 否则就是本文件在
+    status_id 上修过的同一类缺陷（按钮上写着 N、点下去对不上）。"""
+    db = database.get_db()
+    # account_type='' —— 三处 INSERT 目前不写该列，空类型行确实存在
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'blank','6401','', id FROM users WHERE username='ttuser'")
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'explicit','6402','加白户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+    data = client.get("/api/tt/accounts/list?account_types=加白户",
+                      headers=tt_headers).get_json()
+    assert data["type_counts"].get("加白户") == 2, "空类型行计入默认类型桶"
+    assert data["total"] == 2, "筛选口径必须与计数一致，空类型行也要能筛出来"
+    assert {i["advertiser_id"] for i in data["items"]} == {"6401", "6402"}
+
+
+# ==================== 户类型：四个写入端点（Task 9） ====================
+
+
+def test_create_defaults_account_type(client, tt_headers):
+    _mk_account(client, tt_headers, advertiser_id="6301")
+    data = client.get("/api/tt/accounts/list", headers=tt_headers).get_json()
+    assert data["items"][0]["account_type"] == "加白户"
+
+
+def test_create_with_explicit_account_type(client, tt_headers):
+    _mk_account(client, tt_headers, advertiser_id="6302", account_type="企业户")
+    data = client.get("/api/tt/accounts/list", headers=tt_headers).get_json()
+    assert data["items"][0]["account_type"] == "企业户"
+
+
+def test_update_can_change_account_type(client, tt_headers):
+    resp = _mk_account(client, tt_headers, advertiser_id="6303")
+    aid = resp.get_json()["id"]
+    client.put(f"/api/tt/accounts/{aid}", headers=tt_headers, json={"account_type": "企业户"})
+    data = client.get("/api/tt/accounts/list", headers=tt_headers).get_json()
+    assert data["items"][0]["account_type"] == "企业户"
+
+
+def test_batch_create_applies_type_to_whole_batch(client, tt_headers):
+    client.post("/api/tt/accounts/batch-create", headers=tt_headers,
+                json={"account_ids": ["6304", "6305"], "agent": "", "agent_id": None,
+                      "account_type": "企业户"})
+    data = client.get("/api/tt/accounts/list", headers=tt_headers).get_json()
+    assert {i["account_type"] for i in data["items"]} == {"企业户"}
+
+
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_applies_type_to_new_accounts_only(mock_read, mock_build,
+                                                           client, tt_headers):
+    mock_build.return_value = object()
+    mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID"],
+        ["ttuser", "2026-09-20", "否", "6401"],
+    ]
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='ttuser' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    # 已存在的一条：它必须**不被**改写
+    db.execute("INSERT INTO tt_accounts(name, advertiser_id, account_type, owner_id) "
+               "SELECT 'old','6402','加白户', id FROM users WHERE username='ttuser'")
+    db.commit()
+    db.close()
+
+    mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID"],
+        ["ttuser", "2026-09-20", "否", "6401"],
+        ["ttuser", "2026-09-20", "否", "6402"],
+    ]
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": False, "account_type": "企业户"})
+    assert resp.status_code == 200
+    data = client.get("/api/tt/accounts/list", headers=tt_headers).get_json()
+    got = {i["advertiser_id"]: i["account_type"] for i in data["items"]}
+    assert got["6401"] == "企业户", "新建的落选定类型"
+    assert got["6402"] == "加白户", "已存在的账户类型不动"

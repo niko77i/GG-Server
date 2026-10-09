@@ -11,6 +11,14 @@
     </div>
 
     <div v-else-if="done">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <span style="font-size:13px;color:#374151;white-space:nowrap;">本次新建账户的户类型</span>
+        <el-select v-model="accountType" size="small" style="width:200px;" filterable allow-create>
+          <el-option v-for="t in props.typeOptions" :key="t" :label="t" :value="t" />
+        </el-select>
+        <span style="font-size:12px;color:#909399;">只作用于新建的账户；已存在的账户类型不变</span>
+      </div>
+
       <el-alert type="info" :closable="false" style="margin-bottom:16px;">
         Sheet 中共 <strong>{{ total }}</strong> 条记录
       </el-alert>
@@ -20,6 +28,7 @@
         <h4>🆕 新增账户（{{ created.length }} 条）</h4>
         <el-table :data="created" size="small" border stripe>
           <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="180" show-overflow-tooltip />
+          <el-table-column label="户类型" width="100"><template #default>{{ accountType }}</template></el-table-column>
           <el-table-column prop="bc" label="BC" width="100" show-overflow-tooltip />
           <el-table-column prop="country" label="国家" width="80" />
           <el-table-column prop="agent" label="代理" width="90" show-overflow-tooltip />
@@ -110,9 +119,14 @@ import { ttAccountsApi } from '@/api/tt'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
-const props = defineProps({ visible: Boolean })
+const props = defineProps({
+  visible: Boolean,
+  // 户类型候选由 TtAccountPanel 传入（弹窗自己不请求，理由见 TtAccountModal）
+  typeOptions: { type: Array, default: () => ['加白户', '企业户'] },
+})
 const emit = defineEmits(['update:visible', 'synced'])
 
+const accountType = ref('加白户')
 const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
@@ -144,7 +158,7 @@ async function startSync() {
   for (const k of Object.keys(conflictChoices)) delete conflictChoices[k]
   for (const k of Object.keys(statusChoices)) delete statusChoices[k]
   try {
-    const res = await ttAccountsApi.syncFromSheet({ dry_run: true })
+    const res = await ttAccountsApi.syncFromSheet({ dry_run: true, account_type: accountType.value })
     total.value = res.total || 0
     created.value = res.created || []
     updated.value = res.updated || []
@@ -181,7 +195,8 @@ async function doSync() {
         statusResolutions[c.advertiser_id] = c.sheet_status
       }
     }
-    const res = await ttAccountsApi.syncFromSheet({ dry_run: false, resolutions, status_resolutions: statusResolutions })
+    const res = await ttAccountsApi.syncFromSheet({ dry_run: false, resolutions,
+      status_resolutions: statusResolutions, account_type: accountType.value })
     const createdCount = Array.isArray(res.created) ? res.created.length : (res.created || 0)
     const conflictCount = conflicts.value.length
     const statusCount = Object.keys(statusResolutions).length
