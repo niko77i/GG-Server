@@ -167,13 +167,18 @@ def test_own_account_unaffected(client, monkeypatch):
 
 
 def test_claim_executes_reassign(client, monkeypatch):
-    """dry_run=false + confirmed.claim → 账户 owner_id 变为调用者；两次回写被触发。"""
+    """dry_run=false + confirmed.claim → 账户 owner_id 变为调用者。
+
+    认领**不逐条回写**（省 Google API 配额）：认领结果随执行段的 commit 落库，
+    收尾的整片回写腿（`writeback_rows(user_id, "gg", sheet_ids)`）一次覆盖含被认领账户的
+    全部 sheet_ids，故此处只应看到**一次**整体回写、且认领腿不单独触发通道列回写。
+    """
     h, uid = _user(client, "_cl_exec", role="huguan")
     db = database.get_db()
     _setup_sheet(db)
     other = _seed_user(db, "_cl_exec_owner", "拉菲")
     aid = _seed_account(db, "CLAIM-1", other)
-    _seed_account(db, "OWN-2", uid)          # 陪跑：让一般回写的 id 列表与认领腿区分
+    _seed_account(db, "OWN-2", uid)          # 陪跑：证明整体回写覆盖整片 sheet_ids
     db.close()
     _stub_sheets(monkeypatch, [
         _HEADER,
@@ -191,10 +196,38 @@ def test_claim_executes_reassign(client, monkeypatch):
     db.close()
     assert owner == uid
 
-    # 认领腿只回写被认领的账户；一般同步腿回写整片 sheet_ids（含陪跑）
-    assert calls["rows"][0] == ("gg", ["CLAIM-1"])
-    # 归属变更通道列（H「重新分配」）只由认领腿写，值为新归属
-    assert calls["channel"] == [("gg", "CLAIM-1", uid)]
+    # 只有收尾的那一次整体回写，且覆盖整片 sheet_ids（含被认领的 CLAIM-1 与陪跑 OWN-2）；
+    # 认领腿不再各自追加一次 batchUpdate。
+    assert calls["rows"] == [("gg", ["CLAIM-1", "OWN-2"])]
+    # 认领腿也不再单独写「重新分配」通道列（此前每条认领多一次 Sheets 调用）。
+    assert calls["channel"] == []
+
+
+def test_orphan_null_owner_account_goes_to_claim_not_create(client, monkeypatch):
+    """`owner_id IS NULL` 的孤儿账户（如 admin_delete_user 遗留）也进 to_claim、不进 to_create。
+
+    根因二：SQLite 里 `NULL != x` 与 `NULL = x` 皆为 NULL（非真）⇒ 若 other_map 的条件只写
+    `a.owner_id != ?`，孤儿行对 existing_map / other_map **都不可见** ⇒ 掉进 to_create 撞
+    account_id 全局 UNIQUE。这里以真实入口（dry_run 分类）守这一路。
+    """
+    h, uid = _user(client, "_cl_orphan")
+    db = database.get_db()
+    _setup_sheet(db)
+    aid = _seed_account(db, "ORPHAN-1", None)   # 无归属，且未软删
+    db.close()
+    _stub_sheets(monkeypatch, [_HEADER, _row("_cl_orphan", "ORPHAN-1")])
+
+    resp = _post_sync(client, h, dry_run=True)
+    assert resp.status_code == 200, resp.get_json()
+    diff = resp.get_json()["diff"]
+
+    assert "ORPHAN-1" not in {a["account_id"] for a in diff["to_create"]}
+    claim = {a["account_id"]: a for a in diff["to_claim"]}
+    assert "ORPHAN-1" in claim
+    assert claim["ORPHAN-1"]["existing_id"] == aid
+    assert claim["ORPHAN-1"]["owner_id"] is None
+    assert claim["ORPHAN-1"]["owner_name"] == ""   # 无归属 → 空串，前端兜底显示「（未分配）」
+    assert claim["ORPHAN-1"]["deleted"] is False
 
 
 def test_claim_denied_for_non_cross_user_role(client, monkeypatch):

@@ -4808,15 +4808,25 @@ def accounts_update(aid):
         db.close()
 
 
-def _reassign_owner(db, aid: int, target_owner: int, actor_id: int) -> None:
-    """改账户归属并触发两次看板回写。
+def _set_owner(db, aid: int, target_owner: int) -> None:
+    """只改账户归属（**不 commit、不回写**）。调用方负责 commit 与回写。
 
-    口径与 accounts_reassign 末尾逐字一致（规格 §6.2 / §7.2 规则 3①）：
-    先 commit 再回写；回写走 actor 自己的户管看板，未配置则静默 no-op。
-    ⚠️ 调用方负责提供已 commit 的 db（或自行 commit）—— 本函数不 commit。
+    与 `_reassign_owner` 分开，是为了让「同步认领」腿借用外层执行段已有的
+    commit 与收尾整体回写，避免每个认领多打一次 Sheets batchUpdate。
     """
     db.execute("UPDATE accounts SET owner_id = ?, updated_at = datetime('now','localtime') "
                "WHERE id = ?", (target_owner, aid))
+
+
+def _reassign_owner(db, aid: int, target_owner: int, actor_id: int) -> None:
+    """改账户归属 + **本函数内部 commit** + 两次看板回写。
+
+    口径与 accounts_reassign 末尾逐字一致（规格 §6.2 / §7.2 规则 3①）：
+    先 commit 再回写；回写走 actor 自己的户管看板，未配置则静默 no-op。
+    ⚠️ 回写发生在 commit **之后**（回写走独立后台线程/新连接，必须能读到已落库的新归属）。
+    `accounts_reassign` 用本函数（行为逐字不变）；同步认领腿用 `_set_owner`。
+    """
+    _set_owner(db, aid, target_owner)
     acct = db.execute("SELECT account_id FROM accounts WHERE id=?", (aid,)).fetchone()
     db.commit()
     if not acct:
@@ -5399,9 +5409,14 @@ def accounts_sync_from_sheet():
         ).fetchall():
             existing_map[r["account_id"]] = dict(r)
 
-    # 这些 ID 里「不属于自己」的行（含软删）—— 它们是本次的认领候选。
+    # 这些 ID 里「不属于自己」的行（含软删、含无归属的孤儿）—— 它们是本次的认领候选。
     # ⚠️ 必须含软删：软删的他人账户既不在 existing_map（owner 不符）、
     #    若这里再排除掉，它就两边不沾、掉进 to_create 撞 account_id 全局唯一约束。
+    # ⚠️ `OR a.owner_id IS NULL` 不能省：SQLite 里 `NULL != x` 求值为 NULL（非真），
+    #    漏了它，`owner_id IS NULL` 的孤儿行（admin_delete_user 会把手下的账户
+    #    `SET owner_id = NULL`）对两张 map 都不可见 ⇒ 掉进 to_create 撞 account_id 全局唯一约束。
+    #    （这类行 owner_display/owner_username 均为 NULL ⇒ owner_name 落空串，
+    #     前端显示「（未分配）」由前端兜底，后端保持空串。）
     other_map = {}
     for part in chunk(sheet_ids):
         marks = ",".join("?" for _ in part)
@@ -5409,7 +5424,7 @@ def accounts_sync_from_sheet():
             f"""SELECT a.id, a.account_id, a.owner_id, a.deleted_at,
                        u.display_name AS owner_display, u.username AS owner_username
                 FROM accounts a LEFT JOIN users u ON a.owner_id = u.id
-                WHERE a.account_id IN ({marks}) AND a.owner_id != ?""",
+                WHERE a.account_id IN ({marks}) AND (a.owner_id != ? OR a.owner_id IS NULL)""",
             tuple(part) + (user_id,)
         ).fetchall():
             other_map[r["account_id"]] = dict(r)
@@ -5534,7 +5549,10 @@ def accounts_sync_from_sheet():
                 if not _cross_user_actor(user_id):
                     errors.append({"account_id": acct_id, "error": "无权认领他人账户"})
                     continue
-                _reassign_owner(db, aid, user_id, user_id)
+                # 只改归属：**不 commit、不回写**。本腿跑在执行段 commit（10b 之后）之前，
+                # 认领结果随那次 commit 一起落库；收尾的 `writeback_rows(user_id, "gg", sheet_ids)`
+                # 已含被认领账户（其 owner_id 在 commit 后即为 user_id）⇒ 不必逐条回写。
+                _set_owner(db, aid, user_id)
                 claimed_count += 1
             except Exception:
                 log.exception("表格同步：认领账户失败")
