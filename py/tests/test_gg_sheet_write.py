@@ -76,12 +76,42 @@ def _wait_until(pred, msg, tries=300):
     raise AssertionError(msg)
 
 
+def _record_cell_writes(monkeypatch):
+    """把看板批量写换成记录器，返回 ([(account_id, value, col_index)], [key_col])。
+
+    实现已从「逐账户 2 次 update_cell_by_account_id」改成「一次
+    update_rows_by_account_id 覆盖整批」：一次调用里每户的 cells 同时含
+    F 与 H。这里把每户的 cells 展平成逐格三元组 —— 既守住「一次调用覆盖全部
+    账户」，也保住既有「F 列=5、H 列=7」的断言口径。
+
+    同时记下每次调用的 key_col：本看板的账户ID在 **B 列**，而
+    update_rows_by_account_id 的默认值是 "C"（户管看板的列）—— 漏传会按 C 列
+    定位 ⇒ 整批写空且不抛异常（静默写错）。用 key_col 断言把这条风险钉死。
+
+    参数序与 google_sheets_service.update_rows_by_account_id 逐位对齐：
+    (service, spreadsheet_id, sheet_name, rows, key_col="C")。
+    """
+    import google_sheets_service as gs
+    writes = []
+    key_cols = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+
+    def _rec(svc, sid, name, rows, key_col="C"):
+        key_cols.append(key_col)
+        for r in rows:
+            for col, val in r["cells"].items():
+                writes.append((r["account_id"], val, {"F": 5, "H": 7}[col]))
+
+    monkeypatch.setattr(gs, "update_rows_by_account_id", _rec)
+    return writes, key_cols
+
+
 
 def test_status_change_registers_dashboard_write(client, monkeypatch):
     """改状态 ⇒ 登记 gg_my_dashboard 的一条记录，business_key 是 account_id。"""
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
-    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
 
     h, uid = _gg_user(client, "_gg_status")
     db = database.get_db()
@@ -137,12 +167,7 @@ def test_delete_and_restore_register_dashboard_write(client, monkeypatch):
     故用写表实参区分：删户写 H 列「解绑」，恢复清空 H 列 —— 两者先后各自出现，
     才证明两个点位都真的触发过。轮询各自的可观测副作用，不依赖墙钟先后。
     """
-    import google_sheets_service as gs
-    writes = []
-    monkeypatch.setattr(gs, "build_service", lambda _p: object())
-    monkeypatch.setattr(gs, "update_cell_by_account_id",
-                        lambda svc, sid, name, aid, val, col_index=5:
-                        writes.append((aid, val, col_index)))
+    writes, _key_cols = _record_cell_writes(monkeypatch)
 
     h, uid = _gg_user(client, "_gg_del")
     db = database.get_db()
@@ -176,7 +201,7 @@ def test_dashboard_final_failure_lands_retry_failed_not_rolled_back(client, monk
     def _boom(*a, **k):
         raise RuntimeError("Sheets 配额超限")
 
-    monkeypatch.setattr(gs, "update_cell_by_account_id", _boom)
+    monkeypatch.setattr(gs, "update_rows_by_account_id", _boom)
 
     h, uid = _gg_user(client, "_gg_fail")
     db = database.get_db()
@@ -211,12 +236,7 @@ def test_batch_status_change_writes_every_account(client, monkeypatch):
     单户工厂 `build_sync(..., business_keys[0], ...)` 构造，则只有第一户被写进表，
     而 N 行日志全落 synced（静默漏写，比原实现更糟：原来是一个线程串行写 N 户）。
     """
-    import google_sheets_service as gs
-    writes = []
-    monkeypatch.setattr(gs, "build_service", lambda _p: object())
-    monkeypatch.setattr(gs, "update_cell_by_account_id",
-                        lambda svc, sid, name, aid, val, col_index=5:
-                        writes.append((aid, val, col_index)))
+    writes, key_cols = _record_cell_writes(monkeypatch)
 
     h, uid = _gg_user(client, "_gg_batch")
     db = database.get_db()
@@ -240,16 +260,15 @@ def test_batch_status_change_writes_every_account(client, monkeypatch):
     assert (r1["status"], r2["status"]) == ("synced", "synced")
     written = {a for a, _v, _c in writes}
     assert written == {"gg_adv_5", "gg_adv_6"}, f"两户都必须被写表，实际只写了 {writes}"
+    # 一次调用覆盖整批（不再逐账户 2 次），且必须按 B 列（账户ID）定位 ——
+    # 默认值是 "C"（户管看板列）会整批写空且不抛异常。
+    assert key_cols == ["B"], (
+        f"须一次调用且按 B 列定位（默认 C 列会静默写空），实际 key_col={key_cols}")
 
 
 def test_dashboard_write_rebuilds_from_accounts(client, monkeypatch):
     """重建从 accounts 重算 F/H —— 删户态写「解绑」，非删户态写空。"""
-    import google_sheets_service as gs
-    writes = []
-    monkeypatch.setattr(gs, "build_service", lambda _p: object())
-    monkeypatch.setattr(gs, "update_cell_by_account_id",
-                        lambda svc, sid, name, aid, val, col_index=5:
-                        writes.append((aid, val, col_index)))
+    writes, _key_cols = _record_cell_writes(monkeypatch)
 
     h, uid = _gg_user(client, "_gg_rebuild")
     db = database.get_db()
@@ -274,26 +293,29 @@ def test_dashboard_write_rebuilds_from_accounts(client, monkeypatch):
 # 后六条全绿。该维度此前**零覆盖**。
 #
 # 它失败时是静默的：跨用户操作（管理员删他人账户）会写错看板名，
-# update_cell_by_account_id 在该表里查不到对应行，只返回 {"not_found": True}
-# **不抛异常** ⇒ 日志照样落 synced，正是本功能要消灭的「写丢了还不知道」。
+# update_rows_by_account_id 在该表里查不到对应行，只把它记进返回值的
+# not_found 列表、**不抛异常** ⇒ 日志照样落 synced，正是本功能要消灭的
+# 「写丢了还不知道」。
 #
 # 故下面每条都造 owner ≠ 操作者、两人各配**不同的私有看板名**，直接断言传入
-# update_cell_by_account_id 的看板名是哪一份，并反向断言不是另一份。
+# update_rows_by_account_id 的看板名是哪一份，并反向断言不是另一份。
 # ---------------------------------------------------------------------------
 
 
 def _record_sheet_writes(monkeypatch):
     """把看板写表换成记录器，返回 [(dashboard_name, account_id)]。
 
-    参数序与 google_sheets_service.update_cell_by_account_id 逐位对齐：
-    (service, spreadsheet_id, sheet_name, account_id, value, col_index=5)。
+    参数序与 google_sheets_service.update_rows_by_account_id 逐位对齐：
+    (service, spreadsheet_id, sheet_name, rows, key_col="C")。批量写入一次覆盖
+    本批全部账户，故把 rows 里每户展平成一条 (sheet_name, account_id)。
     """
     import google_sheets_service as gs
     calls = []
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(
-        gs, "update_cell_by_account_id",
-        lambda svc, sid, name, aid, val, col_index=5: calls.append((name, aid)))
+        gs, "update_rows_by_account_id",
+        lambda svc, sid, name, rows, key_col="C":
+        calls.extend((name, r["account_id"]) for r in rows))
     return calls
 
 
@@ -543,7 +565,7 @@ def test_status_clear_off_registers_recharge_write(client, monkeypatch):
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "append_recharge",
                         lambda svc, sid, name, rows: written.extend(rows))
-    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
 
     h, uid = _gg_user(client, "_gg_clear")
     db = database.get_db()
@@ -595,7 +617,7 @@ def test_accounts_update_returns_clear_recharge_id(client, monkeypatch):
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "append_recharge", lambda *a, **k: None)
-    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
 
     h, uid = _gg_user(client, "_gg_key1")
     db = database.get_db()
@@ -628,7 +650,7 @@ def test_accounts_update_without_clear_returns_null_key(client, monkeypatch):
     """未触发清账时仍须有该 key（值为 None）—— 前端按键取值，缺 key 会 undefined。"""
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
-    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
 
     h, uid = _gg_user(client, "_gg_key0")
     db = database.get_db()
@@ -650,7 +672,7 @@ def test_batch_update_returns_clear_recharge_ids(client, monkeypatch):
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "append_recharge", lambda *a, **k: None)
-    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
 
     h, uid = _gg_user(client, "_gg_key2")
     db = database.get_db()
@@ -709,7 +731,7 @@ def test_sync_from_sheet_returns_affected_account_ids(client, monkeypatch):
     """
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
-    monkeypatch.setattr(gs, "update_cell_by_account_id", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
     # 端点前置校验 credentials_path 必须是真实存在的文件（main.py:5246），
     # 否则在读到表格之前就 400 —— 与既有一期用例同样用 __file__ 顶上。
     import main

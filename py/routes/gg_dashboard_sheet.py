@@ -43,11 +43,18 @@ def _gg_dashboard_write(dash_uid, account_ids):
         raise RuntimeError("找不到对应账户，无法重建看板行")
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-    for account_id, st, deleted in payload:
-        # 备注列（F 列）：写状态；是否解绑（H 列）：已删除写「解绑」，未删除清空
-        gs.update_cell_by_account_id(service, sheet_id, dashboard_name, account_id, st)
-        gs.update_cell_by_account_id(service, sheet_id, dashboard_name, account_id,
-                                     "解绑" if deleted else "", col_index=7)
+    # 批量写：一次整表读 + 一次 batchUpdate 覆盖全部 N 行。
+    # 改前是逐账户 2 次 update_cell_by_account_id，而那个函数**每次都整表读 A:H**
+    # ⇒ 395 户 ≈ 790 次全表读、实测约 10 分钟。值与逐格写法**逐字相同**：
+    # F 列 = 状态名（status_name or "存活"），H 列 = 已删写「解绑」、未删写空串。
+    #
+    # ⚠️ key_col="B" 不能省：本看板的账户ID在 B 列，而 update_rows_by_account_id
+    # 的默认值是 "C"（那是**户管看板**的列）；用默认值会按 C 列（所属渠道）定位
+    # ⇒ 整批写空、且不抛异常（静默写错）。
+    rows = [{"account_id": account_id,
+             "cells": {"F": st, "H": "解绑" if deleted else ""}}
+            for account_id, st, deleted in payload]
+    gs.update_rows_by_account_id(service, sheet_id, dashboard_name, rows, key_col="B")
 
 
 def build_many_sync(user_id, business_keys, payload):

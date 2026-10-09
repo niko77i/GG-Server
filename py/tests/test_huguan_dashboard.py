@@ -3539,10 +3539,14 @@ class TestGGSoftDeleteNoTrigger:
     def test_soft_delete_does_not_trigger_huguan_sheet(self, client, monkeypatch):
         """GG 软删确实会写「我的看板」H 列，但绝不写户管看板那张表。
 
-        陷阱：软删写的是 `update_cell_by_account_id`（另一张表的另一函数），
-        `_stub_sheets` 只捕获 `update_rows_by_account_id` —— 照字面断言
-        「零 Sheets 调用」就会在软删确实写了点什么的情况下假绿。这里把
-        `update_cell_by_account_id` 也捕获进来，按 spreadsheet_id 过滤断言。
+        陷阱：软删写的是**另一张表**（写的是账户 owner 的「我的看板」，
+        不是户管看板）。`_stub_sheets` 只捕获 `update_rows_by_account_id` ——
+        照字面断言「零 Sheets 调用」就会在软删确实写了点什么的情况下假绿。
+        这里改用 `captured` 里按 spreadsheet_id 过滤，断言那张「我的看板」
+        确实被写过 H 列，证明断言不是恒真式。
+
+        注：GG「我的看板」的批量写自 2026-10-09 起也走 `update_rows_by_account_id`
+        （原先逐账户 `update_cell_by_account_id`，每次都整表读，395 户约 10 分钟）。
         """
         hg, uid = _create_user(client, "_gg_trig_del", role="huguan")
         db = database.get_db()
@@ -3554,14 +3558,6 @@ class TestGGSoftDeleteNoTrigger:
         db.commit()
         db.close()
 
-        import google_sheets_service as gs
-        cell_calls = []
-
-        def _fake_cell(service, spreadsheet_id, sheet_name, account_id, value, col_index=5):
-            cell_calls.append({"spreadsheet_id": spreadsheet_id, "col_index": col_index})
-            return {"updated": 1}
-
-        monkeypatch.setattr(gs, "update_cell_by_account_id", _fake_cell)
         captured = []
         _stub_sheets(monkeypatch, captured)
 
@@ -3569,10 +3565,10 @@ class TestGGSoftDeleteNoTrigger:
 
         # 户管看板那张表（SS-HG）一个单元格都没被写
         assert [c for c in captured if c["spreadsheet_id"] == "SS-HG"] == []
-        assert [c for c in cell_calls if c["spreadsheet_id"] == "SS-HG"] == []
         # 软删确实写了「我的看板」（SRC-SHEET）的 H 列 —— 证明断言不是恒真式
-        assert any(c["spreadsheet_id"] == "SRC-SHEET" and c["col_index"] == 7
-                   for c in cell_calls)
+        assert any(c["spreadsheet_id"] == "SRC-SHEET"
+                   and any("H" in r["cells"] for r in c["rows"])
+                   for c in captured)
 
 
 class TestTTNoTriggerGaps:
