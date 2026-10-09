@@ -1094,7 +1094,17 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
                              "message": f"{f}「{value}」无法唯一匹配，已跳过该列"})
             continue
         out[_target_column(platform, f)] = resolved
-    out["_is_dead"] = is_dead(p)
+    # 只有该表**真的采集了**死亡判定列（是否回收 `_dead_flag` / 状态 `status_name`）才
+    # 产出 `_is_dead`。两个判定列都未采集时 `is_dead(p)` 恒返回 False（见 `is_dead`），
+    # 无条件产出会让「缺这两列的 tt 表」同步一个库里已死账户时判成「变了」→ 确认后
+    # `apply_diff` 清空 `death_date`（**静默复活**），违反「未采集的列一个字不碰」——
+    # 与 Task 7 文本列门控**同族**（这里载体是合成键而非文本列）。
+    # gg/fb 的合成 map 恒含这两列（gg：B `_dead_flag` + K `status_name`；fb：O
+    # `status_name`）⇒ 门控恒真、逐字节不变（见 `spec_column_map`）。
+    # 缺键时的消费端已保证「什么都不做」：create 分支 `pop(..., False)` 默认存活、
+    # update 分支 `pop(..., None)` 直接跳过死亡处理。
+    if "_dead_flag" in p or "status_name" in p:
+        out["_is_dead"] = is_dead(p)
     # 户类型的传递链第 ② 环（规格 §4.3）：`account_type` 不是表里的列，
     # 所以走合成键，与 `_primary_bm_name` 同形 —— 由调用方（同步路由）按
     # 「这一行是从哪张表读出来的」注入，这里原样搬运。
@@ -1982,7 +1992,10 @@ def snapshot_push_targets(service, conf: dict, platform: str, groups: list,
                                   else str(values[i])).strip()
             if row_cells:
                 cells.append({"account_id": aid, "cells": row_cells})
-        out_sheets.append({"sheet_name": sheet_name, "cells": cells})
+        # 逐表记下**本次定位用的列字母**（新增键）：撤回时按它定位，与写表器/快照同一列，
+        # 且不受此后表头漂移影响。账户ID 经手工覆盖映射时尤为关键 —— 撤回若按别名重解析会
+        # 认不出（`resolve_table_col_map` 抛错 → 500）。旧快照没有该键，`undo_push` 回落既有解析。
+        out_sheets.append({"sheet_name": sheet_name, "key_col": key_col, "cells": cells})
     return {"spreadsheet_id": spreadsheets, "sheets": out_sheets}
 
 
@@ -2001,6 +2014,9 @@ def push_undo_cells(payload: dict) -> list:
     sheets = payload.get("sheets")
     if isinstance(sheets, list):
         return [{"sheet_name": s.get("sheet_name") or "",
+                 # `key_col` 是快照记录的定位列（新键）；旧快照没有 ⇒ None ⇒
+                 # `undo_push` 回落到按表头重新解析（带该表的 `columns` 覆盖）。
+                 "key_col": s.get("key_col"),
                  "rows": [{"account_id": c["account_id"], "cells": dict(c["cells"])}
                           for c in (s.get("cells") or [])]}
                 for s in sheets if isinstance(s, dict) and s.get("sheet_name")]
@@ -2119,6 +2135,9 @@ def undo_push(user_id: int, platform: str) -> dict:
         if not conf["spreadsheet_id"] or not tables or (platform != "tt" and not conf["sheet_name"]):
             return {"updated": 0, "not_found": []}
         payload = load_undo(db, user_id, platform, "push")
+        # 各表的手工覆盖（`{sheet_name: columns}`）：只在**旧快照**（没有 `key_col`）
+        # 回落按表头重解析时用得上 —— 账户ID 经覆盖映射时，不带覆盖会抛「找不到账户ID列」。
+        overrides_by_sheet = {t["sheet_name"]: (t.get("columns") or {}) for t in tables}
     finally:
         db.close()
     if not payload:
@@ -2142,18 +2161,23 @@ def undo_push(user_id: int, platform: str) -> dict:
     # 两者之间用户可能改过配置，撤回要退回到当初写的地方。
     spreadsheet_id = payload.get("spreadsheet_id") or ""
     total_updated, total_not_found = 0, []
-    # 定位列必须与**快照用的同一列**（快照由 `snapshot_push_targets` 按该表 col_map 记）：
-    # 写入器默认值是 "C"（GG/TT 的账户ID列），而 **FB 的账户ID在 D 列**（C 是「账户名称」）
-    # —— 不显式传就按错误的列定位、整批写空且不抛异常（静默）。tt 表头顺序与固定列规格
-    # 不同时账户ID 也不在 C 列，故逐表按**该表表头**解析 col_map 再取定位键
-    # （gg/fb 走合成 map、零额外读，与既有行为逐字节一致）。
+    # 定位列必须与**快照用的同一列**：优先用快照里**逐表记下的 `key_col`**（本次修复新增），
+    # 它由 `snapshot_push_targets` 按该表 col_map（含手工覆盖）记，且不受此后表头漂移影响。
+    # 旧快照没有该键 ⇒ 回落到按**该表表头**重新解析 col_map 再取定位键，并把该表的
+    # `columns` 覆盖一并传入 —— 账户ID 经覆盖映射时，不带覆盖会抛「找不到账户ID列」⇒ 撤回 500
+    # （这正是终审 Important #1）。写入器默认值是 "C"（GG/TT 的账户ID列），而 **FB 的账户ID
+    # 在 D 列**（C 是「账户名称」）—— 不显式传就按错误的列定位、整批写空且不抛异常（静默）。
     for g in groups:
         sheet_name, rows = g["sheet_name"], g["rows"]
         if not rows:
             continue
-        cm = resolve_table_col_map(service, spreadsheet_id, sheet_name, platform)
+        key_col = g.get("key_col")
+        if not key_col:
+            cm = resolve_table_col_map(service, spreadsheet_id, sheet_name, platform,
+                                       overrides_by_sheet.get(sheet_name) or {})
+            key_col = key_col_of_col_map(cm, platform)
         res = gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows,
-                                           key_col=key_col_of_col_map(cm, platform))
+                                           key_col=key_col)
         total_updated += res["updated"]
         total_not_found.extend(res["not_found"])
     db = _open_db()
@@ -2202,12 +2226,16 @@ def undo_sync(user_id: int, platform: str) -> dict:
     db = _open_db()
     try:
         conf = get_platform_config(db, user_id, platform)
+        tables = get_platform_tables(db, user_id, platform)
         payload = load_undo(db, user_id, platform, "sync")
     finally:
         db.close()
     if not payload:
         # 键集必须与成功路径一致：前端逐键取字段，少一个就报错（Task 5 补充说明）
         return {"reverted": 0, "conflicts": [], "kept": [], "not_found": []}
+    # 各表的手工覆盖：只在旧快照（没有 `sheet_key_cols`）回落按表头重解析时用 ——
+    # 账户ID 经覆盖映射时，不带覆盖会抛「找不到账户ID列」。
+    overrides_by_sheet = {t["sheet_name"]: (t.get("columns") or {}) for t in tables}
 
     table = _TABLE_FOR_PLATFORM[platform]
     key_field = ACCOUNT_KEY_FIELD[platform]
@@ -2235,6 +2263,9 @@ def undo_sync(user_id: int, platform: str) -> dict:
     # 宁可漏写也不写错表）。
     if back and conf["spreadsheet_id"]:
         sheet_back_sheets = payload.get("sheet_back_sheets") or {}
+        # 逐表记下的定位列（新增键）：撤回按它定位，与读/写路径同一列，也不受表头漂移影响。
+        # 旧快照没有该键 ⇒ 回落既有解析（带该表 `columns` 覆盖）。
+        sheet_key_cols = payload.get("sheet_key_cols") or {}
         by_sheet = {}
         for item in back:
             name = sheet_back_sheets.get(item["account_id"]) or conf["sheet_name"]
@@ -2248,12 +2279,16 @@ def undo_sync(user_id: int, platform: str) -> dict:
             from main import _GOOGLE_SHEETS_CONFIG
             service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
             for name, rows in by_sheet.items():
-                # 定位列必须与**快照/写表器用的同一列**：逐表按该表表头解析 col_map
-                # （tt 表头顺序不同时账户ID 不在 C 列；gg/fb 合成 map、零额外读）。
-                cm = resolve_table_col_map(service, conf["spreadsheet_id"], name, platform)
+                # 定位列必须与**快照/写表器用的同一列**：优先用快照逐表记的 `sheet_key_cols`；
+                # 旧快照没有该键 ⇒ 回落按该表表头解析 col_map（并带上该表 `columns` 覆盖 ——
+                # 账户ID 经覆盖映射时不带覆盖会抛「找不到账户ID列」）。gg/fb 合成 map、零额外读。
+                key_col = sheet_key_cols.get(name)
+                if not key_col:
+                    cm = resolve_table_col_map(service, conf["spreadsheet_id"], name, platform,
+                                               overrides_by_sheet.get(name) or {})
+                    key_col = key_col_of_col_map(cm, platform)
                 res = gs.update_rows_by_account_id(
-                    service, conf["spreadsheet_id"], name, rows,
-                    key_col=key_col_of_col_map(cm, platform))
+                    service, conf["spreadsheet_id"], name, rows, key_col=key_col)
                 table_result["updated"] += res["updated"]
                 table_result["not_found"].extend(res["not_found"])
 

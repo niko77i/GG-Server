@@ -3902,6 +3902,54 @@ class TestOwnerChangeNoteColumn:
         assert row["owner_change_note"] == "", "旧行读回必须是空串，不能是 None"
         db.close()
 
+    def test_legacy_db_gets_subject_name_and_landing_url(self, app):
+        """存量库升级路径补 `subject_name` / `landing_url` 两列（终审 Minor #8）。
+
+        上面的 `test_subject_name_and_landing_url_land_in_db` 走全新临时库的 CREATE TABLE
+        分支 —— 那条语句里已含这两列，故它对**存量库 ALTER 升级**零判别力
+        （`_ensure_schema` 先建表，`_add_column_if_missing` 便提前 return）。这里手工建
+        一张**没有**这两列的旧 tt_accounts，再 `get_db()`（每次都跑 `_ensure_columns`），
+        断言两列被补上且旧行读回空串。删掉 `_ensure_columns` 里那两条，本用例即红。
+        """
+        db_path = database._db_path()
+        raw = sqlite3.connect(db_path)
+        raw.execute("""
+            CREATE TABLE tt_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT DEFAULT '',
+                advertiser_id TEXT NOT NULL UNIQUE,
+                bc_id INTEGER,
+                country TEXT DEFAULT '',
+                agent_id INTEGER,
+                timezone TEXT DEFAULT '',
+                consumption TEXT DEFAULT '',
+                status_id INTEGER,
+                acquired_date TEXT DEFAULT '',
+                death_date TEXT DEFAULT '',
+                status_changed_date TEXT DEFAULT '',
+                remark TEXT DEFAULT '',
+                owner_id INTEGER,
+                deleted_at TEXT DEFAULT NULL,
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT ''
+            )
+        """)
+        raw.execute("INSERT INTO tt_accounts(advertiser_id, name) VALUES('LEGACY-2','旧账户')")
+        raw.commit()
+        raw.close()
+
+        db = database.get_db()
+        cols = {r[1]: r for r in db.execute("PRAGMA table_info(tt_accounts)").fetchall()}
+        assert "subject_name" in cols, "存量库路径未补上 subject_name 列"
+        assert "landing_url" in cols, "存量库路径未补上 landing_url 列"
+        assert cols["subject_name"][4] == "''", "补上的 subject_name 默认值必须是 ''"
+        assert cols["landing_url"][4] == "''", "补上的 landing_url 默认值必须是 ''"
+        row = db.execute("SELECT subject_name, landing_url FROM tt_accounts "
+                         "WHERE advertiser_id='LEGACY-2'").fetchone()
+        assert row is not None, "旧行应当保留"
+        assert (row["subject_name"], row["landing_url"]) == ("", ""), "旧行读回必须是空串"
+        db.close()
+
 
 class TestOwnerChangeNoteReadBack:
     """L 列的值按表覆盖存进 owner_change_note（其他文本列同口径）。"""
@@ -5809,6 +5857,107 @@ class TestNewFieldsSync:
         db.close()
         assert r["subject_name"] == "", "被采集的列空着必须清库（口径不许被打掉）"
         assert r["landing_url"] == "https://x/y", "被采集且有值的列照常写入"
+
+
+# ---------- 终审 Important #2：`_is_dead` 必须按「该表是否采集死亡判定列」门控 ----------
+
+class TestIsDeadGate:
+    """`_is_dead` 是**合成键**，不在 Task 7 的文本列门控里。
+
+    `is_dead(p)` 在两个死亡判定列（是否回收 / 状态）都未采集时恒返回 False ⇒ 若无条件
+    产出，某张既无「是否回收」也无「状态」的 tt 表同步一个**库里已死**的账户时，会把它
+    判成「变了」→ 用户确认后 `apply_diff` 清空 `death_date`（静默复活），违反
+    「未采集的列一个字不碰」。与 Task 7 的文本列缺陷同族。修复：只有采集到死亡判定列
+    才产出 `_is_dead`。
+    """
+
+    def test_tt_table_without_death_columns_does_not_revive_dead_account(self, client,
+                                                                         monkeypatch):
+        import json
+        import database
+        import google_sheets_service as gs
+        hg, uid = _create_user(client, "_deadgate1", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_deadgate1')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "加白户", "sheet_name": "总户-加白"}]}})))
+        # 库里已死的账户（death_date 非空）
+        _seed_tt_account(db, "7301", uid, account_type="加白户",
+                         death_date="2026-01-01", consumption="")
+        db.commit(); db.close()
+        # 表头既无「是否回收」也无「状态」；消耗 100 制造一次真实更新（否则整行不进
+        # to_update，测不到「复活」）。
+        header = ["账户ID", "接户运营", "消耗"]
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [header, ["7301", "_deadgate1", "100"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "dry_run": False,
+            "confirmed": {"update": ["7301"]}})
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["result"]["errors"] == [], resp.get_json()["result"]
+        db = database.get_db()
+        r = db.execute("SELECT death_date, consumption FROM tt_accounts "
+                       "WHERE advertiser_id='7301'").fetchone()
+        db.close()
+        assert r["consumption"] == "100", "对照：这次同步确实更新了该账户"
+        assert (r["death_date"] or "").strip() == "2026-01-01", \
+            "未采集死亡判定列的表不得清空 death_date（静默复活死账户）"
+
+    def test_tt_table_with_death_column_still_revives(self, client, monkeypatch):
+        """对照：采集了「是否回收」的表，表里写「否」⇒ 仍照常撤销死亡。
+
+        门控**不许过抑制**：被采集的死亡列仍要照常驱动 `_apply_death`。
+        """
+        import json
+        import database
+        import google_sheets_service as gs
+        hg, uid = _create_user(client, "_deadgate2", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_deadgate2')}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "加白户", "sheet_name": "总户-加白"}]}})))
+        _seed_tt_account(db, "7302", uid, account_type="加白户",
+                         death_date="2026-01-01", consumption="")
+        db.commit(); db.close()
+        header = ["是否回收", "账户ID", "接户运营", "消耗"]
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [header, ["否", "7302", "_deadgate2", "100"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "dry_run": False,
+            "confirmed": {"update": ["7302"]}})
+        assert resp.status_code == 200, resp.get_json()
+        db = database.get_db()
+        r = db.execute("SELECT death_date FROM tt_accounts "
+                       "WHERE advertiser_id='7302'").fetchone()
+        db.close()
+        assert (r["death_date"] or "").strip() == "", \
+            "采集了「是否回收」且表里写「否」⇒ 仍应照常撤销死亡"
+
+    def test_gg_and_fb_still_emit_is_dead(self, client):
+        """门控对 gg/fb 恒为 no-op：它们的合成 map 恒含死亡判定列 ⇒ 仍产 `_is_dead`。
+
+        证明（非假设）：gg 的 parse_row 恒产 `_dead_flag`（B 列）+ `status_name`（K 列）；
+        fb 恒产 `status_name`（O 列）。两者都命中门控，故行为逐字节不变。
+        """
+        db = database.get_db()
+        gg_row = [""] * 14
+        gg_row[2], gg_row[10] = "GG-DEAD-CHK", "死亡"     # C=账户ID，K=状态
+        gg = dict(hd.parse_row(gg_row, "gg"), row=2)
+        assert "_dead_flag" in gg and "status_name" in gg
+        gg_diff = hd.build_diff(db, [gg], "gg")
+        assert gg_diff["to_create"][0]["db_values"]["_is_dead"] is True
+
+        fb_row = [""] * 17
+        fb_row[3], fb_row[14] = "FB-DEAD-CHK", "死亡"     # D=资产UID，O=状态
+        fb = dict(hd.parse_row(fb_row, "fb"), row=2)
+        assert "status_name" in fb
+        fb_diff = hd.build_diff(db, [fb], "fb")
+        assert fb_diff["to_create"][0]["db_values"]["_is_dead"] is True
+        db.close()
 
 
 # ---------- Task 8: 配置 tables[].columns 的读取与校验 ----------

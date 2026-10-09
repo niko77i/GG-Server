@@ -2028,3 +2028,88 @@ class TestUndoUsesMappedKeyColumn:
         assert calls[0][2] == [{"account_id": "MKC-2", "cells": {"I": "旧运营"}}], calls
 
 
+# ---------- 终审 Important #1：撤回两条路径必须用 push/同步当初的**定位列** ----------
+#
+# 账户ID 若经**手工覆盖**从非标准表头（如「广告账户」）映射到 advertiser_id，push 时按
+# 覆盖认对了列并写好快照；撤回若再按纯别名解析（不带覆盖）就认不出 ⇒
+# `resolve_table_col_map` 抛「找不到账户ID列」→ 撤回 500，或若表里恰有别名列则定位到
+# **另一列**、写回错行。修法：快照记录每张表的定位列，撤回直接用（也免于此后表头漂移）。
+
+class TestUndoUsesSnapshotKeyColumn:
+    def test_undo_push_round_trip_with_manual_override(self, client, monkeypatch):
+        """push→undo 往返：账户ID 只经手工覆盖可认 ⇒ 撤回必须用快照记的定位列。"""
+        import google_sheets_service as gs
+
+        hg, uid = _huguan_headers(client, "_undo_ovr", platform="tt")
+        override = {"广告账户": "advertiser_id"}   # 表头无非标准别名「账户ID」
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "加白户", "sheet_name": "总户-加白",
+                                   "columns": override}]}})))
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, owner_id, account_type, "
+                   "country, timezone, consumption, remark, death_date, acquired_date) "
+                   "VALUES('7001','7001',?,'加白户','','','','','','')", (uid,))
+        db.commit()
+        # 表头：账户ID 在 A（只经覆盖可认）、接户运营 在 B。
+        header = ["广告账户", "接户运营"]
+        grid = [header, ["'7001", "张三"]]
+        monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: grid)
+        cm = hd.resolve_table_col_map(FakeService(), "SS", "总户-加白", "tt", override)
+        assert cm["advertiser_id"] == "A"
+        rows = hd.collect_rows_for_push(db, "tt", col_maps_by_type={"加白户": cm})
+        db.close()
+
+        payload = hd.snapshot_push_targets(FakeService(), {"spreadsheet_id": "SS"}, "tt",
+                                           [("总户-加白", rows)], {"总户-加白": cm})
+        # 快照必须**逐表**记下定位列（修前没有这个键 ⇒ KeyError）
+        assert payload["sheets"][0]["key_col"] == "A"
+
+        db = database.get_db()
+        hd.save_undo(db, uid, "tt", "push", payload)
+        db.commit()
+        db.close()
+
+        calls = []
+        monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, name, rows, key_col="C":
+                            calls.append((name, key_col))
+                            or {"updated": len(rows), "not_found": []})
+        out = hd.undo_push(uid, "tt")
+        assert calls == [("总户-加白", "A")], \
+            f"撤回必须用快照记的定位列 A（修前会按别名重解析 → 找不到账户ID列 → 500）：{calls}"
+        assert out == {"updated": 1, "not_found": []}
+
+    def test_undo_sync_uses_snapshot_key_column(self, client, fb_user, monkeypatch):
+        """sync 撤回的表侧回退同样按快照里记的定位列（`sheet_key_cols`）。"""
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": ""})
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "tt", "sync", _empty_sync_payload(
+            sheet_back=[{"account_id": "A1", "cells": {"A": "旧运营"}}],
+            sheet_back_sheets={"A1": "总户-加白"},
+            sheet_key_cols={"总户-加白": "A"}))
+        db.commit()
+        db.close()
+        hd.undo_sync(fb_user, "tt")
+        assert calls and calls[0]["key_col"] == "A", \
+            f"sync 撤回表侧回退必须用快照记的定位列 A（修前按别名解析得 C）：{calls}"
+
+    def test_undo_sync_legacy_snapshot_without_key_cols_still_works(self, client, fb_user,
+                                                                   monkeypatch):
+        """向后兼容：修复前写入的快照没有 `sheet_key_cols` ⇒ 回落既有表头解析，仍能撤。"""
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        db = database.get_db()
+        hd.save_undo(db, fb_user, "tt", "sync", _empty_sync_payload(
+            sheet_back=[{"account_id": "A1", "cells": {"G": "旧运营"}}],
+            sheet_back_sheets={"A1": "N"}))
+        db.commit()
+        db.close()
+        out = hd.undo_sync(fb_user, "tt")
+        # `_sync_env` 的表头把账户ID 放在 C ⇒ 回落解析得 C，与改动前逐字等价
+        assert calls and calls[0]["key_col"] == "C", calls
+        assert out["not_found"] == []
+
+

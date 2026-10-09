@@ -262,6 +262,12 @@ def dashboard_sync():
         col_map_by_account = {aid: sheet_col_maps[sheet]
                               for aid, sheet in sheet_back_sheets.items()
                               if sheet in sheet_col_maps}
+        # 逐表记下**定位键列**（新增键 `sheet_key_cols`）：撤回的表侧回退据此按
+        # 「当初同步用的同一列」找行，且不受此后表头漂移影响；账户ID 经手工覆盖映射时，
+        # 撤回若按别名重解析会认不出（本批终审 Important #1）。gg/fb 的 sheet_col_maps
+        # 为空 ⇒ 该键也空 ⇒ `undo_sync` 回落既有解析（逐字节不变）。
+        sheet_key_cols = {sheet: hd.key_col_of_col_map(cm, platform)
+                          for sheet, cm in sheet_col_maps.items()}
         try:
             result = hd.apply_diff(db, diff, platform, confirmed, user_id=uid,
                                    collect_undo=True, sheet_from=sheet_from)
@@ -276,6 +282,8 @@ def dashboard_sync():
         # 审查修复轮 1 · Finding 1：把「账户 → 来源表」映射并进快照（新增键，旧快照没有）。
         # 缺这个键时 `undo_sync` 回落到 `conf["sheet_name"]`（gg/fb 与旧单表 tt 的旧行为）。
         undo["sheet_back_sheets"] = sheet_back_sheets
+        # 同批：逐表定位键列（新增键，旧快照没有 ⇒ 撤回回落既有解析）。
+        undo["sheet_key_cols"] = sheet_key_cols
         hd.save_undo(db, uid, platform, "sync", undo)
         db.commit()
 
