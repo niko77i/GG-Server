@@ -755,8 +755,8 @@ class TestE11FbSheetsSyncLogSink:
     def test_extract_save_failure_sanitized(self, client, monkeypatch, caplog):
         """写点 ①（`/api/fb/extract/save`）那条腿：后台写失败同样只落统一固定文案。
 
-        原先观察 `sheets_sync_log`（`sync_log_id` + `/api/fb/reports/sync-status/<id>`）；
-        四期起 FB 不再写那张表，改看 `sheet_write_log`。
+        原先观察 `sheets_sync_log`（`sync_log_id` + 按 id 轮询的同步状态端点，
+        该端点已随四期退役）；四期起 FB 不再写那张表，改看 `sheet_write_log`。
         """
         import logging
         import time as _time

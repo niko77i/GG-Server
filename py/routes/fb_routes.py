@@ -1844,56 +1844,6 @@ def fb_check_duplicates():
     return ok({'duplicates': duplicates})
 
 
-@fb_bp.route('/api/fb/reports/last-sync', methods=['GET'])
-@jwt_required()
-@fb_required
-def fb_last_sync():
-    """获取最近一次 Sheet 同步结果。"""
-    db = get_db()
-    uid = get_uid()
-    row = db.execute(
-        "SELECT * FROM sheets_sync_log WHERE user_id=? ORDER BY created_at DESC LIMIT 1",
-        (uid,)
-    ).fetchone()
-    if not row:
-        return ok({'status': 'none'})
-    result = dict(row)
-    result['rows_json'] = (result.get('rows_json') or '')[:200]  # 截断
-    return ok(result)
-
-
-@fb_bp.route('/api/fb/reports/sync-status/<int:log_id>', methods=['GET'])
-@jwt_required()
-@fb_required
-def fb_sync_status_by_id(log_id):
-    """查询特定同步日志的状态（供前端在保存后精确轮询本次写表结果）。"""
-    db = get_db()
-    uid = get_uid()
-    row = db.execute(
-        "SELECT id, status, error_msg FROM sheets_sync_log WHERE id=? AND user_id=?",
-        (log_id, uid)
-    ).fetchone()
-    if not row:
-        return err('同步记录不存在', 404)
-    return ok({'id': row['id'], 'status': row['status'], 'error_msg': row['error_msg'] or ''})
-
-
-@fb_bp.route('/api/fb/reports/sync-status', methods=['GET'])
-@jwt_required()
-@fb_required
-def fb_sheets_sync_status():
-    """获取 Sheet 同步失败记录。"""
-    db = get_db()
-    user_id = get_uid()
-    product_name = request.args.get('product_name', '')
-    rows = db.execute(
-        "SELECT * FROM sheets_sync_log WHERE user_id=? AND product_name=? "
-        "ORDER BY created_at DESC LIMIT 50",
-        (user_id, product_name)
-    ).fetchall()
-    return ok({'items': [dict(r) for r in rows]})
-
-
 def _rebuild_fb_records(db, user_id, product_name, line_name, report_date):
     """按 (产品名, 线名, 日期) 回查 fb_ad_reports，重建待写 records。
 
