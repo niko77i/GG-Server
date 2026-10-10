@@ -66,9 +66,14 @@
             ✕ 未找到 {{ result.not_found.length }} 个
           </div>
           <div style="max-height:120px;overflow-y:auto;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:8px;">
-            <div v-for="aid in result.not_found" :key="aid" style="font-size:12px;color:#991b1b;line-height:1.8;">
+            <div v-for="aid in notFoundShown.shown" :key="aid" style="font-size:12px;color:#991b1b;line-height:1.8;">
               · {{ aid }}
             </div>
+          </div>
+          <div v-if="notFoundShown.hiddenCount > 0" style="margin-top:4px;font-size:12px;color:#909399;">
+            …另有 {{ notFoundShown.hiddenCount }} 条
+            <el-button v-if="!notFoundAllOpen" link type="primary" size="small"
+                       @click="notFoundAllOpen = true">展开全部 {{ notFoundShown.total }} 条</el-button>
           </div>
         </div>
       </template>
@@ -84,6 +89,8 @@
 import { ref, computed } from 'vue'
 import { fbApi } from '@/api/fb'
 import { ElMessage } from 'element-plus'
+// 大批量结果的「预览」纯逻辑（已过测试，**不要改它**）：slicePreview 只渲染前 N 项。
+import { DEFAULT_PREVIEW_LIMIT, slicePreview } from '@/utils/previewRows.mjs'
 
 const props = defineProps({ visible: Boolean })
 const emit = defineEmits(['update:visible'])
@@ -100,6 +107,15 @@ const foundPaged = computed(() => {
   const found = result.value?.found || []
   return found.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE)
 })
+
+// not_found 是普通 v-for 清单（不是 el-table、无 :data），但与粘贴量成正比 ⇒ 同样封顶：
+// 未展开只画前 100 条；尾部「…另有 N 条」+「展开全部」（抬到有界上限 500）。一万个坏 ID 不再建一万个 div。
+const NOT_FOUND_LIMIT = DEFAULT_PREVIEW_LIMIT
+const NOT_FOUND_LIMIT_EXPANDED = 500
+const notFoundAllOpen = ref(false)
+const notFoundShown = computed(() =>
+  slicePreview(result.value?.not_found || [],
+    notFoundAllOpen.value ? NOT_FOUND_LIMIT_EXPANDED : NOT_FOUND_LIMIT))
 
 // ===== ID 提取（FB 广告账户 ID 为 10 位以上纯数字） =====
 // 与 GG 版的关键差异：GG 的账户 ID 是 `123-456-7890` 带连字符，
@@ -135,6 +151,7 @@ const invalidIds = computed(() => {
 function onIdTextChange() {
   result.value = null
   page.value = 1
+  notFoundAllOpen.value = false
 }
 
 // ===== 查询 =====
@@ -143,6 +160,7 @@ async function doSearch() {
   searching.value = true
   result.value = null
   page.value = 1
+  notFoundAllOpen.value = false
   try {
     const res = await fbApi.batchLookup({ account_ids: parsedIds.value })
     result.value = { found: res.found || [], not_found: res.not_found || [] }
@@ -158,5 +176,6 @@ function init() {
   idText.value = ''
   result.value = null
   page.value = 1
+  notFoundAllOpen.value = false
 }
 </script>

@@ -223,10 +223,20 @@
         </template>
       </el-alert>
       <div v-if="result.skipped?.length" style="margin-top:4px;max-height:80px;overflow-y:auto;">
-        <div v-for="s in result.skipped" :key="s.advertiser_id" style="font-size:12px;color:#e6a23c;">· {{ s.advertiser_id }} — {{ s.reason }}</div>
+        <div v-for="s in skippedShown.shown" :key="s.advertiser_id" style="font-size:12px;color:#e6a23c;">· {{ s.advertiser_id }} — {{ s.reason }}</div>
+      </div>
+      <div v-if="skippedShown.hiddenCount > 0" style="font-size:12px;color:#909399;">
+        …另有 {{ skippedShown.hiddenCount }} 条
+        <el-button v-if="!skippedAllOpen" link type="primary" size="small"
+                   @click="skippedAllOpen = true">展开全部 {{ skippedShown.total }} 条</el-button>
       </div>
       <div v-if="result.claimFailed?.length" style="margin-top:4px;max-height:80px;overflow-y:auto;">
-        <div v-for="f in result.claimFailed" :key="f.advertiser_id" style="font-size:12px;color:#dc2626;">· {{ f.advertiser_id }} — {{ f.reason }}</div>
+        <div v-for="f in claimFailedShown.shown" :key="f.advertiser_id" style="font-size:12px;color:#dc2626;">· {{ f.advertiser_id }} — {{ f.reason }}</div>
+      </div>
+      <div v-if="claimFailedShown.hiddenCount > 0" style="font-size:12px;color:#909399;">
+        …另有 {{ claimFailedShown.hiddenCount }} 条
+        <el-button v-if="!claimFailedAllOpen" link type="primary" size="small"
+                   @click="claimFailedAllOpen = true">展开全部 {{ claimFailedShown.total }} 条</el-button>
       </div>
     </div>
 
@@ -376,6 +386,17 @@ const newAccountRows = computed(() =>
 )
 // ① 动作类：新账户表限行 100（无勾选）。提交按全量 newIds 算 overrides，与渲染行无关。
 const newPrev = computed(() => slicePreview(newAccountRows.value, PREVIEW_LIMIT))
+
+// 导入结果里的 ID 清单（skipped / claimFailed）也是与粘贴量成正比的 v-for ⇒ 一并封顶：
+// 未展开只画前 100 条；尾部「…另有 N 条」+「展开全部」（抬到有界上限 500）。
+const ID_LIST_LIMIT = DEFAULT_PREVIEW_LIMIT
+const ID_LIST_LIMIT_EXPANDED = 500
+const skippedAllOpen = ref(false)
+const claimFailedAllOpen = ref(false)
+const skippedShown = computed(() =>
+  slicePreview(result.value?.skipped || [], skippedAllOpen.value ? ID_LIST_LIMIT_EXPANDED : ID_LIST_LIMIT))
+const claimFailedShown = computed(() =>
+  slicePreview(result.value?.claimFailed || [], claimFailedAllOpen.value ? ID_LIST_LIMIT_EXPANDED : ID_LIST_LIMIT))
 
 function defaultName(aid) {
   return form.name_prefix ? (form.name_prefix + ' ' + aid).trim() : aid
@@ -536,6 +557,8 @@ async function init() {
   claimPickedIds.value = []
   newEditingId.value = null
   result.value = null
+  skippedAllOpen.value = false
+  claimFailedAllOpen.value = false
   for (const k of Object.keys(newAccountEdits)) delete newAccountEdits[k]
   for (const k of Object.keys(newAccountBaselines)) delete newAccountBaselines[k]
 }
@@ -554,6 +577,8 @@ async function submit() {
   }
   saving.value = true
   result.value = null
+  skippedAllOpen.value = false
+  claimFailedAllOpen.value = false
 
   let created = 0, claimed = 0
   const skipped = [], claimFailed = []
