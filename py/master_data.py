@@ -39,6 +39,45 @@ def ensure_agent(db, name, uid):
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
+def ensure_channel(db, name, uid):
+    """fb_channels 里没有就建，返回 id（名称为空返回 None）。
+
+    与 `ensure_bc` 的关键差别：**这张表没有 `deleted_at`**（`database.py` 的建表里
+    只有 name / owner_id / platform / created_at），所以没有「软删复活」这一档。
+
+    `platform` **写死 'fb'**：同步侧的 `_SQL_CHANNEL` 就是
+    `... WHERE name=? AND platform='fb'`；跟着请求侧的 effective platform 走，
+    会建出**同步侧永远查不到**的行（看不见地重复建）。与 `ensure_agent` 写死 'tt' 同理。
+
+    幂等：先查后插，不抛异常（既有 `/api/fb-channels/create` 对同名是 409 拒绝，
+    我们这里是「确保存在」语义，不能抛）。
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    row = db.execute("SELECT id FROM fb_channels WHERE name=? AND platform='fb'",
+                     (name,)).fetchone()
+    if row:
+        return row["id"]
+    db.execute("INSERT INTO fb_channels(name, owner_id, platform) VALUES(?,?, 'fb')",
+               (name, uid))
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def ensure_asset_type(db, name, uid):
+    """fb_asset_types 的 ensure。规则与 `ensure_channel` 逐条相同（表不同而已）。"""
+    name = (name or "").strip()
+    if not name:
+        return None
+    row = db.execute("SELECT id FROM fb_asset_types WHERE name=? AND platform='fb'",
+                     (name,)).fetchone()
+    if row:
+        return row["id"]
+    db.execute("INSERT INTO fb_asset_types(name, owner_id, platform) VALUES(?,?, 'fb')",
+               (name, uid))
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
 def strip_utc_prefix(value):
     """去掉 UTC 前缀（仅当以 UTC 开头），如 UTC+8 → +8；非 UTC 值原样返回。"""
     value = value or ""
