@@ -7561,78 +7561,34 @@ def google_sheets_update_zuobiao():
         except Exception as e:
             log.warning("Google Sheets 同步到数据库失败: %s", e)
 
-    # ---------- 2. 后台同步到 Google Sheets ----------
-    percent_str = f"{int(agency_ratio)}%" if agency_ratio is not None else ""
-
-    def _fmt_rows(op_name):
-        """生成与 upsert_zuobiao 一致的 14 列行数据。"""
-        result = []
-        for row in rows:
-            is_yanghu = row.get("is_yanghu", False)
-            result.append([
-                report_date, op_name,
-                row.get("account", ""), str(row.get("customerId", "")),
-                row.get("cost", 0), "",
-                "养户" if is_yanghu else product_name,
-                "止戈" if is_yanghu else (sales_person or ""),
-                region,
-                row.get("campaign", ""), "",
-                "0%" if is_yanghu else percent_str,
-                None, None,
-            ])
-        return result
-
-    _op_name = [operator_name]  # mutable for closure capture（已从用户表获取）
-    _spreadsheet_id = spreadsheet_id
-    _product_name = product_name
-    _region = region
-    _report_date = report_date
-    _rows = rows
-    _sales_person = sales_person
-    _agency_ratio = agency_ratio
-    _user_id = user_id
-
-    def _do_sync():
-        from google_sheets_service import build_service, upsert_zuobiao
-        service = build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        upsert_zuobiao(
-            service=service,
-            spreadsheet_id=_spreadsheet_id,
-            rows=_rows, product_name=_product_name,
-            region=_region, report_date=_report_date,
-            sales_person=_sales_person, agency_ratio=_agency_ratio,
-            operator_name=_op_name[0],
-        )
-
-    def _on_fail(status, err_msg):
-        _db = database.get_db()
-        if status == "synced":
-            _db.execute(
-                "DELETE FROM sheets_sync_log WHERE user_id=? AND product_name=?",
-                (_user_id, _product_name)
-            )
-        elif status == "retry_failed":
-            # 重试也失败 → 删日志 + 记事件给前端弹窗
-            _db.execute(
-                "DELETE FROM sheets_sync_log WHERE user_id=? AND product_name=?",
-                (_user_id, _product_name)
-            )
-            _retry_failed_events[(_user_id, _product_name)] = __import__("time").time()
-        else:
-            formatted = _fmt_rows(_op_name[0])
-            _db.execute(
-                """INSERT OR REPLACE INTO sheets_sync_log
-                   (user_id, product_name, spreadsheet_id, sheet_gid, status, error_msg, rows_json, retry_count, updated_at)
-                   VALUES (?, ?, ?, '', ?, ?, ?, ?, datetime('now','localtime'))""",
-                (_user_id, _product_name, _spreadsheet_id, status,
-                 _SHEETS_SYNC_FAILED_MSG,
-                 json.dumps(formatted, ensure_ascii=False),
-                 1 if status == "retry_failed" else 0)
-            )
-        _db.commit()
-        _db.close()
-
-    _sync_sheets_background(_do_sync, _on_fail)
+    # ---------- 2. 登记统一写表治理（后台写 Google Sheets） ----------
+    #
+    # 接入统一写表治理（五期）：登记 + 后台写 + 失败可查可重试。
+    # ⚠️ 位置必须在上面两次 db2.commit()（:7503 / :7559）**之后** —— 否则 run_write 会
+    # 在持有未提交写事务的连接上 record_pending，另一条连接拿不到 SQLite 写锁 ⇒
+    # 等满 timeout=30 抛 database is locked（三期在 tt_accounts_routes 修过同族缺陷）。
+    #
+    # 旧实现（自建回调 _on_fail）有两个缺陷，随本次改造消失：
+    #  A 中间态 failed 就 INSERT 一条失败记录 ⇒ 30s 重试窗口内就报警
+    #  B 终态失败只记进程内字典 _retry_failed_events 且消费端 pop 一次性 ⇒ 重启即丢
+    #
+    # ⚠️ 这里**新开**一条连接，而不是复用请求级的 `db`/`db2`：写库那一段末尾的
+    # `db2.close()`（:7560）关掉的正是 `_yt_db()` 返回的 g 共享连接（`db` 与 `db2`
+    # 是同一个对象），复用它会在**已关闭的连接**上 record_pending ⇒ 登记静默失败
+    # （run_write 会吞掉异常只记日志）。新连接没有未提交事务、也不受上面关闭影响。
+    import sheet_write
+    import routes.gg_zuobiao_target as _zbt
+    _payload = {"product_name": product_name}
+    _run_db = database.get_db()
+    try:
+        sheet_write.run_write(
+            _run_db, user_id=user_id, platform="gg", target="gg_zuobiao",
+            business_key=_zbt.gg_zuobiao_key(product_name),
+            sync_fn=sheet_write.build_sync("gg_zuobiao", user_id,
+                                           _zbt.gg_zuobiao_key(product_name), _payload),
+            payload=_payload)
+    finally:
+        _run_db.close()
 
     resp = {
         "success": True,

@@ -238,3 +238,67 @@ def test_zuobiao_spreadsheet_id_falls_back_to_active_when_no_month_match(client)
     assert why is None, f"应能重建，实际 {why}"
     assert kwargs["spreadsheet_id"] == "SHEET_ACTIVE", \
         f"按月不命中应回退 active_config，实际 {kwargs['spreadsheet_id']}"
+
+
+# ---------------------------------------------------------------------------
+# 写点 ①：/api/google-sheets/update-zuobiao 改走统一入口
+# ---------------------------------------------------------------------------
+
+def test_update_zuobiao_registers_and_does_not_block(client, monkeypatch):
+    """保存做表数据必须登记 gg_zuobiao，且**端点不阻塞在 Sheets 上**。"""
+    import google_sheets_service as gs
+    import time as _time
+    # Sheets 层做成"很慢"：若端点同步直写，这条会超时；治理后它只是登记
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda **k: _time.sleep(2))
+
+    hdr, uid = _gg_user(client, "_zb_save")
+    _setup_zuobiao_config(client, hdr)      # 配好表格 ID 等前置
+
+    t0 = _time.time()
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "report_date": "2026-10-01", "rows": [
+            {"account": "acc_1", "customerId": "c1", "cost": 1, "campaign": "x"},
+        ],
+    })
+    elapsed = _time.time() - t0
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    assert resp.get_json()["sheets_status"] == "syncing", resp.get_json()
+    assert elapsed < 1.0, f"端点不得阻塞在写表上，实际 {elapsed:.2f}s"
+
+    db = database.get_db()
+    r = _settle(db, uid, "产品甲")
+    db.close()
+    assert r is not None, "保存做表必须登记 gg_zuobiao"
+    assert r["business_key"] == "产品甲", r["business_key"]
+
+
+def test_update_zuobiao_registers_when_write_block_runs(client, monkeypatch):
+    """带 region/report_date ⇒ 端点自身写库分支真的执行时，也必须登记成功。
+
+    这条钉住现场陷阱：写库分支末尾的 `db2.close()` 关掉的正是请求级 g 共享连接
+    （`_yt_db()` 的 `db` 与 `db2` **是同一个对象**）。若 run_write 复用 `db`/`db2`，
+    登记会在**已关闭的连接**上抛 ProgrammingError，而 run_write 会吞掉异常只记日志
+    ⇒ 日志行根本不存在 ⇒ 本用例必红（上一条用例走的是 `region` 为空、写库分支被跳过
+    的分支，那时 g 连接还开着，**测不出**这个陷阱）。
+    """
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda **k: None)
+
+    hdr, uid = _gg_user(client, "_zb_save_r")
+    _setup_zuobiao_config(client, hdr)
+
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-10-01",
+        "rows": [{"account": "acc_1", "customerId": "c1", "cost": 1, "campaign": "x"}],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    assert resp.get_json()["db_saved"] == 1, resp.get_json()
+
+    db = database.get_db()
+    r = _settle(db, uid, "产品甲")
+    db.close()
+    assert r is not None, \
+        "写库分支执行过后仍必须登记（不得在 db2.close() 关掉的共享连接上登记）"
+    assert r["status"] == "synced", r["status"]
