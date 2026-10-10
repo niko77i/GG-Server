@@ -493,7 +493,7 @@ class TestDirectoryNameHasTwoEntries:
         """承重：目标目录里已有**别人的产物** ⇒ 400。
 
         这条是「只做字符 + 唯一性」挡不住的那类：无主目录的冒名接管 ——
-        用户被删了但 temp/scraped_images/<名字>/ 还在，新用户取同一个名字，
+        用户被删了但 temp/data/scraped_images/<名字>/ 还在，新用户取同一个名字，
         就白拿了别人残留的产物。
         """
         occupied = os.path.join(_SCRAPE_DEFAULT_DIR, "_dn_occupied")
@@ -853,7 +853,7 @@ class TestConcurrentDuplicateDirectoryName:
         #     → 1 个成功、7 个 `duplicate column name: sales_person`（实测踩到）
         #   · 第 2 次 get_db()：cleanup 已置标记不再删，列被加回并**留下**
         #     → 后续所有连接只做 PRAGMA 读、不 ALTER → 无竞态
-        # 稳态这一点与真实库一致（实测 temp/app.db 里 products.sales_person 存在）。
+        # 稳态这一点与真实库一致（实测 temp/data/app.db 里 products.sales_person 存在）。
         #
         # ⚠️ 那个迁移竞态是一个**独立的、先于本轮存在的**缺陷（`_ensure_schema` 有
         # `_schema_lock` 双检锁，`_ensure_columns` 没有），不在本用例射程内，
@@ -1115,7 +1115,7 @@ class TestFormerDirectoryNameIsReclaimable:
     """MEDIUM-1（code-review 第 3 轮）：改回**自己的曾用显示名**被自己的旧目录锁死。
 
     形态（`_probe_hist_dn.py` 曾独立复现，本类把它收编为正式用例）：
-      1. 显示名设为 `老王`，爬取产物落在 `temp/scraped_images/老王/`
+      1. 显示名设为 `老王`，爬取产物落在 `temp/data/scraped_images/老王/`
       2. 改名 `老李` ⇒ 目录名变成 `老李`，`老王` 目录**原封不动留在磁盘上**
       3. 想改回 `老王` ⇒ 判据 3 看到磁盘上存在 `老王`，而它不在 own_keys 里
          ⇒ 400「该名字对应的爬取目录已被占用，请换一个」

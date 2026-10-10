@@ -21,7 +21,7 @@
 | 组件 | 选择 | 说明 |
 |------|------|------|
 | 后端框架 | Flask | 纯 API 服务，main.py ~9800 行 + routes/ 目录 |
-| 数据库 | SQLite (WAL 模式) | `temp/app.db`，局域网 20 人以下足够 |
+| 数据库 | SQLite (WAL 模式) | `temp/data/app.db`，局域网 20 人以下足够 |
 | 认证 | Flask-JWT-Extended | JWT token，24h 过期，支持滑动刷新 |
 | 密码 | Werkzeug pbkdf2:sha256 | Flask 内置哈希 |
 | 前端 | Vue 3 + Vite + Element Plus + Pinia + Vue Router | Composition API |
@@ -41,7 +41,7 @@
   |  Flask (0.0.0.0:5001)                  |
   |  +- JWT Auth Middleware                 |
   |  +- API Routes (with user_id scoping)   |
-  |  +- SQLite (WAL mode, temp/app.db)      |
+  |  +- SQLite (WAL mode, temp/data/app.db) |
   |  +- 前端静态文件 (frontend/dist/)        |
   |  +- 后台定时线程 (掉包检测/每周清理)      |
   +-----------------------------------------+
@@ -1144,7 +1144,7 @@ npm run dev
 - **每次改完 bug 或完成需求后，提醒我提交 git**
 - **每次新的文档都要建立索引**
 - /test-driven-development 使用这个测试新需求
-- SQLite 数据库自动建表 + 迁移，位于 `temp/app.db`
+- SQLite 数据库自动建表 + 迁移，位于 `temp/data/app.db`
 - 本项目是 ImageCrawling 的独立副本，修改不影响原项目
 - **后端重构进行中**：main.py 正逐步拆分为 Blueprint（`py/routes/`），新增路由优先写入独立 Blueprint 文件
 - **前端大组件拆分进行中**：YoutubeView/MediaView/AnalysisView/VideoView 逐步拆分为子组件
@@ -1156,9 +1156,9 @@ npm run dev
 
 | 日期 | 操作 | 影响范围 | 备份位置 |
 |------|------|----------|----------|
-| 2026-10-06 | TT 账户状态选项瘦身 | `account_statuses` platform='tt' 删除 89 行（94 → 5） | 库快照 `temp/app.db.bak-before-tt-statuses-trim-20261006-200410`<br>CSV `temp/tt-statuses-trim-20261006-200410/account_statuses.csv` |
-| 2026-10-06 | TT 广告账户全部硬删 | `tt_accounts` 5097 行（正常 4582 + 回收站 515）、`tt_account_bc_history` 1493 行、`tt_recharge_records` 20 行 | 库快照 `temp/app.db.bak-before-tt-accounts-clear-20261006-195957`<br>CSV `temp/tt-accounts-clear-20261006-195957/` |
-| 2026-09-24 | GG 状态悬空 69 户硬删 | GG 账户 69 行 | 库快照 `temp/app.db.bak-before-69-delete-20260924-152405`<br>CSV `temp/deleted-69-accounts-20260924-152525.csv` |
+| 2026-10-06 | TT 账户状态选项瘦身 | `account_statuses` platform='tt' 删除 89 行（94 → 5） | 库快照 `temp/data/backups/app.db.bak-before-tt-statuses-trim-20261006-200410`<br>CSV `temp/data/backups/tt-statuses-trim-20261006-200410/account_statuses.csv` |
+| 2026-10-06 | TT 广告账户全部硬删 | `tt_accounts` 5097 行（正常 4582 + 回收站 515）、`tt_account_bc_history` 1493 行、`tt_recharge_records` 20 行 | 库快照 `temp/data/backups/app.db.bak-before-tt-accounts-clear-20261006-195957`<br>CSV `temp/data/backups/tt-accounts-clear-20261006-195957/` |
+| 2026-09-24 | GG 状态悬空 69 户硬删 | GG 账户 69 行 | 库快照 `temp/data/backups/app.db.bak-before-69-delete-20260924-152405`<br>CSV `temp/data/backups/deleted-69-accounts-20260924-152525.csv` |
 
 ### 2026-10-06 TT 账户状态选项瘦身说明
 
@@ -1185,5 +1185,5 @@ npm run dev
   清空后若误点该按钮，账户会被依据表格重新导入
 - **备份方式**：服务运行中（WAL 模式）使用 sqlite3 backup API 在线快照，非直接拷贝 `app.db`
   （直接拷贝会丢失尚未 checkpoint 的 `-wal` 内容）；快照已通过 `PRAGMA integrity_check`
-- **恢复方式**：停服后以快照覆盖 `temp/app.db`，并删除同目录 `app.db-wal` / `app.db-shm`；
+- **恢复方式**：停服后以快照覆盖 `temp/data/app.db`，并删除同目录 `app.db-wal` / `app.db-shm`；
   或从 CSV 按需重建（CSV 为 `utf-8-sig` 编码，Excel 可直接打开）

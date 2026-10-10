@@ -232,7 +232,7 @@ class TestScanRetirementAndSentinelIncarnations:
       ② 迁移入口**不再**补哨兵（否则扫盘换个写法又活过来）；
       ③ 当年补下的哨兵行仍对它当年所判的化身生效（live 的 `alice` / `alice2` 靠它）。
 
-    ⚠️ `_scrape_root()` 指向**真实**的 `temp/scraped_images`（测试没有把它隔离到 tmp），
+    ⚠️ `_scrape_root()` 指向**真实**的 `temp/data/scraped_images`（测试没有把它隔离到 tmp），
     故本类**只**对自己造的、名字唯一可控的目录做断言；对真实残留目录（如仓库里
     遗留的 `alice`/`alice2`）不置一词 —— 断言别的东西会被环境污染成假绿/假红。
     """

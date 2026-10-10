@@ -13,6 +13,8 @@ import os
 import sys
 from logging.handlers import RotatingFileHandler
 
+import paths
+
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 # 单文件 10 MB，保留 5 个历史文件 → 磁盘占用硬上限约 60 MB。
@@ -43,7 +45,7 @@ def _data_root() -> str:
 
 
 def log_dir() -> str:
-    return os.path.join(_data_root(), "temp", "logs")
+    return os.path.join(paths.data_dir(_data_root()), "logs")
 
 
 def log_file_path() -> str:

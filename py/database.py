@@ -1,6 +1,6 @@
 """统一 SQLite 存储 — 替换散落的 JSON 文件。
 
-数据库路径：{_DATA_ROOT}/temp/app.db
+数据库路径：{_DATA_ROOT}/temp/data/app.db
 """
 
 import os
@@ -10,23 +10,33 @@ import datetime
 import threading
 from contextlib import contextmanager
 
+import paths
+
 _schema_lock = threading.Lock()
 _schema_verified = False
 _schema_verified_path = None
 
 
-def _db_path() -> str:
-    """计算数据库路径。需要 DATA_ROOT，由调用方注入或在此延迟导入。"""
-    # 与 main.py 共享 _DATA_ROOT 的方式：通过环境变量或模块属性
-    # 最简单的方式：由 main.py 在启动时设置
+def _data_root() -> str:
+    """数据根目录：打包取 EXE 所在目录，开发取项目根（database.py 在 py/ 下，上一级）。
+
+    与 main._DATA_ROOT、logging_setup._data_root() 同一套规则。
+
+    ⚠️ 抽成独立函数是为了让 `_db_path()` 与 `_migrate_if_needed()` **共用同一份推导**。
+    后者原先用 `dirname(dirname(_db_path()))` 反推数据根 —— 2026-10-11 app.db 由
+    `temp/` 归入 `temp/data/` 后，这个反推就少了一层，于是 video_set / youtube /
+    fonts 三个旧格式迁移全部找不到源文件、且都不抛异常（静默 return）。
+    """
     import sys
-    frozen = getattr(sys, "frozen", False)
-    if frozen:
-        root = os.path.dirname(sys.executable)
-    else:
-        # 开发模式：database.py 在 py/ 下，上级是项目根
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(root, "temp", "app.db")
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    # 开发模式：database.py 在 py/ 下，上级是项目根
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _db_path() -> str:
+    """计算数据库路径。"""
+    return os.path.join(paths.data_dir(_data_root()), "app.db")
 
 
 def get_db() -> sqlite3.Connection:
@@ -344,7 +354,7 @@ def _ensure_columns(conn: sqlite3.Connection):
 def _ensure_schema(conn: sqlite3.Connection):
     """创建所有表（IF NOT EXISTS）。"""
     conn.executescript("""
-        -- 视频生成历史（替换 temp/video_set/*.json）
+        -- 视频生成历史（替换 temp/data/video_set/*.json）
         CREATE TABLE IF NOT EXISTS video_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             package TEXT NOT NULL,
@@ -1812,8 +1822,12 @@ def _migrate_scrape_dn_history(conn: sqlite3.Connection):
 
 
 def _migrate_if_needed(conn: sqlite3.Connection):
-    """首次启动时从旧格式导入数据。"""
-    root = os.path.dirname(os.path.dirname(_db_path()))
+    """首次启动时从旧格式导入数据。
+
+    `root` 必须是**数据根**（`_DATA_ROOT`，即 `temp/` 的父目录），
+    不能由 `_db_path()` 反推 —— 见 `_data_root()` 的注释。
+    """
+    root = _data_root()
 
     # 复制 GG 选项到 FB
     _copy_gg_options_to_fb(conn)
@@ -1904,8 +1918,8 @@ def _migrate_if_needed(conn: sqlite3.Connection):
 
 
 def _migrate_video_history(conn: sqlite3.Connection, root: str):
-    """从 temp/video_set/*.json 导入到 video_history 表。"""
-    history_dir = os.path.join(root, "temp", "video_set")
+    """从 temp/data/video_set/*.json 导入到 video_history 表。"""
+    history_dir = os.path.join(paths.data_dir(root), "video_set")
     if not os.path.isdir(history_dir):
         return
 
@@ -1934,17 +1948,17 @@ def _migrate_video_history(conn: sqlite3.Connection, root: str):
 
     if imported > 0:
         # 备份原文件
-        backup_dir = os.path.join(root, "temp", "video_set.bak")
+        backup_dir = os.path.join(paths.data_dir(root), "video_set.bak")
         if not os.path.isdir(backup_dir):
             os.rename(history_dir, backup_dir)
 
 
 def _migrate_youtube_db(conn: sqlite3.Connection, root: str):
     """从 youtube.db 导入到 app.db 的 videos / tags 表。"""
-    yt_db = os.path.join(root, "temp", "youtube.db")
+    yt_db = os.path.join(paths.data_dir(root), "youtube.db")
     if not os.path.isfile(yt_db):
         # 检查旧 JSON 备份
-        json_bak = os.path.join(root, "temp", "youtube_videos.json.backup")
+        json_bak = os.path.join(paths.data_dir(root), "youtube_videos.json.backup")
         if os.path.isfile(json_bak):
             _migrate_youtube_json(conn, json_bak)
         return

@@ -8,6 +8,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import create_access_token, create_refresh_token
 
 import database
+import paths
 
 # `scrape_dn_history.user_id` 的哨兵值 —— 见 `_dn_released_keys`。
 # 该表**无外键**，故 user_id 不是真实用户 id 的取值必须自己约定；0 是安全的哨兵
@@ -41,7 +42,7 @@ _DN_SENTINEL_UID = 0
 def _scrape_root() -> str:
     """爬取产物根目录（须与 main.py 的 _SCRAPE_DEFAULT_DIR 一致，有测试钉住）。"""
     current = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(os.path.dirname(current), "temp", "scraped_images")
+    return os.path.join(paths.data_dir(os.path.dirname(current)), "scraped_images")
 
 
 def _fs_name_error(name: str, what: str):
@@ -341,7 +342,7 @@ def directory_name_error(uid, username=None, display_name=None):
          —— 实测「目录不存在」与「目录存在但为空」两档在原实现下都能通过，
          而每周清理会把整个爬取根 rmtree 重建，那一瞬间**全库**都落在
          「目录不存在」这一档，窗口每周重开。
-         仅做 1+2 也挡不住「无主目录」（用户被删而 temp/scraped_images/<名字>/
+         仅做 1+2 也挡不住「无主目录」（用户被删而 temp/data/scraped_images/<名字>/
          还在），第 3 条才是。
     """
     conn = database.get_db()
@@ -782,13 +783,13 @@ def init_developer(config: dict):
         print(f"[Auth] Developer account created: {username}")
         return
     # display_name 可能因与既有爬取目录冲突被拒（例如库被清空但
-    # temp/scraped_images/ 还在）。退化为**不带显示名** —— 此时目录名回落到
+    # temp/data/scraped_images/ 还在）。退化为**不带显示名** —— 此时目录名回落到
     # username，即 _scrape_root()/<username>。
     if create_user(username=username, password=password, role="developer", display_name=""):
         print(f"[Auth] Developer account created: {username} (无显示名)")
         return
     # ⚠️ 两次都失败：兜底只绕开了 display_name 侧，绕不开 username 侧 ——
-    # 退化后目录名就是 username，若 temp/scraped_images/<username>/ 同样被占用，
+    # 退化后目录名就是 username，若 temp/data/scraped_images/<username>/ 同样被占用，
     # 第二次依旧被拒。developer 账号建不出来 = 整个系统谁也进不去，
     # 所以这里**必须显式告警**。（原实现在此无条件 print "created"，
     # 会把"系统已经不可登录"报成成功 —— code-review 第 3 轮指出。）

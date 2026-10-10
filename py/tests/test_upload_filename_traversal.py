@@ -121,8 +121,7 @@ def _capture_ffmpeg_output(client, auth_headers, monkeypatch, video_name):
 
 
 def _audio_replace_tmp_dir():
-    return os.path.abspath(os.path.join(os.path.dirname(main.__file__),
-                                        "..", "temp", "audio_replace"))
+    return os.path.join(main.paths.data_dir(main._DATA_ROOT), "audio_replace")
 
 
 @pytest.fixture
@@ -140,7 +139,7 @@ def same_drive_scratch():
 
 def test_audio_replace_output_stays_inside_tmp(client, auth_headers, monkeypatch,
                                                same_drive_scratch):
-    """`../` 视频名不得让 ffmpeg 的输出落到 temp/audio_replace/ 之外。
+    """`../` 视频名不得让 ffmpeg 的输出落到 temp/data/audio_replace/ 之外。
 
     该路径不只进 ffmpeg 的 argv，还进 audio_replace_history 表与签名下载 URL，
     所以越界的影响面比前两个端点大。
@@ -150,7 +149,7 @@ def test_audio_replace_output_stays_inside_tmp(client, auth_headers, monkeypatch
     assert out, "未捕获到 ffmpeg 调用 —— 断言会退化成假绿"
     normal = os.path.normpath(out.replace("/", os.sep))
     assert os.path.dirname(normal) == os.path.normpath(_audio_replace_tmp_dir()), \
-        "❌ 输出路径已越出 temp/audio_replace/：%s" % normal
+        "❌ 输出路径已越出 temp/data/audio_replace/：%s" % normal
 
 
 def test_audio_replace_output_normal_name_still_works(client, auth_headers, monkeypatch):

@@ -3864,7 +3864,7 @@ class TestOwnerChangeNoteColumn:
         """锁定**存量库迁移路径**：预置缺列的旧表 → get_db() → 列被补且旧行读回 ''。
 
         为什么专门守护这条：上面的用例用的是全新临时库，走的是 `CREATE TABLE`
-        分支；而生产库 temp/app.db 是**已存在的库**，`CREATE TABLE IF NOT EXISTS`
+        分支；而生产库 temp/data/app.db 是**已存在的库**，`CREATE TABLE IF NOT EXISTS`
         对它不生效 —— 真正给生产补上这一列的是 `_ensure_columns()` 里那条
         `_add_column_if_missing`。删掉那一行，旧用例照样全绿，故这里独立覆盖。
         """
@@ -5208,7 +5208,7 @@ class TestMultiTableSync:
 class TestPushRouting:
     # 说明（与 brief 的两处偏差，均按本文件既有同类测试补齐）：
     # 1. brief 的两条用例没带夹具 —— 该文件里碰库的测试都带 `client`（把 _db_path
-    #    指向临时库），不裸用 database.get_db()，否则会写脏真实 temp/app.db。
+    #    指向临时库），不裸用 database.get_db()，否则会写脏真实 temp/data/app.db。
     # 2. brief 写 `captured = _stub_sheets(monkeypatch, [])`，但该 helper 是
     #    **就地追加**（无返回值）—— 照抄会拿到 None 再 for-迭代炸 TypeError。
     #    改用本文件既有写法：`captured = []; _stub_sheets(monkeypatch, captured)`。

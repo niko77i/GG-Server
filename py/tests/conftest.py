@@ -3,6 +3,7 @@
 运行方式：cd py && python -m pytest tests/ -v
 """
 import os
+import shutil
 import sys
 import tempfile
 import pytest
@@ -18,11 +19,31 @@ import logging_setup  # noqa: E402
 # setup_logging()，而该函数首次调用后即锁定是否写文件 —— 先在这里用
 # enable_file=False 占位，main 那次调用就不会再加 FileHandler。
 # 否则测试造的假故障会写进生产日志（2026-10-07 实测：mock 出来的
-# WARNING「读投手看板备注失败…网络炸了」混进了 temp/logs/gg-server.log）。
+# WARNING「读投手看板备注失败…网络炸了」混进了 temp/data/logs/gg-server.log）。
 logging_setup.setup_logging(enable_file=False)
 
 from main import app as _flask_app  # noqa: E402
 import database  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_data_root(monkeypatch):
+    """自动隔离 `database._data_root`，防止测试去读/改**真实仓库**里的数据根。
+
+    `_migrate_if_needed` 按数据根定位三类旧格式源文件（`temp/data/video_set`、
+    `temp/data/youtube.db`、`<root>/fonts/.recent.json`）。各处夹具历来只
+    monkeypatch `_db_path`，而数据根是独立解析的 —— 本文件与
+    test_fb_platform.py / test_db_connect_race.py 的夹具都如此。
+
+    不隔离的后果不是「读不到」而是「读到真的」：`_migrate_font_recent` 导入后会把
+    源文件 `os.rename` 成 `.bak`，即**跑一次测试就改坏真实的 fonts/.recent.json**
+    （2026-10-11 归类到 temp/data/ 后暴露；此前 root 由被 patch 的 _db_path 反推，
+    恰好顺带隔离了，属偶然而非设计）。
+    """
+    tmp_root = tempfile.mkdtemp(prefix="ggtest_root_")
+    monkeypatch.setattr(database, "_data_root", lambda: tmp_root)
+    yield
+    shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 @pytest.fixture

@@ -14,7 +14,7 @@ _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
     sys.path.insert(0, _current_dir)
 
-# 日志落盘：控制台 + temp/logs/ 轮转文件。必须在 sys.path 就绪之后调用，
+# 日志落盘：控制台 + temp/data/logs/ 轮转文件。必须在 sys.path 就绪之后调用，
 # 否则 logging_setup 可能被 site-packages 里的同名包顶掉
 from logging_setup import setup_logging as _setup_logging
 
@@ -31,6 +31,7 @@ from url_signing import sign_query as _sign_query, verify_query as _verify_query
 from video_processor import VideoTask, VideoError
 from ai_service import get_provider, AIServiceError
 import database
+import paths
 from cache import cache as _app_cache
 
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity, create_access_token, create_refresh_token
@@ -69,8 +70,8 @@ else:
         _FRONTEND_DIR = os.path.dirname(_current_dir)  # 回退到旧前端文件
     _DATA_ROOT = os.path.dirname(_current_dir)
 
-_SCRAPE_DEFAULT_DIR = os.path.join(_DATA_ROOT, "temp", "scraped_images")
-_MUSIC_DIR = os.path.join(_DATA_ROOT, "temp", "music")
+_SCRAPE_DEFAULT_DIR = os.path.join(paths.data_dir(_DATA_ROOT), "scraped_images")
+_MUSIC_DIR = os.path.join(paths.data_dir(_DATA_ROOT), "music")
 
 app = Flask(__name__, static_folder=_FRONTEND_DIR, static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB 上传限制
@@ -541,7 +542,7 @@ def internal_error(e):
 
     此前本处理器把 `str(e)` 与 `tb[-2000:]` 原样回给客户端 ⇒ 任何未收敛的绑定点/编码错误
     都会把英文异常原文与源码路径、行号泄露出去（CWE-209）。响应形状（JSON + success:false）
-    与状态码 500 保持不变；排查线索仍完整进 `log`（控制台 + temp/logs 轮转文件）。
+    与状态码 500 保持不变；排查线索仍完整进 `log`（控制台 + temp/data/logs 轮转文件）。
 
     注册在模块级（此前藏在 `if __name__ == "__main__":` 块内）—— 否则以导入方式拉起
     应用时该兜底根本不生效，测试也无从钉住它。
@@ -967,7 +968,7 @@ def video_scan_dir():
 _ALLOWED_STATIC_DIRS = [
     os.path.normpath(_SCRAPE_DEFAULT_DIR),
     os.path.normpath(_MUSIC_DIR),
-    os.path.normpath(os.path.join(_DATA_ROOT, "temp")),
+    os.path.normpath(paths.data_dir(_DATA_ROOT)),
 ]
 
 
@@ -975,7 +976,7 @@ def _is_safe_music_path(path: str) -> bool:
     """检查路径是否在背景音乐目录（_MUSIC_DIR）内。
 
     `/api/audio` 的合法输入只有 music_list 列出的 `_MUSIC_DIR` 内文件；
-    不复用 `_is_safe_path`（其白名单含整个 temp 树，会放行音频替换产物）。
+    不复用 `_is_safe_path`（其白名单含整个 temp/data 树，会放行音频替换产物）。
     """
     try:
         real = os.path.realpath(path)
@@ -1111,7 +1112,7 @@ def video_generate():
                 api_key = ai["api_key"]
                 custom_prompt = ai.get("prompt") or None
                 ai_videos = {}
-                ai_temp_dir = os.path.join(_DATA_ROOT, "temp", "ai_videos")
+                ai_temp_dir = os.path.join(paths.data_dir(_DATA_ROOT), "ai_videos")
                 os.makedirs(ai_temp_dir, exist_ok=True)
                 import shutil
                 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1397,7 +1398,7 @@ def audio_replace():
         return jsonify({"success": False, "error": "原视频文件名非法"}), 400
 
     # 临时目录
-    tmp_dir = os.path.join(os.path.dirname(__file__), "..", "temp", "audio_replace")
+    tmp_dir = os.path.join(paths.data_dir(_DATA_ROOT), "audio_replace")
     os.makedirs(tmp_dir, exist_ok=True)
 
     ts = int(_time.time() * 1000)
@@ -1589,7 +1590,7 @@ def video_next_filename():
 
 # ---------- 视频设置历史 API ----------
 
-_VIDEO_HISTORY_DIR = os.path.join(_DATA_ROOT, "temp", "video_set")
+_VIDEO_HISTORY_DIR = os.path.join(paths.data_dir(_DATA_ROOT), "video_set")
 
 
 def _history_file(pkg: str) -> str:
@@ -8855,7 +8856,7 @@ def _run_weekly_cleanup_once():
     ai_dir = os.path.join(_SCRAPE_DEFAULT_DIR, "ai")
     os.makedirs(ai_dir, exist_ok=True)
     # 清理音频替换临时文件
-    audio_tmp = os.path.join(_DATA_ROOT, "temp", "audio_replace")
+    audio_tmp = os.path.join(paths.data_dir(_DATA_ROOT), "audio_replace")
     if os.path.isdir(audio_tmp):
         _shutil.rmtree(audio_tmp)
         os.makedirs(audio_tmp, exist_ok=True)

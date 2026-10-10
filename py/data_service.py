@@ -452,7 +452,7 @@ def export_all_users() -> list[dict]:
 
 
 def backup_database() -> str:
-    """复制 app.db 到 temp/backups/ 目录，返回备份路径。"""
+    """复制 app.db 到 temp/data/backups/ 目录，返回备份路径。"""
     db_path = _db_path()
     backup_dir = os.path.join(os.path.dirname(db_path), "backups")
     os.makedirs(backup_dir, exist_ok=True)

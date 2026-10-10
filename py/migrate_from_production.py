@@ -20,9 +20,11 @@ import sys
 import shutil
 from datetime import datetime
 
+import paths
+
 SRC_DB = r"f:\carl_work\carl\Google\cc\ImageCrawling\temp\app.db"
 DST_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DST_DB = os.path.join(DST_DIR, "temp", "app.db")
+DST_DB = os.path.join(paths.data_dir(DST_DIR), "app.db")
 
 # 需要迁移的表及其主键类型
 TABLES = {
@@ -204,7 +206,9 @@ def migrate(dry_run=True):
     src.close()
 
     print(f"\n迁移完成！备份文件: {backup_path}")
-    print("恢复命令: copy /Y <备份文件> temp\\app.db")
+    # 由 DST_DB 推导而非写死，避免路径布局变化后提示与实际库位置脱节
+    _rel_dst = os.path.relpath(DST_DB, DST_DIR).replace("/", "\\")
+    print(f"恢复命令: copy /Y <备份文件> {_rel_dst}")
 
 
 if __name__ == "__main__":

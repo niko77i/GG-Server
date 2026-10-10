@@ -7,6 +7,7 @@ import shutil
 import pytest
 
 import database
+import paths
 
 # 与 test_fb_platform.py 同因同解：conftest 的 15 字节 JWT 密钥会让 PyJWT 每次编解码
 # 都抛 InsecureKeyLengthWarning，属夹具既有产物。按类精确静音，保持测试输出干净。
@@ -50,7 +51,7 @@ def _mk_fb_pixel(db, pixel_bm_id, pixel_id, name="像素"):
 def _data_root():
     """复刻 py/main.py 的 _DATA_ROOT（非 frozen：os.path.dirname(_current_dir)，_current_dir = py/）。
 
-    即仓库根目录，故 _SCRAPE_DEFAULT_DIR = <root>/temp/scraped_images、_FONTS_DIR = <root>/fonts。
+    即仓库根目录，故 _SCRAPE_DEFAULT_DIR = <root>/temp/data/scraped_images、_FONTS_DIR = <root>/fonts。
     main.py 不读 DATA_ROOT 环境变量，因此这里只用与生产一致的推导式。
     """
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -166,7 +167,7 @@ class TestAClassFileWhitelist:
     def test_scrape_download_allows_dir_inside_scrape_root(self, client, dev_headers):
         # 对照组：_SCRAPE_DEFAULT_DIR 内的目录仍可下载（白名单不能误伤合法产出）
         # 用 developer 穿过归属层的原因同上：本类钉白名单，不钉归属。
-        target = os.path.join(_data_root(), "temp", "scraped_images", "pkg_probe")
+        target = os.path.join(paths.data_dir(_data_root()), "scraped_images", "pkg_probe")
         os.makedirs(target, exist_ok=True)
         try:
             resp = client.get(f"/api/scrape/download?path={target}", headers=dev_headers)
@@ -213,8 +214,8 @@ class TestScrapeSaveDirNarrowed:
         assert resp.status_code == 400
 
     def test_scrape_rejects_sibling_dir_escaping_root(self, client, auth_headers):
-        # 前缀绕过防护：<root>/temp/scraped_images_evil 不能被 startswith 误放行
-        evil = os.path.join(_data_root(), "temp", "scraped_images_evil")
+        # 前缀绕过防护：<root>/temp/data/scraped_images_evil 不能被 startswith 误放行
+        evil = os.path.join(paths.data_dir(_data_root()), "scraped_images_evil")
         resp = client.post("/api/scrape", json={
             "url": "https://play.google.com/store/apps/details?id=com.example",
             "save_dir": evil,

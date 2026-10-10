@@ -64,7 +64,7 @@ ANON_GET_WHITELIST = frozenset({
                                 # 字体已被 b48502e 拒绝，不再是「任意字体」。
     # --- @jwt_required(optional=True)：装饰器层「有鉴权」但匿名放行 ---
     # 2026-09-24：A 组 8 条已收口为强制鉴权（其中 4 条原在本表内，故本表 14→10）。
-    "/api/audio",               # main.py:1156，temp/music/ 下任意文件
+    "/api/audio",               # main.py:1156，temp/data/music/ 下任意文件
 })
 
 # 扫描需要覆盖的 GET 规则数量的下界。若 url_map 遍历/过滤被改坏，本测试会大声失败，

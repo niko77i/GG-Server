@@ -2428,7 +2428,7 @@ class TestGgProductVideoDomainHuguanDenied:
         assert "t20-tasks-visible" in ids, "对照行拿不到任务 —— 守卫误伤了普通用户"
 
     def test_audio_rejects_audio_replace_artifact_even_anonymous(self, client):
-        """修复 2 的核心断言：`/api/audio` 不再能取到 `temp/audio_replace` 下的产物。
+        """修复 2 的核心断言：`/api/audio` 不再能取到 `temp/data/audio_replace` 下的产物。
 
         D24 给 `/api/audio-replace/download` 加了精确匹配白名单，但 `/api/audio` 的
         全局静态目录白名单包含整个 `temp` 树，等于开了一道无鉴权的旁路。收紧到音乐目录后，
@@ -2436,7 +2436,7 @@ class TestGgProductVideoDomainHuguanDenied:
         """
         from urllib.parse import quote
         import main as _main
-        art_dir = os.path.join(_main._DATA_ROOT, "temp", "audio_replace")
+        art_dir = os.path.join(_main.paths.data_dir(_main._DATA_ROOT), "audio_replace")
         os.makedirs(art_dir, exist_ok=True)
         f = os.path.join(art_dir, "t20_artifact_probe_new.mp4")
         with open(f, "wb") as fh:

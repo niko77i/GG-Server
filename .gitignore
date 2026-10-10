@@ -12,26 +12,34 @@ py/_patch_*.py
 frontend/node_modules/
 frontend/dist/
 
-# 运行时临时数据（可重新生成）
-# 注意：这里刻意不整目录忽略 temp/ —— temp/music/ 是正式内容
+# 运行时数据（代码经 paths.data_dir() 定位到 temp/data/，2026-10-07 归类）
+# 注意：这里刻意不整目录忽略 temp/ —— temp/data/music/ 是正式内容
 # （_MUSIC_DIR 的 BGM 库，/api/video/music-list 在服务它）。新加规则时同样别盖住它。
-temp/scraped_images/
-temp/backups/
-temp/video_set/
-# *.bak*（非 *.bak.*）：库备份叫 app.db.bak-before-*，原模式匹配不到
-temp/*.bak*
-temp/server.*
-temp/*.db-shm
-temp/*.db-wal
-temp/*.db
-temp/app.db
-temp/audio_replace
-temp/logs/
-# 调试/审查草稿（2026-09-25 被 git add -A 误扫进索引 168 个文件，事后补的规则）
+temp/data/scraped_images/
+# backups/ 整目录忽略：库快照（app.db.bak-before-*）、CSV 导出（tt-*-*/、deleted-*.csv）、
+# 旧前端构建（dist-backup-*/）与 mut-backup/ 都收在这里 —— 原先是散在 temp/ 根上的
+# 独立规则，归入 backups/ 后由本行统一覆盖。
+# 该目录由 data_service.py 按 DB 所在目录推导（dirname(db_path)/backups），
+# 故随 app.db 一起落在 temp/data/ 下，无需另一条规则。
+temp/data/backups/
+temp/data/video_set/
+# *.bak*（非 *.bak.*）：库备份叫 app.db.bak-before-*，原模式匹配不到。
+# 顺带覆盖 database.py 用 os.rename 造出的 temp/data/video_set.bak。
+temp/data/*.bak*
+temp/data/server.*
+temp/data/*.db-shm
+temp/data/*.db-wal
+temp/data/*.db
+temp/data/app.db
+temp/data/audio_replace
+temp/data/logs/
+temp/data/ai_videos/
+# 一次性草稿（探针 / 变异 / 补丁施加脚本等，2026-10-07 归类进 scratch/）
+temp/scratch/
+# ⚠️ 这条**不能删**：temp/ 根上仍留着 9 个被 py/auth.py 与设计文档点名引用的证据脚本
+# （决策 C：文件留在原路径不动）。删掉此规则它们会变成未忽略，
+# 重现 2026-09-25「git add -A 误扫 168 个文件」的事故条件。
 temp/_*
-temp/mut-backup/
-temp/dist-backup-*/
-temp/deleted-*.csv
 
 # 配置敏感信息（含密码）
 config/config.local.json
