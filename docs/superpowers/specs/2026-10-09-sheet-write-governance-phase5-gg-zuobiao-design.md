@@ -88,10 +88,12 @@ else(=failed)→ INSERT OR REPLACE 一条失败行（error_msg=_SHEETS_SYNC_FAIL
 > 重建时追加在 rows 末尾；`payload.report_date` / `payload.region` 兜底纯养户行场景。
 > 老日志行没有这些键 ⇒ `.get()` 缺省 ⇒ 行为与现状一致（不写养户行）。
 
-> **重建只取当月行（I1 修复）**：做表表**按月切**（表名按「操作人名 + `YYYY.MM`」匹配），
+> **重建只取该 `report_date` 的行（I1 修复）**：做表表**按月切**（表名按「操作人名 + `YYYY.MM`」匹配），
 > 而 `ad_reports` 对同一产品累积**多个月份**的行（本仓无按月清理逻辑）。重建时**按
-> `payload.report_date` 过滤 `rows_raw`，只取当月行** —— 否则会把旧月行以最新月日期
-> 统一写进最新月那张表（表键含 date，旧月行查不到 ⇒ append 成当月日期的重复行 ⇒ 静默数据污染）。
+> `payload.report_date` 过滤 `rows_raw`，只取该 `report_date`（当日）的行** ——
+> 过滤是**精确日期相等**，不是按「月」聚合（前端传的是**日级**日期）。
+> 否则会把旧月行以最新月日期统一写进最新月那张表
+> （表键含 date，旧月行查不到 ⇒ append 成当月日期的重复行 ⇒ 静默数据污染）。
 
 ### 4.3 前端（用户裁定：复用统一汇总区）
 

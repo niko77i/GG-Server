@@ -58,12 +58,14 @@ def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
     `log_row["spreadsheet_id"]` 换成 `_zuobiao_spreadsheet_id(db, user_id)`
     （新路径没有 `sheets_sync_log` 行可读）。
 
-    **`report_date` 是月份过滤值**：做表表是**按月切的**（表名按「操作人名 + `YYYY.MM`」
+    **`report_date` 是日期过滤值**：做表表是**按月切的**（表名按「操作人名 + `YYYY.MM`」
     匹配），而 `ad_reports` 对同一产品会累积**多个月份**的行（本仓没有任何按月清理逻辑）。
     若重建不按 `report_date` 过滤，就会把该产品**所有月份**的行都捞出来、再以**最新月**
     的日期统一写进**最新月那张表** ⇒ 旧月行在表里查不到（表键含 date）⇒ 被 append 成
     当月日期的重复行、数值还是旧月的 ⇒ **静默数据污染**。所以 `report_date` 非空时必须
-    追加 `AND report_date=?` 只取当月行；为空时**不加过滤**（兼容 payload 里没有日期的
+    追加 `AND report_date=?` 只取**该 `report_date`（当日）**的行 —— 是**精确日期相等**、
+    不是按「月」聚合（前端传的是**日级**日期，见 `ToolkitView.vue` 的日期选择器）；
+    为空时**不加过滤**（兼容 payload 里没有日期的
     场合，行为与改造前一致）。`report_date` 同时还是纯养户行场景的兜底日期（见下）。
 
     **养户行随 payload 携带**：养户行是请求侧数据、不落库（保存端点写库时只落非养户行，
@@ -74,7 +76,7 @@ def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
 
     纯养户行（DB 无该产品的非养户行）时，`report_date` / `region` 用入参兜底 ——
     表格 ID 解析依赖 `report_date`（做表表按月切），所以纯养户行也必须拿到它。
-    有非养户行时以 DB 行为准（加过滤后两者一致，都是当月）。
+    有非养户行时以 DB 行为准（加过滤后两者一致，都是本次的 `report_date`）。
     """
     where = "user_id=? AND product_name=?"
     params = [user_id, product_name]
