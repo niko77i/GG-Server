@@ -998,8 +998,13 @@ class TestAnyAgentsInsertInvalidatesDropdownCache:
 
         headers, uid = _create_user(client, "_t21_b1_u", role="user", platform="tt")
 
-        key = _agents_dropdown_key(uid)
-        client.get("/api/accounts/list?size=50", headers=headers)
+        # 烘热缓存**必须用 GG 用户**：`/api/accounts/list` 是 GG 专用端点
+        # （`_GG_ONLY_PREFIXES`，平台守卫会拦非 GG 平台的非可切换角色），TT 用户打它会 403。
+        # `accounts:agents:` 的失效是**全局前缀清**（`clear_prefix`），故用 GG 用户的键观测，
+        # 恰好更能证明本用例的主题：「任何 agents 写入都清掉全部用户的该缓存」。
+        gg_headers, gg_uid = _create_user(client, "_t21_b1_u_gg", role="user", platform="gg")
+        key = _agents_dropdown_key(gg_uid)
+        client.get("/api/accounts/list?size=50", headers=gg_headers)
         assert _app_cache.get(key) is not None, "前置失败：下拉缓存没被写热"
 
         resp = client.post("/api/tt/accounts/create", json={
@@ -1031,8 +1036,13 @@ class TestAnyAgentsInsertInvalidatesDropdownCache:
         db.commit()
         db.close()
 
-        key = _agents_dropdown_key(uid)
-        client.get("/api/accounts/list?size=50", headers=headers)
+        # 烘热缓存**必须用 GG 用户**：`/api/accounts/list` 是 GG 专用端点
+        # （`_GG_ONLY_PREFIXES`，平台守卫会拦非 GG 平台的非可切换角色），TT 用户打它会 403。
+        # `accounts:agents:` 的失效是**全局前缀清**（`clear_prefix`），故用 GG 用户的键观测，
+        # 恰好更能证明本用例的主题：「任何 agents 写入都清掉全部用户的该缓存」。
+        gg_headers, gg_uid = _create_user(client, "_t21_b2_u_gg", role="user", platform="gg")
+        key = _agents_dropdown_key(gg_uid)
+        client.get("/api/accounts/list?size=50", headers=gg_headers)
         assert _app_cache.get(key) is not None, "前置失败：下拉缓存没被写热"
 
         # 看板行格式（A:J）：A运营 B入库 C是否回收 D账户ID EBC F国家 G渠道 H时区 I消耗 J备注

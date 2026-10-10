@@ -195,13 +195,23 @@ def _guard_gg_platform():
         return None
     # 对 GG 专用路由做平台检查（仅检查已登录用户，未登录由 @jwt_required 处理）
     if request.path.startswith(_GG_ONLY_PREFIXES):
+        # ⚠️ **必须先 `verify_jwt_in_request(optional=True)`**。
+        # 原实现只调 `get_jwt_identity()` —— 而在**没有 `@jwt_required()` 的 before_request 里**
+        # flask-jwt-extended 会抛 `RuntimeError`（要求先验证 JWT），被下面那句宽泛的
+        # `except Exception` 吞掉 ⇒ **整个守卫被静默跳过、形同虚设**。
+        # 2026-10-11 实测：platform=fb 的用户对 /api/accounts/list、/api/mcc/list、
+        # /api/products/list、/api/ad-reports/dashboard 四个 GG 专用端点**全部 200**。
+        # （影响面不是跨用户泄露 —— 数据仍按 uid 作用域；但平台边界形同虚设，
+        #  且「守卫看起来在工作、其实不工作」比没有守卫更危险。）
+        # optional=True：无 token 不抛，交给路由自身的 @jwt_required 回 401。
         try:
-            from flask_jwt_extended import get_jwt_identity
+            from flask_jwt_extended import verify_jwt_in_request
+            verify_jwt_in_request(optional=True)
             uid = get_jwt_identity()
-            if uid is None:
-                return None  # 未登录，交给路由自身的 @jwt_required 处理
         except Exception:
-            return None  # 无 JWT，交给路由处理
+            return None  # token 无效/过期 ⇒ 交给路由处理（它会回 401）
+        if uid is None:
+            return None  # 未登录，交给路由自身的 @jwt_required 处理
         err_resp = _require_platform('gg')
         if err_resp:
             return err_resp
