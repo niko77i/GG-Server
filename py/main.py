@@ -7582,7 +7582,18 @@ def google_sheets_update_zuobiao():
     # （run_write 会吞掉异常只记日志）。新连接没有未提交事务、也不受上面关闭影响。
     import sheet_write
     import routes.gg_zuobiao_target as _zbt
-    _payload = {"product_name": product_name}
+    # 养户行**不落库**（上面的写库块只落非养户行）⇒ 必须随 payload 携带给重建，
+    # 否则 ad_reports 里没有养户行、重建不出来 ⇒ 养户行不再被写进做表表（功能回退）。
+    _payload = {
+        "product_name": product_name,
+        # 形状与 upsert_zuobiao 吃的完全一致，`is_yanghu` 必须原样保留
+        # （丢了会静默写成普通行：产品名/商务/代投比例）。
+        # ⚠️ 绝不截断（FB 线栽过 `rows_json[:10000]` 截断 ⇒ 重试必坏）。
+        "yanghu_rows": [r for r in rows if r.get("is_yanghu")],
+        # 仅当 ad_reports 里没有该产品的非养户行时兜底（产品全是养户行）：
+        "report_date": report_date,
+        "region": region,
+    }
     _run_db = database.get_db()
     try:
         sheet_write.run_write(

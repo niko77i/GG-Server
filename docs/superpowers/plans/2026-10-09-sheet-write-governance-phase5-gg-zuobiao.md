@@ -583,6 +583,25 @@ git commit -m "chore(gg): 退役做表线的两个专属端点 + 前端包装
 
 ---
 
+### Task 4.5: 养户行必须继续写进做表表（插队修复，用户 2026-10-10 已裁定「必须继续写」）
+
+> 位置在 T4 之后、T5 之前。定性：**功能回退修复** —— T2 把写表实参改为从 `ad_reports` 重建，
+> 而保存端点写库时只落非养户行（`db_rows = [r for r in raw_rows if not r.get("is_yanghu")]`）
+> ⇒ `ad_reports` 里没有养户行 ⇒ 养户行不再被写进做表表。目标行为由缺陷本身决定（恢复既有意图）。
+
+**方案：随 payload 携带养户行**（不采用「把养户行也落库」，那要动 schema 与既有数据语义）。
+
+- **改动 1** `py/main.py` 登记块：`_payload` 补 `yanghu_rows`（请求 `rows` 里 `is_yanghu` 的行，
+  保原顺序、绝不截断）+ `report_date` / `region`（纯养户行时兜底）。
+- **改动 2** `py/routes/gg_zuobiao_target.py`：`gg_zuobiao_kwargs` / `gg_zuobiao_sync` /
+  `_gg_zuobiao_rebuild` 加 `yanghu_rows` / `fallback_report_date` / `fallback_region` 参数；
+  空数据判断改为 `if not rows_raw and not yanghu_rows:`；`rows = DB 非养户行 + list(yanghu_rows or [])`。
+  老日志行无这些键 ⇒ `.get()` 缺省 ⇒ 行为与现状一致。
+- **改动 3** 测试 `py/tests/test_gg_zuobiao_write.py` 追加 4 条：真入口带养户行 / 重试路径复现 /
+  纯养户行不早退 / 无养户行不变；变异验证 3 条（去掉 payload 的 yanghu_rows、去掉 rows 追加、
+  空判断改回 `if not rows_raw:`）。
+- **改动 4** 文档：设计 §4.2 补「rebuild 一律从 DB 重算」的养户行例外；本计划补记本条。
+
 ### Task 5: 收尾回归
 
 - [ ] **Step 1: 全量**

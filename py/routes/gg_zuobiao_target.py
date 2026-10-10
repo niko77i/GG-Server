@@ -3,7 +3,9 @@
 设计见 docs/superpowers/specs/2026-10-09-sheet-write-governance-phase5-gg-zuobiao-design.md
 
 镜像类（表 = 系统状态的投影，`upsert_zuobiao` 幂等）⇒ **不注册 `rollback`**，
-最终失败落 `retry_failed`。rebuild 一律**从 DB 重算**（不重放 `rows_json` 快照）。
+最终失败落 `retry_failed`。rebuild 一律**从 DB 重算**（不重放 `rows_json` 快照），
+**唯一例外**：养户行是请求侧产生、不落库的数据，DB 重算不出来 ⇒ 随 payload 携带
+（见 `gg_zuobiao_kwargs` 与 `_gg_zuobiao_rebuild`），且绝不截断。
 
 线程约束：所有 service 与 DB 连接都在**函数/闭包内**新建 —— 这些代码会在后台线程里跑。
 """
@@ -47,24 +49,38 @@ def _zuobiao_spreadsheet_id(db, user_id, report_date):
     return (sheets[0].get("spreadsheet_id", "") or "")
 
 
-def gg_zuobiao_kwargs(db, user_id, product_name):
+def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
+                      fallback_report_date="", fallback_region=""):
     """从 DB 重算 `upsert_zuobiao` 的实参。返回 `(kwargs, None)` 或 `(None, 失败原因)`。
 
     这段重建**逐行搬自退役前的 `/api/google-sheets/retry-sync`**（`py/main.py` 原
     `:7697-7745`）—— 它本来就是唯一真相源。**唯一改动**：`spreadsheet_id` 的来源从
     `log_row["spreadsheet_id"]` 换成 `_zuobiao_spreadsheet_id(db, user_id)`
     （新路径没有 `sheets_sync_log` 行可读）。
+
+    **养户行随 payload 携带**：养户行是请求侧数据、不落库（保存端点写库时只落非养户行，
+    见 `py/main.py` 的 `db_rows` 过滤），DB 重建不出来 ⇒ 由 `yanghu_rows` 显式传入、
+    追加在 `rows` 末尾。顺序取舍：旧行为按**请求原顺序**写；现在非养户行取自 DB
+    （T2 已改为 DB 序、已过审），养户行追加在末尾并保持它们之间的原顺序 —— 这是本期
+    接受的取舍，不为对齐旧顺序去重排 DB 行。
+
+    纯养户行（DB 无该产品的非养户行）时，`report_date` / `region` 从 `fallback_*` 取 ——
+    表格 ID 解析依赖 `report_date`（做表表按月切），所以纯养户行也必须拿到它。
     """
     rows_raw = db.execute(
         "SELECT DISTINCT account, customer_id, campaign, cost, impressions, clicks, "
         "installs, in_app_actions, cost_per_in_app, report_date, region "
         "FROM ad_reports WHERE user_id=? AND product_name=? ORDER BY report_date DESC",
         (user_id, product_name)).fetchall()
-    if not rows_raw:
+    if not rows_raw and not yanghu_rows:
         return None, "没有找到对应的做表数据"
 
-    report_date = rows_raw[0]["report_date"] or ""
-    region = rows_raw[0]["region"] or ""
+    if rows_raw:
+        report_date = rows_raw[0]["report_date"] or ""
+        region = rows_raw[0]["region"] or ""
+    else:
+        report_date = fallback_report_date or ""
+        region = fallback_region or ""
 
     # ⚠️ 表格 ID 依赖 report_date（做表表按月切，保存端点按「操作人名 + YYYY.MM」匹配表名）
     spreadsheet_id = _zuobiao_spreadsheet_id(db, user_id, report_date)
@@ -76,6 +92,7 @@ def gg_zuobiao_kwargs(db, user_id, product_name):
         "campaign": r["campaign"] or "",
         "cost": r["cost"] or 0,
     } for r in rows_raw]
+    rows = rows + list(yanghu_rows or [])
 
     prod = db.execute(
         "SELECT COALESCE(sp.name, '') AS sales_person, agency_ratio FROM products p "
@@ -97,15 +114,19 @@ def gg_zuobiao_kwargs(db, user_id, product_name):
     }, None
 
 
-def gg_zuobiao_sync(user_id, product_name):
-    """把该产品的做表数据写进 Google 表格。"""
+def gg_zuobiao_sync(user_id, product_name, yanghu_rows=None,
+                    fallback_report_date="", fallback_region=""):
+    """把该产品的做表数据写进 Google 表格。养户行等参数透传给 `gg_zuobiao_kwargs`。"""
     import database
     import google_sheets_service as gs
     from main import _GOOGLE_SHEETS_CONFIG
 
     db = database.get_db()
     try:
-        kwargs, why = gg_zuobiao_kwargs(db, user_id, product_name)
+        kwargs, why = gg_zuobiao_kwargs(db, user_id, product_name,
+                                        yanghu_rows=yanghu_rows,
+                                        fallback_report_date=fallback_report_date,
+                                        fallback_region=fallback_region)
         if kwargs is None:
             raise RuntimeError(why)
     finally:
@@ -120,8 +141,16 @@ def _gg_zuobiao_rebuild(user_id, business_key, payload):
     if not product_name:
         raise RuntimeError("payload 缺 product_name，无法重建做表数据")
 
+    # 养户行不落库 ⇒ 重建时从 payload 取。老日志行没有这些键 ⇒ `.get()` 缺省
+    # ⇒ 行为与现状完全一致（不写养户行），不得因此抛错。
+    yanghu_rows = (payload or {}).get("yanghu_rows") or []
+    fallback_report_date = (payload or {}).get("report_date") or ""
+    fallback_region = (payload or {}).get("region") or ""
+
     def _sync():
-        gg_zuobiao_sync(user_id, product_name)
+        gg_zuobiao_sync(user_id, product_name, yanghu_rows=yanghu_rows,
+                        fallback_report_date=fallback_report_date,
+                        fallback_region=fallback_region)
 
     return _sync
 

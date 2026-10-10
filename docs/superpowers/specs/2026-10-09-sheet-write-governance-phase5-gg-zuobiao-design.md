@@ -82,6 +82,12 @@ else(=failed)→ INSERT OR REPLACE 一条失败行（error_msg=_SHEETS_SYNC_FAIL
 | 1 | `/api/google-sheets/update-zuobiao`：把 `_do_sync` + `_on_fail` + `_sync_sheets_background(...)` 整段换成 `run_write(target='gg_zuobiao', business_key=product_name, payload={product_name}, sync_fn=build_sync(...))`。**登记必须发生在该端点自身写库的 `commit()` 之后** —— 否则 `run_write` 会在**持有未提交写事务**的连接上 `record_pending`，另一条连接拿不到 SQLite 写锁 ⇒ 等满 `timeout=30` 抛 `database is locked`（三期在 `tt_accounts_routes` 修过两处同族缺陷）。⚠️ **该端点当前的 commit 顺序尚未逐行核实** —— 实施时必须先读现场确认（本文件不假设它已经在前）。响应保持 `{success, sheets_status: "syncing", db_saved}` 不变（前端兼容）。 |
 | 2 | `/api/google-sheets/retry-sync`：**退役** —— 逐条重试改用三期已上线的 `/api/sheet-write/retry`（`target=gg_zuobiao` + `business_key`）。 |
 
+> **例外规则（T4.5 补充）**：「rebuild 一律从 DB 重算」在**养户行**这类「请求侧产生、
+> 不落库」的数据上，让位于「随 payload 携带，且**绝不截断**」。养户行是请求侧数据、
+> 不落库（保存端点写库时只落非养户行），DB 重算不出来 ⇒ 由 `payload.yanghu_rows` 携带、
+> 重建时追加在 rows 末尾；`payload.report_date` / `payload.region` 兜底纯养户行场景。
+> 老日志行没有这些键 ⇒ `.get()` 缺省 ⇒ 行为与现状一致（不写养户行）。
+
 ### 4.3 前端（用户裁定：复用统一汇总区）
 
 - `views/ToolkitView.vue`：把现有「状态 + 重试按钮」换成**统一的失败汇总区 + 逐条重试**，

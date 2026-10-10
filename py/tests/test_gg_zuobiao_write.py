@@ -345,3 +345,157 @@ def test_update_zuobiao_rolls_back_when_write_block_raises(client, monkeypatch):
     r = _row(db, uid, "产品甲")
     db.close()
     assert r is not None, "写库块抛异常后仍必须登记（异常路径必须收事务，不得留写锁）"
+
+
+# ---------------------------------------------------------------------------
+# 养户行必须继续写进做表表（T4.5 必做修复）
+#
+# 养户行是请求侧数据、不落库（写库块只落非养户行）⇒ DB 重建不出来。T2 改造后
+# 养户行被静默丢掉（功能回退）。修法：随 payload 携带，重建时追加在 rows 末尾。
+# 下面四条各钉一处：真入口携带 / 重试路径复现 / 纯养户行不早退 / 无养户行不变。
+# ---------------------------------------------------------------------------
+
+def _yanghu_row(campaign="养户广告", acc="acc_yh", cid="cyh"):
+    """造一条养户行，形状与 `upsert_zuobiao` 吃的一致（ToolkitView 送来的 rows 形状）。"""
+    return {"account": acc, "customerId": cid, "cost": 0, "campaign": campaign,
+            "is_yanghu": True}
+
+
+def test_update_zuobiao_writes_yanghu_row(client, monkeypatch):
+    """真入口：请求 rows 含 1 养户行 + 1 普通行 ⇒ 写给 `upsert_zuobiao` 的 rows 含那条养户行。
+
+    判别力：把 `_payload` 里的 `"yanghu_rows"` 去掉 ⇒ 重建出来的 rows 只有 DB 非养户行
+    ⇒ 本用例红（养户行丢失，正是要修的回退）。
+    """
+    import google_sheets_service as gs
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)   # 别让 30s 重试拖慢（成功路径不触发）
+    captured = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda service, **k: captured.append(k["rows"]))
+
+    hdr, uid = _gg_user(client, "_zb_yh")
+    _setup_zuobiao_config(client, hdr)
+
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-10-01",
+        "rows": [
+            {"account": "acc_1", "customerId": "c1", "cost": 1, "campaign": "x"},
+            _yanghu_row(),
+        ],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+
+    db = database.get_db()
+    _settle(db, uid, "产品甲")
+    db.close()
+
+    assert captured, "必须真的调用 upsert_zuobiao（而非配置早退）"
+    rows = captured[0]
+    yh = [r for r in rows if r.get("is_yanghu")]
+    assert len(yh) == 1, f"养户行必须恰好 1 条（不许重复/漏），实际 {yh}"
+    assert yh[0]["campaign"] == "养户广告", yh[0]
+    assert yh[0]["is_yanghu"] is True, yh[0]
+
+
+def test_gg_zuobiao_retry_keeps_yanghu_rows(client, monkeypatch):
+    """重试路径（重启后）：从登记行读回 payload_json 再 build_sync ⇒ 仍带养户行。
+
+    判别力：把 `gg_zuobiao_kwargs` 里的 `+ list(yanghu_rows or [])` 去掉 ⇒ 重试重建
+    出来的 rows 只剩 DB 非养户行 ⇒ 本用例红。
+    """
+    import json
+    import google_sheets_service as gs
+    import routes.gg_zuobiao_target as tgt
+    captured = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda service, **k: captured.append(k["rows"]))
+
+    hdr, uid = _gg_user(client, "_zb_retry")
+    _setup_zuobiao_config(client, hdr)
+    db = database.get_db()
+    _seed_zuobiao(db, uid, "产品甲")
+    key = tgt.gg_zuobiao_key("产品甲")
+    payload = {"product_name": "产品甲", "yanghu_rows": [_yanghu_row()],
+               "report_date": "2026-10-01", "region": "US"}
+    # 只登记、不真写（sync_fn 用 no-op）：这里验证的是 payload_json 的持久化与重试复现
+    sheet_write.run_write(db, user_id=uid, platform="gg", target="gg_zuobiao",
+                          business_key=key, sync_fn=lambda: None, payload=payload)
+    row = _row(db, uid, key)
+    db.close()
+    assert row is not None and row["payload_json"], "登记必须持久化 payload"
+
+    # 模拟重试端点：读回 payload_json 再交给 build_sync
+    payload2 = json.loads(row["payload_json"])
+    sheet_write.build_sync("gg_zuobiao", uid, key, payload2)()
+
+    assert captured, "重试必须真的调用 upsert_zuobiao"
+    yh = [r for r in captured[0] if r.get("is_yanghu")]
+    assert len(yh) == 1, f"重试重建必须仍带养户行，实际 {yh}"
+    assert yh[0]["campaign"] == "养户广告", yh[0]
+
+
+def test_zuobiao_writes_pure_yanghu_rows(client, monkeypatch):
+    """纯养户行：ad_reports 无该产品行、请求 rows 全是养户行 ⇒ 仍写出（不得早退）。
+
+    判别力：把 `if not rows_raw and not yanghu_rows:` 改回 `if not rows_raw:` ⇒ 本用例
+    在「没有找到对应的做表数据」处早退 ⇒ upsert 从不被调用、终态 retry_failed ⇒ 红。
+    """
+    import google_sheets_service as gs
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    captured = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda service, **k: captured.append(k["rows"]))
+
+    hdr, uid = _gg_user(client, "_zb_pure_yh")
+    _setup_zuobiao_config(client, hdr)
+
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-10-01",
+        "rows": [_yanghu_row("养户1"), _yanghu_row("养户2", acc="acc_yh2", cid="cyh2")],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+
+    db = database.get_db()
+    r = _settle(db, uid, "产品甲")
+    db.close()
+    assert r is not None and r["status"] == "synced", \
+        f"纯养户行也必须写出（不得早退成「没有找到」），实际 {r and r['status']}"
+    assert captured, "纯养户行必须真的调用 upsert_zuobiao"
+    rows = captured[0]
+    assert len(rows) == 2, f"两条养户行都应写出，实际 {rows}"
+    assert all(r.get("is_yanghu") for r in rows), f"应全是养户行，实际 {rows}"
+
+
+def test_zuobiao_no_yanghu_unchanged(client, monkeypatch):
+    """无养户行：请求 rows 无 is_yanghu ⇒ 行为与现状一致（不报错、写出的行无养户行）。
+
+    判别力：若空 `yanghu_rows` 的处理把非养户行误标/追加出错 ⇒ 本用例在「写出无养户行」
+    或「终态 synced」上红。
+    """
+    import google_sheets_service as gs
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    captured = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda service, **k: captured.append(k["rows"]))
+
+    hdr, uid = _gg_user(client, "_zb_no_yh")
+    _setup_zuobiao_config(client, hdr)
+
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-10-01",
+        "rows": [{"account": "acc_1", "customerId": "c1", "cost": 1, "campaign": "x"}],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+
+    db = database.get_db()
+    r = _settle(db, uid, "产品甲")
+    db.close()
+    assert r is not None and r["status"] == "synced", \
+        f"无养户行也应正常写出，实际 {r and r['status']}"
+    assert captured, "无养户行也必须调用 upsert_zuobiao"
+    rows = captured[0]
+    assert rows and all(not r.get("is_yanghu") for r in rows), \
+        f"无养户行时写出的行不得有养户行，实际 {rows}"
