@@ -372,8 +372,9 @@
           <el-alert type="warning" show-icon :closable="false" style="margin-bottom:8px;">
             <template #title>归属变更默认不勾选。勾选哪一行，哪一行的归属人就会变成「新归属」。</template>
           </el-alert>
-          <el-table ref="ownerTblRef" :data="hdOwnerChanges" size="small" row-key="account_id"
-                    border @selection-change="v => selOwner = v">
+          <el-table ref="ownerTblRef" :data="hdOwnerPrev.shown" size="small" row-key="account_id"
+                    border @select="(sel, row) => hdToggleRow('owner', row.account_id, sel.some(r => r.account_id === row.account_id))"
+                    @select-all="sel => hdSelectAllPreview('owner', sel.length > 0)">
             <el-table-column type="selection" width="42" />
             <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
@@ -405,6 +406,12 @@
               <template #default="{ row }">{{ hdViaLabel(row.via) }}</template>
             </el-table-column>
           </el-table>
+          <div v-if="hdOwnerPrev.hiddenCount > 0"
+               style="margin-top:6px;font-size:12px;color:#6b7280;">
+            已选 {{ selOwnerIds.length }} / 共 {{ hdOwnerPrev.total }}（表里只画了前 {{ HD_PREVIEW_LIMIT }} 行）
+            <el-button link type="primary" @click="hdSelectAll('owner', true)">全部选中</el-button>
+            <el-button link type="primary" @click="hdSelectAll('owner', false)">全部取消</el-button>
+          </div>
         </div>
 
         <!-- ② 将清空：不可逆，常显、不折叠 -->
@@ -443,8 +450,9 @@
         <div v-if="hdCreate.length" style="margin:16px 0;">
           <div style="font-weight:600;font-size:14px;color:#374151;margin-bottom:6px;">② 新增账户</div>
           <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">这些账户在系统里还没有，确认后会新建。</div>
-          <el-table ref="createTblRef" :data="hdCreate" size="small" row-key="account_id"
-                    border @selection-change="v => selCreate = v">
+          <el-table ref="createTblRef" :data="hdCreatePrev.shown" size="small" row-key="account_id"
+                    border @select="(sel, row) => hdToggleRow('create', row.account_id, sel.some(r => r.account_id === row.account_id))"
+                    @select-all="sel => hdSelectAllPreview('create', sel.length > 0)">
             <el-table-column type="selection" width="42" />
             <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
@@ -474,14 +482,21 @@
               </template>
             </el-table-column>
           </el-table>
+          <div v-if="hdCreatePrev.hiddenCount > 0"
+               style="margin-top:6px;font-size:12px;color:#6b7280;">
+            已选 {{ selCreateIds.length }} / 共 {{ hdCreatePrev.total }}（表里只画了前 {{ HD_PREVIEW_LIMIT }} 行）
+            <el-button link type="primary" @click="hdSelectAll('create', true)">全部选中</el-button>
+            <el-button link type="primary" @click="hdSelectAll('create', false)">全部取消</el-button>
+          </div>
         </div>
 
         <!-- ④ 字段更新（默认勾选，展开给「字段 → 新值」明细） -->
         <div v-if="hdUpdate.length" style="margin:16px 0;">
           <div style="font-weight:600;font-size:14px;color:#374151;margin-bottom:6px;">③ 字段更新</div>
           <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">这些账户在系统里已有，部分字段会按表里的值覆盖。</div>
-          <el-table ref="updateTblRef" :data="hdUpdate" size="small" row-key="account_id"
-                    border @selection-change="v => selUpdate = v">
+          <el-table ref="updateTblRef" :data="hdUpdatePrev.shown" size="small" row-key="account_id"
+                    border @select="(sel, row) => hdToggleRow('update', row.account_id, sel.some(r => r.account_id === row.account_id))"
+                    @select-all="sel => hdSelectAllPreview('update', sel.length > 0)">
             <el-table-column type="selection" width="42" />
             <el-table-column type="expand" width="42">
               <template #default="{ row }">
@@ -519,6 +534,12 @@
               </template>
             </el-table-column>
           </el-table>
+          <div v-if="hdUpdatePrev.hiddenCount > 0"
+               style="margin-top:6px;font-size:12px;color:#6b7280;">
+            已选 {{ selUpdateIds.length }} / 共 {{ hdUpdatePrev.total }}（表里只画了前 {{ HD_PREVIEW_LIMIT }} 行）
+            <el-button link type="primary" @click="hdSelectAll('update', true)">全部选中</el-button>
+            <el-button link type="primary" @click="hdSelectAll('update', false)">全部取消</el-button>
+          </div>
         </div>
 
         <!-- ⑤ 跳过（折叠） -->
@@ -682,8 +703,8 @@
           <span style="font-size:12px;color:#6b7280;margin-right:auto;">
             <template v-if="selectedCount === 0 && hdPendingMasterRows.length">本次只有字典项要补建（将新增 {{ hdPendingMaster.length }} 项）</template>
             <template v-else-if="selectedCount === 0">还没有勾选任何项</template>
-            <template v-else-if="selOwner.length === 0 && hdOwnerChanges.length">已选 {{ selectedCount }} 项（归属变更未勾选，这些账户的归属人不会变）</template>
-            <template v-else>已选 {{ selectedCount }} 项（其中归属变更 {{ selOwner.length }} 项）</template>
+            <template v-else-if="selOwnerIds.length === 0 && hdOwnerChanges.length">已选 {{ selectedCount }} 项（归属变更未勾选，这些账户的归属人不会变）</template>
+            <template v-else>已选 {{ selectedCount }} 项（其中归属变更 {{ selOwnerIds.length }} 项）</template>
           </span>
           <template v-if="syncDlg.applyError">
             <el-button @click="syncDlg.visible = false">关闭</el-button>
@@ -785,7 +806,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue'
+import { ref, reactive, computed, nextTick, watch, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { huguanApi } from '@/api/huguan'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -795,6 +816,9 @@ import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 // 列映射的纯换算（表头响应 ↔ 下拉行状态）。**不要在组件里重推一遍映射** —— 三值约定
 // （字段key / "" 刻意不采集 / null 未指派）只有这一份实现，node --test 覆盖的就是它。
 import { rowsFromColumns, columnsFromRows, pickColumn } from '@/utils/columnMapping.mjs'
+// 大批量结果的「预览」纯逻辑（T1 已交付，node --test 覆盖）。slicePreview 限行、selectedIds
+// 把「默认全选」用「全量 − 排除集」表示 —— 这样只渲染前 100 行也不会丢掉另外几千行的勾选。
+import { DEFAULT_PREVIEW_LIMIT, slicePreview, selectedIds } from '@/utils/previewRows.mjs'
 
 const authStore = useAuthStore()
 
@@ -876,9 +900,15 @@ const clearingExpanded = ref(false)
 
 const syncDiff = ref(null)
 const syncResult = ref(null)
-const selOwner = ref([])
-const selCreate = ref([])
-const selUpdate = ref([])
+// 同步预演弹窗的勾选状态。上一版装「行对象数组」、由 el-table 的 @selection-change 喂，
+// 一旦限行渲染（只画前 100 行），selection-change 就只报那 100 行，另外几千行的勾选会
+// **静默丢掉**（用户以为全建了、其实只建了 100 个）⇒ 改成「id 集合」，与渲染行解耦。
+// 新增 / 更新默认全选 ⇒ 用「排除集」（黑名单）；归属变更默认不勾 ⇒ 用「已勾集」（白名单）。
+// 两者都用普通数组，便于响应式替换。
+const HD_PREVIEW_LIMIT = DEFAULT_PREVIEW_LIMIT
+const hdExcludedCreate = ref([])
+const hdExcludedUpdate = ref([])
+const hdPickedOwner = ref([])
 
 const hdBusy = computed(() =>
   hdReading.value || hdSaving.value || hdPushing.value || hdSyncing.value
@@ -1156,10 +1186,30 @@ const undoTitle = computed(() => (undoDlg.direction === 'push'
   ? '撤回上次 · 刷新到看板'
   : '撤回上次 · 从表同步到系统'))
 
-const selectedCount = computed(() => selCreate.value.length + selUpdate.value.length + selOwner.value.length)
-// 只有「这次点下去会不可逆地清空字段」才染红（永远染红等于没染）
-const willClear = computed(() => selUpdate.value.some(x => (x.clears || []).length))
+// ---- 勾选状态：id 集合 + 与渲染行解耦（限行渲染后 selection-change 只报画出来的行）----
+const hdCreateIds = computed(() => hdCreate.value.map(r => r.account_id))
+const hdUpdateIds = computed(() => hdUpdate.value.map(r => r.account_id))
+const hdOwnerIds = computed(() => hdOwnerChanges.value.map(r => r.account_id))
+
+const selCreateIds = computed(() => selectedIds(hdCreateIds.value, hdExcludedCreate.value))
+const selUpdateIds = computed(() => selectedIds(hdUpdateIds.value, hdExcludedUpdate.value))
+const selOwnerIds = computed(() => hdOwnerIds.value.filter(id => hdPickedOwner.value.includes(id)))
+
+const selectedCount = computed(() =>
+  selCreateIds.value.length + selUpdateIds.value.length + selOwnerIds.value.length)
+
+// 只有「这次点下去会不可逆地清空字段」才染红（永远染红等于没染）。
+// 新模型下「没被排除且带 clears」= 这次真的会清空。
+const willClear = computed(() => {
+  const ex = new Set(hdExcludedUpdate.value)
+  return hdUpdate.value.some(x => !ex.has(x.account_id) && (x.clears || []).length)
+})
 const confirmType = computed(() => willClear.value ? 'danger' : 'primary')
+
+// 限行渲染：三张表只画前 HD_PREVIEW_LIMIT 行，其余折叠（DOM 节点数封顶，防 15035 行崩标签页）
+const hdCreatePrev = computed(() => slicePreview(hdCreate.value, HD_PREVIEW_LIMIT))
+const hdUpdatePrev = computed(() => slicePreview(hdUpdate.value, HD_PREVIEW_LIMIT))
+const hdOwnerPrev  = computed(() => slicePreview(hdOwnerChanges.value, HD_PREVIEW_LIMIT))
 
 // 「确认落库」能不能点：勾选的东西 **或** 孤儿行的字典补建（后者无条件执行、不依赖勾选）。
 // 只有后者时 selectedCount 恒为 0，但落库确实会建字典项 + 挂链 —— 不把按钮置灰（否则纯孤儿
@@ -1168,11 +1218,14 @@ const hdCanApply = computed(() => selectedCount.value > 0 || hdPendingMasterRows
 // 结果页（mode B）口径：带字典项的「新增 / 更新」行若有没勾的，该行的字典项不会落库，
 // 此时区标题就不能写「已补建」（会过度声称）。孤儿行的字典项不受此影响（无条件执行）。
 // 必须在**点确认的那一刻**从当前勾选快照算出来存下（`syncDlg.pendingUnpicked`）：
-// 切到 mode B 后预演用的表会被卸载，`selCreate`/`selUpdate` 不再可靠。
+// 切到 mode B 后预演用的表会被卸载，勾选状态不再可靠。
 function computePendingUnpicked() {
-  const sel = new Set([...selCreate.value, ...selUpdate.value].map(x => x.account_id))
-  return hdCreate.value.some(r => (r.pending_master || []).length && !sel.has(r.account_id))
-    || hdUpdate.value.some(r => (r.pending_master || []).length && !sel.has(r.account_id))
+  // 口径不变：**带字典项、但这次没勾**的行，它的字典项不会落库。
+  // 新模型下「没勾」= 在排除集里。
+  const exC = new Set(hdExcludedCreate.value)
+  const exU = new Set(hdExcludedUpdate.value)
+  return hdCreate.value.some(r => (r.pending_master || []).length && exC.has(r.account_id))
+    || hdUpdate.value.some(r => (r.pending_master || []).length && exU.has(r.account_id))
 }
 // 有出错的行、有勾了却没落库的项、或有带字典项的行没勾 ⇒ 这次「补建」未必都落库，
 // 结果页措辞降级为「本次要补建」，别对未建成的项声称「已补建」。
@@ -1603,6 +1656,75 @@ async function syncHdTable(i) {
   }
 }
 
+// ===========================================================================
+// 同步预演的勾选交互（限行渲染 + id 集合解耦）
+// ===========================================================================
+
+/** 单行勾选切换。create/update 默认全选 ⇒ 走排除集（黑名单）：on 假 ⇒ 加进排除，真 ⇒ 移除。
+ *  owner 默认不勾 ⇒ 走已勾集（白名单）：on 真 ⇒ 加进已勾集，假 ⇒ 移除。 */
+function hdToggleRow(which, id, on) {
+  if (which === 'owner') {
+    hdPickedOwner.value = on
+      ? [...new Set([...hdPickedOwner.value, id])]
+      : hdPickedOwner.value.filter(x => x !== id)
+    return
+  }
+  const excluded = which === 'create' ? hdExcludedCreate : hdExcludedUpdate
+  excluded.value = on
+    ? excluded.value.filter(x => x !== id)
+    : [...new Set([...excluded.value, id])]
+}
+
+/** 表头「全选」勾：只作用**本页渲染出来的 ≤100 行**。create/update 仍走排除集，
+ *  把这 ≤100 行整体从排除集加/移除；owner 走已勾集。 */
+function hdSelectAllPreview(which, on) {
+  if (which === 'owner') {
+    const shownIds = hdOwnerPrev.value.shown.map(r => r.account_id)
+    hdPickedOwner.value = on
+      ? [...new Set([...hdPickedOwner.value, ...shownIds])]
+      : hdPickedOwner.value.filter(id => !shownIds.includes(id))
+    return
+  }
+  const prev = which === 'create' ? hdCreatePrev : hdUpdatePrev
+  const excluded = which === 'create' ? hdExcludedCreate : hdExcludedUpdate
+  const shownIds = prev.value.shown.map(r => r.account_id)
+  excluded.value = on
+    ? excluded.value.filter(id => !shownIds.includes(id))
+    : [...new Set([...excluded.value, ...shownIds])]
+}
+
+/** 脚注「全部选中 / 全部取消」：作用**全量**（不只渲染行）。
+ *  create/update：全部选中 ⇒ 排除集清空；全部取消 ⇒ 排除集 = 全量 id。
+ *  owner：全部选中 ⇒ 已勾集 = 全量 id；全部取消 ⇒ 已勾集清空。
+ *  改完模型后要刷一次表格内建的勾选态（脚注按钮不经过表格自身，勾选不会自己跟着变）。 */
+function hdSelectAll(which, on) {
+  if (which === 'owner') {
+    hdPickedOwner.value = on ? [...hdOwnerIds.value] : []
+  } else {
+    const excluded = which === 'create' ? hdExcludedCreate : hdExcludedUpdate
+    const allIds = which === 'create' ? hdCreateIds.value : hdUpdateIds.value
+    excluded.value = on ? [] : [...allIds]
+  }
+  hdSyncTableSelection()
+}
+
+/** 表格内建的勾选态不在状态模型里（权威是 id 集合）⇒ 渲染完成后按模型把**画出来的那几行**
+ *  同步一次。调用点：① 弹窗打开后；② 三张表的 shown 变化后（watch, flush: 'post'）。 */
+function hdSyncTableSelection() {
+  const exC = new Set(hdExcludedCreate.value)
+  const exU = new Set(hdExcludedUpdate.value)
+  const picked = new Set(hdPickedOwner.value)
+  hdCreatePrev.value.shown.forEach(r => createTblRef.value?.toggleRowSelection(r, !exC.has(r.account_id)))
+  hdUpdatePrev.value.shown.forEach(r => updateTblRef.value?.toggleRowSelection(r, !exU.has(r.account_id)))
+  hdOwnerPrev.value.shown.forEach(r => ownerTblRef.value?.toggleRowSelection(r, picked.has(r.account_id)))
+}
+
+// 渲染行（shown）变了 ⇒ 按当前模型把画出来的行刷一遍勾选态。
+// flush: 'post' 保证在 DOM 更新之后跑（等价于 nextTick 一层的正确写法，不许再用 setTimeout）。
+watch([hdCreatePrev, hdUpdatePrev, hdOwnerPrev], () => {
+  hdSyncTableSelection()
+}, { flush: 'post' })
+
 async function openSyncDialog(diff, sheet = '') {
   syncDiff.value = diff
   syncResult.value = null
@@ -1611,25 +1733,13 @@ async function openSyncDialog(diff, sheet = '') {
   syncDlg.pendingUnpicked = false
   syncDlg.sheet = sheet
   clearingExpanded.value = false
-  selOwner.value = []
-  selCreate.value = []
-  selUpdate.value = []
+  hdExcludedCreate.value = []      // 默认全选
+  hdExcludedUpdate.value = []
+  hdPickedOwner.value = []         // 归属变更默认不勾（既有语义，别改）
   syncDlg.visible = true
-
-  // 默认勾选：新增/更新是这次操作的预期目的，全勾；归属变更是**改别人的户**，
-  // 默认不勾 —— 户管必须逐条主动点，才算「逐个确认才落库」（设计 §4.4）。
+  // 表格内建的勾选态不在状态模型里 ⇒ 渲染完成后按模型把**画出来的那几行**同步一次。
   await nextTick()
-  setTimeout(() => {
-    const createRows = diff.to_create || []
-    const updateRows = diff.to_update || []
-    // 上一轮的勾选状态会留在表格内部：先清干净，否则「上一条 diff 里有、
-    // 这一条 diff 里没有」的行会带着勾选被提交，落库时进 not_applied。
-    ownerTblRef.value?.clearSelection()
-    createTblRef.value?.clearSelection()
-    updateTblRef.value?.clearSelection()
-    createRows.forEach(r => createTblRef.value?.toggleRowSelection(r, true))
-    updateRows.forEach(r => updateTblRef.value?.toggleRowSelection(r, true))
-  }, 100)
+  hdSyncTableSelection()
 }
 
 async function applySync() {
@@ -1646,9 +1756,9 @@ async function applySync() {
       platform: HD_PLATFORM,
       dry_run: false,
       confirmed: {
-        create: selCreate.value.map(x => x.account_id),
-        update: selUpdate.value.map(x => x.account_id),
-        owner: selOwner.value.map(x => x.account_id),
+        create: selCreateIds.value,
+        update: selUpdateIds.value,
+        owner: selOwnerIds.value,
       },
     }
     if (syncDlg.sheet) body.sheet_name = syncDlg.sheet
