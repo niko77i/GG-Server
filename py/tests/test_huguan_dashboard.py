@@ -6372,3 +6372,152 @@ class TestPerTablePush:
         assert headers_read == ["企业户"], f"只该解析目标表的表头，实际 {headers_read}"
         assert written and all(s == "企业户" for s, _ in written), f"实际写了 {written}"
         assert all(ids == ["8001"] for _s, ids in written), f"只该写企业户的账户，实际 {written}"
+
+
+# ---------- Task 3（per-sheet-sync）：跨表归属提示（**只查库**） ----------
+
+class TestCrossSheetNotes:
+    """按表操作时，提示「这些账户当前归属另一张表」（A1 的补偿，只查库）。
+
+    ⚠️ 与 brief 的一处偏差（沿用 T2 同一处发现，见 task-2-report）：brief 的 INSERT 写
+    `deleted_at=''`，但本函数按 `deleted_at IS NULL` 过滤软删账户（与
+    `collect_rows_for_push` 同口径）—— 空串**不是** NULL，会被过滤成 0 行 ⇒ brief 那三条
+    用例对 brief 的函数体恒红。故此处改插 NULL（语义不变，「活着的账户」）。
+    """
+
+    def test_notes_accounts_belonging_to_another_type(self, client):
+        import database
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('7001','甲','加白户',NULL)")
+        db.commit()
+        got = hd.cross_sheet_notes(db, "tt", ["7001", "7002"], "企业户")
+        db.close()
+        assert got["count"] == 1
+        assert got["notes"] == [{"account_id": "7001", "current_type": "加白户",
+                                 "this_sheet": "企业户"}]
+
+    def test_same_type_or_unknown_accounts_are_not_noted(self, client):
+        import database
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('7001','甲','企业户',NULL)")
+        db.commit()
+        got = hd.cross_sheet_notes(db, "tt", ["7001", "7099"], "企业户")
+        db.close()
+        assert got == {"count": 0, "notes": []}
+
+    def test_cap_keeps_total_count(self, client):
+        import database
+        db = database.get_db()
+        for i in range(5):
+            db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                       f"deleted_at) VALUES('71{i:02d}','x','加白户',NULL)")
+        db.commit()
+        got = hd.cross_sheet_notes(db, "tt", [f"71{i:02d}" for i in range(5)],
+                                   "企业户", cap=2)
+        db.close()
+        assert got["count"] == 5 and len(got["notes"]) == 2
+
+    def test_soft_deleted_accounts_are_not_noted(self, client):
+        """软删账户不算「当前归属另一张表」——与 `collect_rows_for_push` 的软删口径一致。"""
+        import database
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('7001','甲','加白户','2026-10-01 00:00:00')")
+        db.commit()
+        got = hd.cross_sheet_notes(db, "tt", ["7001"], "企业户")
+        db.close()
+        assert got == {"count": 0, "notes": []}
+
+    def test_empty_ids_short_circuits(self, client):
+        got = hd.cross_sheet_notes(None, "tt", [], "企业户")
+        assert got == {"count": 0, "notes": []}
+
+
+class TestCrossSheetNotesWiring:
+    """两个端点接入：`cross_sheet_notes` 键**只在给了 sheet_name 时**出现。
+
+    缺省（不带 sheet_name）路径**一个键都不加、一次库都不查**（硬约束）——
+    这里既断言键缺失，也用探针断言 `cross_sheet_notes` **没被调用过**（防「算了但没用」的假实现）。
+    """
+
+    def _conf(self, client, username, tables):
+        return TestPerTableSync()._conf(client, username, tables)
+
+    def test_sync_attaches_notes_with_sheet_name(self, client, monkeypatch):
+        import google_sheets_service as gs
+        hg = self._conf(client, "_csn1", [{"name": "企业户", "sheet_name": "企业户"}])
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('7001','甲','加白户',NULL)")
+        db.commit(); db.close()
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda svc, sid, sheet, rng: [["账户ID"], ["7001"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "sheet_name": "企业户", "dry_run": True}).get_json()["diff"]
+        assert diff["cross_sheet_notes"] == {
+            "count": 1, "notes": [{"account_id": "7001", "current_type": "加白户",
+                                   "this_sheet": "企业户"}]}
+
+    def test_sync_default_path_has_no_notes_key(self, client, monkeypatch):
+        import google_sheets_service as gs
+        hg = self._conf(client, "_csn2", [{"name": "企业户", "sheet_name": "企业户"}])
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('7001','甲','加白户',NULL)")
+        db.commit(); db.close()
+        called = []
+        monkeypatch.setattr(hd, "cross_sheet_notes",
+                            lambda *a, **k: called.append(a) or {"count": 0, "notes": []})
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda svc, sid, sheet, rng: [["账户ID"], ["7001"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True}).get_json()["diff"]
+        assert "cross_sheet_notes" not in diff
+        assert called == [], "缺省路径不得为跨表提示多查一次库"
+
+    def test_push_attaches_notes_with_sheet_name(self, client, monkeypatch):
+        import google_sheets_service as gs
+        # 户类型名与工作表名**故意不同**：push 的行过滤按 `account_type`（=类型名），
+        # 而提示按工作表名比对 ⇒ 只有二者不同时提示才非空（见 task-3-report「顾虑」）。
+        # 这样才证明该键的值真来自库（活的连接），而不是硬写的空壳。
+        hg = self._conf(client, "_csn3", [{"name": "企业户", "sheet_name": "企业户表"}])
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('8001','甲','企业户',NULL)")
+        db.commit(); db.close()
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda svc, sid, sheet, rng: [["账户ID"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, sheet, rows, key_col="C":
+                            {"updated": len(rows), "not_found": []})
+        result = client.post("/api/huguan/dashboard/push", headers=hg, json={
+            "platform": "tt", "sheet_name": "企业户表"}).get_json()["result"]
+        assert result["cross_sheet_notes"] == {
+            "count": 1, "notes": [{"account_id": "8001", "current_type": "企业户",
+                                   "this_sheet": "企业户表"}]}
+
+    def test_push_default_path_has_no_notes_key(self, client, monkeypatch):
+        import google_sheets_service as gs
+        hg = self._conf(client, "_csn4", [{"name": "企业户", "sheet_name": "企业户"}])
+        db = database.get_db()
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('8001','甲','企业户',NULL)")
+        db.commit(); db.close()
+        called = []
+        monkeypatch.setattr(hd, "cross_sheet_notes",
+                            lambda *a, **k: called.append(a) or {"count": 0, "notes": []})
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda svc, sid, sheet, rng: [["账户ID"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, sheet, rows, key_col="C":
+                            {"updated": len(rows), "not_found": []})
+        result = client.post("/api/huguan/dashboard/push", headers=hg,
+                             json={"platform": "tt"}).get_json()["result"]
+        assert "cross_sheet_notes" not in result
+        assert called == [], "缺省路径不得为跨表提示多查一次库"

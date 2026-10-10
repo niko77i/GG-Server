@@ -1979,6 +1979,35 @@ def collect_rows_for_push(db, platform: str, account_ids=None,
     return [o for o in out if o["account_id"]]
 
 
+def cross_sheet_notes(db, platform: str, account_ids: list, sheet_name: str,
+                      cap: int = 50) -> dict:
+    """按表操作时的「跨表重复」提示（设计 §3.3）：这些账户**当前归属另一张表**。
+
+    为什么只查库：读其它表会抵消按表操作带来的提速（与「只在该表内去重」的初衷冲突）。
+    库里的 `account_type` 就是「上一次同步时它来自哪张表」的记账，够用。
+
+    判据：本次同步里出现的账户，其库里 `account_type` 非空且与本次表名不同。
+    `count` 给总数（前端能说「共 N 个」），`notes` 最多 `cap` 条（防空表刷爆报告）。
+    软删账户不计（`deleted_at IS NULL`，与 `collect_rows_for_push` 同口径）。
+    """
+    ids = [a for a in (account_ids or []) if a]
+    if not ids:
+        return {"count": 0, "notes": []}
+    table = _TABLE_FOR_PLATFORM[platform]
+    hits = []
+    for part in chunk(ids):
+        marks = ",".join("?" for _ in part)
+        for r in db.execute(
+                f"SELECT {ACCOUNT_KEY_FIELD[platform]} AS aid, account_type "
+                f"FROM {table} WHERE {ACCOUNT_KEY_FIELD[platform]} IN ({marks}) "
+                "AND deleted_at IS NULL", tuple(part)).fetchall():
+            cur = _conf_text(r["account_type"])
+            if cur and cur != sheet_name:
+                hits.append({"account_id": _conf_text(r["aid"]),
+                             "current_type": cur, "this_sheet": sheet_name})
+    return {"count": len(hits), "notes": hits[:cap]}
+
+
 def _operator_dashboard_name(db, owner_id: int) -> str:
     """解析某投手「我的看板」的 sheet 名。
 

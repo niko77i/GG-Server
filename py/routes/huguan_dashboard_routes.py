@@ -28,18 +28,25 @@ def _tick(label: str, t0: float) -> float:
     return time.perf_counter()
 
 
-def _log_sync_summary(scope, t0, parsed_rows, diff, *, dry_run=False) -> None:
-    """一次操作一行汇总（设计 §3.4）：范围 + 总耗时 + 行数。只记日志，不改响应。
+def _log_summary(action: str, scope, t0: float, *fields) -> None:
+    """一次操作一行汇总日志（设计 §3.4）：范围 + 总耗时 + 计数。只记日志，不改响应。
 
-    `scope` 是本次操作的按表范围（空串＝全部表）。dry_run 与落库两条返回路径共用它，
-    免得两处各写一份日志格式、日后只改一处。
+    sync 与 push **共用这一份格式**（原先 push 手写了自己的串，两处各长各的，改一处漏一处）。
+    `action` 带方向与是否 dry_run（如「同步（dry_run）」/「刷新」，即「XX汇总」的 XX）；
+    `fields` 是若干 `(标签, 值)` 对，逐项附在日志尾。
     """
-    log.info("户管看板 同步汇总%s 范围=%s 耗时%.2fs 读入行=%d 新建=%d 更新=%d 归属=%d",
-             "（dry_run）" if dry_run else "", scope or "全部表",
-             time.perf_counter() - t0, len(parsed_rows),
-             len((diff or {}).get("to_create", [])),
-             len((diff or {}).get("to_update", [])),
-             len((diff or {}).get("owner_changes", [])))
+    detail = " ".join(f"{label}={value}" for label, value in fields)
+    log.info("户管看板 %s汇总 范围=%s 耗时%.2fs %s", action, scope or "全部表",
+             time.perf_counter() - t0, detail)
+
+
+def _log_sync_summary(scope, t0, parsed_rows, diff, *, dry_run=False) -> None:
+    """sync 的汇总行（薄封装，格式统一走 `_log_summary`）。dry_run 与落库两条返回路径共用它。"""
+    _log_summary("同步（dry_run）" if dry_run else "同步", scope, t0,
+                 ("读入行", len(parsed_rows)),
+                 ("新建", len((diff or {}).get("to_create", []))),
+                 ("更新", len((diff or {}).get("to_update", []))),
+                 ("归属", len((diff or {}).get("owner_changes", []))))
 
 
 @huguan_dashboard_bp.route("/api/huguan/dashboard", methods=["GET"])
@@ -265,6 +272,15 @@ def dashboard_sync():
         diff["unmatched_columns"] = unmatched_columns
         t0 = _tick("build_diff 完成", t0)
 
+        # 跨表归属提示（设计 §3.3，A1 的补偿）：**只在按表时**追加，且**只查库**（读别的表
+        # 会抵消按表提速）。挂在 `diff` 上 ⇒ dry_run 与落库两条返回路径都带上它。
+        # 必须在这里算：dry_run 分支紧接着就 return，而 `parsed_rows` 与**活着的** `db` 都还在
+        # 作用域里（`apply_diff` 之后用同一份 diff 返回，两处共用，不重复查）。
+        # 缺省路径（`only_sheet` 空）一个键都不加、一次库都不查 —— 与改动前逐字节一致。
+        if only_sheet:
+            diff["cross_sheet_notes"] = hd.cross_sheet_notes(
+                db, platform, [p.get("account_id") for p in parsed_rows], only_sheet)
+
         # fail-safe：只有**显式布尔 False** 才落库。缺省 / true / null / "false"
         # (字符串) / 0 全部走只读 dry_run —— 少了这个 is not False，JSON null 会因
         # `None` 为假值而掉进落库分支，等于「传了个空值就把库改了」。
@@ -482,6 +498,13 @@ def dashboard_push():
         if target_type is not None:
             # 只留目标户类型的账户：写回的是**这张表**，别的表一个格都不碰。
             rows = [r for r in rows if (r.get("account_type") or "") == target_type]
+        # 跨表归属提示（设计 §3.3，A1 的补偿）：只有按表时算。
+        # ⚠️ **必须在这条连接关掉之前**算 —— 下面的 `finally: db.close()`（以及快照用的
+        # `undo_db`）都早于响应组装，那里已无活着的连接可用。只查库、不读表（读表会抵消
+        # 按表提速）。缺省路径 ⇒ None ⇒ 响应里不加键、也不查库（逐字节不变）。
+        cross_sheet_notes = (hd.cross_sheet_notes(
+            db, platform, [r["account_id"] for r in rows], only_sheet)
+            if only_sheet else None)
         groups, skipped = hd.group_rows_by_sheet(db, uid, platform, rows)
         t0 = _tick("收集完成", t0)
     finally:
@@ -536,11 +559,16 @@ def dashboard_push():
         _discard_push_undo(uid, platform)
 
     # 一次操作一行汇总（设计 §3.4）：范围 + 总耗时 + 行数。只记日志，不改响应。
-    log.info("户管看板 刷新汇总 范围=%s 耗时%.2fs 待写行=%d 已写=%d 未找到=%d",
-             only_sheet or "全部表", time.perf_counter() - op_t0, len(rows),
-             total_updated, len(total_not_found))
-    return ok({"result": {"rows": len(rows), "updated": total_updated,
-                          "not_found": total_not_found}})
+    # 与 sync 共用 `_log_summary` 的格式（原先此处手写自己的串，两处各长各的）。
+    _log_summary("刷新", only_sheet, op_t0,
+                 ("待写行", len(rows)), ("已写", total_updated),
+                 ("未找到", len(total_not_found)))
+    result = {"rows": len(rows), "updated": total_updated,
+              "not_found": total_not_found}
+    # 跨表归属提示（设计 §3.3）：只在按表时挂上；缺省路径不加键（逐字节不变）。
+    if cross_sheet_notes is not None:
+        result["cross_sheet_notes"] = cross_sheet_notes
+    return ok({"result": result})
 
 
 def _discard_undo(uid: int, platform: str, direction: str) -> None:
