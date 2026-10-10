@@ -66,8 +66,12 @@
 
           <!-- 列映射（第二批 §3.4）：每张表各自的「读表头 → 逐列指派」面板。
                改动只落进 t.columns，跟卡片既有的「💾 保存配置」一起提交 —— 不新增第二条写路径。 -->
-          <div :ref="el => setHdPanelEl(i, el)" style="margin-top:6px;">
-            <el-collapse :model-value="hdIsOpen(t) ? ['map'] : []" @change="v => hdSetOpen(t, v)">
+          <!-- 这一行 = 「列映射」折叠区（占满剩余宽度）+ 该表自己的两个按钮（右端）。
+               按钮与左侧折叠标题之间由 flex gap 保证 ≥24px —— 免得被误读成折叠区的一部分
+               （视觉规格「版式」：与「删除」同一层级，不抢平台级按钮的主色，故都用 plain）。 -->
+          <div :ref="el => setHdPanelEl(i, el)" style="margin-top:6px;display:flex;align-items:flex-start;gap:24px;">
+            <el-collapse :model-value="hdIsOpen(t) ? ['map'] : []" @change="v => hdSetOpen(t, v)"
+                         style="flex:1;min-width:0;">
               <el-collapse-item name="map">
                 <template #title>
                   <span style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
@@ -160,6 +164,28 @@
                 </div>
               </el-collapse-item>
             </el-collapse>
+
+            <!-- 该表自己的两个入口（本期 §3.1）：只处理**这一行**的工作表。
+                 图标沿用既有语言（⬇️ 表→系统 / ⬆️ 系统→表），与平台级按钮同款。
+                 没填工作表名时禁用并给提示：空名发出去会被后端当成「全部表」（静默跑全量），
+                 而不是报错 —— 这里必须拦住。 -->
+            <el-tooltip content="先在左边填这张表的工作表名" placement="top" :disabled="!!hdSheetKey(t)">
+              <span class="hd-sheet-actions">
+                <el-button size="small" plain
+                           :loading="!!hdSheetBusy && hdSheetBusy.sheet === hdSheetKey(t) && hdSheetBusy.dir === 'sync'"
+                           :disabled="hdBusy || !hdSheetKey(t)"
+                           @click="syncHdTable(i)">⬇️ 导入这张表</el-button>
+                <el-button size="small" plain
+                           :loading="!!hdSheetBusy && hdSheetBusy.sheet === hdSheetKey(t) && hdSheetBusy.dir === 'push'"
+                           :disabled="hdBusy || !hdSheetKey(t)"
+                           @click="pushHdTable(i)">⬆️ 刷新回这张表</el-button>
+              </span>
+            </el-tooltip>
+          </div>
+          <!-- 禁用说明（视觉规格「状态」）：进行中时该行下方一行灰字，否则用户会以为界面坏了。 -->
+          <div v-if="hdSheetBusy && hdSheetBusy.sheet === hdSheetKey(t)"
+               style="font-size:12px;color:#6b7280;margin-top:4px;">
+            正在处理「{{ hdSheetBusy.sheet }}」，请稍候…
           </div>
         </div>
         <el-button size="small" :disabled="hdBusy" @click="addHdTable">＋ 新增户类型</el-button>
@@ -183,8 +209,12 @@
                     :disabled="hdConfigured">
           <span style="display:inline-flex;gap:24px;align-items:center;flex-wrap:wrap;">
             <span style="display:inline-flex;gap:8px;align-items:center;">
-              <el-button @click="pushDlg.visible = true" :loading="hdPushing"
-                         :disabled="!hdConfigured || hdBusy">🔄 刷新到看板</el-button>
+              <!-- tt 下文案改「⬆️ 全部刷新」并挂列出所有表的 tooltip（视觉规格 §平台级按钮）；
+                   这两个是「全部表」，按表入口在每张表那一行。gg/fb 文案逐字节不变。 -->
+              <el-tooltip :content="hdTablesTip" placement="top" :disabled="!hdTablesTip">
+                <el-button @click="pushDlg.visible = true" :loading="hdPushing"
+                           :disabled="!hdConfigured || hdBusy">{{ hdPushBtnLabel }}</el-button>
+              </el-tooltip>
               <el-button @click="askUndo('push')" :loading="hdUndoing === 'push'"
                          :disabled="!hdUndo.push || hdBusy">↩️ 撤回上次</el-button>
               <span v-if="hdUndo.push" style="font-size:12px;color:#6b7280;">
@@ -192,8 +222,10 @@
               </span>
             </span>
             <span style="display:inline-flex;gap:8px;align-items:center;">
-              <el-button @click="syncHd" :loading="hdSyncing"
-                         :disabled="!hdConfigured || hdBusy">⬇️ 从表同步到系统</el-button>
+              <el-tooltip :content="hdTablesTip" placement="top" :disabled="!hdTablesTip">
+                <el-button @click="syncHd" :loading="hdSyncing"
+                           :disabled="!hdConfigured || hdBusy">{{ hdSyncBtnLabel }}</el-button>
+              </el-tooltip>
               <el-button @click="askUndo('sync')" :loading="hdUndoing === 'sync'"
                          :disabled="!hdUndo.sync || hdBusy">↩️ 撤回上次</el-button>
               <span v-if="hdUndo.sync" style="font-size:12px;color:#6b7280;">
@@ -266,7 +298,7 @@
     <div style="font-size:12px;color:#6b7280;margin-top:8px;">{{ hdPushExtraNote }}</div>
 
     <el-alert type="info" show-icon :closable="false" style="margin-top:16px;">
-      <template #title>建议：如果表里刚改过上面那几列，先点「⬇️ 从表同步到系统」把改动读回系统，再刷新到看板。</template>
+      <template #title>建议：如果表里刚改过上面那几列，先点「{{ hdSyncBtnLabel }}」把改动读回系统，再刷新到看板。</template>
     </el-alert>
 
     <template #footer>
@@ -304,6 +336,29 @@
           <el-descriptions-item label="警告">{{ hdSummary.warnings }} 条</el-descriptions-item>
         </el-descriptions>
 
+        <!-- 跨表归属提示（设计 §3.3，A1 的补偿）：只在**按表同步且命中时**出现 ——
+             后端只在给了 sheet_name 时才带这个键（push 侧刻意不接，见设计 §3.3 的注）。
+             这些账户在库里属于另一张表，本次按本表同步可能把它们的字段/归属按本表覆盖。
+             只提示、不阻断：要不要继续由户管自己判断。色用卡片既有的警告橙。 -->
+        <div v-if="hdCrossNotes.notes.length"
+             style="border-left:3px solid #e6a23c;padding-left:10px;margin:16px 0;">
+          <div style="font-weight:600;font-size:14px;color:#374151;margin-bottom:6px;">
+            这些账户当前属于别的表
+          </div>
+          <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">
+            本次按「{{ syncDlg.sheet }}」同步可能覆盖它们的字段。
+          </div>
+          <div v-for="(n, i) in hdCrossNotes.notes" :key="n.account_id + '#' + i"
+               style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <span style="font-family:monospace;font-size:12px;color:#374151;">{{ n.account_id }}</span>
+            <el-tag size="small" type="info">{{ n.current_type }}</el-tag>
+          </div>
+          <div v-if="hdCrossNotes.count > hdCrossNotes.notes.length"
+               style="font-size:12px;color:#6b7280;">
+            等共 {{ hdCrossNotes.count }} 个
+          </div>
+        </div>
+
         <!-- ① 归属变更：置顶 + 户管紫左边框 + 默认不勾（改错人不可撤销） -->
         <div v-if="hdOwnerChanges.length"
              style="border-left:3px solid #7c3aed;padding-left:10px;margin:16px 0;">
@@ -317,7 +372,7 @@
           <el-table ref="ownerTblRef" :data="hdOwnerChanges" size="small" row-key="account_id"
                     border @selection-change="v => selOwner = v">
             <el-table-column type="selection" width="42" />
-            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+            <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
                 <span v-else>—</span>
@@ -356,7 +411,7 @@
             <div style="font-size:12px;">表里这些列是空的，同步后系统里对应的值会被清掉。</div>
           </el-alert>
           <el-table :data="hdClearingShown" size="small" border style="margin-top:8px;">
-            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+            <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
                 <span v-else>—</span>
@@ -388,7 +443,7 @@
           <el-table ref="createTblRef" :data="hdCreate" size="small" row-key="account_id"
                     border @selection-change="v => selCreate = v">
             <el-table-column type="selection" width="42" />
-            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+            <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
                 <span v-else>—</span>
@@ -437,7 +492,7 @@
                 </el-table>
               </template>
             </el-table-column>
-            <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+            <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
                 <span v-else>—</span>
@@ -471,7 +526,7 @@
               <span style="margin-left:12px;font-size:12px;color:#6b7280;">系统里已删除的账户，本次不动。</span>
             </template>
             <el-table :data="hdSkip" size="small" border>
-              <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
                 <template #default="{ row }">
                   <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
                   <span v-else>—</span>
@@ -496,7 +551,7 @@
               <span style="margin-left:12px;font-size:12px;color:#6b7280;">这些行没能同步，需要你去表里改。</span>
             </template>
             <el-table :data="hdWarnings" size="small" border>
-              <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+              <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
                 <template #default="{ row }">
                   <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
                   <span v-else>—</span>
@@ -558,7 +613,7 @@
         </el-alert>
         <el-table v-if="(hdResult.errors || []).length" :data="hdResult.errors" size="small"
                   border style="margin-top:8px;">
-          <el-table-column v-if="HD_PLATFORM === 'tt'" label="表" min-width="120" show-overflow-tooltip>
+          <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
             <template #default="{ row }">
               <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
               <span v-else>—</span>
@@ -576,7 +631,7 @@
           <el-alert type="warning" show-icon :closable="false" style="margin-top:12px;">
             <template #title>有 {{ hdResult.not_applied.length }} 项没有落库（确认之后表又变了）</template>
             <div style="font-size:12px;">
-              下面这些你在预演里勾选的项，在确认前表被改动了，系统找不到对应账户，已跳过。请重新点「⬇️ 从表同步到系统」再看一次。
+              下面这些你在预演里勾选的项，在确认前表被改动了，系统找不到对应账户，已跳过。请重新点「{{ hdSyncBtnLabel }}」再看一次。
             </div>
           </el-alert>
           <el-table :data="hdNotAppliedShown" size="small" border style="margin-top:8px;">
@@ -769,13 +824,19 @@ const createTblRef = ref(null)
 const updateTblRef = ref(null)
 
 const pushDlg = reactive({ visible: false })
-const syncDlg = reactive({ visible: false, mode: 'A', applyError: '', applying: false })
+// sheet = 这次差异报告是**哪张表**的按表同步（空串 = 平台级/全部表）。它同时决定：
+// 弹窗标题带不带表名、「表」列藏不藏、落库那一步带不带 sheet_name（见 applySync）。
+const syncDlg = reactive({ visible: false, mode: 'A', applyError: '', applying: false, sheet: '' })
 
 // 撤回（子项目 ③，spec §八）：hdUndo 是「两个方向各有没有可撤的快照」，
 // 平铺取自 GET /huguan/dashboard/undo 的 res.push / res.sync（各为 {count, created_at} 或 null）。
 // 撤回成功后这两个值会作废，必须重新拉一次，否则按钮状态停在旧值。
 const hdUndo = ref({ push: null, sync: null })
 const hdUndoing = ref(null)            // 'push' | 'sync' | null，用于按钮 loading
+// 按表操作进行中（本期 §3.1）：{ sheet, dir }（dir: 'sync' | 'push'）或 null。
+// 唯一的用途是点亮**被点的那一个**按表按钮的 loading —— 其余所有按钮靠 hdBusy 一并禁用
+// （用户裁定禁止并发，故不区分哪张表）；也驱动该行下方那句「正在处理…」。
+const hdSheetBusy = ref(null)
 const undoDlg = reactive({ visible: false, direction: 'push', result: null, error: '' })
 const clearingExpanded = ref(false)
 
@@ -787,7 +848,7 @@ const selUpdate = ref([])
 
 const hdBusy = computed(() =>
   hdReading.value || hdSaving.value || hdPushing.value || hdSyncing.value
-  || !!hdUndoing.value || syncDlg.applying)
+  || !!hdUndoing.value || syncDlg.applying || !!hdSheetBusy.value)
 const hdConfigured = computed(() => {
   if (!hdForm.value.spreadsheet_id) return false
   if (HD_PLATFORM === 'tt') {
@@ -795,6 +856,19 @@ const hdConfigured = computed(() => {
   }
   return !!hdForm.value.sheet_name
 })
+
+// 平台级两个按钮的文案（视觉规格 §平台级按钮）：tt 下改「全部导入 / 全部刷新」，与每张表
+// 那一行的按表入口构成两层且无歧义；gg/fb 只有一张表、按表无意义 ⇒ 逐字节不变。
+const hdPushBtnLabel = HD_PLATFORM === 'tt' ? '⬆️ 全部刷新' : '🔄 刷新到看板'
+const hdSyncBtnLabel = HD_PLATFORM === 'tt' ? '⬇️ 全部导入' : '⬇️ 从表同步到系统'
+// tt 的按表配置里所有填了工作表名的表名（按配置顺序）—— 给平台级按钮当 tooltip 用。
+const hdPlatformTables = computed(() => (hdForm.value.tables || [])
+  .map(t => ((t && t.sheet_name) || '').trim()).filter(Boolean))
+// 空串 = 不挂 tooltip（gg/fb、未配置、或一张表都没填）。挂上时两条 tooltip 不叠加：
+// 未配置时这条为空，让位给外层那条「请先填写表格地址…」。
+const hdTablesTip = computed(() => (HD_PLATFORM === 'tt' && hdConfigured.value
+  && hdPlatformTables.value.length)
+  ? `所有表：${hdPlatformTables.value.join('、')}` : '')
 
 // 提示条三态：显式消息 > 未配置空态 > 无。type 只跟着显式消息走。
 const hdHint = computed(() => {
@@ -984,6 +1058,16 @@ const hdPushExtraNote = PUSH_EXTRA_NOTE[HD_PLATFORM]
 
 // ---------- 差异对话框的派生数据 ----------
 const hdSummary = computed(() => (syncDiff.value && syncDiff.value.summary) || {})
+// 「表」列只在 tt 且**非**按表时显示：按表同步时它恒为同一张表，列出来只是噪声
+// （视觉规格：表名改放弹窗标题）。gg/fb 本来就恒不显示。
+const hdShowSheetCol = computed(() => HD_PLATFORM === 'tt' && !syncDlg.sheet)
+// 跨表归属提示（设计 §3.3，A1 的补偿）：**只有按表同步的后端响应才带这个键**
+// （push 侧刻意不接）；缺省路径没有这个键 ⇒ 恒为空，这一节不出现。
+const hdCrossNotes = computed(() => {
+  const c = syncDiff.value && syncDiff.value.cross_sheet_notes
+  if (!c || !Array.isArray(c.notes)) return { count: 0, notes: [] }
+  return { count: Number(c.count) || 0, notes: c.notes }
+})
 const hdOwnerChanges = computed(() => (syncDiff.value && syncDiff.value.owner_changes) || [])
 const hdCreate = computed(() => (syncDiff.value && syncDiff.value.to_create) || [])
 const hdUpdate = computed(() => (syncDiff.value && syncDiff.value.to_update) || [])
@@ -1023,6 +1107,11 @@ const willClear = computed(() => selUpdate.value.some(x => (x.clears || []).leng
 const confirmType = computed(() => willClear.value ? 'danger' : 'primary')
 
 const syncTitle = computed(() => {
+  // 按表同步（本期）：标题带表名（视觉规格「单表差异弹窗」），与平台级区分。结果页也带 ——
+  // 否则确认之后表名从标题消失，用户看不出这份结果报告是哪张表的。
+  if (syncDlg.sheet) {
+    return syncDlg.mode === 'B' ? `${syncDlg.sheet} · 同步结果` : `${syncDlg.sheet} · 差异报告`
+  }
   if (syncDlg.mode === 'B') return '从表同步到系统 · 同步结果'
   const name = hdForm.value.sheet_name || ''
   // 工作表名太长会撑爆标题：省略，完整名交给 el-dialog 的原生 title tooltip
@@ -1338,25 +1427,30 @@ async function saveHdConfig() {
   }
 }
 
+/** 刷新的收尾反馈（平台级与按表共用）。sheet 为空 = 全部表；非空 = 那张表，文案带表名。
+ *  「不在你的表里」是**正常结果**不是失败，所以用 warning。 */
+function reportPushHd(res, sheet) {
+  const r = res.result || {}
+  const notFound = (r.not_found || []).length
+  const scope = sheet ? `（${sheet}）` : ''
+  if (notFound) {
+    ElMessage.warning(`有 ${notFound} 个账户不在你的表里，未写入。`)
+    setHdHint(`已刷新到看板${scope}：写入 ${r.updated} 行。有 ${notFound} 个账户不在你的表里，没有写入。`, 'warning')
+  } else {
+    ElMessage.success(`已刷新到看板${scope}：写入 ${r.updated} 行。`)
+    setHdHint(`已刷新到看板${scope}：写入 ${r.updated} 行。`, 'success')
+  }
+  // push 走的就是点位 #1 的 writeback_rows 链路（写表是异步的）：
+  // 成功分支刷一次 + 起有界轮询，失败路径不跟（见 onUnmounted 注释同理）。
+  loadHdSwFailures()
+  startHdSwPoll()
+}
+
 async function doPushHd() {
   pushDlg.visible = false
   hdPushing.value = true
   try {
-    const res = await huguanApi.push(HD_PLATFORM)
-    const r = res.result || {}
-    const notFound = (r.not_found || []).length
-    if (notFound) {
-      // 表里没有的账户是**正常结果**不是失败，所以用 warning
-      ElMessage.warning(`有 ${notFound} 个账户不在你的表里，未写入。`)
-      setHdHint(`已刷新到看板：写入 ${r.updated} 行。有 ${notFound} 个账户不在你的表里，没有写入。`, 'warning')
-    } else {
-      ElMessage.success(`已刷新到看板：写入 ${r.updated} 行。`)
-      setHdHint(`已刷新到看板：写入 ${r.updated} 行。`, 'success')
-    }
-    // push 走的就是点位 #1 的 writeback_rows 链路（写表是异步的）：
-    // 成功分支刷一次 + 起有界轮询，失败路径不跟（见 onUnmounted 注释同理）。
-    loadHdSwFailures()
-    startHdSwPoll()
+    reportPushHd(await huguanApi.push(HD_PLATFORM), '')
   } catch (e) {
     // 单次 values().batchUpdate 是原子的：要么全成、要么全不成，不存在「写了一半」。
     // 因此失败即整批未写入，直接重试是安全的，无需打开表格核对。
@@ -1369,25 +1463,49 @@ async function doPushHd() {
   }
 }
 
+/** 只刷新这一张表（本期 §3.1）。刻意**不加**二次确认弹窗（视觉规格「不做」：刷新是既有
+ *  行为，只是范围变小 —— 覆盖列清单那套二次确认仍归平台级那一个按钮）。
+ *  ⚠️ 必须取**这一行**的表名（按下标 i 取），不能图省事取第一张。 */
+async function pushHdTable(i) {
+  const sheet = hdSheetKey(hdForm.value.tables[i])
+  if (!sheet) return                        // 按钮已禁用，这里是兜底
+  hdSheetBusy.value = { sheet, dir: 'push' }
+  try {
+    reportPushHd(await huguanApi.push(HD_PLATFORM, sheet), sheet)
+  } catch (e) {
+    setHdHint(`刷新到看板失败（${sheet}）。本次没有写入任何数据，直接重试是安全的。`, 'error')
+  } finally {
+    hdSheetBusy.value = null
+    loadHdUndo()
+  }
+}
+
+/** 同步预演的收尾（平台级与按表共用）：一处差异都没有就只给一条提示，否则开差异弹窗。
+ *  sheet 为空 = 平台级（全部表）。这段判据必须与后端「有差异」的口径一致，故整体共用。 */
+async function handleSyncPreview(res, sheet) {
+  const d = res.diff || {}
+  const s = d.summary || {}
+  // warnings 必须一起判：表里运营名写错（系统里没有这个名字）这类差异**只**
+  // 产生警告，不产生 new_accounts / updates / owner_changes 任何一条。漏掉它
+  // 就会把「表里有行没同步上」当成「已经一致」整份丢掉 —— 既不弹警告面板，
+  // 用户也永远不知道表里有行没同步上。
+  // unmatched_columns 同理要一起判：表里多了一列没见过的表头、又恰好没有别的差异
+  // （例如新列整列是空的）时，它同样**只**产生未采集、不产生任何其它条目。不判它，
+  // 「加了一列 ⇒ 报告里出现「未采集列」⇒ 点去指派」这条闭环就会在这类表上整条消失。
+  if (!s.new_accounts && !s.updates && !s.owner_changes && !s.warnings
+      && !(d.unmatched_columns || []).length) {
+    setHdHint(sheet
+      ? `「${sheet}」与系统已经一致，没有需要同步的改动。`
+      : '看板与系统已经一致，没有需要同步的改动。', 'info')
+    return
+  }
+  await openSyncDialog(d, sheet)
+}
+
 async function syncHd() {
   hdSyncing.value = true
   try {
-    const res = await huguanApi.sync({ platform: HD_PLATFORM, dry_run: true })
-    const d = res.diff || {}
-    const s = d.summary || {}
-    // warnings 必须一起判：表里运营名写错（系统里没有这个名字）这类差异**只**
-    // 产生警告，不产生 new_accounts / updates / owner_changes 任何一条。漏掉它
-    // 就会把「表里有行没同步上」当成「已经一致」整份丢掉 —— 既不弹警告面板，
-    // 用户也永远不知道表里有行没同步上。
-    // unmatched_columns 同理要一起判：表里多了一列没见过的表头、又恰好没有别的差异
-    // （例如新列整列是空的）时，它同样**只**产生未采集、不产生任何其它条目。不判它，
-    // 「加了一列 ⇒ 报告里出现「未采集列」⇒ 点去指派」这条闭环就会在这类表上整条消失。
-    if (!s.new_accounts && !s.updates && !s.owner_changes && !s.warnings
-        && !(d.unmatched_columns || []).length) {
-      setHdHint('看板与系统已经一致，没有需要同步的改动。', 'info')
-      return
-    }
-    await openSyncDialog(d)
+    await handleSyncPreview(await huguanApi.sync({ platform: HD_PLATFORM, dry_run: true }), '')
   } catch (e) {
     ElMessage.error(e?.response?.data?.error || '从表同步到系统失败')
   } finally {
@@ -1395,11 +1513,28 @@ async function syncHd() {
   }
 }
 
-async function openSyncDialog(diff) {
+/** 只同步这一张表（本期 §3.1）：body 带该行的 sheet_name ⇒ 后端只读这一张（别的表一个
+ *  格不读）。⚠️ 必须取**这一行**的表名（按下标 i 取），不能图省事取第一张。 */
+async function syncHdTable(i) {
+  const sheet = hdSheetKey(hdForm.value.tables[i])
+  if (!sheet) return                        // 按钮已禁用，这里是兜底
+  hdSheetBusy.value = { sheet, dir: 'sync' }
+  try {
+    await handleSyncPreview(
+      await huguanApi.sync({ platform: HD_PLATFORM, dry_run: true, sheet_name: sheet }), sheet)
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error || '从表同步到系统失败')
+  } finally {
+    hdSheetBusy.value = null
+  }
+}
+
+async function openSyncDialog(diff, sheet = '') {
   syncDiff.value = diff
   syncResult.value = null
   syncDlg.applyError = ''
   syncDlg.mode = 'A'
+  syncDlg.sheet = sheet
   clearingExpanded.value = false
   selOwner.value = []
   selCreate.value = []
@@ -1426,7 +1561,11 @@ async function applySync() {
   syncDlg.applying = true
   syncDlg.applyError = ''
   try {
-    const applied = await huguanApi.sync({
+    // 落库这一步必须带**同一个** sheet_name（按表同步时）。不带的话后端会把所有表重读
+    // 一遍：一是「其它表缺账户ID」这类问题会误拒这一次按表落库，二是撤回快照会覆盖
+    // **全部表** —— 破坏「一次按表操作一份只含该表的快照 / 撤回上次＝撤上一次那次操作」
+    // （设计 §3.2 表 + 裁定 B）。缺省路径（sheet 为空）不带这个键，与改动前逐字节一致。
+    const body = {
       platform: HD_PLATFORM,
       dry_run: false,
       confirmed: {
@@ -1434,7 +1573,9 @@ async function applySync() {
         update: selUpdate.value.map(x => x.account_id),
         owner: selOwner.value.map(x => x.account_id),
       },
-    })
+    }
+    if (syncDlg.sheet) body.sheet_name = syncDlg.sheet
+    const applied = await huguanApi.sync(body)
     syncResult.value = applied.result || {}
     syncDlg.mode = 'B'
     const r = syncResult.value
@@ -1553,6 +1694,17 @@ onUnmounted(stopHdSwPoll)
 </script>
 
 <style scoped>
+/* 某个表项的两个按表按钮（本期视觉规格 §版式）：与「列映射」折叠标题同一行、右端。
+   高度钉在 EP 折叠标题的高度上，让按钮与标题落在同一条视觉基准线上 —— 面板展开后
+   标题线被推高，若不钉住高度，按钮会跟着跑到展开区的中段（规格要的是标题那一行）。 */
+.hd-sheet-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 48px;   /* = Element Plus 的 --el-collapse-header-height 默认值 */
+}
+
 /* 列映射的列行（第二批视觉规格）：两列 grid、无边框，靠留白分组。
    表头原文固定 12em、下拉固定 14em（宽度在模板里给）—— 这里只补规格里无法用行内
    样式表达的两件事：整行降饱和（要穿透到 el-select 内部）与未采集行的红左条。 */

@@ -16,10 +16,16 @@ export const huguanApi = {
   getSheetHeaders: (platform, sheetName) =>
     api.get('/huguan/dashboard/sheet-headers', { params: { platform, sheet_name: sheetName } }),
 
-  /** 系统 → 表：全量刷新（body 由封装补 platform） */
-  push: (platform) => api.post('/huguan/dashboard/push', { platform }),
+  /** 系统 → 表：刷新（body 由封装补 platform）。
+   *  给了 sheetName ⇒ 只刷新那一张表（body 带 `sheet_name`，后端另有归属门禁）；
+   *  缺省 ⇒ 全部表，且**不发 `sheet_name` 键**（与改动前逐字节一致）。 */
+  push: (platform, sheetName) =>
+    api.post('/huguan/dashboard/push', sheetName ? { platform, sheet_name: sheetName } : { platform }),
 
-  /** 表 → 系统：dry_run=true 出差异报告，false 才落库 */
+  /** 表 → 系统：dry_run=true 出差异报告，false 才落库。
+   *  body 里可选 `sheet_name`（本期 §3.1）：给了就只处理那一张表（tt 多表专用），
+   *  缺省＝全部表。**落库那一步必须带同一个 `sheet_name`** —— 否则后端会把所有表
+   *  重读一遍，撤回快照也会覆盖全部表，破坏「一次按表操作一份只含该表的快照」。 */
   sync: (body) => api.post('/huguan/dashboard/sync', body),
 
   /** 两个方向各有没有可撤的快照（子项目 ③）。平铺：res.push / res.sync，各为
