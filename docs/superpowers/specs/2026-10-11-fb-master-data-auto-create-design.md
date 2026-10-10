@@ -185,11 +185,31 @@ def ensure_channel(db, name, uid):
 
 `ensure_asset_type` 同形，换表名 `fb_asset_types`。
 
-**缓存（硬要求）**：`ensure_agent` 写完会 `_app_cache.clear_prefix("accounts:agents:")`，
-否则代理名下拉不刷新。渠道 / 资产类型的下拉**同样有可能带缓存** ⇒ 实现时必须
-grep 出它们对应的 cache key（找 `fb_channels` / `fb_asset_types` 的列表端点与
-`clear_prefix` 用法），**在 INSERT 之后清一次**。没找到缓存则不改（但要在报告里写明
-「已核，无缓存」，不要沉默跳过）。
+### 4.4bis 与既有「选项表 API」对齐（写 spec 时新查到的事实）
+
+`fb_channels` / `fb_asset_types` **已经有一组现成的 list/create/rename/delete 端点**，
+由 `py/main.py:6889` 的通用工厂注册：
+
+```python
+_register_shared_option_api("fb_channels",     "/api/fb-channels",     "channel_id",   "渠道")
+_register_shared_option_api("fb_asset_types",  "/api/fb-asset-types",  "asset_type_id", "资产类型")
+```
+
+它对 `ensure_channel` / `ensure_asset_type` 有**三条硬约束**：
+
+1. **`platform` 必须写死 `'fb'`，不能用请求侧的值。**
+   工厂的 `/list` 与 `/create` 都用 `_get_effective_platform()`，而
+   `_SQL_CHANNEL` / `_SQL_ASSET_TYPE`（同步侧的解析）**写死 `platform='fb'`**。
+   自动补建若跟着请求侧走，一旦调用方的 effective platform 不是 fb，
+   建出来的行**同步侧永远查不到**（看不见地重复建）。故照 `ensure_agent` 的做法写死。
+2. **语义必须与那个 create 端点一致**：它「同名已存在 ⇒ 409 拒绝」，不做 upsert。
+   我们的 `ensure_*` 是**幂等**的（先查、有就返回、没有才 INSERT），
+   INSERT 的列形状照抄它：`INSERT INTO {table}(name, owner_id, platform) VALUES(?,?,?)`。
+   （不能直接复用那个端点：它是 HTTP 层、依赖 jwt 上下文，纯逻辑层调不到。）
+3. **没有缓存**：工厂的 `/list` 是**直查**（`SELECT id, name FROM …`），
+   没有走 `_app_cache`。⇒ `ensure_channel` / `ensure_asset_type` **不需要**清缓存。
+   （`ensure_agent` 要清是因为 `agents` 的列表走了缓存；这两张表不是。）
+   实现时**再核一遍**并写进报告，别沉默跳过。
 
 ### 4.5 模块改名
 
