@@ -111,15 +111,15 @@
                   <template v-else>
                     <div v-for="(row, ri) in hdHeaderRows[hdSheetKey(t)]" :key="row.header + '#' + ri"
                          class="hd-map-row"
-                         :class="{ 'hd-map-row--none': hdRowMiss(t, row),
-                                   'hd-map-row--ignored': !hdRowIsDup(t, row) && hdRowState(row) === 'ignored' }">
+                         :class="{ 'hd-map-row--none': hdRowMiss(row),
+                                   'hd-map-row--ignored': hdRowState(row) === 'ignored' }">
                       <span class="hd-map-head" :title="row.header">{{ row.header }}</span>
                       <span style="display:flex;align-items:center;gap:6px;min-width:0;">
                         <!-- empty-values 去掉默认的空串档：否则选中「（不采集）」(= '') 会被当成
                              「没有值」而只显示占位符，看不出这一列是刻意不采集。 -->
                         <el-select :model-value="row.selected" :empty-values="[null, undefined]"
                                    size="small" placeholder="选择字段…" style="width:14em;flex:none;"
-                                   :disabled="hdBusy || hdRowIsDup(t, row)"
+                                   :disabled="hdBusy"
                                    @change="v => hdOnColumnPick(i, row, v)">
                           <el-option v-for="o in hdColumnOptions" :key="o.value"
                                      :label="o.label" :value="o.value">
@@ -132,10 +132,11 @@
                           </el-option>
                           <el-option label="（不采集）" value="" />
                         </el-select>
-                        <!-- 表头重复的行只读：columns 按表头名存键，指派第二个同名表头会静默作用于最左列 -->
+                        <!-- 同名列（同名表头的后一个）：可指派，且与同名第一列**共享**同一份映射
+                             （columns 按表头名存键 ⇒ 两行同改，见 pickColumn）。中性说明，不报警。 -->
                         <template v-if="hdRowIsDup(t, row)">
-                          <el-tag size="small" type="danger">未采集</el-tag>
-                          <span style="font-size:12px;color:#f56c6c;white-space:nowrap;">表头重复，先在表里改名</span>
+                          <el-tag size="small" type="info">同名列</el-tag>
+                          <span style="font-size:12px;color:#909399;white-space:nowrap;">与上一列同名，只采集最左那列</span>
                         </template>
                         <template v-else-if="hdRowState(row) === 'none'">
                           <el-tag size="small" type="danger">未采集</el-tag>
@@ -707,7 +708,7 @@ import { sheetWriteApi } from '@/api/sheetWrite'
 import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 // 列映射的纯换算（表头响应 ↔ 下拉行状态）。**不要在组件里重推一遍映射** —— 三值约定
 // （字段key / "" 刻意不采集 / null 未指派）只有这一份实现，node --test 覆盖的就是它。
-import { rowsFromColumns, columnsFromRows } from '@/utils/columnMapping.mjs'
+import { rowsFromColumns, columnsFromRows, pickColumn } from '@/utils/columnMapping.mjs'
 
 const authStore = useAuthStore()
 
@@ -1203,31 +1204,35 @@ async function hdReadHeaders(i) {
   }
 }
 
-/** 改了某列的指派 ⇒ 写回该表的 columns（只认碰过的行；没碰过的键原样保留）。 */
+/** 改了某列的指派 ⇒ 写回该表的 columns（只认碰过的行；没碰过的键原样保留）。
+ *  同名表头共享一份映射（columns 按名存键）⇒ 用 pickColumn 把**所有**同行改一遍，不能只改
+ *  点中的那行（否则两行显示不同值、落盘却只有一条键，就是全批要消灭的「看不见的串列」）。 */
 function hdOnColumnPick(i, row, value) {
-  row.selected = value
-  row.touched = true
   const t = hdForm.value.tables[i]
-  t.columns = columnsFromRows(hdHeaderRows.value[hdSheetKey(t)] || [], t.columns)
+  const name = hdSheetKey(t)
+  const rows = pickColumn(hdHeaderRows.value[name] || [], row.header, value)
+  hdHeaderRows.value = { ...hdHeaderRows.value, [name]: rows }
+  t.columns = columnsFromRows(rows, t.columns)
 }
 
-/** 某张表的表头里出现**两次**的名字。columns 按表头名存键 ⇒ 指派第二个同名表头会
- *  静默作用于最左那一列，所以这些行在 UI 上只读（视觉规格的两条决定之 2）。 */
-const hdDupHeaders = computed(() => {
+/** 某张表里**同名表头的后一个**（落选行）。columns 按表头名存键 ⇒ 两行共享同一份映射，
+ *  改任一行的下拉都会同时改到另一行（见 hdOnColumnPick / pickColumn），故这些行**可指派**，
+ *  只做中性「说明」（同名列），不再报警。只标**后一个**：第一列照常显示别名/手工档。 */
+const hdDupRows = computed(() => {
   const out = {}
   Object.keys(hdHeaderRows.value).forEach((name) => {
-    const seen = new Set(), dup = new Set()
+    const seen = new Set(), losers = new Set()
     ;(hdHeaderRows.value[name] || []).forEach((r) => {
-      if (seen.has(r.header)) dup.add(r.header)
+      if (seen.has(r.header)) losers.add(r)
       else seen.add(r.header)
     })
-    out[name] = dup
+    out[name] = losers
   })
   return out
 })
 function hdRowIsDup(t, row) {
-  const dup = hdDupHeaders.value[hdSheetKey(t)]
-  return !!dup && dup.has(row.header)
+  const losers = hdDupRows.value[hdSheetKey(t)]
+  return !!losers && losers.has(row)
 }
 
 /** 标题行统计：按**当前选择值**分档，与三值约定一一对应。 */
@@ -1248,8 +1253,8 @@ function hdStats(t) { return hdHeaderStats.value[hdSheetKey(t)] || { ok: 0, miss
 
 /** 一行的显示档位：manual 手工 / alias 别名 / ignored 不采集 / none 未采集。
  *  判据是**下拉的当前值**（rowsFromColumns 已把当前有效值填进 selected）：
- *  有值＝已识别，''＝不采集，null＝还没指派。未识别与「识别到了但落选」统一显示「未采集」
- *  —— 与同步报告同一口径，前端不假装能区分（视觉规格的两条决定之 1）。
+ *  有值＝已识别，''＝不采集，null＝还没指派。未识别的列（含同名列整体没映射时）显示「未采集」
+ *  —— 与同步报告同一口径，前端不假装能区分。
  *  「手工」的判据是**当前值 ≠ 别名单独会给出的答案**（row.auto = alias_field），
  *  而不是「有 via==='override'」：后者对「本次会话把覆盖改回别名答案」的行会误标「手工」
  *  （那条覆盖保存后即被撤掉）。前者的语义与保存后落盘的 columns 一致。 */
@@ -1258,8 +1263,10 @@ function hdRowState(row) {
   if (row.selected === null || row.selected === undefined) return 'none'
   return row.selected !== row.auto ? 'manual' : 'alias'
 }
-/** 这一行算不算「未采集」（红左条）：未指派，或表头重复（重复行根本没法安全指派）。 */
-function hdRowMiss(t, row) { return hdRowState(row) === 'none' || hdRowIsDup(t, row) }
+/** 这一行算不算「未采集」（红左条）：只有真正没指派到的行。
+ *  同名列不再算未采集 —— 它与同名第一列共享同一份映射（rowsFromColumns 已把落选行的 selected
+ *  对齐到第一列），报了红条等于给一条**永远解不掉**的信号报警（与「位置」哨兵同款的陷阱）。 */
+function hdRowMiss(row) { return hdRowState(row) === 'none' }
 
 /** 下拉选项 = 字段目录（按中文名显示；定位键标「定位键」、只读回标「只读回」）
  *  + 末尾的「（不采集）」= 空串。目录来自后端，与 POST 校验同源（设计 §3.2）。 */

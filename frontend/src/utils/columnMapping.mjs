@@ -15,7 +15,7 @@
 // 二者若都取 field，则 override 行的 auto 就是那条覆盖本身 —— 用户「改一下又改回原值」
 // 会被误判成「改回自动」而静默删掉覆盖。
 export function rowsFromColumns(columns) {
-  return (columns || []).map((c) => {
+  const rows = (columns || []).map((c) => {
     // auto 取别名目标（alias_field）。判据只看**这个键本身**，绝不看 via：任何将来新增的
     // via 只要带 `alias_field: null`，都必须落成「不写覆盖」的 null —— 否则 `?? ''` 会把它
     // 兜成空串，等于替用户声明「这一列我刻意不采集」，同步报告的「未采集」提示会**静默消失**。
@@ -25,6 +25,25 @@ export function rowsFromColumns(columns) {
     const selected = c.field == null ? null : c.field
     return { header: c.header, via: c.via, auto, selected, touched: false }
   })
+  // `columns` 按**表头名**存键 ⇒ 同名表头共享同一条映射。后端对同名落选列只给 field=null
+  // （这一列确实没被采集），但它的**有效值**就是同名第一列那条映射。这里把落选行的 selected
+  // 对齐到第一列，使下拉显示与统计把两行当作同一个映射 —— 否则落选行会顶着「未采集」红条，
+  // 而它其实永远变不了（指派按名字走，只会改到最左那列）。第一列本身不动。
+  const firstSelected = new Map()
+  for (const r of rows) {
+    if (firstSelected.has(r.header)) r.selected = firstSelected.get(r.header)
+    else firstSelected.set(r.header, r.selected)
+  }
+  return rows
+}
+
+// 改名指派：`columns` 按**表头名**存键 ⇒ 同名表头共享同一条映射。选定一个名字的取值时，
+// **所有**同名行一起改（selected=value、touched=true），不能只改点中的那行 —— 否则两行
+// 下拉显示不同值，而落盘只有一条键（静默作用于最左列，正是全批要消灭的「看不见的串列」）。
+// 返回**新数组**（不改入参），供组件重新赋值 `hdHeaderRows`（触发响应式）。
+export function pickColumn(rows, header, value) {
+  return (rows || []).map((r) =>
+    r.header === header ? { ...r, selected: value, touched: true } : r)
 }
 
 // 组装要保存的 columns：只认「用户碰过」的行（touched），没碰过的一个键都不动 ——
