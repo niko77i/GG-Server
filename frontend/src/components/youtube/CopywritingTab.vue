@@ -28,16 +28,20 @@
       <el-select v-model="cwBatchEff" @change="val => cwDoBatchEffEdit(val)" placeholder="批量改成效" size="small" style="width:140px;" clearable filterable>
         <el-option v-for="e in store.tags.effectiveness" :key="e" :label="e || '(空)'" :value="e" />
       </el-select>
-      <span style="font-size:12px;color:#888;margin-left:auto;">已选 {{ cwSelected.length }} 条</span>
+      <span style="font-size:12px;color:#888;margin-left:auto;">已选 {{ cwSelectedIds.length }} 条</span>
     </div>
 
     <!-- 文案表格（扁平列表，按地区分组排序）
          ③ 浏览类 · 前端分页：`store.copywritings` 由 `/api/copywriting/list` 一次全量返回
          （无 LIMIT），直通 el-table 会按条数建 DOM（Element Plus 不做虚拟滚动）。
-         与相邻的视频表（YoutubeView 的 pagedVideos）同一口径：勾选也随当前页，
-         切换地区标签时回到第 1 页。 -->
+         **勾选按 id 集合解耦**（① 的做法）——分页后 el-table 只看得到当前页，
+         直接截断会让其余页的勾选静默丢失（用户以为全删了、其实只删了一页）。
+         权威是 `cwPickedIds`（本表默认不勾 ⇒ 白名单/已勾集），表格内建勾选态只是它的投影。
+         `@select` 第一参是**已选行数组**（不是布尔），故自己取 `.some(...)`。 -->
     <el-table ref="cwTableRef" :data="pagedCopywritings" row-key="id"
-      @selection-change="v => cwSelected = v" stripe size="small"
+      @select="(sel, row) => cwToggleRow(row.id, sel.some(r => r.id === row.id))"
+      @select-all="sel => cwSelectAllPage(sel.length > 0)"
+      stripe size="small"
       class="cw-table">
       <el-table-column type="selection" width="40" />
       <el-table-column label="文案内容" min-width="300">
@@ -115,7 +119,6 @@ const store = useYoutubeStore()
 const authStore = useAuthStore()
 
 const cwTableRef = ref(null)
-const cwSelected = ref([])
 const cwBatchRegion = ref('')
 const cwBatchEff = ref('')
 const cwTransMap = ref({})
@@ -185,31 +188,60 @@ const cwPage = ref(1)
 const cwPageSize = ref(50)
 const pagedCopywritings = computed(() =>
   filteredCopywritings.value.slice((cwPage.value - 1) * cwPageSize.value, cwPage.value * cwPageSize.value))
-// 切地区标签 ⇒ 回第 1 页，否则当前页码可能越过新结果集的末页（列表空白且分页控件消失）。
-watch(activeRegion, () => { cwPage.value = 1 })
 
+// 勾选状态：权威是 id 集合（白名单/已勾集 —— 本表默认不勾，用户主动选），
+// 表格内建的勾选态只是它在**当前页**上的投影。见模板注释。
+const cwPickedIds = ref([])
+const cwFilteredIds = computed(() => filteredCopywritings.value.map(c => c.id))
+// 只认「当前筛选结果里仍然存在」的已勾 id：列表重载 / 删掉某条后，陈旧 id 不参与计数与操作。
+const cwSelectedIds = computed(() => {
+  const cur = new Set(cwFilteredIds.value)
+  return cwPickedIds.value.filter(id => cur.has(id))
+})
+// 切地区标签 ⇒ 回第 1 页（否则当前页码可能越过新结果集的末页），并清空勾选
+// （与改动前一致：换筛选即换一批数据，旧勾选不该留下）。
+watch(activeRegion, () => { cwPage.value = 1; cwPickedIds.value = [] })
+
+/** 单行勾选切换（`@select` 已在模板里取好布尔）。 */
+function cwToggleRow(id, on) {
+  cwPickedIds.value = on
+    ? [...new Set([...cwPickedIds.value, id])]
+    : cwPickedIds.value.filter(x => x !== id)
+}
+
+/** 表头「全选」勾：只作用**本页渲染出来的行**（分页后表头勾天然只能覆盖当前页）。 */
+function cwSelectAllPage(on) {
+  const ids = pagedCopywritings.value.map(c => c.id)
+  cwPickedIds.value = on
+    ? [...new Set([...cwPickedIds.value, ...ids])]
+    : cwPickedIds.value.filter(x => !ids.includes(x))
+}
+
+/** 工具栏「☑ 全选」：作用**全量筛选结果**（不只当前页）—— 这正是解耦要保住的能力。 */
 function cwToggleSelectAll() {
-  if (!cwTableRef.value) return
-  const list = filteredCopywritings.value
-  const sel = new Set(cwSelected.value.map(v => v.id))
-  if (sel.size === 0) {
-    cwTableRef.value.clearSelection()
-  } else if (list.every(l => sel.has(l.id))) {
-    cwTableRef.value.clearSelection()
-  } else {
-    list.forEach(l => cwTableRef.value.toggleRowSelection(l, true))
-  }
+  const all = cwFilteredIds.value
+  const sel = new Set(cwSelectedIds.value)
+  const allSelected = all.length > 0 && all.every(id => sel.has(id))
+  cwPickedIds.value = allSelected ? [] : [...all]
+  cwSyncTableSelection()
 }
 
+/** 工具栏「↔ 反选」：同样作用全量筛选结果。 */
 function cwInvertSelection() {
-  if (!cwTableRef.value) return
-  const list = filteredCopywritings.value
-  const sel = new Set(cwSelected.value.map(v => v.id))
-  list.forEach(l => {
-    if (sel.has(l.id)) cwTableRef.value.toggleRowSelection(l, false)
-    else cwTableRef.value.toggleRowSelection(l, true)
-  })
+  const sel = new Set(cwSelectedIds.value)
+  cwPickedIds.value = cwFilteredIds.value.filter(id => !sel.has(id))
+  cwSyncTableSelection()
 }
+
+/** 表格内建的勾选态不在状态模型里（权威是 id 集合）⇒ 渲染完成后按模型把**画出来的那几行**
+ *  同步一次。`toggleRowSelection` 会回调 `@select`，但写回的是同一个值（幂等），不会震荡。
+ *  调用点：① 工具栏全选/反选后；② `pagedCopywritings` 变化后（watch, flush: 'post'）。 */
+function cwSyncTableSelection() {
+  const picked = new Set(cwSelectedIds.value)
+  pagedCopywritings.value.forEach(c => cwTableRef.value?.toggleRowSelection(c, picked.has(c.id)))
+}
+// flush: 'post' 保证在 DOM 更新之后跑（等价于 nextTick 一层的正确写法，不用 setTimeout）。
+watch(pagedCopywritings, () => { cwSyncTableSelection() }, { flush: 'post' })
 
 function copyCopywriting(row) {
   copyToClipboard(row.content).then(() => ElMessage.success('已复制 ✓'))
@@ -271,26 +303,27 @@ async function cwDeleteOne(row) {
 }
 
 async function cwDeleteSelected() {
-  if (!cwSelected.value.length) return
-  await ElMessageBox.confirm(`确定删除选中的 ${cwSelected.value.length} 条文案？`, '确认', { type: 'warning' })
-  await store.deleteCopywritings(cwSelected.value.map(v => v.id))
-  cwSelected.value = []
+  // 用 id 集合（= 全量勾选），不是当前页渲染出来的行 —— 这才是解耦的目的。
+  if (!cwSelectedIds.value.length) return
+  await ElMessageBox.confirm(`确定删除选中的 ${cwSelectedIds.value.length} 条文案？`, '确认', { type: 'warning' })
+  await store.deleteCopywritings([...cwSelectedIds.value])
+  cwPickedIds.value = []
   loadCopywritings()
 }
 
 async function cwDoBatchEdit(region) {
-  if (!region || !cwSelected.value.length) return
-  await store.batchEditCopywritings({ ids: cwSelected.value.map(v => v.id), region })
+  if (!region || !cwSelectedIds.value.length) return
+  await store.batchEditCopywritings({ ids: [...cwSelectedIds.value], region })
   cwBatchRegion.value = ''
-  ElMessage.success(`已更新 ${cwSelected.value.length} 条文案地区 ✓`)
+  ElMessage.success(`已更新 ${cwSelectedIds.value.length} 条文案地区 ✓`)
   loadCopywritings()
 }
 
 async function cwDoBatchEffEdit(effectiveness) {
-  if (effectiveness === undefined || effectiveness === null || !cwSelected.value.length) return
-  await store.batchEditCopywritings({ ids: cwSelected.value.map(v => v.id), effectiveness })
+  if (effectiveness === undefined || effectiveness === null || !cwSelectedIds.value.length) return
+  await store.batchEditCopywritings({ ids: [...cwSelectedIds.value], effectiveness })
   cwBatchEff.value = ''
-  ElMessage.success(`已更新 ${cwSelected.value.length} 条文案成效 ✓`)
+  ElMessage.success(`已更新 ${cwSelectedIds.value.length} 条文案成效 ✓`)
   loadCopywritings()
 }
 
@@ -300,6 +333,8 @@ async function loadCopywritings() {
   for (const key of Object.keys(cwTransMap.value)) {
     if (!curIds.has(Number(key))) delete cwTransMap.value[key]
   }
+  // 已勾 id 同样按「还在不在」清一遍（删掉的条不再计入「已选」；`cwSelectedIds` 另有交集兜底）。
+  cwPickedIds.value = cwPickedIds.value.filter(id => curIds.has(id))
 }
 
 onMounted(() => loadCopywritings())
