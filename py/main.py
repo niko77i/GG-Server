@@ -383,6 +383,7 @@ import routes.gg_dashboard_sheet  # noqa: F401  —— 注册 gg_my_dashboard ta
 import routes.gg_recharge_sheet  # noqa: F401  —— 注册 gg_recharge target
 import routes.huguan_sheet_targets  # noqa: F401  —— 注册户管看板域的 4 个写表目标
 import routes.fb_sheet_targets  # noqa: F401  —— 注册 fb_report target
+import routes.gg_zuobiao_target  # noqa: F401  —— 注册 gg_zuobiao target
 
 try:
     auth.init_developer(APP_CONFIG)
