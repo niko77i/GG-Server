@@ -2,12 +2,14 @@
   <div style="display:flex;flex-direction:column;height:calc(100vh - 72px);">
     <h1 style="flex-shrink:0;">📊 数据分析</h1>
 
-    <!-- 筛选栏 -->
-    <div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
+    <!-- 筛选栏：仅 GG / FB 渲染。TT 无数据源、整页只有空状态，连筛选控件都不给 ——
+         否则日期选择器 / 刷新按钮会打到 /ad-reports/*（本 bug 判据是 Network 里不出现它）。 -->
+    <div v-if="analysisPlatform !== 'tt'" style="flex-shrink:0;display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
       <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:200px;" filterable multiple collapse-tags @change="onGlobalProductChange">
         <el-option v-for="p in filterProducts" :key="p.name" :label="p.label" :value="p.name" />
       </el-select>
-      <el-select v-model="filterRegion" placeholder="全部地区" clearable style="width:140px;" @change="refreshAll">
+      <!-- FB 无 region 字段 ⇒ 不渲染地区筛选（见设计 §2.4） -->
+      <el-select v-if="analysisPlatform !== 'fb'" v-model="filterRegion" placeholder="全部地区" clearable style="width:140px;" @change="refreshAll">
         <el-option v-for="r in filterRegions" :key="r" :label="r" :value="r" />
       </el-select>
       <el-date-picker v-model="filterDateRange" type="daterange" range-separator="~" start-placeholder="开始" end-placeholder="结束"
@@ -17,6 +19,60 @@
 
     <!-- Tab 页 -->
     <div style="flex:1;min-height:0;overflow-y:auto;">
+      <!-- TT：无数据源，整页空状态。**刻意不发任何请求** —— 判定标准是
+           DevTools Network 里不出现 /api/ad-reports/*。 -->
+      <div v-if="analysisPlatform === 'tt'" style="padding:64px 0;text-align:center;">
+        <p style="font-size:16px;color:#303133;margin:0 0 8px;">TT 暂无分析数据</p>
+        <p style="font-size:13px;color:#909399;margin:0;">
+          TT 的数据提取目前不会把结果保存到系统（只支持复制 / 导出），因此没有可供分析的数据。
+        </p>
+      </div>
+
+      <!-- FB：自有数据（fb_ad_reports）的花费看板 -->
+      <template v-else-if="analysisPlatform === 'fb'">
+        <div style="padding:8px;">
+          <!-- 指标卡：容器与卡片类名逐字沿用仪表盘 tab（.stat-card / .stat-val / .stat-label） -->
+          <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+            <div class="stat-card"><div class="stat-val">${{ (fbSummary.total_cost || 0).toLocaleString() }}</div><div class="stat-label">总花费</div></div>
+            <div class="stat-card"><div class="stat-val">{{ (fbSummary.record_count || 0).toLocaleString() }}</div><div class="stat-label">记录数</div></div>
+            <div class="stat-card"><div class="stat-val">{{ (fbSummary.account_count || 0).toLocaleString() }}</div><div class="stat-label">账户数</div></div>
+            <!-- 展示/点击：FB 侧目前几乎全为 0（见设计 §2.4）。照实显示但明确标注，
+                 且数值降为灰色 —— 让「这个数可能是缺的」一眼可见，而不是让人误读成权威的 0。 -->
+            <div class="stat-card">
+              <div class="stat-val" style="color:#c0c4cc;">{{ (fbSummary.total_impressions || 0).toLocaleString() }}</div>
+              <div class="stat-label">总展示 <span style="color:#E6A23C;font-size:11px;">数据不全</span></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-val" style="color:#c0c4cc;">{{ (fbSummary.total_clicks || 0).toLocaleString() }}</div>
+              <div class="stat-label">总点击 <span style="color:#E6A23C;font-size:11px;">数据不全</span></div>
+            </div>
+          </div>
+
+          <!-- 按线花费表。**必须限行**：fbByLine 来自无 LIMIT 的聚合端点，直通 el-table
+               会在维度爆炸时崩页（本仓库已知缺陷族「无上限数组直通 el-table」）。 -->
+          <el-table :data="fbByLineTop" stripe border size="small">
+            <el-table-column prop="line_name" label="线名" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="total_cost" label="花费" min-width="110" sortable>
+              <template #default="{ row }">${{ (row.total_cost || 0).toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column prop="total_impressions" label="展示" min-width="100" sortable />
+            <el-table-column prop="total_clicks" label="点击" min-width="90" sortable />
+            <el-table-column prop="record_count" label="记录数" min-width="90" sortable />
+          </el-table>
+
+          <!-- 限行的实情要说出来，不做静默截断 -->
+          <p v-if="fbByLine.length > FB_TABLE_LIMIT" style="font-size:12px;color:#909399;margin:8px 0 0;">
+            仅显示花费前 {{ FB_TABLE_LIMIT }} 条（共 {{ fbByLine.length }} 条）
+          </p>
+
+          <!-- 花费趋势（命令式 echarts：init + setOption，写法照趋势 tab） -->
+          <div v-if="fbTrendPoints.length" ref="fbTrendChart" style="width:100%;height:340px;margin-top:16px;"></div>
+          <el-empty v-else description="暂无趋势数据" />
+        </div>
+      </template>
+
+      <!-- GG：原样不动 -->
+      <template v-else>
       <el-tabs v-model="activeTab" type="border-card">
         <!-- 仪表盘 -->
         <el-tab-pane label="📊 仪表盘" name="dashboard">
@@ -447,17 +503,70 @@
           </div>
         </el-tab-pane>
       </el-tabs>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { reportsApi } from '@/api/reports'
+import { fbApi } from '@/api/fb'
 import { ElMessage } from 'element-plus'
 import api from '@/api/client'
 import * as echarts from 'echarts'
 import { parseAdsData } from '@/utils/adsParser'
+
+// 分析页按平台隔离（2026-10-11）：路由前缀即平台。
+// /analysis 缺省 gg（与 GG 其它页面无前缀的现状一致）。
+const route = useRoute()
+const analysisPlatform = computed(() => route.meta?.platform || 'gg')
+
+// ---- FB 分支状态（只读 fb_ad_reports）----
+const fbSummary = ref({ total_cost: 0, total_impressions: 0, total_clicks: 0, record_count: 0, account_count: 0 })
+const fbByLine = ref([])
+const fbTrendPoints = ref([])
+const fbTrendChart = ref(null)
+let fbChart = null
+
+// 表格限行上限。fbByLine 来自无 LIMIT 的聚合端点（`_group` 里没有 LIMIT，
+// 与 GG 同款），直通 el-table 会在维度爆炸时崩页 —— 本仓库已知缺陷族。
+// 这里是**渲染侧**的兜底；服务端加 LIMIT 是更彻底的后续项。
+const FB_TABLE_LIMIT = 200
+const fbByLineTop = computed(() => fbByLine.value.slice(0, FB_TABLE_LIMIT))
+
+async function loadFbDashboard() {
+  // filterParams()（本文件 :581）的参数名与 Task 1 的端点口径是同一套，
+  // 故直接复用，不另写一套筛选。
+  const res = await fbApi.analysisDashboard(filterParams())
+  fbSummary.value = res.summary || fbSummary.value
+  fbByLine.value = res.by_line || []
+  // FB 没有 /ad-reports/list 那种产品清单接口；产品下拉直接取 FB 分析返回的
+  // by_product（键为 product_name），避免 FB 页跨平台去取 GG 的产品列表。
+  if (!filterProducts.value.length && Array.isArray(res.by_product)) {
+    filterProducts.value = res.by_product.map(p => ({ name: p.product_name, label: p.product_name }))
+  }
+}
+
+async function loadFbTrends() {
+  const res = await fbApi.analysisTrends(filterParams())
+  fbTrendPoints.value = res.points || []
+  await nextTick()
+  if (!fbTrendChart.value || !fbTrendPoints.value.length) return
+  if (fbChart) fbChart.dispose()
+  fbChart = echarts.init(fbTrendChart.value)
+  fbChart.setOption({
+    tooltip: { trigger: 'axis' },
+    grid: { left: 60, right: 20, top: 30, bottom: 40 },
+    xAxis: { type: 'category', data: fbTrendPoints.value.map(p => p.report_date) },
+    yAxis: { type: 'value', name: '花费' },
+    series: [{
+      name: '花费', type: 'line', smooth: true,
+      data: fbTrendPoints.value.map(p => p.total_cost),
+    }],
+  })
+}
 
 const activeTab = ref('dashboard')
 const filterProduct = ref([])
@@ -597,6 +706,11 @@ function onGlobalProductChange() {
 }
 
 async function refreshAll() {
+  // 按平台分流：TT 无数据源 ⇒ 直接 return，不发起任何取数
+  // （判据：DevTools Network 里不出现任何 /api/ad-reports/*）。
+  if (analysisPlatform.value === 'tt') return
+  if (analysisPlatform.value === 'fb') { loadFbDashboard(); loadFbTrends(); return }
+  // ↓↓↓ GG 分支的原有逻辑一字不改 ↓↓↓
   loadDates()
   loadDashboard()
   loadTrends()
@@ -762,6 +876,11 @@ async function loadFilterOptions() {
 }
 
 onMounted(() => {
+  // 按平台分流：TT 无数据源 ⇒ **直接 return**，不发起任何取数
+  // （含 /ad-reports/* 与 config/ai）。这是本 bug 的直接判据。
+  if (analysisPlatform.value === 'tt') return
+  if (analysisPlatform.value === 'fb') { loadFbDashboard(); loadFbTrends(); return }
+  // ↓↓↓ 以下 GG 分支的原有逻辑一字不改 ↓↓↓
   loadFilterOptions()
   loadDates()
   loadDashboard()
@@ -770,6 +889,7 @@ onMounted(() => {
 
 // 地区变化时刷新产品列表 + 联动多维分析
 watch(filterRegion, () => {
+  if (analysisPlatform.value !== 'gg') return
   trendProducts.value = []
   multiFilterCampaign.value = ''
   multiFilterAccount.value = ''
@@ -779,6 +899,9 @@ watch(filterRegion, () => {
 
 // 产品变化时刷新地区列表 + 联动多维分析
 watch(filterProduct, () => {
+  // TT / FB 不走这里：筛选变化由各自分支的 @change 处理（FB 走 refreshAll 的 fb 分支）。
+  // 这里若放行会打 /ad-reports/list。
+  if (analysisPlatform.value !== 'gg') return
   multiFilterCampaign.value = ''
   multiFilterAccount.value = ''
   loadFilterOptions()
@@ -789,6 +912,8 @@ watch(filterProduct, () => {
 })
 
 watch(activeTab, (tab) => {
+  // 只有 GG 有这 6 个 tab；TT / FB 下 tab 不渲染，这里也必须短路。
+  if (analysisPlatform.value !== 'gg') return
   if (tab === 'trends') {
     // 趋势页未选产品则用全局筛选的产品
     if (!trendProducts.value.length && filterProduct.value.length) {

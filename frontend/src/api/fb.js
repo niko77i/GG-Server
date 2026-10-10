@@ -77,4 +77,8 @@ export const fbApi = {
   reportStats(params = {}) { return client.get('/fb/reports/stats', { params }) },
   exportReports(params = {}) { return client.get('/fb/reports/export', { params }) },
   retrySheetsSync(body = {}) { return client.post('/fb/reports/retry-sync', body) },
+
+  // 分析（按平台隔离：只读 fb_ad_reports，见 2026-10-11 设计）
+  analysisDashboard(params = {}) { return client.get('/fb/analysis/dashboard', { params }) },
+  analysisTrends(params = {}) { return client.get('/fb/analysis/trends', { params }) },
 }
