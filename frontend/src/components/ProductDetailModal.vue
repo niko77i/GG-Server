@@ -17,7 +17,9 @@
       </div>
 
       <h4>📌 关联账户（{{ product.related_account_count || 0 }} 个）</h4>
-      <el-table :data="sortedAccounts" size="small" v-if="sortedAccounts.length">
+      <!-- ③ 浏览类 · 前端分页。产品经 MCC 关联的账户可能上万（`related_accounts` 由后端
+           一次全量返回），el-table 不做虚拟滚动 ⇒ 只把当前页交给它渲染。 -->
+      <el-table :data="accountsShown" size="small" v-if="sortedAccounts.length">
         <el-table-column prop="name" label="账户名称" />
         <el-table-column prop="account_id" label="账户 ID" />
         <el-table-column prop="status" label="状态">
@@ -26,7 +28,11 @@
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else description="未关联 MCC 或 MCC 下无账户" :image-size="40" />
+      <div v-if="sortedAccounts.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+        <el-pagination v-model:current-page="accountPage" :page-size="PAGE_SIZE"
+          :total="sortedAccounts.length" layout="prev, pager, next" small background />
+      </div>
+      <el-empty v-if="!sortedAccounts.length" description="未关联 MCC 或 MCC 下无账户" :image-size="40" />
 
       <h4 style="margin-top:12px;">📦 包列表（{{ (product.packages || []).length }} 个）</h4>
       <el-table :data="product.packages" size="small" max-height="200">
@@ -184,6 +190,12 @@ const sortedAccounts = computed(() => {
   })
 })
 
+// 前端分页（③ 浏览类）：见模板注释。权威数据是 `sortedAccounts`，这里只切当前页渲染。
+const PAGE_SIZE = 50
+const accountPage = ref(1)
+const accountsShown = computed(() =>
+  sortedAccounts.value.slice((accountPage.value - 1) * PAGE_SIZE, accountPage.value * PAGE_SIZE))
+
 const assetGroups = computed(() => {
   const map = {}
   for (const a of assets.value) {
@@ -205,6 +217,8 @@ const runnerIds = computed(() => {
 
 async function load() {
   if (props.prodId) {
+    // 换产品 ⇒ 账户分页归 1，否则当前页码可能越过新结果集的末页。
+    accountPage.value = 1
     const res = await store.loadProductDetail(props.prodId)
     product.value = res.product
     await loadUsers()

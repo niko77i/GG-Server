@@ -29,7 +29,10 @@
 
       <!-- 充值记录 -->
       <h4>💰 充值记录（{{ rechargeRecords.length }} 条）</h4>
-      <el-table :data="rechargeRecords" size="small" border stripe v-if="rechargeRecords.length" style="margin-top:8px;">
+      <!-- ③ 浏览类 · 前端分页。后端 `/api/accounts/<aid>/recharge-records` 一次全量返回
+           （无 LIMIT），老户的充值历史可上千；el-table 不做虚拟滚动 ⇒ 只渲染当前页。
+           逐行编辑/删除都按行对象（`row.id`）定位，不受分页影响。 -->
+      <el-table :data="rechargeShown" size="small" border stripe v-if="rechargeRecords.length" style="margin-top:8px;">
         <el-table-column prop="amount" label="金额" width="80">
           <template #default="{ row }">
             <template v-if="editingId === row.id">
@@ -83,7 +86,11 @@
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else description="暂无充值记录" :image-size="40" />
+      <div v-if="rechargeRecords.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+        <el-pagination v-model:current-page="rechargePage" :page-size="PAGE_SIZE"
+          :total="rechargeRecords.length" layout="prev, pager, next" small background />
+      </div>
+      <el-empty v-if="!rechargeRecords.length" description="暂无充值记录" :image-size="40" />
 
       <el-divider />
 
@@ -139,7 +146,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onUnmounted } from 'vue'
+import { ref, reactive, computed, onUnmounted } from 'vue'
 import { accountsApi, rechargeApi } from '@/api/accounts'
 import { sheetWriteApi } from '@/api/sheetWrite'
 import { SHEET_WRITE_TOAST, sheetWriteMark, sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
@@ -155,6 +162,11 @@ const account = ref(null)
 const history = ref([])
 const rechargeRecords = ref([])
 const deleting = ref(null)
+// 前端分页（③ 浏览类）：见模板注释。权威数据是 `rechargeRecords`，这里只切当前页渲染。
+const PAGE_SIZE = 50
+const rechargePage = ref(1)
+const rechargeShown = computed(() =>
+  rechargeRecords.value.slice((rechargePage.value - 1) * PAGE_SIZE, rechargePage.value * PAGE_SIZE))
 const editingId = ref(null)
 const editForm = reactive({ amount: '', agent: '' })
 // 写表失败治理：business_key（= recharge_records.id 的字符串）-> 该条的终态记录
@@ -183,6 +195,7 @@ async function load() {
   account.value = null
   history.value = []
   rechargeRecords.value = []
+  rechargePage.value = 1
   editingId.value = null
   if (!props.accountId) return
   // 与充值记录请求分开：标记是「失败必须可见」的兜底，不能随列表请求的成败而丢
@@ -320,6 +333,9 @@ async function deleteRecharge(rid) {
   try {
     await rechargeApi.delete(rid)
     rechargeRecords.value = rechargeRecords.value.filter(r => r.id !== rid)
+    // 删掉末页仅剩的行后当前页会越过新末页 ⇒ 回退，否则表格空白、分页控件消失。
+    const maxPage = Math.max(1, Math.ceil(rechargeRecords.value.length / PAGE_SIZE))
+    if (rechargePage.value > maxPage) rechargePage.value = maxPage
     ElMessage.success('已删除')
   } catch (e) {
     ElMessage.error('删除失败: ' + (e.response?.data?.error || e.message))
