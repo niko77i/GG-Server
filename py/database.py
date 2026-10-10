@@ -1463,7 +1463,7 @@ def _migrate_options_tables(conn: sqlite3.Connection):
     conn.commit()
 
 
-def _migrate_account_status_platform(conn: sqlite3.Connection):
+def _migrate_account_status_platform(conn: sqlite3.Connection) -> bool:
     """把挂在**非 gg 平台**字典行上的 GG 账户状态归位到 gg 的同名行。
 
     起因（2026-10-06）：GG 侧写 status_id 的四处 SQL 都按 `owner_id=?` 取行、且缺
@@ -1477,8 +1477,19 @@ def _migrate_account_status_platform(conn: sqlite3.Connection):
       即「GG 账户的状态名必须能在这张表的 gg 分区里解析」）。**不置 NULL** —— 置 NULL
       会让该账户的状态显示退回 COALESCE 兜底的「存活」。
     - `status_id IS NULL` 的行不动（那是「未设置状态」，不是错挂）。
-    - 天然幂等：跑完一遍后 `platform != 'gg'` 的引用清零，后续连接只做一次 SELECT，
-      不产生写操作（`_migrate_if_needed` 每次连接都会跑，不能留下常驻写）。
+    - **只跑一次**（2026-10-11 改）：由 `_migrate_if_needed` 用 config 标记
+      `migrated_account_status_platform` 门控，不再每次 `get_db()` 都跑。
+      改前它虽也「首轮之后 SELECT 恒空、不再写库」，但「**一旦再有错挂就静默改写
+      `accounts.status_id`**」这个能力是**常驻**的 —— 每个请求都带着它。
+      真实危害：管理员删掉 gg 的某个状态行时，`statuses_delete` 与
+      `huguan_dashboard` 两条路径都只数**当前引用数**，而账户被旧写侧 bug 指在
+      fb 行上 ⇒ 计数为 0 ⇒ 删除成功；可**下一次任何请求** get_db() 时，本迁移
+      发现账户指着 fb 的同名行，就补建一行 gg 行并把他们挪回去 ⇒
+      **管理员的删除被静默撤销、同名行复活**，没有任何路径拦得住。
+      与 2026-09-24「69 户 status_id 悬空」同源。
+
+    返回值：`True` = 本轮已跑完（调用方**可以**写下一次性标记）；
+            `False` = 本轮失败（调用方**不得**写标记 —— 保住「下轮重试」的契约）。
 
     ⚠️ **异常绝不能逃出去**（与 `_migrate_scrape_dn_history` 同契约）：本函数由
     `_migrate_if_needed` 调用，而后者**每个请求**都跑 —— 逃出一个异常就是整个服务
@@ -1495,7 +1506,7 @@ def _migrate_account_status_platform(conn: sqlite3.Connection):
             "WHERE s.platform != 'gg'"
         ).fetchall()
         if not rows:
-            return
+            return True
         for r in rows:
             name = r["name"]
             conn.execute(
@@ -1512,9 +1523,11 @@ def _migrate_account_status_platform(conn: sqlite3.Connection):
                 "(SELECT id FROM account_statuses WHERE name=? AND platform!='gg')",
                 (target["id"], name))
         conn.commit()
+        return True
     except Exception as e:  # noqa: BLE001 — 迁移契约：异常不得逃出去打死 get_db()
         print(f"[Migrate] account_statuses platform 归位失败（下轮重试）: {e}")
         conn.rollback()
+        return False
 
 
 def _cleanup_old_option_columns(conn: sqlite3.Connection):
@@ -1905,7 +1918,19 @@ def _migrate_if_needed(conn: sqlite3.Connection):
 
     _migrate_options_tables(conn)
     # 4b. 挂在 fb/tt 字典行上的 GG 账户状态 → 归位到 gg 的同名行（见函数 docstring）
-    _migrate_account_status_platform(conn)
+    #
+    # ⚠️ **只跑一次**（2026-10-11）：加 config 标记门控。改前是无条件调用 ⇒ 这条
+    # 「静默改写 accounts.status_id」的写路径**挂在每个请求的 get_db() 上**，
+    # 会把管理员刚删掉的状态行悄悄补建回来（详见该函数 docstring）。
+    # 只有本轮**成功**（返回 True）才写标记；失败不写 ⇒ 保住下轮重试。
+    status_platform_claim = conn.execute(
+        "SELECT value FROM config WHERE key='migrated_account_status_platform'"
+    ).fetchone()
+    if not status_platform_claim and _migrate_account_status_platform(conn):
+        conn.execute(
+            "INSERT OR REPLACE INTO config(key,value) "
+            "VALUES('migrated_account_status_platform','1')")
+        conn.commit()
     # 5. users.prev_scrape_dns（JSON）→ scrape_dn_history 表，并删掉旧列
     _migrate_scrape_dn_history(conn)
     # 6. （已退役）磁盘上的无主爬取目录 → 补哨兵墓碑。

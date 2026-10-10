@@ -471,3 +471,68 @@ class TestCrossPlatformSameNameReference:
         assert body["total"] == body["status_counts"].get("未知"), (
             "统计里「未知」有几条，按它筛选就该有几条 —— 跨平台那条漏了就是死链"
         )
+
+
+# ---------- 迁移只跑一次（2026-10-11） ----------
+
+MARKER = "migrated_account_status_platform"
+
+
+class TestMigrationRunsOncePerDatabase:
+    """`_migrate_account_status_platform` 必须**只跑一次**，不再每次 `get_db()` 都跑。
+
+    根因：它原先在 `_migrate_if_needed` 里**无条件**调用，而后者挂在**每个请求**的
+    `get_db()` 上。首轮之后那条 `SELECT ... WHERE s.platform != 'gg'` 虽然恒空、
+    不再写库，但「**一旦再有错挂就静默改写 `accounts.status_id`**」这个能力是
+    **常驻**的 —— 每次请求都带着它。
+
+    为什么这真的会伤人（比「跑得勤」具体）：管理员删掉 gg 的「存活」行时，
+    `statuses_delete` / `huguan_dashboard` 两条路径都只数**当前引用数**；账户被旧
+    写侧 bug 指在 fb 行上 ⇒ 计数为 0 ⇒ 删除成功。可**下一次任何请求** get_db() 时，
+    迁移发现账户指着 fb 的「存活」行，于是补建一行 gg「存活」并把他们挪回去 ——
+    **管理员的删除被静默撤销、同名行复活**，而没有任何一条路径拦得住它。同源自
+    2026-09-24「69 户 status_id 悬空」事故。
+
+    可证伪：去掉标记（回到无条件调用）时，第二次 `get_db()` 会把新造的错挂也挪走，
+    下面第二条断言变红。
+    """
+
+    def _clear_marker(self):
+        """夹具已经开过连接 ⇒ 标记可能已置。清掉，让「首轮确实会跑」成立。"""
+        db = database.get_db()
+        db.execute("DELETE FROM config WHERE key=?", (MARKER,))
+        db.commit()
+        return db
+
+    def _platform_of(self, db, account_id):
+        return db.execute(
+            "SELECT s.platform FROM accounts a JOIN account_statuses s ON a.status_id=s.id "
+            "WHERE a.account_id=?", (account_id,)
+        ).fetchone()["platform"]
+
+    def test_second_connection_does_not_remigrate(self, client):
+        _, uid = _register(client, "oneshotuser")
+        db = self._clear_marker()
+        # 造第一处错挂（GG 账户指向 fb 的同名行）
+        sid_a = _mk_status(db, "一次性迁移A", "fb", owner_id=1)
+        _mk_account(db, "771-000-0001", uid, sid_a)
+        db.close()
+
+        # ① 首轮连接：应归位，并写下标记
+        db = database.get_db()
+        assert self._platform_of(db, "771-000-0001") == "gg", "首轮应把错挂归位到 gg 同名行"
+        marked = db.execute("SELECT value FROM config WHERE key=?", (MARKER,)).fetchone()
+        # 同一连接里再造一处错挂 —— 它落在本轮迁移**之后**，留给下一轮检验
+        sid_b = _mk_status(db, "一次性迁移B", "fb", owner_id=1)
+        _mk_account(db, "771-000-0002", uid, sid_b)
+        db.close()
+        assert marked is not None, "首轮成功后必须写下 config 标记"
+
+        # ② 第二轮连接：标记已置 ⇒ 必须**不再**改写
+        db = database.get_db()
+        pl = self._platform_of(db, "771-000-0002")
+        db.close()
+        assert pl == "fb", (
+            "标记已置却仍改写了 accounts.status_id —— 「管理员删状态行被静默撤销」"
+            "的根因未除（迁移仍是常驻写路径）"
+        )
