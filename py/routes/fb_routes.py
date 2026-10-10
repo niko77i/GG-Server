@@ -2348,6 +2348,107 @@ def reports_stats():
     return ok([dict(r) for r in row])
 
 
+# ---------- 分析端点（按平台隔离：只读 fb_ad_reports） ----------
+# 参数口径逐字照 GG 的 ad_reports_dashboard（py/main.py:10276），
+# 这样前端 AnalysisView 的 filterParams() 一份就够喂两个平台。
+# 与 /api/fb/reports/stats 的区别：那个是「数据管理」的原始分组列表，
+# 这两个是给分析页的汇总/趋势，字段名按分析页的语义取。
+
+def _fb_analysis_where(args, uid):
+    """构造 WHERE 与参数。product_name 支持逗号分隔多值（照 GG 口径）。"""
+    where = ["user_id = ?"]
+    params = [uid]
+
+    product_name = (args.get("product_name") or "").strip()
+    if product_name:
+        names = [n.strip() for n in product_name.split(",") if n.strip()]
+        if len(names) == 1:
+            where.append("product_name = ?")
+            params.append(names[0])
+        else:
+            where.append(f"product_name IN ({','.join(['?'] * len(names))})")
+            params.extend(names)
+
+    line_name = (args.get("line_name") or "").strip()
+    if line_name:
+        where.append("line_name = ?")
+        params.append(line_name)
+
+    from_date = (args.get("from_date") or "").strip()
+    if from_date:
+        where.append("report_date >= ?")
+        params.append(from_date)
+
+    to_date = (args.get("to_date") or "").strip()
+    if to_date:
+        where.append("report_date <= ?")
+        params.append(to_date)
+
+    return " AND ".join(where), params
+
+
+@fb_bp.route('/api/fb/analysis/dashboard', methods=['GET'])
+@jwt_required()
+@fb_required
+def fb_analysis_dashboard():
+    """FB 分析页的仪表盘：总览 + 按线/按产品分组。
+
+    **只读 fb_ad_reports**（GG 的 ad_reports 无 platform 列，绝不能混进来）。
+    """
+    db = get_db()
+    uid = get_uid()
+    where_clause, params = _fb_analysis_where(request.args, uid)
+
+    summary = db.execute(
+        f"SELECT COALESCE(SUM(cost),0) AS total_cost, "
+        f"COALESCE(SUM(impressions),0) AS total_impressions, "
+        f"COALESCE(SUM(clicks),0) AS total_clicks, "
+        f"COALESCE(SUM(registrations),0) AS total_registrations, "
+        f"COALESCE(SUM(purchases),0) AS total_purchases, "
+        f"COUNT(*) AS record_count, "
+        f"COUNT(DISTINCT account_id) AS account_count "
+        f"FROM fb_ad_reports WHERE {where_clause}", params
+    ).fetchone()
+
+    def _group(col):
+        # 不别名：分组键**保留原列名**（line_name / product_name）——
+        # 设计 §3.2 规定 `by_line: [{line_name, …}]`、`by_product: [{product_name, …}]`，
+        # 前端按这两个键取值（同名别名 `name` 会让前端取不到）。
+        rows = db.execute(
+            f"SELECT {col}, COALESCE(SUM(cost),0) AS total_cost, "
+            f"COALESCE(SUM(impressions),0) AS total_impressions, "
+            f"COALESCE(SUM(clicks),0) AS total_clicks, COUNT(*) AS record_count "
+            f"FROM fb_ad_reports WHERE {where_clause} "
+            f"GROUP BY {col} ORDER BY total_cost DESC", params
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    return ok({
+        "summary": dict(summary),
+        "by_line": _group("line_name"),
+        "by_product": _group("product_name"),
+    })
+
+
+@fb_bp.route('/api/fb/analysis/trends', methods=['GET'])
+@jwt_required()
+@fb_required
+def fb_analysis_trends():
+    """FB 分析页的趋势：按日期升序的每日汇总。"""
+    db = get_db()
+    uid = get_uid()
+    where_clause, params = _fb_analysis_where(request.args, uid)
+
+    rows = db.execute(
+        f"SELECT report_date, COALESCE(SUM(cost),0) AS total_cost, "
+        f"COALESCE(SUM(impressions),0) AS total_impressions, "
+        f"COALESCE(SUM(clicks),0) AS total_clicks, COUNT(*) AS record_count "
+        f"FROM fb_ad_reports WHERE {where_clause} "
+        f"GROUP BY report_date ORDER BY report_date ASC", params
+    ).fetchall()
+    return ok({"points": [dict(r) for r in rows]})
+
+
 @fb_bp.route('/api/fb/reports/export', methods=['GET'])
 @jwt_required()
 @fb_required
