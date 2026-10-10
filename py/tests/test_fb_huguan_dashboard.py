@@ -1058,3 +1058,82 @@ class TestFbPendingMaster:
         assert _PENDING_MASTER_FIELDS[("tt", "bc_name")] == "bc"
         assert _PENDING_MASTER_FIELDS[("tt", "agent_name")] == "agent"
         assert ("gg", "agent_name") not in _PENDING_MASTER_FIELDS, "GG 一个都不命中"
+
+
+class TestEnsurePendingMasterDispatch:
+    """kind 分派必须**显式穷举**。曾经的 `else: _ensure_region(...)` 兜底会让
+    新增的 kind 被静默写进 regions 表（把渠道名当国家），而且不报错。"""
+
+    def test_unknown_kind_raises_instead_of_falling_into_region(self, client):
+        db = database.get_db()
+        with pytest.raises(ValueError):
+            hd.ensure_pending_master(db, [{"kind": "不存在的类别", "name": "X"}], 1)
+        assert db.execute("SELECT COUNT(*) FROM regions WHERE name='X'").fetchone()[0] == 0, \
+            "绝不能落进 regions"
+        db.close()
+
+    def test_channel_kind_creates_and_maps_to_channel_id(self, client):
+        db = database.get_db()
+        # fb_channels.owner_id 有 REFERENCES users(id)，get_db 开着 foreign_keys=ON，
+        # 直接传 owner_id=3 会 IntegrityError —— 先建一行 id=3 的用户（同
+        # test_existing_channel_resolves_and_produces_no_pending 的既有口径）。
+        db.execute("INSERT INTO users(id, username, password, role, platform) "
+                   "VALUES(3, 'fb_dispatch_owner', 'x', 'user', 'fb')")
+        out = hd.ensure_pending_master(db, [{"kind": "channel", "name": "派单渠道"}], 3)
+        db.commit()
+        assert set(out) == {"channel_id"}
+        assert out["channel_id"] == db.execute(
+            "SELECT id FROM fb_channels WHERE name='派单渠道'").fetchone()[0]
+        db.close()
+
+    def test_region_kind_creates_nothing_to_map(self, client):
+        db = database.get_db()
+        out = hd.ensure_pending_master(
+            db, [{"kind": "region", "name": "美国", "timezone": "+8"}], 3)
+        db.commit()
+        assert out == {}, "region 没有可挂的 id"
+        assert db.execute("SELECT COUNT(*) FROM regions WHERE name='美国'").fetchone()[0] == 1
+        db.close()
+
+    def test_empty_items_is_noop(self, client):
+        db = database.get_db()
+        assert hd.ensure_pending_master(db, None, 1) == {}
+        assert hd.ensure_pending_master(db, [], 1) == {}
+        db.close()
+
+
+class TestFbMasterDataEndToEnd:
+    """走真实路径：build_diff → apply_diff，确认字典项真被补建**且挂到账户上**。"""
+
+    def test_confirm_creates_the_channel_and_links_it(self, client):
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row_with_dicts("FB9", "端到端渠道", "端到端资产"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        res = hd.apply_diff(db, diff, "fb",
+                            {"create": ["FB9"], "update": [], "owner": []}, user_id=1)
+        db.commit()
+        assert res.get("created", 1) == 1
+        acc = db.execute("SELECT channel_id, asset_type_id FROM fb_accounts "
+                         "WHERE account_id='FB9'").fetchone()
+        ch = db.execute("SELECT id FROM fb_channels WHERE name='端到端渠道'").fetchone()
+        at = db.execute("SELECT id FROM fb_asset_types WHERE name='端到端资产'").fetchone()
+        assert acc["channel_id"] == ch["id"], "新账户必须挂上补建的渠道"
+        assert acc["asset_type_id"] == at["id"], "新账户必须挂上补建的资产类型"
+        db.close()
+
+    def test_second_sync_creates_nothing_new(self, client):
+        """再同步一次：字典项已存在 ⇒ pending 为空、表里行数不变（不会重复建）。"""
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row_with_dicts("FB10", "幂等渠道", ""), "fb")
+        parsed["row"] = 2
+        diff1 = hd.build_diff(db, [parsed], "fb")
+        hd.apply_diff(db, diff1, "fb", {"create": ["FB10"], "update": [], "owner": []},
+                      user_id=1)
+        db.commit()
+        n1 = db.execute("SELECT COUNT(*) FROM fb_channels WHERE name='幂等渠道'").fetchone()[0]
+        diff2 = hd.build_diff(db, [parsed], "fb")
+        assert diff2["pending_master"] == [], "第二次不该再有待补建项"
+        assert db.execute("SELECT COUNT(*) FROM fb_channels WHERE name='幂等渠道'"
+                          ).fetchone()[0] == n1
+        db.close()

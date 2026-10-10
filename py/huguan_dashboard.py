@@ -10,7 +10,8 @@ import json
 import logging
 
 from google_sheets_service import col_index, read_sheet_values
-from master_data import ensure_agent, ensure_bc, strip_utc_prefix
+from master_data import (ensure_agent, ensure_asset_type, ensure_bc,
+                         ensure_channel, strip_utc_prefix)
 from utils import chunk
 
 log = logging.getLogger("gg-server")
@@ -863,6 +864,33 @@ def _ensure_region(db, name: str, timezone: str) -> None:
                (name, timezone))
 
 
+def ensure_pending_master(db, items, owner_id) -> dict:
+    """补建一行引用的全部字典项，返回要写进账户行的 `{列名: id}`。
+
+    **kind 必须显式穷举，末位 `raise`**：这里曾经是 `else: _ensure_region(...)` 的兜底，
+    新增 kind 若漏改就会被**静默写进 regions 表**（把渠道名当国家写进去），而且不报错。
+    不知道的类别要当场炸，不要猜。
+
+    `region` 没有可挂的 id ⇒ 只建、不进返回值。
+    """
+    out = {}
+    for x in items or []:
+        kind = x.get("kind")
+        if kind == "bc":
+            out["bc_id"] = ensure_bc(db, x["name"], owner_id)
+        elif kind == "agent":
+            out["agent_id"] = ensure_agent(db, x["name"], owner_id)
+        elif kind == "channel":
+            out["channel_id"] = ensure_channel(db, x["name"], owner_id)
+        elif kind == "asset_type":
+            out["asset_type_id"] = ensure_asset_type(db, x["name"], owner_id)
+        elif kind == "region":
+            _ensure_region(db, x["name"], x.get("timezone"))
+        else:
+            raise ValueError(f"未知的字典项类别: {kind!r}")
+    return out
+
+
 def resolve_owner_id(db, name: str):
     """归属名 → users.id。空 display_name 回退 username，唯一命中才返回。
 
@@ -1682,13 +1710,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 系统字典里缺的 BC / 渠道 / 国家（build_diff 只在 tt 产，见设计 §4.4）：
             # 到这一步才补建。BC / 渠道把新建的 id 挂进 `src` ⇒ 随下面的 INSERT 一起写。
             # region 是纯 INSERT，没有 id 要挂（国家 → 时区字典）。
-            for x in item.get("pending_master") or []:
-                if x["kind"] == "bc":
-                    src["bc_id"] = ensure_bc(db, x["name"], item.get("owner_id"))
-                elif x["kind"] == "agent":
-                    src["agent_id"] = ensure_agent(db, x["name"], item.get("owner_id"))
-                else:
-                    _ensure_region(db, x["name"], x.get("timezone"))
+            src.update(ensure_pending_master(db, item.get("pending_master"),
+                                             item.get("owner_id")))
             src[key_field] = item["account_id"]
             # 设计 §4.6：表里有「账户名称」列就用它；没有（如加白户表）仍回落账户 ID。
             # `_sheet_name` 是合成键（不是数据库列），必须先 pop 再拼 INSERT；未映射时
@@ -1774,13 +1797,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # id 放进 `fields` ⇒（a）进下面的 `sets` 子句写进账户；
             # （b）`_record_channel_change` 据 `bc_id` 记上 BC 变更留痕。
             # **必须在 `sets = [...]` 与历史留痕之前**，否则 id 落不进 SET。
-            for x in item.get("pending_master") or []:
-                if x["kind"] == "bc":
-                    fields["bc_id"] = ensure_bc(db, x["name"], item.get("scope_owner_id"))
-                elif x["kind"] == "agent":
-                    fields["agent_id"] = ensure_agent(db, x["name"], item.get("scope_owner_id"))
-                else:
-                    _ensure_region(db, x["name"], x.get("timezone"))
+            fields.update(ensure_pending_master(db, item.get("pending_master"),
+                                                item.get("scope_owner_id")))
             # 状态真的变了（build_diff 只在状态真变了才把它放进 fields）⇒
             # 「状态变更时间」必须跟着刷新，否则前端显示的永远是旧值。
             # 注意 `datetime('now','localtime')` 是 SQL 表达式不是值：只能作为
@@ -1923,18 +1941,10 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
     # 与其它分支同：逐行 try，异常只回固定中文文案（result 会被路由整体回出，CWE-209）。
     for item in diff.get("pending_master_rows", []):
         try:
-            link = {}
-            for x in item.get("pending_master") or []:
-                if x["kind"] == "bc":
-                    bc_id = ensure_bc(db, x["name"], item.get("scope_owner_id"))
-                    if bc_id is not None:
-                        link["bc_id"] = bc_id
-                elif x["kind"] == "agent":
-                    agent_id = ensure_agent(db, x["name"], item.get("scope_owner_id"))
-                    if agent_id is not None:
-                        link["agent_id"] = agent_id
-                else:                                   # region：只建，无 id 可挂
-                    _ensure_region(db, x["name"], x.get("timezone"))
+            # 原有的「None 不挂链」口径保留（ensure_bc / ensure_agent 只在名称为空时返 None）。
+            link = {k: v for k, v in ensure_pending_master(
+                db, item.get("pending_master"), item.get("scope_owner_id")).items()
+                if v is not None}
             if link:
                 # 撤回快照：挂链列的**旧值必须在 UPDATE 之前读**（写完这一行就读不到了，
                 # 与 update 分支逐字同一条纪律）。形状与 update 分支**完全一致**
