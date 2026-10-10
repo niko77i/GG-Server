@@ -9,6 +9,10 @@ from flask_jwt_extended import jwt_required
 
 import database
 from cache import cache as _app_cache
+from tt_master_data import ensure_bc, ensure_agent, strip_utc_prefix
+
+# 兼容既有导入点：py/tests/test_tt_accounts.py 仍从本模块 import _ensure_bc（纯搬运不改行为）。
+_ensure_bc = ensure_bc
 
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES, parse_pagination
 from .decorators import tt_required, tt_write_required
@@ -1262,50 +1266,13 @@ def recycle_reason_delete(rid):
 
 # ==================== 同步（我的看板） ====================
 
-def _ensure_bc(db, name, uid):
-    if not name:
-        return None
-    row = db.execute("SELECT id, deleted_at FROM tt_bcs WHERE name=?", (name,)).fetchone()
-    if row:
-        if row["deleted_at"]:
-            db.execute("UPDATE tt_bcs SET deleted_at=NULL WHERE id=?", (row["id"],))
-        return row["id"]
-    # bc_id 唯一冲突兜底：同名软删后 name 可能仍在，但 bc_id 一定还占用
-    row = db.execute("SELECT id, deleted_at FROM tt_bcs WHERE bc_id=?", (name,)).fetchone()
-    if row:
-        if row["deleted_at"]:
-            db.execute("UPDATE tt_bcs SET deleted_at=NULL WHERE id=?", (row["id"],))
-        return row["id"]
-    db.execute("INSERT INTO tt_bcs(name, bc_id, owner_id) VALUES(?,?,?)",
-               (name, name, uid))
-    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-
-def _ensure_agent(db, name, uid):
-    if not name:
-        return None
-    row = db.execute("SELECT id FROM agents WHERE name=? AND platform='tt'", (name,)).fetchone()
-    if row:
-        return row["id"]
-    db.execute("INSERT INTO agents(name, owner_id, platform) VALUES(?,?, 'tt')", (name, uid))
-    # 清除缓存：任何写入 agents 表都须让代理名下拉立即刷新
-    _app_cache.clear_prefix("accounts:agents:")
-    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-
 def _region_timezone(db, country):
     """看板时区为空时，用 regions 的时区补（归一化去掉 UTC 前缀，如 UTC+8 → +8）。"""
     row = db.execute("SELECT timezone FROM regions WHERE name=? AND platform='tt'", (country,)).fetchone()
     if row:
-        return _strip_utc_prefix(row["timezone"])
+        return strip_utc_prefix(row["timezone"])
     row = db.execute("SELECT timezone FROM regions WHERE platform='tt' ORDER BY id LIMIT 1").fetchone()
-    return (_strip_utc_prefix(row["timezone"]) if row else "")
-
-
-def _strip_utc_prefix(value):
-    """去掉 UTC 前缀（仅当以 UTC 开头），如 UTC+8 → +8；非 UTC 值原样返回。"""
-    value = value or ""
-    return value[3:] if value.startswith("UTC") else value
+    return (strip_utc_prefix(row["timezone"]) if row else "")
 
 
 @tt_accounts_bp.route('/api/tt/accounts/sync-from-sheet', methods=['POST'])
@@ -1373,8 +1340,8 @@ def sync_from_sheet():
 
         if not advertiser_id.isdigit():
             continue
-        bc_id = _ensure_bc(db, bc_name, uid) if not dry_run else None
-        agent_id = _ensure_agent(db, agent_name, uid) if not dry_run else None
+        bc_id = ensure_bc(db, bc_name, uid) if not dry_run else None
+        agent_id = ensure_agent(db, agent_name, uid) if not dry_run else None
 
         existing = db.execute("SELECT * FROM tt_accounts WHERE advertiser_id=?", (advertiser_id,)).fetchone()
         if not existing:
