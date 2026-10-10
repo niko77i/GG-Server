@@ -44,7 +44,9 @@ import requests
 from functools import wraps
 from routes.decorators import reject_viewer as _reject_viewer, require_platform as _require_platform, no_huguan
 from routes.decorators import scheduler_required
-from routes.helpers import PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES, GLOBAL_OPTION_ROLES, parse_pagination
+from routes.helpers import (PLATFORM_SWITCH_ROLES, CROSS_USER_ROLES, GLOBAL_OPTION_ROLES,
+                            parse_pagination, report_scope_where, report_editable_fields,
+                            user_role, REPORT_VIEW_ALL_ROLES, REPORT_COST_ONLY_ROLES, err)
 from routes.auth_routes import auth_bp, register_jwt_callbacks
 import huguan_dashboard as hd
 # google_ads_service 按需加载，不打包进 EXE
@@ -9944,6 +9946,15 @@ def ad_reports_save():
     """保存做表数据（含自动关联 MCC/账户/时区）。"""
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
+
+    db = _yt_db()
+
+    # 户管 / 管理员不可新增（只读角色；developer 仍全权）。守卫放在字段校验之前，
+    # 确保只读角色无论提交何种 payload 都统一 403（而非先落到 400 校验分支）。
+    _role = user_role(db, user_id)
+    if _role in REPORT_COST_ONLY_ROLES or _role == "admin":
+        return err("无权限：只读角色不可新增数据", 403)
+
     product_name = (data.get("product_name") or "").strip()
     region = (data.get("region") or "").strip()
     report_date = (data.get("report_date") or "").strip()
@@ -9958,8 +9969,6 @@ def ad_reports_save():
         return jsonify({"success": False, "error": "请选择日期"}), 400
     if not rows:
         return jsonify({"success": False, "error": "没有数据"}), 400
-
-    db = _yt_db()
 
     # 自动关联 MCC / 账户 / 时区
     _auto_link_mcc_and_accounts(db, user_id, product_name, region, rows)
@@ -10088,7 +10097,13 @@ def ad_reports_list():
     # 构建 campaign → 产品 动态映射（通过 packages.series_name 匹配）
     campaign_map = _build_campaign_product_map(db)
 
-    where = ["user_id=?"]; params = [user_id]
+    # 报表类资源没有 owner_id，归属轴是 user_id（见设计 §2.3）。跨用户角色看全部，
+    # 普通 user 仍只看自己；`user_id` 查询参数是「保存人」筛选（跨用户角色才生效，
+    # 不得成为普通用户的越权口 —— 该保证由 report_scope_where 内部结构给出）。
+    _role = user_role(db, user_id)
+    _owner_uid = request.args.get("user_id", type=int)
+    _scope_sql, _scope_params = report_scope_where(_role, user_id, _owner_uid)
+    where = [_scope_sql]; params = list(_scope_params)
     if product_name:
         names = [n.strip() for n in product_name.split(",") if n.strip()]
         # 找出所有 campaign 解析后匹配目标产品名的行
@@ -10205,7 +10220,13 @@ def ad_reports_export():
     search = request.args.get("search", "").strip()
 
     db = _yt_db()
-    where = ["user_id=?"]; params = [user_id]
+    # 报表类资源没有 owner_id，归属轴是 user_id（见设计 §2.3）。跨用户角色看全部，
+    # 普通 user 仍只看自己；`user_id` 查询参数是「保存人」筛选（跨用户角色才生效，
+    # 不得成为普通用户的越权口 —— 该保证由 report_scope_where 内部结构给出）。
+    _role = user_role(db, user_id)
+    _owner_uid = request.args.get("user_id", type=int)
+    _scope_sql, _scope_params = report_scope_where(_role, user_id, _owner_uid)
+    where = [_scope_sql]; params = list(_scope_params)
     if product_name:
         names = [n.strip() for n in product_name.split(",") if n.strip()]
         if len(names) == 1:
@@ -10263,11 +10284,25 @@ def ad_reports_update(report_id):
 
     db = _yt_db()
 
-    # 确认记录存在且属于当前用户
-    existing = db.execute(
-        "SELECT id FROM ad_reports WHERE id=? AND user_id=?",
-        (report_id, user_id)
-    ).fetchone()
+    # 字段白名单（**只对跨用户角色**）：户管只能改「消耗」，管理员是空集 ⇒ 只读。
+    # 普通 user 不受此限 —— 对自己的行仍可改全字段（设计 §3 的回归硬判据）。
+    # 校验放在动数据库之前，避免「先写后拒」。
+    _role = user_role(db, user_id)
+    _editable = report_editable_fields(_role) if _role in REPORT_VIEW_ALL_ROLES else None
+    # ⚠️ 「只读」必须先于「白名单子集」判定：admin 的 `_editable` 是**空集**，
+    # 空集的任何非空子集判断都为假 ⇒ 顺序反了会把「管理员只读」误报成「仅可修改消耗」。
+    if _editable == set():
+        return err("无权限：只读角色不可修改数据", 403)
+    if _editable is not None and not set(data.keys()) <= _editable:
+        return err("无权限：仅可修改消耗", 403)
+
+    # 确认记录存在；跨用户角色（developer/户管）可改他人的行，其余仍限自己。
+    # 失败分支沿用既有的 404（不区分「不存在」与「不是你的」）。
+    if _role in REPORT_VIEW_ALL_ROLES:
+        existing = db.execute("SELECT id FROM ad_reports WHERE id=?", (report_id,)).fetchone()
+    else:
+        existing = db.execute("SELECT id FROM ad_reports WHERE id=? AND user_id=?",
+                              (report_id, user_id)).fetchone()
     if not existing:
         db.close()
         return jsonify({"success": False, "error": "记录不存在或无权操作"}), 404
@@ -10312,6 +10347,10 @@ def ad_reports_delete(report_id):
     """删除单条报告（仅 owner）。"""
     user_id = int(get_jwt_identity())
     db = _yt_db()
+    # 户管 / 管理员一律不可删（只读角色；developer 仍全权）。
+    _role = user_role(db, user_id)
+    if _role in REPORT_COST_ONLY_ROLES or _role == "admin":
+        return err("无权限：只读角色不可删除数据", 403)
     db.execute("DELETE FROM ad_reports WHERE id=? AND user_id=?", (report_id, user_id))
     db.commit(); db.close()
     return jsonify({"success": True})
@@ -10329,6 +10368,10 @@ def ad_reports_batch_delete():
         return jsonify({"success": False, "error": "请提供要删除的 ID 列表"}), 400
 
     db = _yt_db()
+    # 户管 / 管理员一律不可批删（只读角色；developer 仍全权）。
+    _role = user_role(db, user_id)
+    if _role in REPORT_COST_ONLY_ROLES or _role == "admin":
+        return err("无权限：只读角色不可删除数据", 403)
     placeholders = ",".join(["?"] * len(ids))
     cur = db.execute(
         f"DELETE FROM ad_reports WHERE id IN ({placeholders}) AND user_id=?",

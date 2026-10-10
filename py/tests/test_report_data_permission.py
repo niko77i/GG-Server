@@ -187,3 +187,151 @@ def test_fb_export_owner_filter_cannot_widen_plain_user(client, fb_three):
     body = r.get_data(as_text=True)
     assert "u1" in body, "自己那行（account_id=u1）必须在导出里"
     assert "g1" not in body, "他人那行（account_id=g1）不得出现"
+
+
+# ---------- GG ----------
+
+def _mk_report(uid, product="P1", date="2026-10-01", cost=10.0, campaign="C1"):
+    db = database.get_db()
+    db.execute(
+        "INSERT INTO ad_reports (user_id, product_name, region, report_date, customer_id, "
+        "campaign, cost) VALUES (?,?,?,?,?,?,?)",
+        (uid, product, "R", date, "cust1", campaign, cost))
+    db.commit()
+    rid = db.execute("SELECT id FROM ad_reports ORDER BY id DESC LIMIT 1").fetchone()["id"]
+    db.close()
+    return rid
+
+
+@pytest.fixture
+def three(client):
+    """三个账号：普通 user / 户管 / 管理员，各造一条自己的 GG 报表。"""
+    user_h, user_uid = _mk_user(client, "perm_user", "user")
+    hug_h, hug_uid = _mk_user(client, "perm_hug", "huguan")
+    adm_h, adm_uid = _mk_user(client, "perm_adm", "admin")
+    user_rid = _mk_report(user_uid, cost=11.0)
+    hug_rid = _mk_report(hug_uid, cost=22.0)
+    adm_rid = _mk_report(adm_uid, cost=33.0)
+    return {
+        "user": (user_h, user_uid, user_rid),
+        "huguan": (hug_h, hug_uid, hug_rid),
+        "admin": (adm_h, adm_uid, adm_rid),
+    }
+
+
+def _items(client, headers, **params):
+    r = client.get("/api/ad-reports/list", headers=headers, query_string=params)
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    # ⚠️ GG 的 list 返回键是 `reports`（不是 `data`）。
+    return r.get_json()["reports"]
+
+
+# ---------- GG：可见范围 ----------
+
+def test_gg_plain_user_still_sees_only_self(client, three):
+    """**回归硬判据**：普通用户的行为与改动前逐字一致。"""
+    h, uid, _ = three["user"]
+    got = _items(client, h)
+    assert len(got) == 1
+    assert got[0]["cost"] == 11.0
+
+
+def test_gg_huguan_sees_all(client, three):
+    h, _, _ = three["huguan"]
+    assert len(_items(client, h)) == 3, "户管应看到全部用户的数据"
+
+
+def test_gg_admin_sees_all(client, three):
+    h, _, _ = three["admin"]
+    assert len(_items(client, h)) == 3, "管理员应看到全部用户的数据"
+
+
+def test_gg_owner_filter_narrows_for_cross_user(client, three):
+    """「保存人」筛选：跨用户角色传 user_id 只拿到该人的行。"""
+    h, _, _ = three["huguan"]
+    _, user_uid, _ = three["user"]
+    got = _items(client, h, user_id=user_uid)
+    assert len(got) == 1 and got[0]["cost"] == 11.0
+
+
+def test_gg_owner_filter_cannot_widen_plain_user(client, three):
+    """**越权硬判据**：普通用户传别人的 user_id 也只看自己。"""
+    h, _, _ = three["user"]
+    _, hug_uid, _ = three["huguan"]
+    got = _items(client, h, user_id=hug_uid)
+    assert len(got) == 1 and got[0]["cost"] == 11.0, "owner 筛选不得让普通用户看到别人的行"
+
+
+# ---------- GG：写权限 ----------
+
+def test_gg_huguan_can_edit_cost_of_others_row(client, three):
+    h, _, _ = three["huguan"]
+    _, user_uid, user_rid = three["user"]
+    r = client.put(f"/api/ad-reports/{user_rid}", json={"cost": 99.5}, headers=h)
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    db = database.get_db()
+    got = db.execute("SELECT cost FROM ad_reports WHERE id=?", (user_rid,)).fetchone()["cost"]
+    db.close()
+    assert got == 99.5
+
+
+def test_gg_huguan_cannot_edit_other_fields(client, three):
+    """**白名单外字段 → 403**（不是静默忽略）。"""
+    h, _, _ = three["huguan"]
+    _, _, user_rid = three["user"]
+    for payload in ({"campaign": "改过的"}, {"cost": 1.0, "campaign": "改过的"},
+                    {"region": "XX"}, {"report_date": "2030-01-01"}):
+        r = client.put(f"/api/ad-reports/{user_rid}", json=payload, headers=h)
+        assert r.status_code == 403, f"{payload} 应被拒，实际 {r.status_code}"
+
+
+def test_gg_admin_cannot_edit_anything(client, three):
+    h, _, _ = three["admin"]
+    _, _, user_rid = three["user"]
+    for payload in ({"cost": 1.0}, {"campaign": "x"}):
+        assert client.put(f"/api/ad-reports/{user_rid}", json=payload, headers=h).status_code == 403
+
+
+def test_gg_admin_and_huguan_cannot_delete(client, three):
+    for who in ("admin", "huguan"):
+        h, _, own_rid = three[who]
+        assert client.delete(f"/api/ad-reports/{own_rid}", headers=h).status_code == 403, who
+        r = client.post("/api/ad-reports/batch-delete", json={"ids": [own_rid]}, headers=h)
+        assert r.status_code == 403, who
+
+
+def test_gg_admin_and_huguan_cannot_create(client, three):
+    payload = {"product_name": "P1", "report_date": "2026-10-01", "region": "R",
+               "records": [{"campaign": "C9", "cost": 1}]}
+    for who in ("admin", "huguan"):
+        h, _, _ = three[who]
+        assert client.post("/api/ad-reports/save", json=payload, headers=h).status_code == 403, who
+
+
+def test_gg_export_allowed_for_admin_and_huguan(client, three):
+    for who in ("admin", "huguan"):
+        h, _, _ = three[who]
+        assert client.get("/api/ad-reports/export", headers=h).status_code == 200, who
+
+
+def test_gg_export_owner_filter_cannot_widen_plain_user(client, three):
+    """**审查补强**：export 也钉住「普通 user 传他人 user_id 仍只导出自己的行」。
+
+    三条夹具的 (产品,地区,日期,客户ID,广告系列) 完全相同，唯一可判别的是 cost：
+    自己 11.0，他人 22.0 / 33.0。越权成功的话 CSV 正文会同时出现他人行的 cost。
+    """
+    h, _, _ = three["user"]
+    _, hug_uid, _ = three["huguan"]
+    r = client.get("/api/ad-reports/export", headers=h, query_string={"user_id": hug_uid})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    body = r.get_data(as_text=True)
+    assert "11.0" in body, "自己那行（cost=11.0）必须在导出里"
+    assert "22.0" not in body, "他人那行（cost=22.0）不得出现"
+    assert "33.0" not in body, "他人那行（cost=33.0）不得出现"
+
+
+def test_gg_plain_user_write_paths_unchanged(client, three):
+    """普通用户对自己行的增删改仍是 200（回归）。"""
+    h, _, own_rid = three["user"]
+    assert client.put(f"/api/ad-reports/{own_rid}", json={"cost": 5.0}, headers=h).status_code == 200
+    assert client.delete(f"/api/ad-reports/{own_rid}", headers=h).status_code == 200
