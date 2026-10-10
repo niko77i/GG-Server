@@ -11,9 +11,6 @@ import database
 from cache import cache as _app_cache
 from tt_master_data import ensure_bc, ensure_agent, strip_utc_prefix
 
-# 兼容既有导入点：py/tests/test_tt_accounts.py 仍从本模块 import _ensure_bc（纯搬运不改行为）。
-_ensure_bc = ensure_bc
-
 from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES, parse_pagination
 from .decorators import tt_required, tt_write_required
 

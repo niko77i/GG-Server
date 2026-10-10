@@ -600,8 +600,8 @@ def test_update_same_status_does_not_rewrite_recycle(mock_trigger, client, tt_he
 
 
 def test_ensure_bc_restores_soft_deleted(app):
-    """软删后的 tt_bcs 应被 _ensure_bc 恢复复用，避免 bc_id UNIQUE 冲突。"""
-    from routes.tt_accounts_routes import _ensure_bc
+    """软删后的 tt_bcs 应被 ensure_bc 恢复复用，避免 bc_id UNIQUE 冲突。"""
+    from tt_master_data import ensure_bc
 
     db = database.get_db()
     db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES(?,?)", ("BC-X", "BC-X"))
@@ -610,7 +610,7 @@ def test_ensure_bc_restores_soft_deleted(app):
     db.execute("UPDATE tt_bcs SET deleted_at=datetime('now','localtime') WHERE id=?", (bid,))
     db.commit()
 
-    got = _ensure_bc(db, "BC-X", 1)
+    got = ensure_bc(db, "BC-X", 1)
     assert got == bid
 
     row = db.execute("SELECT id, deleted_at FROM tt_bcs WHERE name='BC-X'").fetchone()
@@ -880,14 +880,14 @@ def test_recharge_background_callback_updates_sheets_synced(client):
 
 def test_ensure_bc_uses_owner_uid(client, tt_headers):
     """#6 同步新建 BC 时 owner_id 应为当前用户，而非写死 1。"""
-    from routes.tt_accounts_routes import _ensure_bc
+    from tt_master_data import ensure_bc
 
     # tt_headers 已注册 ttuser(id=1)；再注册一个用户，取 id != 1 验证未写死 1
     _mk_tt_headers(client, "bcowner")
     db = database.get_db()
     uid = db.execute("SELECT id FROM users WHERE username='bcowner'").fetchone()["id"]
     assert uid != 1
-    bid = _ensure_bc(db, "同步BC", uid)
+    bid = ensure_bc(db, "同步BC", uid)
     row = db.execute("SELECT owner_id FROM tt_bcs WHERE id=?", (bid,)).fetchone()
     assert row["owner_id"] == uid
     db.close()
