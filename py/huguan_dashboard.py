@@ -1707,9 +1707,10 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             if pending:
                 src[_target_column(platform, "status_name")] = _ensure_status(
                     pending, item.get("owner_id"))
-            # 系统字典里缺的 BC / 渠道 / 国家（build_diff 只在 tt 产，见设计 §4.4）：
-            # 到这一步才补建。BC / 渠道把新建的 id 挂进 `src` ⇒ 随下面的 INSERT 一起写。
-            # region 是纯 INSERT，没有 id 要挂（国家 → 时区字典）。
+            # 系统字典里缺的字典项（TT 的 BC / 渠道 / 国家时区、FB 的所属渠道 / 资产类型）：
+            # `build_diff` 干跑只产不写，到这一步才补建；新建的 id 挂进 `src` ⇒ 随下面的
+            # INSERT 一起写。region 是纯 INSERT，没有 id 要挂（国家 → 时区字典）。
+            # **`kind` 的穷举在 `ensure_pending_master` 里，未知类别会 raise**——加新类别改那一处。
             src.update(ensure_pending_master(db, item.get("pending_master"),
                                              item.get("owner_id")))
             src[key_field] = item["account_id"]
@@ -1793,10 +1794,11 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             if pending:
                 fields[_target_column(platform, "status_name")] = _ensure_status(
                     pending, item.get("scope_owner_id"))
-            # 系统字典里缺的 BC / 渠道 / 国家（build_diff 只在 tt 产）：补建并把新建的
-            # id 放进 `fields` ⇒（a）进下面的 `sets` 子句写进账户；
+            # 系统字典里缺的字典项（TT 的 BC / 渠道 / 国家时区、FB 的所属渠道 / 资产类型）：
+            # 补建并把新建的 id 放进 `fields` ⇒（a）进下面的 `sets` 子句写进账户；
             # （b）`_record_channel_change` 据 `bc_id` 记上 BC 变更留痕。
             # **必须在 `sets = [...]` 与历史留痕之前**，否则 id 落不进 SET。
+            # `kind` 的穷举在 `ensure_pending_master`（未知类别会 raise）。
             fields.update(ensure_pending_master(db, item.get("pending_master"),
                                                 item.get("scope_owner_id")))
             # 状态真的变了（build_diff 只在状态真变了才把它放进 fields）⇒
@@ -1936,9 +1938,10 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
 
     # 缺字典项的「孤儿行」收尾（见 build_diff 的 `pending_master_rows`）：这些既存账户
     # 既不新建也不更新（其余列与库里逐字相同），上面的 create/update 两个分支都够不到
-    # 它们 —— 若不在**这里**补建并定向挂链，dry_run 报告里列出的「将新增 BC/渠道」
+    # 它们 —— 若不在**这里**补建并定向挂链，dry_run 报告里列出的「将新增字典项」
     # 落库时一个都不兑现，「已存账户要挂新字典项」也永远挂不上。
-    # 与其它分支同：逐行 try，异常只回固定中文文案（result 会被路由整体回出，CWE-209）。
+    # `kind` 的穷举在 `ensure_pending_master`（未知类别会 raise）；与其它分支同：
+    # 逐行 try，异常只回固定中文文案（result 会被路由整体回出，CWE-209）。
     for item in diff.get("pending_master_rows", []):
         try:
             # 原有的「None 不挂链」口径保留（ensure_bc / ensure_agent 只在名称为空时返 None）。
@@ -1957,7 +1960,8 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                     for k in link:
                         old_cols[k] = _read_old_value(db, table, k, item["existing_id"])
                 # BC 变更留痕：与 update 分支同款，**必须在 UPDATE 之前**（旧值写完读不到）。
-                # 只 tt 有 `_CHANNEL_HISTORY_SPEC`（fb 无此键，且孤儿项本就只在 tt 产）。
+                # `_CHANNEL_HISTORY_SPEC` 没有 "fb" 键（直接调用会 KeyError）；且 FB 的
+                # 孤儿项挂的是 channel_id/asset_type_id、不产 bc_id，`"bc_id" in link` 恒 False。
                 if platform != "fb" and "bc_id" in link:
                     _record_channel_change(db, platform, item["existing_id"], link, user_id)
                 sets = [f"{k}=?" for k in link]
