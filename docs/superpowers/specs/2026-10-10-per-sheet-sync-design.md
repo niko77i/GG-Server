@@ -61,8 +61,14 @@ POST /api/huguan/dashboard/push   {"platform":"tt", "sheet_name":"企业户"}
 
 ### 3.3 跨表重复的提示（A1 的补偿，**只查库、不读别的表**）
 
-按表同步时，报告里追加一节（**不含在 `diff` 的既有键里**，避免动前端契约；作为 `result` 或 `diff` 的新键
-`cross_sheet_notes: [{"account_id": str, "current_type": str, "this_sheet": str}]`）：
+按表**同步**时，报告里追加一节（**不含在 `diff` 的既有键里**，避免动前端契约；作为 `diff` 的新键
+`cross_sheet_notes: {"count": int, "notes": [{"account_id": str, "current_type": str, "this_sheet": str}]}`）：
+
+> ⚠️ **只在 sync 侧有，push 侧不接**（2026-10-10 实现时发现）：push 的行**已经**按
+> `account_type == 目标户类型` 过滤过 ⇒「当前属于另一张表」**按构造不可能命中**；而本判据比的是
+> 「`account_type` vs **工作表名**」，两者在正常配置里相等 ⇒ 永远不触发（死代码），
+> 一旦用户把户类型名与工作表名取成不同 ⇒ **每一行都误报**。所以 push 侧撤掉，只保留 sync 侧
+> （行来自表格，库里那个账户的 `account_type` 才可能真的不同）。
 
 - 判据：本次同步里出现、且**库里该账户的 `account_type` 与本次表名不同**的账户
   ⇒ 它「当前归属另一张表」，本次按表同步可能把归属/字段按这张表覆盖。
@@ -120,8 +126,8 @@ POST /api/huguan/dashboard/push   {"platform":"tt", "sheet_name":"企业户"}
 | `py/tests/test_huguan_dashboard.py` | 按表同步/按表回滚/跨表提示/快照按表 的用例 |
 | 本文件 + 实现计划 + 验收清单 | 设计 / 计划 / 清单补项 |
 
-**数据结构**：请求体加 `sheet_name`；`diff` 或 `result` 加 `cross_sheet_notes`（新键，前端据此多显示一节）；
-快照 payload **不变**（只是内容只含该表）。
+**数据结构**：请求体加 `sheet_name`；**sync 的 `diff`** 加 `cross_sheet_notes`（新键，前端据此多显示一节；
+**仅 sync**，push 侧不接 —— 见 §3.3 的注）；快照 payload **不变**（只是内容只含该表）。
 
 ## 六、非目标
 
