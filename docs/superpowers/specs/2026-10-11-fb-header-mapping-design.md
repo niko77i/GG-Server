@@ -158,7 +158,8 @@ FB 的推导结果（17 项，**实现时按此逐项核对**）：
 
 | 位置 | 现在 | 改成 |
 |---|---|---|
-| `_fb_acceptor_cells` / `_fb_owner_transition` 的 cells 键 | 写死 `"I"` | col_map 里 `acceptor` 字段的列字母 |
+| `_fb_acceptor_cells`（`huguan_dashboard.py:1999`，被 `huguan_sheet_targets.py:318` 调用） | 写死 `"I"` | col_map 里 `acceptor` 字段的列字母（函数加一个 `col` 参数） |
+| `huguan_dashboard_routes.py:407` 的 cells 字面量 | 写死 `"I"`（路由里**另一处**，不走 `_fb_acceptor_cells`） | 同上，按该账户那张表的 col_map 取 |
 | 归属回写的落点 | `OWNER_COL["fb"]` = `"J"` | `owner_role_col("fb", "owner", col_map)`（该函数**已支持** col_map，取不到返回 `None` = 一个字不碰） |
 | `huguan_sheet_targets.py:183` 的角色列解析 | `owner_role_col(platform, role, cm if platform == "tt" else None)` —— **fb 落进 `None` 分支、拿固定字母** | 改成 `cm`（tt/fb 都按本表 col_map 取；fb 的 `role="channel"` 因没有通道列而返回 `None`，即一个字不碰 —— 与今天的 fb 行为一致） |
 | `resolve_table_col_map` 的分叉 | `if platform != "tt": return spec_column_map(...)` | 只有 **gg** 走固定；tt/fb 读 `A1:ZZ1` 解析 |
