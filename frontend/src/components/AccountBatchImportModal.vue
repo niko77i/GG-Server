@@ -41,7 +41,7 @@
         <el-table ref="claimTableRef" :data="claimPrev.shown" size="small" border stripe max-height="260"
           row-key="account_id"
           @select="(sel, row) => toggleClaimRow(row.account_id, sel.some(r => r.account_id === row.account_id))"
-          @select-all="sel => selectAllClaimPreview(sel.length > 0)"
+          @select-all="sel => selectAllClaim(sel.length > 0)"
           :row-class-name="existingRowClass" style="width:100%;">
           <el-table-column v-if="auth.canManageAccounts" type="selection" width="34" />
           <el-table-column prop="account_id" label="账户 ID" width="118" />
@@ -373,20 +373,15 @@ function toggleClaimRow(id, on) {
     ? [...new Set([...claimPickedIds.value, id])]
     : claimPickedIds.value.filter(x => x !== id)
 }
-/** 表头「全选」勾：只作用**本页渲染出来的 ≤100 行**。 */
-function selectAllClaimPreview(on) {
-  const shownIds = new Set(claimPrev.value.shown.map(a => a.account_id))
-  claimPickedIds.value = on
-    ? [...new Set([...claimPickedIds.value, ...shownIds])]
-    : claimPickedIds.value.filter(x => !shownIds.has(x))
-}
-/** 脚注「全部选中 / 全部取消」：作用**全量**（不只渲染行）。 */
+/** 「全部选中 / 全部取消」：作用**全量**（不只渲染行）。表头「全选」勾与脚注**同一语义**：
+ *  渲染行最多 100、全量可能上万 ⇒「只选本页」没有意义，脚注已提供全量控件，两者统一后无歧义入口。 */
 function selectAllClaim(on) {
   claimPickedIds.value = on ? existingAccounts.value.map(a => a.account_id) : []
   syncClaimSelection()
 }
 /** 表格内建的勾选态不在模型里（权威是 id 白名单）⇒ 渲染完成后按模型把画出来的 ≤100 行同步一次。
- *  不能用 setTimeout 等渲染。toggleRowSelection 默认不触发 change 事件，故不会与 @select 互相打架。 */
+ *  不能用 setTimeout 等渲染。toggleRowSelection 只有在真正增/删该行时才 emit select（无变化则
+ *  no-op），所以按模型推同一状态不会反触发 @select、不会互相打架。 */
 function syncClaimSelection() {
   const picked = new Set(claimPickedIds.value)
   claimPrev.value.shown.forEach(r => claimTableRef.value?.toggleRowSelection(r, picked.has(r.account_id)))

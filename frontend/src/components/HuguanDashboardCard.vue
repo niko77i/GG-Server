@@ -374,7 +374,7 @@
           </el-alert>
           <el-table ref="ownerTblRef" :data="hdOwnerPrev.shown" size="small" row-key="account_id"
                     border @select="(sel, row) => hdToggleRow('owner', row.account_id, sel.some(r => r.account_id === row.account_id))"
-                    @select-all="sel => hdSelectAllPreview('owner', sel.length > 0)">
+                    @select-all="sel => hdSelectAll('owner', sel.length > 0)">
             <el-table-column type="selection" width="42" />
             <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
@@ -459,7 +459,7 @@
           <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">这些账户在系统里还没有，确认后会新建。</div>
           <el-table ref="createTblRef" :data="hdCreatePrev.shown" size="small" row-key="account_id"
                     border @select="(sel, row) => hdToggleRow('create', row.account_id, sel.some(r => r.account_id === row.account_id))"
-                    @select-all="sel => hdSelectAllPreview('create', sel.length > 0)">
+                    @select-all="sel => hdSelectAll('create', sel.length > 0)">
             <el-table-column type="selection" width="42" />
             <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">
@@ -503,7 +503,7 @@
           <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">这些账户在系统里已有，部分字段会按表里的值覆盖。</div>
           <el-table ref="updateTblRef" :data="hdUpdatePrev.shown" size="small" row-key="account_id"
                     border @select="(sel, row) => hdToggleRow('update', row.account_id, sel.some(r => r.account_id === row.account_id))"
-                    @select-all="sel => hdSelectAllPreview('update', sel.length > 0)">
+                    @select-all="sel => hdSelectAll('update', sel.length > 0)">
             <el-table-column type="selection" width="42" />
             <el-table-column type="expand" width="42">
               <template #default="{ row }">
@@ -566,14 +566,16 @@
                            @click="hdToggleGroup('skip', gi)">{{ hdGroupIsOpen('skip', gi) ? '收起' : '展开' }}</el-button>
               </div>
               <div v-if="hdGroupIsOpen('skip', gi)" style="padding:2px 0 2px 22px;">
-                <div v-for="(r, ri) in hdGroupRows(g).shown" :key="'skiprow' + gi + '-' + ri"
+                <div v-for="(r, ri) in hdGroupRows(g, 'skip', gi).shown" :key="'skiprow' + gi + '-' + ri"
                      style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6b7280;line-height:1.9;">
                   <el-tag v-if="hdShowSheetCol && r.sheet" size="small" type="info" effect="plain">{{ r.sheet }}</el-tag>
                   <span>第 {{ r.row }} 行</span>
                   <span style="font-family:monospace;">{{ r.account_id }}</span>
                 </div>
-                <div v-if="hdGroupRows(g).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
-                  …另有 {{ hdGroupRows(g).hiddenCount }} 行
+                <div v-if="hdGroupRows(g, 'skip', gi).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
+                  …另有 {{ hdGroupRows(g, 'skip', gi).hiddenCount }} 行
+                  <el-button v-if="!hdGroupRowsAllOpen('skip', gi)" link type="primary" size="small"
+                             @click="hdExpandGroupRowsAll('skip', gi)">展开全部 {{ g.count }} 行</el-button>
                 </div>
               </div>
             </div>
@@ -604,13 +606,15 @@
                            @click="hdToggleGroup('warn', gi)">{{ hdGroupIsOpen('warn', gi) ? '收起' : '展开' }}</el-button>
               </div>
               <div v-if="hdGroupIsOpen('warn', gi)" style="padding:2px 0 2px 22px;">
-                <div v-for="(r, ri) in hdGroupRows(g).shown" :key="'warnrow' + gi + '-' + ri"
+                <div v-for="(r, ri) in hdGroupRows(g, 'warn', gi).shown" :key="'warnrow' + gi + '-' + ri"
                      style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6b7280;line-height:1.9;">
                   <el-tag v-if="hdShowSheetCol && r.sheet" size="small" type="info" effect="plain">{{ r.sheet }}</el-tag>
                   <span>第 {{ r.row }} 行</span>
                 </div>
-                <div v-if="hdGroupRows(g).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
-                  …另有 {{ hdGroupRows(g).hiddenCount }} 行
+                <div v-if="hdGroupRows(g, 'warn', gi).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
+                  …另有 {{ hdGroupRows(g, 'warn', gi).hiddenCount }} 行
+                  <el-button v-if="!hdGroupRowsAllOpen('warn', gi)" link type="primary" size="small"
+                             @click="hdExpandGroupRowsAll('warn', gi)">展开全部 {{ g.count }} 行</el-button>
                 </div>
               </div>
             </div>
@@ -672,13 +676,15 @@
                        @click="hdToggleGroup('err', gi)">{{ hdGroupIsOpen('err', gi) ? '收起' : '展开' }}</el-button>
           </div>
           <div v-if="hdGroupIsOpen('err', gi)" style="padding:2px 0 2px 22px;">
-            <div v-for="(r, ri) in hdGroupRows(g).shown" :key="'errrow' + gi + '-' + ri"
+            <div v-for="(r, ri) in hdGroupRows(g, 'err', gi).shown" :key="'errrow' + gi + '-' + ri"
                  style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6b7280;line-height:1.9;">
               <el-tag v-if="hdShowSheetCol && r.sheet" size="small" type="info" effect="plain">{{ r.sheet }}</el-tag>
               <span>第 {{ r.row }} 行</span>
             </div>
-            <div v-if="hdGroupRows(g).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
-              …另有 {{ hdGroupRows(g).hiddenCount }} 行
+            <div v-if="hdGroupRows(g, 'err', gi).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
+              …另有 {{ hdGroupRows(g, 'err', gi).hiddenCount }} 行
+              <el-button v-if="!hdGroupRowsAllOpen('err', gi)" link type="primary" size="small"
+                         @click="hdExpandGroupRowsAll('err', gi)">展开全部 {{ g.count }} 行</el-button>
             </div>
           </div>
         </div>
@@ -1294,8 +1300,19 @@ function hdToggleGroup(scope, i) {
   const k = scope + ':' + i
   hdGroupOpen.value = { ...hdGroupOpen.value, [k]: !hdGroupOpen.value[k] }
 }
-/** 某一组的逐行明细预览（行数上限 HD_PREVIEW_LIMIT，超出显示「…另有 N 行」）。 */
-function hdGroupRows(g) { return slicePreview(g.rows, HD_PREVIEW_LIMIT) }
+// 「展开全部 N 行」态（键 = 作用域:下标，与 hdGroupOpen 平行）。组内逐行明细默认只画
+// HD_PREVIEW_LIMIT(100) 行；单原因失败几千行时用户需要完整 id 清单去重试（尤其「落库报错」），
+// 故给每组的明细一个「展开全部」入口，抬到 HD_GROUP_LIMIT_EXPANDED(500)，超出部分仍「…另有 N 行」。
+const hdGroupRowsExpanded = ref({})
+function hdGroupRowsAllOpen(scope, i) { return !!hdGroupRowsExpanded.value[scope + ':' + i] }
+function hdExpandGroupRowsAll(scope, i) {
+  hdGroupRowsExpanded.value = { ...hdGroupRowsExpanded.value, [scope + ':' + i]: true }
+}
+/** 某一组的逐行明细预览：默认上限 HD_PREVIEW_LIMIT(100)，「展开全部」后抬到
+ *  HD_GROUP_LIMIT_EXPANDED(500)，超出部分照旧显示「…另有 N 行」。 */
+function hdGroupRows(g, scope, i) {
+  return slicePreview(g.rows, hdGroupRowsAllOpen(scope, i) ? HD_GROUP_LIMIT_EXPANDED : HD_PREVIEW_LIMIT)
+}
 
 // 「确认落库」能不能点：勾选的东西 **或** 孤儿行的字典补建（后者无条件执行、不依赖勾选）。
 // 只有后者时 selectedCount 恒为 0，但落库确实会建字典项 + 挂链 —— 不把按钮置灰（否则纯孤儿
@@ -1761,28 +1778,12 @@ function hdToggleRow(which, id, on) {
     : [...new Set([...excluded.value, id])]
 }
 
-/** 表头「全选」勾：只作用**本页渲染出来的 ≤100 行**。create/update 仍走排除集，
- *  把这 ≤100 行整体从排除集加/移除；owner 走已勾集。 */
-function hdSelectAllPreview(which, on) {
-  if (which === 'owner') {
-    const shownIds = hdOwnerPrev.value.shown.map(r => r.account_id)
-    hdPickedOwner.value = on
-      ? [...new Set([...hdPickedOwner.value, ...shownIds])]
-      : hdPickedOwner.value.filter(id => !shownIds.includes(id))
-    return
-  }
-  const prev = which === 'create' ? hdCreatePrev : hdUpdatePrev
-  const excluded = which === 'create' ? hdExcludedCreate : hdExcludedUpdate
-  const shownIds = prev.value.shown.map(r => r.account_id)
-  excluded.value = on
-    ? excluded.value.filter(id => !shownIds.includes(id))
-    : [...new Set([...excluded.value, ...shownIds])]
-}
-
-/** 脚注「全部选中 / 全部取消」：作用**全量**（不只渲染行）。
- *  create/update：全部选中 ⇒ 排除集清空；全部取消 ⇒ 排除集 = 全量 id。
- *  owner：全部选中 ⇒ 已勾集 = 全量 id；全部取消 ⇒ 已勾集清空。
- *  改完模型后要刷一次表格内建的勾选态（脚注按钮不经过表格自身，勾选不会自己跟着变）。 */
+/** 「全部选中 / 全部取消」：作用**全量**（不只渲染行）。表头「全选」勾与脚注按钮**同一语义**：
+ *  渲染出来的行最多 100 行、而全量可能上万 ⇒「只选本页」不是一个有意义的操作，脚注已提供了
+ *  全量控件；两者语义统一后就没有歧义入口了。表头勾的方向用事件选择数组的 `sel.length > 0`
+ *  判（全选 / 全不选），具体选中的行不看。create/update：全部选中 ⇒ 排除集清空；全部取消 ⇒
+ *  排除集 = 全量 id。owner：全部选中 ⇒ 已勾集 = 全量 id；全部取消 ⇒ 已勾集清空。
+ *  改完模型后刷一次表格内建的勾选态（表头勾会自己动，但按模型同步一次保证两者一致）。 */
 function hdSelectAll(which, on) {
   if (which === 'owner') {
     hdPickedOwner.value = on ? [...hdOwnerIds.value] : []
@@ -1822,6 +1823,7 @@ async function openSyncDialog(diff, sheet = '') {
   hdWarnOpen.value = ['warn']      // 有警告就默认展开（T2b：别让问题藏在收起的区里）
   hdGroupOpen.value = {}           // 每次重开清掉上一次的分组展开态
   hdGroupsExpanded.value = {}      // 连「展开全部 N 类」也一起收回去（别串到下一次）
+  hdGroupRowsExpanded.value = {}   // 组内「展开全部 N 行」也一起收回去
   hdExcludedCreate.value = []      // 默认全选
   hdExcludedUpdate.value = []
   hdPickedOwner.value = []         // 归属变更默认不勾（既有语义，别改）

@@ -39,7 +39,7 @@
              ⇒ 用「已勾集」（白名单）。@select 第一参是「已选行数组」不是布尔，必须自己取值。 -->
         <el-table ref="claimTableRef" :data="claimPrev.shown" size="small" border stripe row-key="account_id"
                   @select="(sel, row) => toggleClaim(row.account_id, sel.some(r => r.account_id === row.account_id))"
-                  @select-all="sel => selectAllClaimPreview(sel.length > 0)">
+                  @select-all="sel => selectAllClaim(sel.length > 0)">
           <el-table-column v-if="canClaim" type="selection" width="45" />
           <el-table-column prop="account_id" label="账户ID" min-width="130" />
           <el-table-column label="当前归属" width="110">
@@ -66,7 +66,7 @@
              toggleRowSelection(row, true)）⇒ 用「排除集」（黑名单）表示「没被排除即选中」。 -->
         <el-table ref="updateTableRef" :data="updatePrev.shown" size="small" border stripe row-key="account_id"
           @select="(sel, row) => toggleUpdate(row.account_id, sel.some(r => r.account_id === row.account_id))"
-          @select-all="sel => selectAllUpdatePreview(sel.length > 0)">
+          @select-all="sel => selectAllUpdate(sel.length > 0)">
           <el-table-column type="selection" width="45" />
           <el-table-column prop="account_id" label="账户ID" min-width="130" />
           <el-table-column prop="current_status" label="当前状态" width="90">
@@ -109,12 +109,14 @@
                      @click="toggleGroup(gi)">{{ groupOpen[gi] ? '收起' : '展开' }}</el-button>
         </div>
         <div v-if="groupOpen[gi]" style="padding:2px 0 2px 22px;">
-          <div v-for="(r, ri) in groupRows(g).shown" :key="'errrow' + gi + '-' + ri"
+          <div v-for="(r, ri) in groupRows(g, gi).shown" :key="'errrow' + gi + '-' + ri"
                style="display:flex;align-items:center;gap:8px;font-size:12px;color:#909399;line-height:1.9;">
             <span style="font-family:monospace;">{{ r.account_id }}</span>
           </div>
-          <div v-if="groupRows(g).hiddenCount > 0" style="font-size:12px;color:#909399;">
-            …另有 {{ groupRows(g).hiddenCount }} 行
+          <div v-if="groupRows(g, gi).hiddenCount > 0" style="font-size:12px;color:#909399;">
+            …另有 {{ groupRows(g, gi).hiddenCount }} 行
+            <el-button v-if="!groupRowsAllOpen(gi)" link type="primary" size="small"
+                       @click="expandGroupRowsAll(gi)">展开全部 {{ g.count }} 行</el-button>
           </div>
         </div>
       </div>
@@ -189,11 +191,19 @@ const GROUP_LIMIT = 50
 const GROUP_LIMIT_EXPANDED = 500
 const groupsAllOpen = ref(false)
 const groupOpen = ref({})
+// 「展开全部 N 行」态（键 = 组下标）。组内逐行明细默认只画 PREVIEW_LIMIT(100) 行；
+// 单原因失败几千行时用户需要完整 id 清单去重试，故给每组的明细一个「展开全部」入口，
+// 抬到 GROUP_LIMIT_EXPANDED(500)，超出部分仍「…另有 N 行」。
+const groupRowsOpen = ref({})
 const errorGroups = computed(() => groupWarnings(errors.value.map(r => ({ ...r, message: r.error || '' }))))
 const errorGroupsShown = computed(() =>
   slicePreview(errorGroups.value, groupsAllOpen.value ? GROUP_LIMIT_EXPANDED : GROUP_LIMIT))
 function toggleGroup(i) { groupOpen.value = { ...groupOpen.value, [i]: !groupOpen.value[i] } }
-function groupRows(g) { return slicePreview(g.rows, PREVIEW_LIMIT) }
+function groupRowsAllOpen(i) { return !!groupRowsOpen.value[i] }
+function expandGroupRowsAll(i) { groupRowsOpen.value = { ...groupRowsOpen.value, [i]: true } }
+function groupRows(g, i) {
+  return slicePreview(g.rows, groupRowsAllOpen(i) ? GROUP_LIMIT_EXPANDED : PREVIEW_LIMIT)
+}
 
 const canSync = computed(() => {
   if (!diff.value) return false
@@ -216,20 +226,8 @@ function toggleClaim(id, on) {
     ? [...new Set([...claimPicked.value, id])]
     : claimPicked.value.filter(x => x !== id)
 }
-/** 表头「全选」勾：只作用**本页渲染出来的 ≤100 行**。 */
-function selectAllUpdatePreview(on) {
-  const shownIds = new Set(updatePrev.value.shown.map(r => r.account_id))
-  updateExcluded.value = on
-    ? updateExcluded.value.filter(id => !shownIds.has(id))
-    : [...new Set([...updateExcluded.value, ...shownIds])]
-}
-function selectAllClaimPreview(on) {
-  const shownIds = new Set(claimPrev.value.shown.map(r => r.account_id))
-  claimPicked.value = on
-    ? [...new Set([...claimPicked.value, ...shownIds])]
-    : claimPicked.value.filter(id => !shownIds.has(id))
-}
-/** 脚注「全部选中 / 全部取消」：作用**全量**（不只渲染行）。 */
+/** 「全部选中 / 全部取消」：作用**全量**（不只渲染行）。表头「全选」勾与脚注按钮**同一语义**：
+ *  渲染行最多 100、全量可能上万 ⇒「只选本页」没有意义，脚注已提供全量控件，两者统一后无歧义入口。 */
 function selectAllUpdate(on) {
   updateExcluded.value = on ? [] : [...updateIds.value]
   syncTableSelection()
@@ -264,6 +262,7 @@ async function startSync() {
   errors.value = []
   groupsAllOpen.value = false
   groupOpen.value = {}
+  groupRowsOpen.value = {}
   try {
     const res = await store.syncFromSheet({ dry_run: true })
     if (res.success) {

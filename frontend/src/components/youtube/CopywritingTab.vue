@@ -40,7 +40,7 @@
          `@select` 第一参是**已选行数组**（不是布尔），故自己取 `.some(...)`。 -->
     <el-table ref="cwTableRef" :data="pagedCopywritings" row-key="id"
       @select="(sel, row) => cwToggleRow(row.id, sel.some(r => r.id === row.id))"
-      @select-all="sel => cwSelectAllPage(sel.length > 0)"
+      @select-all="sel => cwSelectAll(sel.length > 0)"
       stripe size="small"
       class="cw-table">
       <el-table-column type="selection" width="40" />
@@ -209,12 +209,12 @@ function cwToggleRow(id, on) {
     : cwPickedIds.value.filter(x => x !== id)
 }
 
-/** 表头「全选」勾：只作用**本页渲染出来的行**（分页后表头勾天然只能覆盖当前页）。 */
-function cwSelectAllPage(on) {
-  const ids = pagedCopywritings.value.map(c => c.id)
-  cwPickedIds.value = on
-    ? [...new Set([...cwPickedIds.value, ...ids])]
-    : cwPickedIds.value.filter(x => !ids.includes(x))
+/** 「全选 / 全不选」：作用**全量筛选结果**（不只当前页）。表头「全选」勾与工具栏「☑ 全选」
+ *  同一语义 —— 分页后表头勾天然只能覆盖当前页，但那不是「全选」，与工具栏的全量控件冲突；
+ *  统一成作用于全量 id 后就没有歧义入口了。 */
+function cwSelectAll(on) {
+  cwPickedIds.value = on ? [...cwFilteredIds.value] : []
+  cwSyncTableSelection()
 }
 
 /** 工具栏「☑ 全选」：作用**全量筛选结果**（不只当前页）—— 这正是解耦要保住的能力。 */
@@ -234,7 +234,8 @@ function cwInvertSelection() {
 }
 
 /** 表格内建的勾选态不在状态模型里（权威是 id 集合）⇒ 渲染完成后按模型把**画出来的那几行**
- *  同步一次。`toggleRowSelection` 会回调 `@select`，但写回的是同一个值（幂等），不会震荡。
+ *  同步一次。`toggleRowSelection` 只有在真正增/删该行时才 emit `select`（无变化则 no-op），
+ *  所以按模型推同一状态不会反触发 `@select`、不会震荡。
  *  调用点：① 工具栏全选/反选后；② `pagedCopywritings` 变化后（watch, flush: 'post'）。 */
 function cwSyncTableSelection() {
   const picked = new Set(cwSelectedIds.value)
