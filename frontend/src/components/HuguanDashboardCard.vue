@@ -178,7 +178,7 @@
                 <el-button size="small" plain
                            :loading="!!hdSheetBusy && hdSheetBusy.sheet === hdSheetKey(t) && hdSheetBusy.dir === 'push'"
                            :disabled="hdBusy || !hdSheetKey(t)"
-                           @click="pushHdTable(i)">⬆️ 刷新回这张表</el-button>
+                           @click="openPushDlg(hdSheetKey(t))">⬆️ 刷新回这张表</el-button>
               </span>
             </el-tooltip>
           </div>
@@ -212,7 +212,7 @@
               <!-- tt 下文案改「⬆️ 全部刷新」并挂列出所有表的 tooltip（视觉规格 §平台级按钮）；
                    这两个是「全部表」，按表入口在每张表那一行。gg/fb 文案逐字节不变。 -->
               <el-tooltip :content="hdTablesTip" placement="top" :disabled="!hdTablesTip">
-                <el-button @click="pushDlg.visible = true" :loading="hdPushing"
+                <el-button @click="openPushDlg(null)" :loading="hdPushing"
                            :disabled="!hdConfigured || hdBusy">{{ hdPushBtnLabel }}</el-button>
               </el-tooltip>
               <el-button @click="askUndo('push')" :loading="hdUndoing === 'push'"
@@ -296,6 +296,9 @@
     </div>
     <div style="font-size:12px;color:#6b7280;margin-top:4px;">{{ hdPushSafeNote }}</div>
     <div style="font-size:12px;color:#6b7280;margin-top:8px;">{{ hdPushExtraNote }}</div>
+    <!-- 范围（本期）：平台级与按表**共用这一个弹窗**，这里点明这次会写哪张表。列的清单两边
+         一样（列不随范围变），所以只加这一行、不动上面那两张表。 -->
+    <div style="font-size:12px;color:#6b7280;margin-top:8px;">{{ hdPushScopeText }}</div>
 
     <el-alert type="info" show-icon :closable="false" style="margin-top:16px;">
       <template #title>建议：如果表里刚改过上面那几列，先点「{{ hdSyncBtnLabel }}」把改动读回系统，再刷新到看板。</template>
@@ -823,7 +826,9 @@ const hdPanelEls = {}               // 下标 → 折叠区根元素（「去指
 const createTblRef = ref(null)
 const updateTblRef = ref(null)
 
-const pushDlg = reactive({ visible: false })
+// sheet = 这次刷新写哪张表（null = 平台级/全部表）。平台级与按表**共用同一个确认弹窗**
+// （规格修正 2026-10-10：按表刷新也必须经过这道闸，否则误点即静默写表）。
+const pushDlg = reactive({ visible: false, sheet: null })
 // sheet = 这次差异报告是**哪张表**的按表同步（空串 = 平台级/全部表）。它同时决定：
 // 弹窗标题带不带表名、「表」列藏不藏、落库那一步带不带 sheet_name（见 applySync）。
 const syncDlg = reactive({ visible: false, mode: 'A', applyError: '', applying: false, sheet: '' })
@@ -869,6 +874,9 @@ const hdPlatformTables = computed(() => (hdForm.value.tables || [])
 const hdTablesTip = computed(() => (HD_PLATFORM === 'tt' && hdConfigured.value
   && hdPlatformTables.value.length)
   ? `所有表：${hdPlatformTables.value.join('、')}` : '')
+// 刷新确认弹窗里那行「范围」（视觉规格修正 2026-10-10）：说清这次写的是哪张表。
+const hdPushScopeText = computed(() => (pushDlg.sheet
+  ? `范围：仅「${pushDlg.sheet}」` : '范围：全部表'))
 
 // 提示条三态：显式消息 > 未配置空态 > 无。type 只跟着显式消息走。
 const hdHint = computed(() => {
@@ -1446,36 +1454,35 @@ function reportPushHd(res, sheet) {
   startHdSwPoll()
 }
 
-async function doPushHd() {
-  pushDlg.visible = false
-  hdPushing.value = true
-  try {
-    reportPushHd(await huguanApi.push(HD_PLATFORM), '')
-  } catch (e) {
-    // 单次 values().batchUpdate 是原子的：要么全成、要么全不成，不存在「写了一半」。
-    // 因此失败即整批未写入，直接重试是安全的，无需打开表格核对。
-    setHdHint('刷新到看板失败。本次没有写入任何数据，直接重试是安全的。', 'error')
-  } finally {
-    hdPushing.value = false
-    // 这次刷新留下了新快照（写失败/空写时后端作废，拉回来就是 null）⇒
-    // 重新拉一次，「撤回上次」按钮才会随本次操作亮起。
-    loadHdUndo()
-  }
+/** 打开刷新的二次确认弹窗。sheet 为空/null = 平台级（全部表）；非空 = 只写那一张表。
+ *  平台级与按表**共用这一个弹窗**（规格修正 2026-10-10）：按表刷新也必须有这道闸 ——
+ *  单点即写表的话，误点一次是无声的（比平台级那次更危险）。⚠️ 按表时传的必须是**那一行**
+ *  的表名。 */
+function openPushDlg(sheet) {
+  pushDlg.sheet = sheet || null
+  pushDlg.visible = true
 }
 
-/** 只刷新这一张表（本期 §3.1）。刻意**不加**二次确认弹窗（视觉规格「不做」：刷新是既有
- *  行为，只是范围变小 —— 覆盖列清单那套二次确认仍归平台级那一个按钮）。
- *  ⚠️ 必须取**这一行**的表名（按下标 i 取），不能图省事取第一张。 */
-async function pushHdTable(i) {
-  const sheet = hdSheetKey(hdForm.value.tables[i])
-  if (!sheet) return                        // 按钮已禁用，这里是兜底
-  hdSheetBusy.value = { sheet, dir: 'push' }
+async function doPushHd() {
+  pushDlg.visible = false
+  // 按表刷新：这次只写那一张表。平台级（弹窗里是 null）不带 sheet_name ⇒ 与改动前一致。
+  const sheet = pushDlg.sheet || ''
+  hdPushing.value = true
+  // 按表时点亮该行：此刻卡片上所有按钮都被 hdBusy 禁用，没有那句灰字用户会以为界面坏了。
+  if (sheet) hdSheetBusy.value = { sheet, dir: 'push' }
   try {
     reportPushHd(await huguanApi.push(HD_PLATFORM, sheet), sheet)
   } catch (e) {
-    setHdHint(`刷新到看板失败（${sheet}）。本次没有写入任何数据，直接重试是安全的。`, 'error')
+    // 单次 values().batchUpdate 是原子的：要么全成、要么全不成，不存在「写了一半」。
+    // 因此失败即整批未写入，直接重试是安全的，无需打开表格核对。
+    setHdHint(sheet
+      ? `刷新到看板失败（${sheet}）。本次没有写入任何数据，直接重试是安全的。`
+      : '刷新到看板失败。本次没有写入任何数据，直接重试是安全的。', 'error')
   } finally {
+    hdPushing.value = false
     hdSheetBusy.value = null
+    // 这次刷新留下了新快照（写失败/空写时后端作废，拉回来就是 null）⇒
+    // 重新拉一次，「撤回上次」按钮才会随本次操作亮起。
     loadHdUndo()
   }
 }
