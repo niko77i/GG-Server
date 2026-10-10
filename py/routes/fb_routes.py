@@ -80,6 +80,90 @@ def _escape_like(value: str) -> str:
     return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
 
+# ==================== 归属闸门助手 ====================
+#
+# 2026-10-11 全仓复核：`fb_bms` 与 `fb_products` / `fb_lines` 两族**整族没有归属校验** ——
+# 同文件的 `fb_accounts` / `fb_ad_reports` / `fb_pixels` / `fb_pixel_bms` 四族早已有
+# （见 update_pixel_bm / update_account / update_report 的写法）。是**漏做**，不是设计如此。
+#
+# `fb_bms` 族的口径与 `update_pixel_bm` 逐字一致，故直接内联那四行、不另设助手；
+# 下面三个助手只服务产品族 —— 判据特殊（见 docstring）且要被 7 个端点复用。
+
+
+def _fb_product_accessible(db, pid, uid):
+    """产品归属判据（2026-10-11 用户裁定）：**创建人 或 在跑人员 或 跨用户角色**。
+
+    取并集而非单选，是因为产品有两套并存的归属模型：
+      - `list_products` 按「是否为在跑人员」过滤可见性（`fb_product_runners`）；
+      - `fb_products.owner_id` 在创建时写入。
+    只按 owner_id 收口会误杀「在跑人员本来能改」这条既有能力；只按 runner 收口
+    则会让创建人在没把自己填进 runner 时立刻改不了自己刚建的产品。
+
+    返回 True / False / None（None = 产品不存在）—— 调用方一律用 `is False` 判，
+    以便保持既有「行不存在时 UPDATE 0 行仍返回 200」的行为、不把 404 混进来。
+    """
+    if _get_role(db, uid) in CROSS_USER_ROLES:
+        return True
+    row = db.execute("SELECT owner_id FROM fb_products WHERE id=?", (pid,)).fetchone()
+    if row is None:
+        return None
+    if row["owner_id"] == uid:
+        return True
+    return db.execute(
+        "SELECT 1 FROM fb_product_runners WHERE product_id=? AND user_id=?", (pid, uid)
+    ).fetchone() is not None
+
+
+def _fb_pixel_ref_ok(db, uid, pixel_id, prod_owner_id):
+    """能否把 `pixel_id` 写进 `fb_lines.pixel_id` —— 堵「借道读他人像素名」。
+
+    为什么需要：`fb_lines.pixel_id` 指向 `fb_pixels.id`（主键），而产品列表与详情的
+    `LEFT JOIN fb_pixels` **不带任何归属条件**。于是给自己产品的线填**他人**的像素 id
+    （主键连号、可猜），就能读回他人的 `pixel_name` 与外部号 —— 8.2 对 `fb_pixels`
+    的收口因此**端到端失效**（HANDOFF §8.5 第 1 条）。像素表**无 owner 列**，
+    归属看父表 `fb_pixel_bms.owner_id`（与本文件测试 helper 的口径一致）。
+
+    空值放行（该列本就可空、存量多为 NULL）；**格式非法一律不放行**（含超 int64，
+    避免落到绑定处抛 OverflowError）。
+    归属放行两条腿：`uid` 自己的，或 `prod_owner_id`（产品创建人）的 —— 后者是
+    必需的：并集轴允许在跑人员编辑产品，而产品上的像素通常属于创建人。
+    """
+    if pixel_id in (None, ''):
+        return True
+    pk = _valid_pk_int64(pixel_id)
+    if pk is None:
+        return False
+    if _get_role(db, uid) in CROSS_USER_ROLES:
+        return True
+    row = db.execute(
+        "SELECT pb.owner_id FROM fb_pixels p JOIN fb_pixel_bms pb ON pb.id = p.pixel_bm_id "
+        "WHERE p.id=?", (pk,)).fetchone()
+    return row is not None and row["owner_id"] in (uid, prod_owner_id)
+
+
+def _fb_bm_ref_ok(db, uid, bm_pk, prod_owner_id):
+    """能否把 `bm_pk` 写进 `fb_product_bms.bm_id` —— **借道的第二条腿**。
+
+    与像素同理：`list_products` / `product_detail` 的 `JOIN fb_bms` 不回带归属条件，
+    把他人 BM 链进自己的产品即可读出其 `name` 与 `bm_id`。放行腿同 `_fb_pixel_ref_ok`。
+    """
+    pk = _valid_pk_int64(bm_pk)
+    if pk is None:
+        return False
+    if _get_role(db, uid) in CROSS_USER_ROLES:
+        return True
+    row = db.execute("SELECT owner_id FROM fb_bms WHERE id=?", (pk,)).fetchone()
+    return row is not None and row["owner_id"] in (uid, prod_owner_id)
+
+
+def _fb_pixel_pk(pixel_id):
+    """把请求体里的 `pixel_id` 归一为可落库的主键（空 ⇒ None）。
+
+    必须先过 `_fb_pixel_ref_ok` 的格式闸；这里只做形状归一，不做归属判断。
+    """
+    return None if pixel_id in (None, '') else _valid_pk_int64(pixel_id)
+
+
 # ==================== BM 管理 ====================
 
 @fb_bp.route('/api/fb/bms/list', methods=['GET'])
@@ -225,9 +309,17 @@ def create_bm():
 @fb_required
 def update_bm(bid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
     data = parse_body()
     name = data.get('name', '').strip()
     note = data.get('note', '').strip()
+    # 归属校验（口径同 update_pixel_bm）：非跨用户角色只能改自己名下的 BM。
+    # 少了这道闸，任何 FB 用户按 id 就能改**别人**的 BM 名。行不存在时不拦
+    # （existing 为 None），保持既有「UPDATE 0 行仍返回 200」的行为。
+    existing = db.execute("SELECT owner_id FROM fb_bms WHERE id=?", (bid,)).fetchone()
+    if existing and role not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     if name:
         db.execute(
             "UPDATE fb_bms SET name=?, note=?, updated_at=datetime('now','localtime') WHERE id=?",
@@ -241,6 +333,13 @@ def update_bm(bid):
 @fb_required
 def delete_bm(bid):
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    # 归属校验：非跨用户角色只能软删自己的 BM（否则可软删他人 BM）。
+    # 行不存在时不拦，保持既有 200。
+    existing = db.execute("SELECT owner_id FROM fb_bms WHERE id=?", (bid,)).fetchone()
+    if existing and role not in CROSS_USER_ROLES and existing["owner_id"] != uid:
+        return err("无权限", 403)
     db.execute("UPDATE fb_bms SET deleted_at=datetime('now','localtime') WHERE id=?", (bid,))
     db.commit()
     return ok()
@@ -251,8 +350,24 @@ def delete_bm(bid):
 @fb_required
 def bm_options():
     db = get_db()
+    uid = get_uid()
+    role = _get_role(db, uid)
+    # 收窄口径同 pixel_bm_options：非跨用户角色强制只看自己的 BM；跨用户角色可用
+    # owner_id 收窄，不带则看全部。原实现返回**全库所有人的 BM**，属跨租户可见。
+    cross_user = role in CROSS_USER_ROLES
+    owner_filter = (request.args.get('owner_id') or '').strip() if cross_user else ''
+    where = ["status='normal'", "deleted_at IS NULL"]
+    params = []
+    if cross_user:
+        if owner_filter:
+            where.append("owner_id = ?")
+            params.append(owner_filter)
+    else:
+        where.append("owner_id = ?")
+        params.append(uid)
+    where_clause = " AND ".join(where)
     rows = db.execute(
-        "SELECT id, name, bm_id FROM fb_bms WHERE status='normal' AND deleted_at IS NULL ORDER BY name"
+        f"SELECT id, name, bm_id FROM fb_bms WHERE {where_clause} ORDER BY name", params
     ).fetchall()
     return ok([dict(r) for r in rows])
 
@@ -267,18 +382,26 @@ def ban_and_migrate(bid):
     target_bm_id_str = data.get('target_bm_id', '').strip()
     target_bm_name = data.get('target_bm_name', '').strip()
     uid = get_uid()
+    role = _get_role(db, uid)
 
     # 检查当前 BM 状态
     bm = db.execute("SELECT * FROM fb_bms WHERE id=?", (bid,)).fetchone()
     if not bm:
         return err('BM不存在', 404)
+    # 归属校验：封禁+迁移是**破坏性**操作（会把该 BM 上的账户整体搬走并留迁移历史），
+    # 非跨用户角色只能操作自己名下的 BM。
+    if role not in CROSS_USER_ROLES and bm['owner_id'] != uid:
+        return err("无权限", 403)
     if bm['status'] == 'banned':
         return err('该BM已被封禁', 400)
 
     try:
         # 查找或创建目标 BM
-        target = db.execute("SELECT id FROM fb_bms WHERE bm_id=?", (target_bm_id_str,)).fetchone()
+        target = db.execute("SELECT id, owner_id FROM fb_bms WHERE bm_id=?", (target_bm_id_str,)).fetchone()
         if target:
+            # 目标 BM 若属于他人，则不能把账户迁进去（否则等于往别人 BM 上写关联）。
+            if role not in CROSS_USER_ROLES and target['owner_id'] != uid:
+                return err("无权限", 403)
             target_bid = target['id']
             if target_bid == bid:
                 return err('不能迁移到自身', 400)
@@ -1106,6 +1229,16 @@ def create_product():
         return err('产品名不能为空', 400)
 
     uid = get_uid()
+    # 借道守卫（HANDOFF §8.5 第 1 条）：`bm_ids` / `lines[].pixel_id` 引用的 BM 与像素
+    # 必须归自己 —— 否则可经 `product_detail` / `list_products` 的 `JOIN fb_bms` /
+    # `LEFT JOIN fb_pixels` 读回他人的 BM 名、bm_id 与像素名、外部号。
+    # 新建时产品创建人就是自己，故放行腿的 prod_owner_id 传 uid。
+    for bm_id in bm_ids:
+        if not _fb_bm_ref_ok(db, uid, bm_id, uid):
+            return err('BM不存在或无权限', 403)
+    for line in lines:
+        if not _fb_pixel_ref_ok(db, uid, line.get('pixel_id', None), uid):
+            return err('像素不存在或无权限', 403)
     try:
         db.execute(
             "INSERT INTO fb_products (product_name, kpi, region, status, sales_person_id, agency_ratio, owner_id) "
@@ -1120,7 +1253,8 @@ def create_product():
         for line in lines:
             db.execute(
                 "INSERT INTO fb_lines (product_id, line_name, link, pixel_id) VALUES (?, ?, ?, ?)",
-                (pid, line.get('line_name', ''), line.get('link', ''), line.get('pixel_id', None)))
+                (pid, line.get('line_name', ''), line.get('link', ''),
+                 _fb_pixel_pk(line.get('pixel_id', None))))
 
         db.commit()
         return ok({'id': pid})
@@ -1137,6 +1271,7 @@ def create_product():
 @no_huguan
 def update_product(pid):
     db = get_db()
+    uid = get_uid()
     data = parse_body()
     product_name = data.get('product_name', '').strip()
     kpi = data.get('kpi', '')
@@ -1147,6 +1282,25 @@ def update_product(pid):
     bm_ids = data.get('bm_ids', None)
     runner_ids = data.get('runner_ids', None)
     lines = data.get('lines', None)
+
+    # 归属校验（2026-10-11 裁定：创建人 / 在跑人员 / 跨用户角色）。少了这道闸，
+    # 任何 FB 用户按 id 就能改**别人**的产品 —— 且下方 bm_ids/runner_ids/lines
+    # 三个分支都会**全量替换**该产品的关联，破坏面不止改个名字。
+    if _fb_product_accessible(db, pid, uid) is False:
+        return err("无权限", 403)
+    owner_row = db.execute("SELECT owner_id FROM fb_products WHERE id=?", (pid,)).fetchone()
+    prod_owner_id = owner_row["owner_id"] if owner_row else uid
+
+    # 借道守卫：口径同 create_product，但放行腿还要算上**产品创建人**的 BM/像素 ——
+    # 并集轴允许在跑人员编辑产品，而产品上的 BM、像素通常属于创建人。
+    if bm_ids is not None:
+        for bm_id in bm_ids:
+            if not _fb_bm_ref_ok(db, uid, bm_id, prod_owner_id):
+                return err('BM不存在或无权限', 403)
+    if lines is not None:
+        for line in lines:
+            if not _fb_pixel_ref_ok(db, uid, line.get('pixel_id', None), prod_owner_id):
+                return err('像素不存在或无权限', 403)
 
     if product_name:
         db.execute(
@@ -1169,7 +1323,8 @@ def update_product(pid):
         for line in lines:
             db.execute(
                 "INSERT INTO fb_lines (product_id, line_name, link, pixel_id) VALUES (?, ?, ?, ?)",
-                (pid, line.get('line_name', ''), line.get('link', ''), line.get('pixel_id', None)))
+                (pid, line.get('line_name', ''), line.get('link', ''),
+                 _fb_pixel_pk(line.get('pixel_id', None))))
 
     db.commit()
     return ok()
@@ -1181,6 +1336,9 @@ def update_product(pid):
 @no_huguan
 def delete_product(pid):
     db = get_db()
+    # 归属校验：非授权用户不得归档**别人**的产品。行不存在时不拦，保持既有 200。
+    if _fb_product_accessible(db, pid, get_uid()) is False:
+        return err("无权限", 403)
     db.execute("UPDATE fb_products SET is_archived=1, updated_at=datetime('now','localtime') WHERE id=?", (pid,))
     db.commit()
     return ok()
@@ -1192,6 +1350,9 @@ def delete_product(pid):
 @no_huguan
 def restore_product(pid):
     db = get_db()
+    # 归属校验：否则可把**别人**归档的产品恢复出来。行不存在时不拦，保持既有 200。
+    if _fb_product_accessible(db, pid, get_uid()) is False:
+        return err("无权限", 403)
     db.execute("UPDATE fb_products SET is_archived=0, updated_at=datetime('now','localtime') WHERE id=?", (pid,))
     db.commit()
     return ok()
@@ -1202,6 +1363,10 @@ def restore_product(pid):
 @fb_required
 def product_detail(pid):
     db = get_db()
+    # 归属校验：原实现回**任意**产品的完整树（含经 JOIN 带出的 BM 名与像素名/外部号），
+    # 是「借道」读侧的那一半。
+    if _fb_product_accessible(db, pid, get_uid()) is False:
+        return err("无权限", 403)
     prod = db.execute("SELECT * FROM fb_products WHERE id=?", (pid,)).fetchone()
     if not prod:
         return err('产品不存在', 404)
@@ -1226,17 +1391,26 @@ def product_detail(pid):
 @no_huguan
 def add_line(pid):
     db = get_db()
+    uid = get_uid()
     data = parse_body()
     line_name = data.get('line_name', '').strip()
     link = data.get('link', '')
     pixel_id = data.get('pixel_id', None)
 
+    # 归属校验：线挂到哪个产品上，就要有那个产品的权限。原实现可往**任意** pid 插线。
+    if _fb_product_accessible(db, pid, uid) is False:
+        return err("无权限", 403)
     if not line_name:
         return err('线名不能为空', 400)
+    owner_row = db.execute("SELECT owner_id FROM fb_products WHERE id=?", (pid,)).fetchone()
+    prod_owner_id = owner_row["owner_id"] if owner_row else uid
+    # 借道守卫：pixel_id 必须指向自己或产品创建人名下的像素（见 _fb_pixel_ref_ok）。
+    if not _fb_pixel_ref_ok(db, uid, pixel_id, prod_owner_id):
+        return err('像素不存在或无权限', 403)
     try:
         db.execute(
             "INSERT INTO fb_lines (product_id, line_name, link, pixel_id) VALUES (?, ?, ?, ?)",
-            (pid, line_name, link, pixel_id))
+            (pid, line_name, link, _fb_pixel_pk(pixel_id)))
         db.commit()
         return ok({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0]})
     except Exception as e:
@@ -1250,15 +1424,27 @@ def add_line(pid):
 @no_huguan
 def update_line(lid):
     db = get_db()
+    uid = get_uid()
     data = parse_body()
     line_name = data.get('line_name', '').strip()
     link = data.get('link', '')
     pixel_id = data.get('pixel_id', None)
 
+    # 线无 owner 列，归属看所属产品（判据同 _fb_product_accessible）。行不存在时不拦。
+    row = db.execute("SELECT product_id FROM fb_lines WHERE id=?", (lid,)).fetchone()
+    if row is not None:
+        if _fb_product_accessible(db, row["product_id"], uid) is False:
+            return err("无权限", 403)
+        owner_row = db.execute("SELECT owner_id FROM fb_products WHERE id=?",
+                               (row["product_id"],)).fetchone()
+        prod_owner_id = owner_row["owner_id"] if owner_row else uid
+        if not _fb_pixel_ref_ok(db, uid, pixel_id, prod_owner_id):
+            return err('像素不存在或无权限', 403)
+
     if line_name:
         db.execute(
             "UPDATE fb_lines SET line_name=?, link=?, pixel_id=? WHERE id=?",
-            (line_name, link, pixel_id, lid))
+            (line_name, link, _fb_pixel_pk(pixel_id), lid))
         db.commit()
     return ok()
 
@@ -1269,6 +1455,10 @@ def update_line(lid):
 @no_huguan
 def delete_line(lid):
     db = get_db()
+    # 归属校验：线无 owner 列，归属看所属产品。行不存在时不拦，保持既有 200。
+    row = db.execute("SELECT product_id FROM fb_lines WHERE id=?", (lid,)).fetchone()
+    if row is not None and _fb_product_accessible(db, row["product_id"], get_uid()) is False:
+        return err("无权限", 403)
     db.execute("DELETE FROM fb_lines WHERE id=?", (lid,))
     db.commit()
     return ok()

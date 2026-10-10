@@ -2029,3 +2029,330 @@ class TestFbDeletedAccountsSearch:
                           query_string={"search": "\\"}, headers=hdr).get_json()
         assert body["total"] == 1
         assert [a["account_id"] for a in body["items"]] == ["bs0002"]
+
+
+# ==================== FB bms / products / lines 三族归属收口 ====================
+#
+# 背景（2026-10-11 全仓复核）：本文件里 `fb_accounts`、`fb_ad_reports`、`fb_pixels`、
+# `fb_pixel_bms` 四族**早已带归属闸**（对照 TestFbPixelOwnershipClosure），
+# **唯独 `fb_bms` 与 `fb_products`/`fb_lines` 两族整族一个都没装** —— 是漏做，不是设计如此。
+#
+# 口径（2026-10-11 用户裁定）：
+#   - `fb_bms`：`owner_id` 轴，逐字照抄 `update_pixel_bm` 的写法。
+#   - `fb_products`/`fb_lines`：**创建人 或 在跑人员 或 跨用户角色**。取并集是因为产品
+#     有两套并存的归属模型 —— `list_products` 按「是否为在跑人员」过滤可见性，
+#     而 `fb_products.owner_id` 在创建时写入；只取其一都会误杀既有能力。
+#   - `fb_lines` 无 owner_id，归属看所属产品。
+#   - `fb_lines.pixel_id` 还必须指向**自己名下**的像素，否则可借道读回他人像素名
+#     （HANDOFF §8.5 第 1 条的「间接绕过」）。像素无 owner 列，归属看父表 `fb_pixel_bms`。
+
+
+def _mk_fb_product(db, owner_id, name="产品", region="", status="active"):
+    db.execute("INSERT INTO fb_products(product_name, owner_id, status, region) VALUES(?,?,?,?)",
+               (name, owner_id, status, region))
+    pk = db.execute("SELECT id FROM fb_products WHERE product_name=?", (name,)).fetchone()["id"]
+    db.commit()
+    return pk
+
+
+def _mk_fb_line(db, product_id, line_name="线", pixel_id=None):
+    db.execute("INSERT INTO fb_lines(product_id, line_name, pixel_id) VALUES(?,?,?)",
+               (product_id, line_name, pixel_id))
+    pk = db.execute("SELECT id FROM fb_lines WHERE product_id=? AND line_name=?",
+                    (product_id, line_name)).fetchone()["id"]
+    db.commit()
+    return pk
+
+
+def _seed_two_product_owners(client, tag):
+    """A、B 两个 FB 普通用户，各带一个产品 + 一条线，另各带一个像素（借道用例要用）。"""
+    a_hdr, a_id = _fb_user(client, f"{tag}_a")
+    b_hdr, b_id = _fb_user(client, f"{tag}_b")
+    db = database.get_db()
+    a_pbm = _mk_pixel_bm(db, a_id, f"{tag}-A-PBM", "A的像素BM")
+    b_pbm = _mk_pixel_bm(db, b_id, f"{tag}-B-PBM", "B的像素BM")
+    a_px = _mk_pixel(db, a_pbm, f"{tag}-A-PX", "A的像素")
+    b_px = _mk_pixel(db, b_pbm, f"{tag}-B-PX", "B的像素")
+    a_prod = _mk_fb_product(db, a_id, f"{tag}-A产品")
+    b_prod = _mk_fb_product(db, b_id, f"{tag}-B产品")
+    a_line = _mk_fb_line(db, a_prod, f"{tag}-A线")
+    b_line = _mk_fb_line(db, b_prod, f"{tag}-B线")
+    db.close()
+    return dict(a_hdr=a_hdr, a_id=a_id, b_hdr=b_hdr, b_id=b_id,
+                a_px=a_px, b_px=b_px, a_prod=a_prod, b_prod=b_prod,
+                a_line=a_line, b_line=b_line)
+
+
+def _prod_name(pid):
+    db = database.get_db()
+    v = db.execute("SELECT product_name FROM fb_products WHERE id=?", (pid,)).fetchone()
+    db.close()
+    return v["product_name"] if v else None
+
+
+def _prod_name_by_name(name):
+    """按产品名查是否已落库 —— 断言「整个创建被拒、不留半个产品」用。"""
+    db = database.get_db()
+    v = db.execute("SELECT product_name FROM fb_products WHERE product_name=?", (name,)).fetchone()
+    db.close()
+    return v["product_name"] if v else None
+
+
+class TestFbBmOwnershipClosure:
+    """HANDOFF §8.5 第 2 条：`fb_bms` 族补齐归属校验（原本 4 个端点全裸）。"""
+
+    def _seed(self, client, tag):
+        a_hdr, a_id = _fb_user(client, f"{tag}_a")
+        b_hdr, b_id = _fb_user(client, f"{tag}_b")
+        db = database.get_db()
+        a_bm = _mk_fb_bm(db, a_id, f"{tag}-A-BM", "A的BM")
+        b_bm = _mk_fb_bm(db, b_id, f"{tag}-B-BM", "B的BM")
+        db.close()
+        return dict(a_hdr=a_hdr, a_id=a_id, b_hdr=b_hdr, b_id=b_id, a_bm=a_bm, b_bm=b_bm)
+
+    def test_user_cannot_update_others_bm(self, client):
+        """越权写照：去掉闸门会 200 且真改了 B 的 BM 名（证伪条件）。"""
+        s = self._seed(client, "t_fbbmupd")
+        resp = client.put(f"/api/fb/bms/{s['b_bm']}", json={"name": "被改名"}, headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        name = db.execute("SELECT name FROM fb_bms WHERE id=?", (s["b_bm"],)).fetchone()["name"]
+        db.close()
+        assert name == "B的BM"
+
+    def test_user_can_update_own_bm(self, client):
+        """防「一律 403」的过度收口。"""
+        s = self._seed(client, "t_fbbmupd_ok")
+        resp = client.put(f"/api/fb/bms/{s['a_bm']}", json={"name": "我改了"}, headers=s["a_hdr"])
+        assert resp.status_code == 200
+        db = database.get_db()
+        name = db.execute("SELECT name FROM fb_bms WHERE id=?", (s["a_bm"],)).fetchone()["name"]
+        db.close()
+        assert name == "我改了"
+
+    def test_user_cannot_delete_others_bm(self, client):
+        s = self._seed(client, "t_fbbmdel")
+        resp = client.delete(f"/api/fb/bms/{s['b_bm']}", headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        row = db.execute("SELECT deleted_at FROM fb_bms WHERE id=?", (s["b_bm"],)).fetchone()
+        db.close()
+        assert row["deleted_at"] is None
+
+    def test_bm_options_hides_others(self, client):
+        """`bm_options` 原本返回**全库**所有人的 BM（对照 pixel_bm_options 已收窄）。"""
+        s = self._seed(client, "t_fbbmopt")
+        ids = [b["id"] for b in
+               client.get("/api/fb/bms/options", headers=s["a_hdr"]).get_json()["data"]]
+        assert s["a_bm"] in ids
+        assert s["b_bm"] not in ids         # 证伪：不收窄时 B 的 BM 也在列表里
+
+    def test_user_cannot_ban_others_bm(self, client):
+        """封禁+迁移是破坏性操作：缺闸门时可把他人 BM 上的账户整体搬走。"""
+        s = self._seed(client, "t_fbbmban")
+        resp = client.post(f"/api/fb/bms/{s['b_bm']}/ban-and-migrate",
+                           json={"target_bm_id": "99999999", "target_bm_name": "转移目标"},
+                           headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        st = db.execute("SELECT status FROM fb_bms WHERE id=?", (s["b_bm"],)).fetchone()["status"]
+        db.close()
+        assert st != "banned"
+
+    def test_dev_can_update_others_bm(self, client):
+        """跨用户角色（CROSS_USER_ROLES）放行腿 —— 与 pixel 族口径一致。"""
+        s = self._seed(client, "t_fbbmdev")
+        hdr = _dev_headers(client, "t_fbbmdev")
+        resp = client.put(f"/api/fb/bms/{s['b_bm']}", json={"name": "运维改名"}, headers=hdr)
+        assert resp.status_code == 200
+
+
+class TestFbProductOwnershipClosure:
+    """HANDOFF §8.5 第 1 条：`fb_products` / `fb_lines` 族补齐归属校验。"""
+
+    # ---------------- 产品写 ----------------
+
+    def test_user_cannot_update_others_product(self, client):
+        s = _seed_two_product_owners(client, "t_fbppupd")
+        resp = client.put(f"/api/fb/products/{s['b_prod']}",
+                          json={"product_name": "被改名"}, headers=s["a_hdr"])
+        assert resp.status_code == 403
+        assert _prod_name(s["b_prod"]) == "t_fbppupd-B产品"
+
+    def test_user_can_update_own_product(self, client):
+        s = _seed_two_product_owners(client, "t_fbppupd_ok")
+        resp = client.put(f"/api/fb/products/{s['a_prod']}",
+                          json={"product_name": "我改了"}, headers=s["a_hdr"])
+        assert resp.status_code == 200
+        assert _prod_name(s["a_prod"]) == "我改了"
+
+    def test_runner_can_update_product(self, client):
+        """**并集轴的关键腿**：在跑人员不是创建人，但 `list_products` 让他看得见 ⇒ 也要能改。
+
+        可证伪：若只按 owner_id 收口（不取并集），此用例变 403 ⇒ 变红。
+        """
+        s = _seed_two_product_owners(client, "t_fbpprun")
+        db = database.get_db()
+        db.execute("INSERT OR IGNORE INTO fb_product_runners(product_id, user_id) VALUES(?,?)",
+                   (s["a_prod"], s["b_id"]))
+        db.commit()
+        db.close()
+        resp = client.put(f"/api/fb/products/{s['a_prod']}",
+                          json={"product_name": "在跑人员改的"}, headers=s["b_hdr"])
+        assert resp.status_code == 200
+        assert _prod_name(s["a_prod"]) == "在跑人员改的"
+
+    def test_runner_can_relink_product_owner_bm(self, client):
+        """**防过度收口的回归腿**：在跑人员不是创建人，产品上的 BM 属于创建人。
+
+        若把 `bm_ids` 的判据写成「BM 必须是自己的」（漏掉「或产品创建人的」），
+        这条会变 403 —— 即在跑人员的正常编辑被自己的闸门打死。
+        """
+        s = _seed_two_product_owners(client, "t_fbrunbm")
+        db = database.get_db()
+        a_bm = _mk_fb_bm(db, s["a_id"], "t_fbrunbm-A-BM", "A的BM")
+        db.execute("INSERT OR IGNORE INTO fb_product_runners(product_id, user_id) VALUES(?,?)",
+                   (s["a_prod"], s["b_id"]))
+        db.commit()
+        db.close()
+        resp = client.put(f"/api/fb/products/{s['a_prod']}",
+                          json={"product_name": "t_fbrunbm-A产品", "bm_ids": [a_bm]},
+                          headers=s["b_hdr"])
+        assert resp.status_code == 200
+
+    def test_user_cannot_delete_others_product(self, client):
+        s = _seed_two_product_owners(client, "t_fbppdel")
+        resp = client.delete(f"/api/fb/products/{s['b_prod']}", headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        arch = db.execute("SELECT is_archived FROM fb_products WHERE id=?", (s["b_prod"],)).fetchone()[0]
+        db.close()
+        assert arch == 0
+
+    def test_user_cannot_restore_others_product(self, client):
+        s = _seed_two_product_owners(client, "t_fbppres")
+        db = database.get_db()
+        db.execute("UPDATE fb_products SET is_archived=1 WHERE id=?", (s["b_prod"],))
+        db.commit()
+        db.close()
+        resp = client.post(f"/api/fb/products/{s['b_prod']}/restore", headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        arch = db.execute("SELECT is_archived FROM fb_products WHERE id=?", (s["b_prod"],)).fetchone()[0]
+        db.close()
+        assert arch == 1
+
+    # ---------------- 产品读（间接绕过的一半） ----------------
+
+    def test_user_cannot_read_others_product_detail(self, client):
+        """`product_detail` 原本回任意产品的完整树（含像素名/外部号）。"""
+        s = _seed_two_product_owners(client, "t_fbppdet")
+        resp = client.get(f"/api/fb/products/{s['b_prod']}/detail", headers=s["a_hdr"])
+        assert resp.status_code == 403
+
+    def test_user_can_read_own_product_detail(self, client):
+        s = _seed_two_product_owners(client, "t_fbppdet_ok")
+        resp = client.get(f"/api/fb/products/{s['a_prod']}/detail", headers=s["a_hdr"])
+        assert resp.status_code == 200
+        assert resp.get_json()["id"] == s["a_prod"]
+
+    # ---------------- 线 ----------------
+
+    def test_user_cannot_add_line_to_others_product(self, client):
+        s = _seed_two_product_owners(client, "t_fblineadd")
+        resp = client.post(f"/api/fb/products/{s['b_prod']}/lines",
+                           json={"line_name": "偷加线"}, headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM fb_lines WHERE product_id=? AND line_name='偷加线'",
+                       (s["b_prod"],)).fetchone()[0]
+        db.close()
+        assert n == 0
+
+    def test_user_cannot_update_others_line(self, client):
+        s = _seed_two_product_owners(client, "t_fblineupd")
+        resp = client.put(f"/api/fb/lines/{s['b_line']}",
+                          json={"line_name": "被改名"}, headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        name = db.execute("SELECT line_name FROM fb_lines WHERE id=?", (s["b_line"],)).fetchone()["line_name"]
+        db.close()
+        assert name == "t_fblineupd-B线"
+
+    def test_user_cannot_delete_others_line(self, client):
+        s = _seed_two_product_owners(client, "t_fblinedel")
+        resp = client.delete(f"/api/fb/lines/{s['b_line']}", headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM fb_lines WHERE id=?", (s["b_line"],)).fetchone()[0]
+        db.close()
+        assert n == 1
+
+    # ---------------- 借道（§8.5 第 1 条的间接绕过） ----------------
+
+    def test_line_cannot_point_at_others_pixel(self, client):
+        """**间接绕过守卫。** 给自己的产品写**他人**的 pixel_id，再读产品列表即可
+        经 `LEFT JOIN fb_pixels` 拿回他人像素名与外部号。
+
+        可证伪：不校验 pixel 归属时写入成功 ⇒ 403 断言失败；且 JOIN 后确实能读到
+        B 的像素名（下方第二段断言证明这条链真的通）。
+        """
+        s = _seed_two_product_owners(client, "t_fbpxsteal")
+        resp = client.post(f"/api/fb/products/{s['a_prod']}/lines",
+                           json={"line_name": "借道", "pixel_id": s["b_px"]}, headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM fb_lines WHERE product_id=? AND pixel_id=?",
+                       (s["a_prod"], s["b_px"])).fetchone()[0]
+        db.close()
+        assert n == 0
+
+    def test_line_can_point_at_own_pixel(self, client):
+        """防过度收口：指向自己的像素必须能写，且列表里读得到自己的像素名。"""
+        s = _seed_two_product_owners(client, "t_fbpxown")
+        resp = client.post(f"/api/fb/products/{s['a_prod']}/lines",
+                           json={"line_name": "自己的", "pixel_id": s["a_px"]}, headers=s["a_hdr"])
+        assert resp.status_code == 200
+        body = client.get(f"/api/fb/products/{s['a_prod']}/detail", headers=s["a_hdr"]).get_json()
+        got = [li.get("pixel_name") for li in body["lines"] if li["line_name"] == "自己的"]
+        assert got == ["A的像素"]
+
+    def test_dev_can_update_others_product(self, client):
+        s = _seed_two_product_owners(client, "t_fbppdev")
+        hdr = _dev_headers(client, "t_fbppdev")
+        resp = client.put(f"/api/fb/products/{s['b_prod']}",
+                          json={"product_name": "运维改名"}, headers=hdr)
+        assert resp.status_code == 200
+        assert _prod_name(s["b_prod"]) == "运维改名"
+
+    # ---------------- 数组入口（同一族的第二个口子） ----------------
+
+    def test_create_product_cannot_link_others_bm(self, client):
+        """`bm_ids` 是**借道的第二条腿**：把他人 BM 链进自己的产品后，
+        `product_detail` 的 `JOIN fb_bms` 会回出他人 BM 的名字与 bm_id。
+
+        可证伪：不校验 BM 归属时创建成功、且 detail 里确实出现 B 的 BM ⇒ 变红。
+        """
+        s = _seed_two_product_owners(client, "t_fbmsteal")
+        db = database.get_db()
+        b_bm = _mk_fb_bm(db, s["b_id"], "t_fbmsteal-B-BM", "B的BM")
+        db.close()
+        resp = client.post("/api/fb/products/create",
+                           json={"product_name": "借道BM", "bm_ids": [b_bm]},
+                           headers=s["a_hdr"])
+        assert resp.status_code == 403
+        assert _prod_name_by_name("借道BM") is None   # 整个创建被拒，不留半个产品
+
+    def test_update_product_lines_cannot_point_at_others_pixel(self, client):
+        """`lines` 数组是像素借道的第二个入口（`add_line` 之外）。"""
+        s = _seed_two_product_owners(client, "t_fbarrpx")
+        resp = client.put(f"/api/fb/products/{s['a_prod']}",
+                          json={"product_name": "t_fbarrpx-A产品",
+                                "lines": [{"line_name": "数组借道", "pixel_id": s["b_px"]}]},
+                          headers=s["a_hdr"])
+        assert resp.status_code == 403
+        db = database.get_db()
+        n = db.execute("SELECT COUNT(*) FROM fb_lines WHERE product_id=? AND pixel_id=?",
+                       (s["a_prod"], s["b_px"])).fetchone()[0]
+        db.close()
+        assert n == 0
