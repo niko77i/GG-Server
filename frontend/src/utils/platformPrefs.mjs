@@ -1,13 +1,17 @@
-// 平台上下文（GG / TT / FB）的判据 —— 纯逻辑，供 node --test 覆盖，并供 **store 与 api 层共用**。
+// 平台上下文（GG / TT / FB）的判据 —— 纯逻辑，供 node --test 覆盖。
 //
 // 为什么单独成模块：store 依赖 pinia 与 localStorage、api/client.js 依赖 axios，在 node 里都跑不动；
-// 而真正需要被钉住的判据（路径→平台、白名单回落、按角色归一）都是纯函数。
+// 而真正需要被钉住的判据都是纯函数。
 //
-// 背景（2026-10-11 修的 bug）：`currentPlatform` 原先只活在内存里（初值硬编码 'gg'、setPlatform 不落盘、
-// initFromStorage 不恢复）⇒ **整页刷新后，可切换平台的角色（户管/开发者）会静默掉回 GG**，
-// 而页面还在刷新前那张表 ⇒ 侧边栏、导航、路由守卫、筛选器全按 GG 算：看着是 TT、实际是 GG。
-// 另一条相关事实：**请求侧的平台**一直是从 URL 推的（见 api/client.js）——两处口径必须一致，
-// 否则就会出现「数据是 TT、导航是 GG」这种割裂。
+// **两个信号别混用**（2026-10-11 修 bug 时踩过）：
+//   - `platformFromPath`  —— **请求层**的规则：请求总得带一个平台，所以"其余一律 gg"是对的默认。
+//   - `platformFamily`    —— **store（侧边栏/导航）**的规则：只认路由**自己声明**的平台族。
+//     路由没声明（`/profile`、`/analysis`、`/toolkit/*`、`/admin/*`）就必须返回 null，
+//     否则 TT/FB 的用户点「个人信息」「数据分析」会被**连平台一起按回 GG**（刷新还会丢平台）。
+//
+// 背景：`currentPlatform` 原先只活在内存里（初值硬编码 'gg'、setPlatform 不落盘、initFromStorage
+// 不恢复）⇒ 整页刷新后，可切换平台的角色（户管/开发者）会静默掉回 GG，而页面还在刷新前那张表
+// ⇒ 侧边栏、导航、路由守卫、筛选器全按 GG 算：看着是 TT、实际是 GG。
 export const PLATFORMS = ['gg', 'tt', 'fb']
 
 /** localStorage 的键名（与 store 共用一个常量，避免两边写错字符串）。 */
@@ -19,17 +23,14 @@ export function sanitizePlatform(value) {
 }
 
 /**
- * 路径 → 平台；**路由没有"意见"时返回 null**，由调用方决定兜底（而不是硬按一个平台上去）。
+ * **请求层**用：路径 → 该请求该带的 platform 参数；`/admin/users`（有独立平台 Tab）返回 null
+ * 表示"不带该参数"。其余路径一律落到 'gg' —— 请求侧必须有个默认值，这是刻意的。
+ * 与 `api/client.js` 改动前的内联写法**逐字等价**。
  *
- * 这是**唯一一份**路径推导规则，`api/client.js`（请求参数）与 store（侧边栏/导航）共用。
- * ⚠️ `/admin/users` 必须返回 null：用户管理页有自己的平台 Tab 显式控制平台，按路径推断会把它
- * 误判成 gg，导致该页的「全部」看不到其它平台（该页的历史 bug，见 api/client.js 的注释）。
- * ⚠️ 空路径 / 根路径也返回 null：首帧路由尚未解析、根路径会重定向到平台首页，此时按 gg 会**凭空**
- * 把平台按到 GG 上。
+ * ⚠️ **不要**拿它当 store 的平台权威（见文件头）：`/profile`、`/analysis` 这类中性页会被它判成 gg。
  */
 export function platformFromPath(path) {
   const p = String(path || '')
-  if (!p || p === '/') return null
   if (p.startsWith('/admin/users')) return null
   if (p.startsWith('/tt')) return 'tt'
   if (p.startsWith('/fb')) return 'fb'
@@ -37,14 +38,24 @@ export function platformFromPath(path) {
 }
 
 /**
- * 平台优先级的**唯一权威**：非切换角色取账号自带平台；可切换角色则 **路由 > 存储 > 'gg'**。
+ * **store 用**：路由的**平台族**信号，来自 `to.meta.platform`（路由自己的声明）。
+ * 路由没声明平台 ⇒ **返回 null = "路由没有意见"**，此时平台保持不变（不动、更不落盘）。
  *
- * - **非切换角色**（admin / viewer / user）：平台由账号决定（与 store 的 `effectivePlatform` 同一口径），
- *   **无视存储与路由**。理由是同一浏览器换号时存储里可能还留着上一个人的平台。
- * - **可切换角色**（户管 / 开发者）：路由说了算（切平台本来就是导航）；路由没意见时用存下来的值
- *   —— 这正是本 bug 要修的：刷新不该改变你正在看的平台。
+ * 这正是中性路由（`/profile`、`/analysis`、`/toolkit/*`、`/admin/*`）必须走的那条：
+ * 它们可能从任意平台的导航里点进来，把平台按成某个固定值就是回归（2026-10-11 代码审查抓到）。
  */
-export function resolvePlatform({ stored, routePath, canSwitch, userPlatform }) {
-  if (!canSwitch) return sanitizePlatform(userPlatform)
-  return platformFromPath(routePath) || sanitizePlatform(stored)
+export function platformFamily(metaPlatform) {
+  return PLATFORMS.includes(metaPlatform) ? metaPlatform : null
+}
+
+/**
+ * 水合（刷新后 / 换号后）时的平台，**唯一权威**：
+ * 可切换角色用存下来的值（刷新不该改变你正在看的平台）；其余角色一律取 `user.platform`，
+ * **无视存储**（同一浏览器换号时存储里可能还留着上一个人的平台）。
+ *
+ * 路由不在这个函数里：它经 `router.afterEach` → `syncPlatformFromRoute` 单独校正，
+ * 因为首帧导航是异步的（守卫经微任务），水合这一刻路由还没解析。
+ */
+export function resolvePlatform({ stored, canSwitch, userPlatform }) {
+  return canSwitch ? sanitizePlatform(stored) : sanitizePlatform(userPlatform)
 }

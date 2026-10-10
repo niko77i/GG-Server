@@ -9,9 +9,11 @@ api.interceptors.request.use(config => {
     config.headers.Authorization = 'Bearer ' + token
   }
   // 跨平台角色（developer / 户管）请求时传递 platform 参数。
-  // 推导规则与 store（侧边栏/导航）**共用同一份**（`utils/platformPrefs.mjs`）—— 两处口径必须一致，
-  // 否则会出现「数据是 TT、导航是 GG」这种割裂（2026-10-11 修）。路由"没有意见"（null：/admin/users、
-  // 首帧未解析、根路径）时不带该参数，绝不凭空按 GG。
+  // 规则抽到 `utils/platformPrefs.mjs` 的 `platformFromPath`（**请求层**专用：请求总得带一个平台，
+  // 所以"其余一律 gg"是刻意的默认）；`/admin/users` 返回 null ⇒ 不带该参数
+  //（该页有自己的平台 Tab，带 gg 会让「全部」看不到其它平台）。
+  // ⚠️ store（侧边栏/导航）**不用**这条规则，它认 `to.meta.platform`（见 platformFamily）——
+  // 按路径推会把 /profile、/analysis 这类中性页按成 gg（2026-10-11 审查抓到）。
   try {
     const user = JSON.parse(localStorage.getItem('user') || '{}')
     if (['developer', 'huguan'].includes(user.role)) {
