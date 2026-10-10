@@ -1907,6 +1907,17 @@ def extract_parse():
 @fb_required
 def extract_save():
     db = get_db()
+    uid = get_uid()
+    # 角色守卫（2026-10-11，Task 3 审查 🔴）：本端点是 FB 侧**另一条**写入
+    # `fb_ad_reports` 的路径（「数据提取」页的新增 / 回填），不在数据管理页的七端点
+    # 清单里，但同属「写 FB 报表数据」⇒ 同样受设计 §3 的角色矩阵约束。
+    # 户管与管理员是只读角色：户管只能改「消耗」、管理员一律不可写。
+    # 户管的这条守卫与**既有**前端意图一致（`router/index.js` 本来就把户管从
+    # `/fb/extract` 弹走），不是新限制。developer 与普通 user 不受影响 ——
+    # 后者写的 `user_id` 恒为自己（`ON CONFLICT` 键含 `user_id`）。
+    _role = _get_role(db, uid)
+    if _role in REPORT_COST_ONLY_ROLES or _role == "admin":
+        return err("无权限：只读角色不可写入数据", 403)
     data = parse_body()
     product_name = data.get('product_name', '').strip()
     line_name = data.get('line_name', '')
@@ -1916,7 +1927,6 @@ def extract_save():
     if not product_name or not records:
         return err('产品名和数据不能为空', 400)
 
-    uid = get_uid()
     try:
         for rec in records:
             db.execute(
@@ -2245,10 +2255,13 @@ def update_report(rid):
     # 校验放在动数据库之前，避免「先写后拒」。
     _role = _get_role(db, uid)
     _editable = report_editable_fields(_role) if _role in REPORT_VIEW_ALL_ROLES else None
-    if _editable is not None and not set(data.keys()) <= _editable:
-        return err("无权限：仅可修改消耗", 403)
+    # ⚠️ 「只读」必须先于「白名单子集」判定：admin 的 `_editable` 是**空集**，
+    # 空集的任何非空子集判断都为假 ⇒ 顺序反了会把「管理员只读」误报成「仅可修改消耗」
+    # （状态码同为 403，但文案指错了限制）（2026-10-11，Task 3 审查 💭）。
     if _editable == set():
         return err("无权限：只读角色不可修改数据", 403)
+    if _editable is not None and not set(data.keys()) <= _editable:
+        return err("无权限：仅可修改消耗", 403)
     # 归属校验（隔离轴是 `user_id`，非 owner_id —— 口径同 list_reports / reports_stats
     # 的 `WHERE user_id = ?`）：非跨用户角色只能改**自己**的做表数据。
     # 行不存在时不拦，保持既有「UPDATE 0 行仍返回 200」的行为。

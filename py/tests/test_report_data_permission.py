@@ -123,3 +123,67 @@ def test_fb_export_allowed_for_cross_user(client, fb_three):
     for who in ("admin", "huguan"):
         h, _, _ = fb_three[who]
         assert client.get("/api/fb/reports/export", headers=h).status_code == 200, who
+
+
+# ---------- FB：审查收口（2026-10-11，Task 3 审查 🔴 / 🟡） ----------
+
+_EXTRACT_PAYLOAD = {
+    "product_name": "P1", "line_name": "L1", "report_date": "2026-10-01",
+    "records": [{"account_name": "n", "account_id": "x1", "cost": 1}],
+}
+
+
+def _fb_report_count():
+    db = database.get_db()
+    n = db.execute("SELECT COUNT(*) FROM fb_ad_reports").fetchone()[0]
+    db.close()
+    return n
+
+
+@pytest.mark.parametrize("who", ["huguan", "admin"])
+def test_fb_extract_save_rejects_readonly_roles(client, fb_three, who):
+    """**审查 🔴**：`/api/fb/extract/save` 是 FB 侧**另一条**写 `fb_ad_reports` 的路径
+    （「数据提取」页的新增 / 回填）。它的装饰器只过平台门禁、不判角色 ——
+    户管与 FB 管理员曾能直接 200 新增行并写全字段（实测复现）。
+    它与数据管理页同属「写 FB 报表数据」，同受设计 §3 矩阵约束 ⇒ 只读角色 403。
+    """
+    h, _, _ = fb_three[who]
+    before = _fb_report_count()
+    r = client.post("/api/fb/extract/save", json=_EXTRACT_PAYLOAD, headers=h)
+    assert r.status_code == 403, r.get_data(as_text=True)[:300]
+    assert _fb_report_count() == before, "被拒的请求不得落库（守卫须在 INSERT 之前）"
+
+
+def test_fb_extract_save_still_allows_plain_user(client, fb_three, monkeypatch):
+    """回归：普通 user 用数据提取页保存**自己名下**的数据不受影响（收窄不得误伤）。"""
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "upsert_fb_reports", lambda *a, **k: None)
+    h, _, _ = fb_three["user"]
+    r = client.post("/api/fb/extract/save", json=_EXTRACT_PAYLOAD, headers=h)
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+
+
+def test_fb_stats_owner_filter_cannot_widen_plain_user(client, fb_three):
+    """**审查 🟡**：stats 也钉住「普通 user 传他人 `user_id` 仍只见自己」。
+
+    三条夹具的 (产品, 线, 日期) 完全相同 ⇒ 越权成功的话会聚成一行、total_cost=66.0；
+    被正确收窄则只有自己那行、total_cost=11.0。两者可判别。
+    """
+    h, _, _ = fb_three["user"]
+    _, hug_uid, _ = fb_three["huguan"]
+    r = client.get("/api/fb/reports/stats", headers=h, query_string={"user_id": hug_uid})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    rows = r.get_json()["data"]
+    assert len(rows) == 1, f"只该看到自己那一行，实际 {rows}"
+    assert rows[0]["total_cost"] == 11.0, f"聚合值不得含他人行：{rows}"
+
+
+def test_fb_export_owner_filter_cannot_widen_plain_user(client, fb_three):
+    """**审查 🟡**：export 也钉住同一条硬约束（CSV 正文不得出现他人那行）。"""
+    h, _, _ = fb_three["user"]
+    _, hug_uid, _ = fb_three["huguan"]
+    r = client.get("/api/fb/reports/export", headers=h, query_string={"user_id": hug_uid})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    body = r.get_data(as_text=True)
+    assert "u1" in body, "自己那行（account_id=u1）必须在导出里"
+    assert "g1" not in body, "他人那行（account_id=g1）不得出现"
