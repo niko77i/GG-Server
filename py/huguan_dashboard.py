@@ -200,39 +200,64 @@ def describe_header_columns(headers: list, overrides: dict,
                             col_map: dict, unmatched: list) -> list:
     """把一次表头解析的结果摊成「逐列一行」，供前端列映射 UI 显示（设计 §3.1）。
 
-    每项：{"header": strip 后的表头原文, "field": 字段key | "" | None, "via": 四档}
+    每项：{"header": strip 后的表头原文, "field": 字段key | "" | None, "via": 四档,
+           "alias_field": 字段key | "" | None}
 
       via = "override" 该表手工指派 / "alias" 别名自动认出 /
             "ignored" 认识但刻意不采集（目录哨兵「位置」，或覆盖值为空串）/
             "none" 该列没被采集到任何字段（完全不认识，**或识别到了但落选**——如同表头重复的后一个）
       field = "" 只与 "ignored" 同现；field = None 只与 "none" 同现。
+      alias_field = **去掉手工覆盖后**这一列会被别名单独认成什么（同 field 的三值约定）：
+        字段key 别名能认出 / "" 别名说刻意不采集（目录哨兵「位置」）/ None 别名不认识。
+        前端「改回自动」的落点取它是**必要的**：override 行的 field 就是那条覆盖本身，
+        若拿 field 当「自动值」，用户「改一下又改回原值」会被误判成「改回自动」而静默删掉覆盖（I1）。
 
-    **不重新解析**：全部从 resolve_column_map 的三个产出（col_map / unmatched / overrides）
-    反推，避免第二套「认列」逻辑（那是本批最容易漂的地方）。空表头列不列出
-    —— 与 resolve_column_map 的跳过口径一致。
+    **不重新解析**：主结果全部从 resolve_column_map 的三个产出（col_map / unmatched / overrides）
+    反推，避免第二套「认列」逻辑（那是本批最容易漂的地方）；alias_field 另调一次同一个
+    `resolve_column_map(headers, {})`（＝「无覆盖」的解析），判据与主解析逐行同款
+    （缺席 ⟺ 未识别 → None；在场且非空 ⟺ 别名档；在场且空 ⟺ 哨兵档）。
+    空表头列不列出 —— 与 resolve_column_map 的跳过口径一致。
     """
     field_by_letter = {col: field for field, col in col_map.items()}
     ov = overrides or {}
     unknown = set(unmatched)
+    # 别名单独（无覆盖）的解析：只回答「这列去掉覆盖会是什么」，不是第二套认列逻辑。
+    alias_map, alias_unmatched = resolve_column_map(headers, {})
+    alias_by_letter = {col: field for field, col in alias_map.items()}
+    alias_unknown = set(alias_unmatched)
+
+    def _alias_field(i: int, name: str):
+        """这一列别名单独会认成什么：与主解析同款判据（不看 via）。"""
+        f = alias_by_letter.get(_col_letter(i))
+        if f is None:
+            # 别名 col_map 里没有这一列：不认识 ⇒ None；否则是哨兵（刻意不采集）⇒ ""
+            return None if name in alias_unknown else ""
+        return f
+
     rows = []
     for i, raw in enumerate(headers):
         name = ("" if raw is None else str(raw)).strip()
         if not name:
             continue
+        alias_field = _alias_field(i, name)
         if name in ov and ov[name] == "":
             # 覆盖空串：认识但刻意不采集（占用该列，不在 col_map 里）
-            rows.append({"header": name, "field": "", "via": "ignored"})
+            rows.append({"header": name, "field": "", "via": "ignored",
+                         "alias_field": alias_field})
             continue
         field = field_by_letter.get(_col_letter(i))
         if field is None:
             # 该列没进 col_map：要么根本不认识（在 unmatched 里），要么是目录哨兵那一档
             if name in unknown:
-                rows.append({"header": name, "field": None, "via": "none"})
+                rows.append({"header": name, "field": None, "via": "none",
+                             "alias_field": alias_field})
             else:
-                rows.append({"header": name, "field": "", "via": "ignored"})
+                rows.append({"header": name, "field": "", "via": "ignored",
+                             "alias_field": alias_field})
             continue
         via = "override" if ov.get(name) == field else "alias"
-        rows.append({"header": name, "field": field, "via": via})
+        rows.append({"header": name, "field": field, "via": via,
+                     "alias_field": alias_field})
     return rows
 
 

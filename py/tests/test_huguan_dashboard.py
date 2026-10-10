@@ -5409,16 +5409,19 @@ class TestDescribeHeaderColumns:
     def test_alias_and_ignored_and_none_are_distinguished(self):
         rows, _u = self._describe(["账户ID", "位置", "备注二"], {})
         assert rows == [
-            {"header": "账户ID", "field": "advertiser_id", "via": "alias"},
-            {"header": "位置", "field": "", "via": "ignored"},
-            {"header": "备注二", "field": None, "via": "none"},
+            {"header": "账户ID", "field": "advertiser_id", "via": "alias",
+             "alias_field": "advertiser_id"},
+            {"header": "位置", "field": "", "via": "ignored", "alias_field": ""},
+            {"header": "备注二", "field": None, "via": "none", "alias_field": None},
         ]
 
     def test_override_reported_as_override_and_empty_override_as_ignored(self):
         rows, _u = self._describe(["账户ID", "负责人", "备注二"],
                                   {"负责人": "owner_name", "备注二": ""})
-        assert rows[1] == {"header": "负责人", "field": "owner_name", "via": "override"}
-        assert rows[2] == {"header": "备注二", "field": "", "via": "ignored"}
+        assert rows[1] == {"header": "负责人", "field": "owner_name", "via": "override",
+                           "alias_field": None}
+        assert rows[2] == {"header": "备注二", "field": "", "via": "ignored",
+                           "alias_field": None}
 
     def test_duplicate_header_loser_is_reported_as_none(self):
         """同表头出现两次：后一个落选 ⇒ 报 none（规范只有四档，没有「落选」档）。"""
@@ -5426,6 +5429,8 @@ class TestDescribeHeaderColumns:
         assert unmatched == ["账户ID"]
         assert [r["via"] for r in rows] == ["alias", "none"]
         assert rows[1]["field"] is None
+        # 落选列别名也不认（它本就没进别名 col_map）⇒ alias_field 为 None。
+        assert [r["alias_field"] for r in rows] == ["advertiser_id", None]
 
     def test_blank_headers_are_skipped(self):
         rows, _u = self._describe(["账户ID", "", "  "], {})
@@ -5436,6 +5441,44 @@ class TestDescribeHeaderColumns:
         assert unmatched == []
         assert [r["via"] for r in rows] == ["alias"] * len(self.ENTERPRISE)
         assert [r["field"] for r in rows][:3] == ["acquired_date", "_dead_flag", "advertiser_id"]
+        # 零覆盖时别名目标就是当前值。
+        assert [r["alias_field"] for r in rows] == [r["field"] for r in rows]
+
+    # ----- alias_field：别名单独会把这一列认成什么（前端「改回自动」的落点） -----
+
+    def test_alias_field_keeps_alias_target_while_field_is_the_override(self):
+        """覆盖指向的字段**不同于**别名会自动给的那个 ⇒ field=覆盖值，alias_field=别名目标。
+
+        这正是 I1 的数据形状：override 行的 field 是覆盖本身，不能拿它当「自动值」。
+        「日期」别名会自动认成入库时间（acquired_date），这里被手工改指到 remark。
+        """
+        rows, _u = self._describe(["账户ID", "日期"], {"日期": "remark"})
+        b = rows[1]
+        assert b["header"] == "日期"
+        assert b["field"] == "remark" and b["via"] == "override"
+        assert b["alias_field"] == "acquired_date", "别名单独仍会认成入库时间"
+
+    def test_alias_field_is_none_when_alias_does_not_recognize(self):
+        """别名根本不认识的表头（如「备注二」）被手工指派 ⇒ alias_field 为 None
+        （＝去掉覆盖会回落「未采集」）。"""
+        rows, _u = self._describe(["账户ID", "备注二"], {"备注二": "remark"})
+        assert rows[1] == {"header": "备注二", "field": "remark", "via": "override",
+                           "alias_field": None}
+
+    def test_alias_field_empty_for_the_catalog_sentinel(self):
+        """目录哨兵「位置」：别名单独也会说「刻意不采集」⇒ alias_field == ""。"""
+        rows, _u = self._describe(["账户ID", "位置"], {})
+        assert rows[1]["alias_field"] == ""
+
+    def test_alias_field_is_kept_for_empty_string_override(self):
+        """空串覆盖（刻意不采集）压在别名认得的列上：field="" 但 alias_field=别名目标。
+
+        前端据此把「改回别名目标」判成真正回到自动（撤掉空串覆盖）。
+        """
+        rows, _u = self._describe(["账户ID", "日期"], {"日期": ""})
+        b = rows[1]
+        assert b["field"] == "" and b["via"] == "ignored"
+        assert b["alias_field"] == "acquired_date"
 
 
 class TestFieldCatalogExposure:
@@ -6127,10 +6170,12 @@ class TestSheetHeadersEndpoint:
         res = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
                          query_string={"platform": "tt", "sheet_name": "企业户"}).get_json()
         assert res["columns"] == [
-            {"header": "账户ID", "field": "advertiser_id", "via": "alias"},
-            {"header": "备注二", "field": "remark", "via": "override"},
-            {"header": "位置", "field": "", "via": "ignored"},
-            {"header": "陌生列", "field": None, "via": "none"},
+            {"header": "账户ID", "field": "advertiser_id", "via": "alias",
+             "alias_field": "advertiser_id"},
+            {"header": "备注二", "field": "remark", "via": "override",
+             "alias_field": None},
+            {"header": "位置", "field": "", "via": "ignored", "alias_field": ""},
+            {"header": "陌生列", "field": None, "via": "none", "alias_field": None},
         ]
         assert res["unmatched"] == ["陌生列"]
 
