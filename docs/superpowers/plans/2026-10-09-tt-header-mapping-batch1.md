@@ -101,11 +101,17 @@ class TestResolveColumnMap:
         m, _u = hd.resolve_column_map(["账户ID", "日期"], {"日期": "remark"})
         assert m["remark"] == "B" and "acquired_date" not in m
 
-    def test_duplicate_field_takes_leftmost_and_reports(self):
-        """两列都叫「日期」→ 取最左，另一个记未采集（不静默）。"""
+    def test_duplicate_field_takes_leftmost_without_reporting(self):
+        """两列都叫「日期」→ 取最左那列，后一个**不报未采集**。
+
+        同名表头的后一个输给的只是**它自己这个名字**：`columns` 按表头名存键，用户按名字指派
+        也只能认领最左那列 ⇒ 报它＝每条同步报告都挂一行**永远解不掉**的未采集（永久噪音，
+        与「位置」哨兵同款的陷阱，会把「未采集」这个信号训练成被忽略）。
+        （2026-10-10 用户验收时裁定改为不报；本文档此处已同步。）
+        """
         m, unmatched = hd.resolve_column_map(["账户ID", "日期", "日期"], {})
         assert m["acquired_date"] == "B"
-        assert unmatched == ["日期"]
+        assert unmatched == [], f"同名后一个不该报未采集，实际={unmatched}"
 
     def test_recognized_but_ignored_header_is_not_reported(self):
         """「位置」是**认识但刻意不采集**的列：既不映射、也不进未采集列表。
@@ -187,7 +193,8 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
     优先级：**手工覆盖 > 别名自动匹配 > 不采集**（设计 §4.2）。
 
     - 表头文本 strip() 后匹配；空表头跳过。
-    - 多列命中同一字段 ⇒ 取**最左**那列，其余记入未采集（不静默）。
+    - 多列命中同一字段 ⇒ 取**最左**那列；**同名重复**的后一个既不采集也**不上报**（它输给的只是
+      它自己这个名字，用户按名字指派也只能认领最左列 ⇒ 报它就是永久噪音）；不同名的真冲突仍上报。
     - 覆盖指向的字段key 非法 ⇒ 忽略该条并记入未采集（校验已在 HTTP 层拦，这里是纵深防御）。
     返回的未采集列表保留表头原文（strip 后），供前端逐条显示与指派。
     """
