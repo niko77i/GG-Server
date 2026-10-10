@@ -254,4 +254,5 @@ FB（花费看板）
 - 空状态：`AnalysisView.vue` TT 分支 `<div v-if="analysisPlatform === 'tt'">`
 - 指标卡 / 表 / 折线：FB 分支 `<template v-else-if="analysisPlatform === 'fb'">`
 - **筛选栏的可见性也是本次的视觉决策**：TT 整页无数据 ⇒ 连筛选控件都不渲染（否则日期选择器 / 刷新按钮会打到 `/ad-reports/*`）；FB 无 `region` 字段 ⇒ 只去掉地区筛选。GG 的筛选栏一字未改。
-- 与简报字面的一处**有意偏离**：简报给出的数值插值是 `row.total_cost.toLocaleString()`（无兜底）。因 `SUM()` 在整组为 NULL 时返回 `NULL`，直接调用会抛 `TypeError` 并**整页白屏**。实现改为本页既有 idiom `(x || 0).toLocaleString()`，数据正常时渲染结果完全一致。
+- 与简报字面的一处**有意偏离（纯风格，非修 bug）**：简报给出的数值插值是 `row.total_cost.toLocaleString()`（无兜底），实现改为本页既有 idiom `(x || 0).toLocaleString()`，与 GG 分支的写法保持一致，**数据正常时渲染结果完全相同**。
+  > 更正（2026-10-11 复审）：早先此处写成「`SUM()` 返回 NULL 会白屏」，**对本端点不成立** —— FB 端点的每个聚合量都做了 `COALESCE(...,0)`（`py/routes/fb_routes.py:2414-2420`、`:2429-2431`），`total_cost` 不可能为 NULL。保留 `(x || 0)` 的理由只是**与本页 idiom 统一**，不是防御真实存在的 NULL。

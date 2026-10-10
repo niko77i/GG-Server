@@ -537,35 +537,47 @@ const FB_TABLE_LIMIT = 200
 const fbByLineTop = computed(() => fbByLine.value.slice(0, FB_TABLE_LIMIT))
 
 async function loadFbDashboard() {
-  // filterParams()（本文件 :581）的参数名与 Task 1 的端点口径是同一套，
-  // 故直接复用，不另写一套筛选。
-  const res = await fbApi.analysisDashboard(filterParams())
-  fbSummary.value = res.summary || fbSummary.value
-  fbByLine.value = res.by_line || []
-  // FB 没有 /ad-reports/list 那种产品清单接口；产品下拉直接取 FB 分析返回的
-  // by_product（键为 product_name），避免 FB 页跨平台去取 GG 的产品列表。
-  if (!filterProducts.value.length && Array.isArray(res.by_product)) {
-    filterProducts.value = res.by_product.map(p => ({ name: p.product_name, label: p.product_name }))
+  try {
+    // filterParams()（本文件 :581）的参数名与 Task 1 的端点口径是同一套，
+    // 故直接复用，不另写一套筛选。
+    const res = await fbApi.analysisDashboard(filterParams())
+    fbSummary.value = res.summary || fbSummary.value
+    fbByLine.value = res.by_line || []
+    // FB 没有 /ad-reports/list 那种产品清单接口；产品下拉直接取 FB 分析返回的
+    // by_product（键为 product_name），避免 FB 页跨平台去取 GG 的产品列表。
+    // 与表格同一上限一起 slice（同族缺陷：无上限数组直通重组件）。
+    if (!filterProducts.value.length && Array.isArray(res.by_product)) {
+      filterProducts.value = res.by_product.slice(0, FB_TABLE_LIMIT)
+        .map(p => ({ name: p.product_name, label: p.product_name }))
+    }
+  } catch (e) {
+    // 本文件其它取数函数都有 catch；FB 端点 401/403/500 时不能静默停在零值。
+    ElMessage.error('FB 分析数据加载失败：' + (e.message || ''))
   }
 }
 
 async function loadFbTrends() {
-  const res = await fbApi.analysisTrends(filterParams())
-  fbTrendPoints.value = res.points || []
-  await nextTick()
-  if (!fbTrendChart.value || !fbTrendPoints.value.length) return
-  if (fbChart) fbChart.dispose()
-  fbChart = echarts.init(fbTrendChart.value)
-  fbChart.setOption({
-    tooltip: { trigger: 'axis' },
-    grid: { left: 60, right: 20, top: 30, bottom: 40 },
-    xAxis: { type: 'category', data: fbTrendPoints.value.map(p => p.report_date) },
-    yAxis: { type: 'value', name: '花费' },
-    series: [{
-      name: '花费', type: 'line', smooth: true,
-      data: fbTrendPoints.value.map(p => p.total_cost),
-    }],
-  })
+  try {
+    const res = await fbApi.analysisTrends(filterParams())
+    fbTrendPoints.value = res.points || []
+    await nextTick()
+    if (!fbTrendChart.value || !fbTrendPoints.value.length) return
+    if (fbChart) fbChart.dispose()
+    fbChart = echarts.init(fbTrendChart.value)
+    fbChart.setOption({
+      tooltip: { trigger: 'axis' },
+      grid: { left: 60, right: 20, top: 30, bottom: 40 },
+      xAxis: { type: 'category', data: fbTrendPoints.value.map(p => p.report_date) },
+      yAxis: { type: 'value', name: '花费' },
+      series: [{
+        name: '花费', type: 'line', smooth: true,
+        data: fbTrendPoints.value.map(p => p.total_cost),
+      }],
+    })
+  } catch (e) {
+    fbTrendPoints.value = []
+    ElMessage.error('FB 花费趋势加载失败：' + (e.message || ''))
+  }
 }
 
 const activeTab = ref('dashboard')
@@ -881,6 +893,33 @@ onMounted(() => {
   if (analysisPlatform.value === 'tt') return
   if (analysisPlatform.value === 'fb') { loadFbDashboard(); loadFbTrends(); return }
   // ↓↓↓ 以下 GG 分支的原有逻辑一字不改 ↓↓↓
+  loadFilterOptions()
+  loadDates()
+  loadDashboard()
+  checkAIEnabled()
+})
+
+// keep-alive 下本组件会被复用（/analysis、/tt/analysis、/fb/analysis 指向同一组件，
+// 且 App.vue 的 router-view 无 :key）⇒ onMounted 只跑一次。站内切平台时必须靠这个
+// watch 补一次分流装载。analysisPlatform 派生自 route.meta.platform，路由一变它就变，
+// 故覆盖 GG↔FB / TT↔GG 全部方向；同平台反复进入值不变、不会重复拉。
+// **刻意不加 immediate**：首次装载由 onMounted 负责，加了会拉两遍。
+watch(analysisPlatform, () => {
+  // 切平台先清掉上一平台残留的筛选：GG 的产品清单来自 /ad-reports/list、FB 的来自
+  // by_product，不能互串；残留的 region 更会被带进 FB 的查询参数（filterParams 里）。
+  // 清空 selection 会连带触发 watch(filterProduct)/watch(filterRegion)，但它们的
+  // 平台守卫决定了非 gg 时不会真的取数。
+  filterProduct.value = []
+  filterRegion.value = ''
+  filterDateRange.value = null
+  filterProducts.value = []
+  if (analysisPlatform.value === 'tt') return
+  if (analysisPlatform.value === 'fb') { loadFbDashboard(); loadFbTrends(); return }
+  // ↓↓↓ GG：与 onMounted 的 GG 分支同一套装载。**不能只用 refreshAll()** ——
+  // 它不含选项清单(loadFilterOptions)与 AI 状态(checkAIEnabled)，切回 GG 后
+  // 下拉会是空的 / AI tab 卡在"加载中"。
+  // 注：上面置空 filterProduct 也会触发 watch(filterProduct) → 再拉一次
+  // loadFilterOptions；两次是幂等的 GET，不影响正确性。
   loadFilterOptions()
   loadDates()
   loadDashboard()
