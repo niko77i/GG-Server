@@ -302,3 +302,46 @@ def test_update_zuobiao_registers_when_write_block_runs(client, monkeypatch):
     assert r is not None, \
         "写库分支执行过后仍必须登记（不得在 db2.close() 关掉的共享连接上登记）"
     assert r["status"] == "synced", r["status"]
+
+
+def test_update_zuobiao_rolls_back_when_write_block_raises(client, monkeypatch):
+    """写库块中途抛异常时必须**收事务**，否则请求线程被 SQLite 写锁冻 ~30 秒 + 漏登记。
+
+    现场陷阱：第 1 行正常落库（开启未提交写事务），第 2 行触发异常 —— 恰好落在
+    「首次 DML 之后、第二次 commit() 之前」。若 except 只 `log.warning` 而不
+    rollback/close，则 `db2`（= flask.g 共享连接）**持着写锁不撒手**；紧随其后的
+    record_pending 走**新连接** ⇒ 等满 `timeout=30` 抛 `database is locked`（被
+    run_write 吞掉）⇒ 响应冻结 ~30s 且 `sheet_write_log` 一行都没有。
+
+    构造：第 2 行的 `impressions` 用超出 SQLite INTEGER 范围的整数（JSON 里合法），
+    在第二循环 bind 参数时抛 `OverflowError`（`int(10**30)` 本身不报错，故异常点
+    确实在**已有一条 DML 之后**）。
+    判别力：去掉 except 里的 `db2.rollback()` ⇒ 本用例必红（零行 + elapsed≈30s）。
+    """
+    import google_sheets_service as gs
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)   # 别让后台 30s 重试拖慢用例
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda **k: None)
+
+    hdr, uid = _gg_user(client, "_zb_rb")
+    _setup_zuobiao_config(client, hdr)
+
+    t0 = _time.time()
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-10-01",
+        "rows": [
+            {"account": "acc_1", "customerId": "c1", "cost": 1,
+             "campaign": "x", "impressions": 1},
+            {"account": "acc_2", "customerId": "c2", "cost": 1,
+             "campaign": "y", "impressions": 10 ** 30},
+        ],
+    })
+    elapsed = _time.time() - t0
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    assert elapsed < 5.0, f"异常路径不得冻结在 SQLite 写锁上，实际 {elapsed:.2f}s"
+
+    db = database.get_db()
+    r = _row(db, uid, "产品甲")
+    db.close()
+    assert r is not None, "写库块抛异常后仍必须登记（异常路径必须收事务，不得留写锁）"

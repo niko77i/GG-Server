@@ -7436,8 +7436,6 @@ def google_sheets_update_zuobiao():
     region = (data.get("region") or "").strip()
     report_date = (data.get("report_date") or "").strip()
     rows = data.get("rows") or []
-    sales_person = (data.get("sales_person") or "").strip()
-    agency_ratio = data.get("agency_ratio")
     raw_rows = data.get("raw_rows") or []
 
     if not product_name:
@@ -7560,6 +7558,15 @@ def google_sheets_update_zuobiao():
             db2.close()
         except Exception as e:
             log.warning("Google Sheets 同步到数据库失败: %s", e)
+            # ⚠️ 异常路径也必须收事务：若在首次 DML 之后、上面 commit() 之前抛异常，
+            # 而这里不回滚，则 db2（= flask.g 共享连接）会留下**未提交写事务、持着
+            # SQLite 写锁**；紧随其后的 record_pending 走**新连接**，拿不到写锁 ⇒
+            # 等满 timeout=30 抛 database is locked（被 run_write 吞掉）⇒ 静默漏登记 +
+            # 请求线程白冻 30 秒（违反「业务端点响应不得因写表阻塞」）。
+            try:
+                db2.rollback()
+            except Exception:
+                pass
 
     # ---------- 2. 登记统一写表治理（后台写 Google Sheets） ----------
     #
