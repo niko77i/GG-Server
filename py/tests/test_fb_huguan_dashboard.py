@@ -984,3 +984,77 @@ class TestFbWritebackTriggers:
         assert owner == new_uid
         assert stored == "旧主十转新主十", stored
         assert acc_calls == [("fb", "WB-10", "旧主十转新主十")], acc_calls
+
+
+def _fb_row_with_dicts(account_id, channel, asset_type):
+    """一行 FB 表原始单元格：只填 D 资产UID / E 所属渠道 / F 资产类型。"""
+    values = [""] * 17
+    values[hd.col_index("D")] = account_id
+    values[hd.col_index("E")] = channel
+    values[hd.col_index("F")] = asset_type
+    return values
+
+
+class TestFbPendingMaster:
+    """FB 的渠道 / 资产类型：系统里没有 ⇒ 产 pending，且**不再报「无法唯一匹配」**。
+
+    这条「不再报警告」正是用户报的问题本身（现状是记一句
+    「channel_name「X」无法唯一匹配，已跳过该列」并把整列丢掉）。
+    """
+
+    def test_missing_channel_produces_pending_and_no_warning(self, client):
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row_with_dicts("FB1", "新渠道", ""), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        assert diff["pending_master"] == [
+            {"kind": "channel", "name": "新渠道", "timezone": None, "rows": 1}], \
+            diff["pending_master"]
+        assert not [w for w in diff["warnings"] if "channel_name" in w["message"]], \
+            "不再报「channel_name 无法唯一匹配」"
+        db.close()
+
+    def test_missing_asset_type_produces_pending(self, client):
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row_with_dicts("FB2", "", "新资产类型"), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        assert [(m["kind"], m["name"]) for m in diff["pending_master"]] \
+            == [("asset_type", "新资产类型")]
+        assert not [w for w in diff["warnings"] if "asset_type_name" in w["message"]]
+        db.close()
+
+    def test_existing_channel_resolves_and_produces_no_pending(self, client):
+        """系统里已有的渠道名 ⇒ 照常解析成 id，不产 pending（不能重复建）。"""
+        db = database.get_db()
+        # 偏离 brief：brief 原文直接写 `owner_id, ..., 1`，但 `fb_channels.owner_id`
+        # 有 `REFERENCES users(id)`，而 get_db 开着 `PRAGMA foreign_keys=ON`、本用例
+        # 的临时库里没有 id=1 的用户 ⇒ 直接插入会 IntegrityError。补一行 id=1 的
+        # 用户把 brief 的字面量落地（不改被测口径：查名只按 name/platform）。
+        db.execute("INSERT INTO users(id, username, password, role, platform) "
+                   "VALUES(1, 'fb_chan_owner', 'x', 'user', 'fb')")
+        db.execute("INSERT INTO fb_channels(name, owner_id, platform) VALUES('老渠道', 1, 'fb')")
+        db.commit()
+        parsed = hd.parse_row(_fb_row_with_dicts("FB3", "老渠道", ""), "fb")
+        parsed["row"] = 2
+        diff = hd.build_diff(db, [parsed], "fb")
+        assert diff["pending_master"] == []
+        assert not diff["warnings"]
+        db.close()
+
+    def test_dry_run_does_not_write_the_dictionaries(self, client):
+        """干跑只产出报告，**不写库**。"""
+        db = database.get_db()
+        parsed = hd.parse_row(_fb_row_with_dicts("FB4", "干跑渠道", ""), "fb")
+        parsed["row"] = 2
+        hd.build_diff(db, [parsed], "fb")
+        assert db.execute("SELECT COUNT(*) FROM fb_channels WHERE name='干跑渠道'"
+                          ).fetchone()[0] == 0
+        db.close()
+
+    def test_tt_gate_unchanged(self, client):
+        """TT 的 BC / 渠道 仍走原来的两条（门控换表不能改 TT）。"""
+        from huguan_dashboard import _PENDING_MASTER_FIELDS
+        assert _PENDING_MASTER_FIELDS[("tt", "bc_name")] == "bc"
+        assert _PENDING_MASTER_FIELDS[("tt", "agent_name")] == "agent"
+        assert ("gg", "agent_name") not in _PENDING_MASTER_FIELDS, "GG 一个都不命中"

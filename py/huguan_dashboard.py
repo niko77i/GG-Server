@@ -815,14 +815,23 @@ def _named_hits(db, platform: str, field: str, value: str) -> int:
     `resolve_named_id` 对 0 条与 ≥2 条都返回 None，两者的处理却**相反**：
     0 条 = 系统里没有 ⇒ 产 pending、落库补建；≥2 条 = 歧义 ⇒ 仍警告跳过。
     本函数只数命中行数，**不改变 `resolve_named_id` 的取值口径**。
+
+    FB 的两个字段也在这里认（2026-10-11）：它们走 fb_channels / fb_asset_types
+    （不是 agents 表），而两张表都有 UNIQUE(name, platform) ⇒ 实际至多 1 条、
+    没有歧义档，`hits == 0` 就等价于「系统里没有」。
     """
     if field == "bc_name":
         sql = _SQL_BC
     elif field == "agent_name":
         sql = _AGENT_SQL[platform]
         if sql is None:
-            # fb 的「所属渠道」不在 agents 表里（走 fb_channels）⇒ 不走本 pending 分支
+            # 只有 fb 的 agent_name 是 None（它的「所属渠道」在 fb_channels 里，
+            # 走下面 channel_name 那一支）⇒ 不进 pending 分支。
             return 0
+    elif field == "channel_name":
+        sql = _SQL_CHANNEL
+    elif field == "asset_type_name":
+        sql = _SQL_ASSET_TYPE
     else:
         return 0
     return len(db.execute(sql, (value,)).fetchall())
@@ -984,6 +993,19 @@ _PARSEABLE_FIELDS = {
 def _parseable_fields(platform: str) -> tuple:
     """该平台可读且需要名称解析的字段（值非空时才解析）。"""
     return _PARSEABLE_FIELDS[platform]
+
+
+# 字段 → 待补建的字典项类别。**这是唯一的门控**：命中这个表才产 pending。
+# 用数据表而不是 `platform == ".."` 分支 —— 将来加平台/加字段只是加一行，
+# 不会再多一个「某平台走某分支」的地方（那种分支正是漏算新类别的温床：
+# 2026-10-10 的教训就是加新类别时门控谓词没跟上）。
+# GG 一个键都没有 ⇒ 行为逐字节不变。
+_PENDING_MASTER_FIELDS = {
+    ("tt", "bc_name"): "bc",
+    ("tt", "agent_name"): "agent",
+    ("fb", "channel_name"): "channel",
+    ("fb", "asset_type_name"): "asset_type",
+}
 
 
 # 按平台给出「归属变更会写到表侧的那几列」，用于把表里原值记进撤回快照。
@@ -1310,12 +1332,13 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
             # 「查不到」与「重名多条」在 resolve_named_id 里都返回 None（0 或 ≥2 ⇒ 不猜）。
             # 但两者处理**相反**：0 条 = 系统里没有 ⇒ dry_run 产 pending、落库补建；
             # ≥2 条 = 歧义 ⇒ 仍然只警告跳过（多建一条只会更乱）。
-            # **只 tt 产**（设计 §4.4）：本功能只落 tt 字典，gg/fb 行为逐字不变
-            # （gg 的 0 命中仍记警告；fb 的 agent 查名 SQL 为 None、_named_hits 恒 0）。
             hits = _named_hits(db, platform, f, value)
-            if hits == 0 and platform == "tt" and f in ("bc_name", "agent_name"):
-                pending_master.append({"kind": "bc" if f == "bc_name" else "agent",
-                                       "name": value, "timezone": None})
+            kind = _PENDING_MASTER_FIELDS.get((platform, f))
+            if kind and hits == 0:
+                # 系统里没有这个名字 ⇒ 产 pending，落库阶段再补建（设计 §4.6）。
+                # FB 的 channel_name / asset_type_name 从这里进来 ⇒ 不再落进下面那句
+                # 警告、也不再「整列跳过」（那正是用户报的问题本身）。
+                pending_master.append({"kind": kind, "name": value, "timezone": None})
                 continue
             warnings.append({"row": row_no, "sheet": _conf_text(p.get("_sheet")),
                              "message": f"{f}「{value}」无法唯一匹配，已跳过该列"})
