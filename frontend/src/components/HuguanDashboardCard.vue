@@ -440,9 +440,16 @@
               </template>
             </el-table-column>
           </el-table>
-          <div v-if="hdClearing.length > 20" style="margin-top:6px;font-size:12px;color:#6b7280;">
+          <!-- 收起态：前 20 行 +「另有 N 行」+ 展开全部（既有观感，不动）。
+               展开态：也限行（HD_PREVIEW_LIMIT），超出部分照旧给「另有 N 行」。 -->
+          <div v-if="!clearingExpanded && hdClearing.length > 20"
+               style="margin-top:6px;font-size:12px;color:#6b7280;">
             …另有 {{ hdClearing.length - 20 }} 行
             <el-button v-if="!clearingExpanded" link type="primary" @click="clearingExpanded = true">展开全部</el-button>
+          </div>
+          <div v-else-if="clearingExpanded && hdClearing.length > HD_PREVIEW_LIMIT"
+               style="margin-top:6px;font-size:12px;color:#6b7280;">
+            …另有 {{ hdClearing.length - HD_PREVIEW_LIMIT }} 行
           </div>
         </div>
 
@@ -572,6 +579,8 @@
             </div>
             <div v-if="hdSkipPrev.hiddenCount > 0" style="font-size:12px;color:#6b7280;">
               …另有 {{ hdSkipPrev.hiddenCount }} 类原因
+              <el-button v-if="!hdGroupsAllOpen('skip')" link type="primary"
+                         @click="hdExpandGroupsAll('skip')">展开全部 {{ hdSkipGroups.length }} 类</el-button>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -607,6 +616,8 @@
             </div>
             <div v-if="hdWarnPrev.hiddenCount > 0" style="font-size:12px;color:#6b7280;">
               …另有 {{ hdWarnPrev.hiddenCount }} 类原因
+              <el-button v-if="!hdGroupsAllOpen('warn')" link type="primary"
+                         @click="hdExpandGroupsAll('warn')">展开全部 {{ hdWarnGroups.length }} 类</el-button>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -673,6 +684,8 @@
         </div>
         <div v-if="hdErrPrev.hiddenCount > 0" style="margin-top:8px;font-size:12px;color:#6b7280;">
           …另有 {{ hdErrPrev.hiddenCount }} 类原因
+          <el-button v-if="!hdGroupsAllOpen('err')" link type="primary"
+                     @click="hdExpandGroupsAll('err')">展开全部 {{ hdErrGroups.length }} 类</el-button>
         </div>
 
         <template v-if="(hdResult.not_applied || []).length">
@@ -1165,7 +1178,11 @@ const hdUpdate = computed(() => (syncDiff.value && syncDiff.value.to_update) || 
 const hdSkip = computed(() => (syncDiff.value && syncDiff.value.to_skip) || [])
 const hdWarnings = computed(() => (syncDiff.value && syncDiff.value.warnings) || [])
 const hdClearing = computed(() => hdUpdate.value.filter(x => (x.clears || []).length))
-const hdClearingShown = computed(() => clearingExpanded.value ? hdClearing.value : hdClearing.value.slice(0, 20))
+// 收起 = 前 20 行（既有观感）；展开后**也必须限行** —— 全量直通 el-table 在上万行时同样崩
+// （一类崩溃、一键可达、就在这个弹窗里）。展开态仍用 slicePreview 封顶 HD_PREVIEW_LIMIT。
+const hdClearingShown = computed(() => clearingExpanded.value
+  ? slicePreview(hdClearing.value, HD_PREVIEW_LIMIT).shown
+  : hdClearing.value.slice(0, 20))
 const hdResult = computed(() => syncResult.value || {})
 const hdNotAppliedShown = computed(() => (hdResult.value.not_applied || []).slice(0, 20))
 // 未采集列（第二批 §3.4）：第一批只把 `unmatched_columns` 放进了 diff 载荷，前端一直没渲染它。
@@ -1238,25 +1255,39 @@ const hdOwnerPrev  = computed(() => slicePreview(hdOwnerChanges.value, HD_PREVIE
 // 预警类三桶（警告 / 跳过 / 落库报错）：它们的语义是「要你去处理的问题」，**不能靠截断埋掉**
 // —— 用户不知道被截掉的哪几行有问题 ⇒ 按原因聚合，把上千条重复警告压成几条可读信号
 // （shape 形如「BC · 7677… · 128 行」的 hdPendingMaster 那一节）。聚合后条数本来就很少，
-// 用 v-for 而非 el-table；每组最多 HD_GROUP_LIMIT 条，多余的折叠成「…另有 N 类原因」。
+// 用 v-for 而非 el-table。收起态最多 HD_GROUP_LIMIT 类，其余折叠成「…另有 N 类原因」——
+// 但「另有 N 类」本身也必须有个入口（否则那 N 类永远看不到，等于又埋了一次），故给
+// 每区一个「展开全部 N 类」，抬到 HD_GROUP_LIMIT_EXPANDED（展开态下仍保留尾部文案，
+// 那时的 N 是超出 500 的部分）。
 const HD_GROUP_LIMIT = 50
+const HD_GROUP_LIMIT_EXPANDED = 500
+// 三区各自的「展开全部类」态（键 = 作用域）。与「组内明细展开」是两件事，故分开存。
+const hdGroupsExpanded = ref({})
+function hdGroupsAllOpen(scope) { return !!hdGroupsExpanded.value[scope] }
+function hdExpandGroupsAll(scope) {
+  hdGroupsExpanded.value = { ...hdGroupsExpanded.value, [scope]: true }
+}
+// 生效条数上限随「展开全部」态在 50 / 500 之间切换。
+function hdGroupLimit(scope) {
+  return hdGroupsAllOpen(scope) ? HD_GROUP_LIMIT_EXPANDED : HD_GROUP_LIMIT
+}
 const hdWarnGroups = computed(() => groupWarnings(hdWarnings.value))
-const hdWarnPrev = computed(() => slicePreview(hdWarnGroups.value, HD_GROUP_LIMIT))
+const hdWarnPrev = computed(() => slicePreview(hdWarnGroups.value, hdGroupLimit('warn')))
 // 跳过：字段名先归一（reason → message），其余原样 —— 展开的明细仍是原条目（带 account_id/sheet/row）。
 const hdSkipGroups = computed(() => groupWarnings(
   hdSkip.value.map(r => ({ ...r, message: r.reason || '' }))))
-const hdSkipPrev = computed(() => slicePreview(hdSkipGroups.value, HD_GROUP_LIMIT))
+const hdSkipPrev = computed(() => slicePreview(hdSkipGroups.value, hdGroupLimit('skip')))
 // 落库报错（结果页 Mode B）：同上，error → message。
 const hdErrGroups = computed(() => groupWarnings(
   (hdResult.value.errors || []).map(r => ({ ...r, message: r.error || '' }))))
-const hdErrPrev = computed(() => slicePreview(hdErrGroups.value, HD_GROUP_LIMIT))
+const hdErrPrev = computed(() => slicePreview(hdErrGroups.value, hdGroupLimit('err')))
 
 // 警告区有内容时**默认展开**（用户问过「字段识别不对的户会不会被看不见」）。
 // ⚠️ el-collapse-item 用 v-show，折叠 ≠ 不渲染 —— 这条改动的意义是「让人看得见」，
 // 不是性能手段（性能靠上面的聚合）。
 const hdWarnOpen = ref(['warn'])
 // 各组的「展开明细」态（键 = 作用域:下标）。用 v-if（而非折叠的 v-show）控住明细 DOM：
-// 明细上限 HD_PREVIEW_LIMIT，但最多 HD_GROUP_LIMIT 组，全渲染是 5000 行 —— 只有展开的才该有 DOM。
+// 明细上限 HD_PREVIEW_LIMIT，组数上限最大 HD_GROUP_LIMIT_EXPANDED —— 只有展开的那几组才该有 DOM。
 const hdGroupOpen = ref({})
 function hdGroupIsOpen(scope, i) { return !!hdGroupOpen.value[scope + ':' + i] }
 function hdToggleGroup(scope, i) {
@@ -1790,6 +1821,7 @@ async function openSyncDialog(diff, sheet = '') {
   clearingExpanded.value = false
   hdWarnOpen.value = ['warn']      // 有警告就默认展开（T2b：别让问题藏在收起的区里）
   hdGroupOpen.value = {}           // 每次重开清掉上一次的分组展开态
+  hdGroupsExpanded.value = {}      // 连「展开全部 N 类」也一起收回去（别串到下一次）
   hdExcludedCreate.value = []      // 默认全选
   hdExcludedUpdate.value = []
   hdPickedOwner.value = []         // 归属变更默认不勾（既有语义，别改）
