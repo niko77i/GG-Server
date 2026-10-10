@@ -35,8 +35,13 @@
             ⚠ 他人账户（{{ existingAccounts.length }} 个）— 属于他人，需由户管或管理员转移
           </template>
         </el-divider>
-        <el-table :data="existingAccounts" size="small" border stripe max-height="240"
-          @selection-change="v => claimSelection = v" style="width:100%;">
+        <!-- ① 动作类：限行 100 + 勾选解耦。existingAccounts **默认不勾**（用户逐条主动认领）
+             ⇒ 用「已勾集」（白名单 claimPickedIds）。@select 第一参是「已选行数组」不是布尔，
+             故取 sel.some(...) 得到本行的真勾选态（直传那个数组会在取消勾选时恒为 truthy）。 -->
+        <el-table ref="claimTableRef" :data="claimPrev.shown" size="small" border stripe max-height="240"
+          row-key="advertiser_id"
+          @select="(sel, row) => toggleClaimRow(row.advertiser_id, sel.some(r => r.advertiser_id === row.advertiser_id))"
+          @select-all="sel => selectAllClaimPreview(sel.length > 0)" style="width:100%;">
           <el-table-column v-if="auth.canManageAccounts" type="selection" width="34" />
           <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="180" show-overflow-tooltip />
           <el-table-column label="归属" min-width="100" show-overflow-tooltip>
@@ -45,12 +50,21 @@
             </template>
           </el-table-column>
         </el-table>
+        <!-- 脚注仅在「有行被折叠」时出现（行数少时保持既有界面干净）。
+             「全部选中/全部取消」作用**全量**（不只渲染出的 ≤100 行），与勾选权威（id 白名单）一致。 -->
+        <div v-if="claimPrev.hiddenCount > 0" style="margin-top:6px;font-size:12px;color:#909399;">
+          已选 {{ claimSelection.length }} / 共 {{ claimPrev.total }}（表里只画了前 {{ PREVIEW_LIMIT }} 行）
+          <el-button link type="primary" @click="selectAllClaim(true)">全部选中</el-button>
+          <el-button link type="primary" @click="selectAllClaim(false)">全部取消</el-button>
+        </div>
       </template>
 
       <!-- ===== 新账户列表 + 共用默认值 ===== -->
       <template v-if="newIds.length">
         <el-divider content-position="left" style="margin:8px 0;">新账户（{{ newIds.length }} 个）</el-divider>
-        <el-table :data="newAccountRows" size="small" border stripe max-height="260"
+        <!-- ① 动作类：限行 100（无勾选）。上万行直通 el-table（不做虚拟滚动）会崩标签页。
+             提交不由渲染行驱动：overrides 仍按全量 newIds 逐行算出（逐行覆盖不随渲染丢）。 -->
+        <el-table :data="newPrev.shown" size="small" border stripe max-height="260"
           :row-class-name="newRowClass" style="width:100%;">
           <el-table-column prop="advertiser_id" label="广告账户 ID" min-width="180" show-overflow-tooltip />
           <el-table-column label="名称" min-width="80" show-overflow-tooltip>
@@ -82,6 +96,9 @@
             </template>
           </el-table-column>
         </el-table>
+        <div v-if="newPrev.hiddenCount > 0" style="margin-top:6px;font-size:12px;color:#909399;">
+          …另有 {{ newPrev.hiddenCount }} 行（共 {{ newPrev.total }} 个，表里只画了前 {{ PREVIEW_LIMIT }} 行，导入时全部都会新建）
+        </div>
 
         <!-- 新账户编辑面板 -->
         <div v-if="newEditingId" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;margin-top:8px;">
@@ -229,6 +246,8 @@ import { useAuthStore } from '@/stores/auth'
 import { ttApi, ttAccountsApi } from '@/api/tt'
 import client from '@/api/client'
 import { ElMessage } from 'element-plus'
+// 大批量结果的「预览」纯逻辑（已过测试，**不要改它**）：slicePreview 只渲染前 N 行。
+import { DEFAULT_PREVIEW_LIMIT, slicePreview } from '@/utils/previewRows.mjs'
 
 const props = defineProps({
   visible: Boolean,
@@ -244,7 +263,7 @@ const agentOptions = ref([])
 const statusOptions = ref([])
 const idText = ref('')
 const allFound = ref([])           // 查询到的全部已有账户
-const claimSelection = ref([])
+const claimTableRef = ref(null)   // 认领表的 ref（用于把内建勾选态按模型刷上去）
 const newAccountEdits = reactive({})   // { [advertiser_id]: { name, timezone, agent, status, bc_id, acquired_date } }
 const newAccountBaselines = reactive({})
 const newEditingId = ref(null)
@@ -260,6 +279,42 @@ const existingAccounts = computed(() =>
 const alreadyMine = computed(() =>
   allFound.value.filter(a => (a.owner || '') === myName.value)
 )
+
+// ① 动作类：existingAccounts 限行 100 + 勾选解耦。
+//   · 限行：表里最多画 PREVIEW_LIMIT 行（DOM 节点封顶，防上万行崩标签页）。
+//   · 勾选解耦：默认**不勾**（用户逐条主动认领）⇒ 用「已勾集」（白名单 claimPickedIds）。
+//     提交用的行对象由白名单从**全量** existingAccounts 推出 ⇒ 限行既不丢勾选、也不误认领。
+const PREVIEW_LIMIT = DEFAULT_PREVIEW_LIMIT
+const claimPrev = computed(() => slicePreview(existingAccounts.value, PREVIEW_LIMIT))
+const claimPickedIds = ref([])
+const claimSelection = computed(() =>
+  existingAccounts.value.filter(a => claimPickedIds.value.includes(a.advertiser_id))
+)
+
+function toggleClaimRow(id, on) {
+  claimPickedIds.value = on
+    ? [...new Set([...claimPickedIds.value, id])]
+    : claimPickedIds.value.filter(x => x !== id)
+}
+/** 表头「全选」勾：只作用**本页渲染出来的 ≤100 行**。 */
+function selectAllClaimPreview(on) {
+  const shownIds = claimPrev.value.shown.map(a => a.advertiser_id)
+  claimPickedIds.value = on
+    ? [...new Set([...claimPickedIds.value, ...shownIds])]
+    : claimPickedIds.value.filter(x => !shownIds.includes(x))
+}
+/** 脚注「全部选中 / 全部取消」：作用**全量**（不只渲染行）。 */
+function selectAllClaim(on) {
+  claimPickedIds.value = on ? existingAccounts.value.map(a => a.advertiser_id) : []
+  syncClaimSelection()
+}
+/** 表格内建的勾选态不在模型里（权威是 id 白名单）⇒ 渲染完成后按模型把画出来的 ≤100 行同步一次。
+ *  不能用 setTimeout 等渲染。toggleRowSelection 默认不触发 change 事件，故不会与 @select 互相打架。 */
+function syncClaimSelection() {
+  const picked = new Set(claimPickedIds.value)
+  claimPrev.value.shown.forEach(r => claimTableRef.value?.toggleRowSelection(r, picked.has(r.advertiser_id)))
+}
+watch(claimPrev, () => { syncClaimSelection() }, { flush: 'post' })
 
 // ===== ID 提取（TikTok 广告账户 ID 为十位以上纯数字） =====
 function extractAdvertiserId(line) {
@@ -319,6 +374,8 @@ const form = reactive({
 const newAccountRows = computed(() =>
   newIds.value.map(id => ({ advertiser_id: id }))
 )
+// ① 动作类：新账户表限行 100（无勾选）。提交按全量 newIds 算 overrides，与渲染行无关。
+const newPrev = computed(() => slicePreview(newAccountRows.value, PREVIEW_LIMIT))
 
 function defaultName(aid) {
   return form.name_prefix ? (form.name_prefix + ' ' + aid).trim() : aid
@@ -441,7 +498,7 @@ async function doLookup() {
   try {
     const res = await ttAccountsApi.batchLookup(parsedIds.value)
     allFound.value = res.found || []
-    claimSelection.value = []
+    claimPickedIds.value = []
     newEditingId.value = null
   } catch {
     allFound.value = []
@@ -476,7 +533,7 @@ async function init() {
   form.account_type = '加白户'
   idText.value = ''
   allFound.value = []
-  claimSelection.value = []
+  claimPickedIds.value = []
   newEditingId.value = null
   result.value = null
   for (const k of Object.keys(newAccountEdits)) delete newAccountEdits[k]

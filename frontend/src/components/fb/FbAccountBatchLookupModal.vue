@@ -29,7 +29,9 @@
           <div style="font-size:13px;color:#16a34a;margin-bottom:4px;font-weight:600;">
             ✓ 找到 {{ result.found.length }} 个
           </div>
-          <el-table :data="result.found" size="small" border stripe max-height="350" style="width:100%;">
+          <!-- ③ 浏览类：查出来的清单（无「确认/执行」按钮按这些行做事）⇒ 前端分页，
+               防一次粘贴上万 ID 的结果直通 el-table（不做虚拟滚动）崩标签页。 -->
+          <el-table :data="foundPaged" size="small" border stripe max-height="350" style="width:100%;">
             <el-table-column prop="account_id" label="账户 ID" width="160" show-overflow-tooltip />
             <el-table-column prop="name" label="名称" min-width="110" show-overflow-tooltip />
             <el-table-column label="主 BM" min-width="140" show-overflow-tooltip>
@@ -53,6 +55,9 @@
               </template>
             </el-table-column>
           </el-table>
+          <el-pagination v-if="result.found.length > PAGE_SIZE" v-model:current-page="page"
+            :page-size="PAGE_SIZE" :total="result.found.length" layout="prev,pager,next"
+            style="margin-top:8px;justify-content:flex-end;" />
         </div>
 
         <!-- 未找到的 -->
@@ -87,6 +92,15 @@ const idText = ref('')
 const searching = ref(false)
 const result = ref(null)
 
+// ③ 浏览类：result.found 是「查出来的清单」（无「确认/执行」语义）⇒ 前端分页，
+// 防一次粘贴上万 ID 的结果直通 el-table（不做虚拟滚动）崩标签页。
+const PAGE_SIZE = 50
+const page = ref(1)
+const foundPaged = computed(() => {
+  const found = result.value?.found || []
+  return found.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE)
+})
+
 // ===== ID 提取（FB 广告账户 ID 为 10 位以上纯数字） =====
 // 与 GG 版的关键差异：GG 的账户 ID 是 `123-456-7890` 带连字符，
 // FB 是纯数字（后端 `batch_create` 亦要求 `aid.isdigit()`）。
@@ -120,6 +134,7 @@ const invalidIds = computed(() => {
 
 function onIdTextChange() {
   result.value = null
+  page.value = 1
 }
 
 // ===== 查询 =====
@@ -127,6 +142,7 @@ async function doSearch() {
   if (!parsedIds.value.length) return
   searching.value = true
   result.value = null
+  page.value = 1
   try {
     const res = await fbApi.batchLookup({ account_ids: parsedIds.value })
     result.value = { found: res.found || [], not_found: res.not_found || [] }
@@ -141,5 +157,6 @@ async function doSearch() {
 function init() {
   idText.value = ''
   result.value = null
+  page.value = 1
 }
 </script>
