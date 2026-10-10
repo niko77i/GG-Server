@@ -1212,6 +1212,8 @@ const hdPendingMasterRows = computed(() => (syncDiff.value && syncDiff.value.pen
 const hdOrphanLinked = computed(() => Number(hdResult.value.orphan_linked) || 0)
 // kind → 中文名。`agent` 是 **TT** 的「所属渠道」（agents 表）；FB 的走 `channel`
 // （fb_channels 表）—— 两者是不同字典，标签各自对齐自己表里的表头原文，不互相改。
+// 这只是「已知 kind 的中文名」，**不是**合法 kind 的白名单：没登记 ≠ 不合法，
+// 未登记的 kind 会在展示时原样露出 token（见 hdMasterKindLabel 的兜底），不静默丢。
 const HD_MASTER_KIND_LABEL = {
   bc: 'BC', agent: '渠道', region: '国家时区',
   channel: '所属渠道', asset_type: '资产类型',
@@ -1220,13 +1222,20 @@ function hdMasterKindLabel(kind) { return HD_MASTER_KIND_LABEL[kind] || kind }
 // 「将新增的字典项」那一节说明文案里的类别清单，**从本次实际出现的 kind 推导**。
 // 原先写死成「BC / 渠道 / 国家时区」——2026-10-11 加 FB 的两个新类别时它就没跟上，
 // 正是「写死的清单必漂」。改成从数据推就不会有第二次。
+// ORDER 只负责**排序**，不负责**过滤**：后端将来加第 6 个 kind 时，那句文案不会漏掉它
+//（最坏是露出一个英文 token —— 漏说一个类别的危害大得多）。
 const HD_MASTER_KIND_ORDER = ['bc', 'agent', 'channel', 'asset_type', 'region']
 const hdMasterKindList = computed(() => {
-  const present = new Set((hdPendingMaster.value || []).map(m => m && m.kind))
-  // 兜底：正常不会走到（那一节整体 `v-if="hdPendingMaster.length"`，有空项就至少有一个 kind），
-  // 但万一某条 payload 缺 kind，filter 会把它滤光 ⇒ 空串会写出「系统里还没有的 ，确认…」。
-  return HD_MASTER_KIND_ORDER.filter(k => present.has(k)).map(hdMasterKindLabel).join(' / ')
-    || '字典项'
+  const seen = []
+  for (const m of (hdPendingMaster.value || [])) {
+    const k = m && m.kind
+    if (k && !seen.includes(k)) seen.push(k)
+  }
+  // 已知的按固定顺序在前，未登记的（后端将来新增）原样追加在后。
+  const known = HD_MASTER_KIND_ORDER.filter(k => seen.includes(k))
+  const unknown = seen.filter(k => !HD_MASTER_KIND_ORDER.includes(k))
+  // `|| '字典项'` 是空值兜底：只有整条 payload 都没有可用 kind 时才会走到。
+  return [...known, ...unknown].map(hdMasterKindLabel).join(' / ') || '字典项'
 })
 // BC 的 name 就是那串 19 位数字：纯数字用等宽数字（tabular-nums），避免逐条对不齐。
 function hdIsDigits(s) { return /^\d+$/.test(String(s == null ? '' : s)) }
