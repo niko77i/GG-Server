@@ -2,7 +2,8 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from .helpers import (ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES,
-                      parse_pagination)
+                      parse_pagination, report_scope_where, report_editable_fields,
+                      user_role, REPORT_VIEW_ALL_ROLES, REPORT_COST_ONLY_ROLES)
 from .decorators import fb_required, no_huguan
 import huguan_dashboard as hd
 import logging
@@ -2095,6 +2096,9 @@ def fb_retry_sheets_sync():
 
     db = get_db()
     uid = get_uid()
+    # 管理员只读：不可重试写表（户管 / developer 可）。
+    if _get_role(db, uid) == "admin":
+        return err("无权限：管理员不可重试写表", 403)
     data = parse_body()
 
     # 每项 = (产品, 线, 日期, records_or_None)。records 非 None ⇒ 直接写它（本次解析
@@ -2198,8 +2202,14 @@ def list_reports():
     offset = (page - 1) * size
     uid = get_uid()
 
-    where = ["user_id = ?"]
-    params = [uid]
+    # 报表类资源没有 owner_id，归属轴是 user_id（设计 §2.3）。跨用户角色看全部，
+    # 普通 user 仍只看自己；`user_id` 查询参数是「保存人」筛选（跨用户角色才生效，
+    # 不得成为普通用户的越权口 —— 该保证由 helpers.report_scope_where 内部结构给出）。
+    _role = _get_role(db, uid)
+    _scope_sql, _scope_params = report_scope_where(_role, uid,
+                                                   request.args.get("user_id", type=int))
+    where = [_scope_sql]
+    params = list(_scope_params)
     if product_name:
         where.append("product_name = ?")
         params.append(product_name)
@@ -2229,13 +2239,22 @@ def list_reports():
 def update_report(rid):
     db = get_db()
     uid = get_uid()
+    data = parse_body()
+    # 字段白名单（**只对跨用户角色**）：户管只能改「消耗」，管理员是空集 ⇒ 只读。
+    # 普通 user 不受此限 —— 对自己的行仍可改全字段（设计 §3 的回归硬判据）。
+    # 校验放在动数据库之前，避免「先写后拒」。
+    _role = _get_role(db, uid)
+    _editable = report_editable_fields(_role) if _role in REPORT_VIEW_ALL_ROLES else None
+    if _editable is not None and not set(data.keys()) <= _editable:
+        return err("无权限：仅可修改消耗", 403)
+    if _editable == set():
+        return err("无权限：只读角色不可修改数据", 403)
     # 归属校验（隔离轴是 `user_id`，非 owner_id —— 口径同 list_reports / reports_stats
     # 的 `WHERE user_id = ?`）：非跨用户角色只能改**自己**的做表数据。
     # 行不存在时不拦，保持既有「UPDATE 0 行仍返回 200」的行为。
     row = db.execute("SELECT user_id FROM fb_ad_reports WHERE id=?", (rid,)).fetchone()
-    if row and _get_role(db, uid) not in CROSS_USER_ROLES and row["user_id"] != uid:
+    if row and _role not in CROSS_USER_ROLES and row["user_id"] != uid:
         return err("无权限", 403)
-    data = parse_body()
     updates = []
     params = []
     for field in ['account_name', 'account_id', 'cost', 'impressions', 'clicks',
@@ -2257,10 +2276,14 @@ def update_report(rid):
 def delete_report(rid):
     db = get_db()
     uid = get_uid()
+    # 户管 / 管理员一律不可删（只读角色；developer 仍全权）。
+    _role = _get_role(db, uid)
+    if _role in REPORT_COST_ONLY_ROLES or _role == "admin":
+        return err("无权限：只读角色不可删除数据", 403)
     # 归属校验（`user_id` 轴，同 update_report）：非跨用户角色只能删自己的做表数据。
     # 行不存在时不拦，保持既有 200。
     row = db.execute("SELECT user_id FROM fb_ad_reports WHERE id=?", (rid,)).fetchone()
-    if row and _get_role(db, uid) not in CROSS_USER_ROLES and row["user_id"] != uid:
+    if row and _role not in ("developer",) and row["user_id"] != uid:
         return err("无权限", 403)
     db.execute("DELETE FROM fb_ad_reports WHERE id=?", (rid,))
     db.commit()
@@ -2290,6 +2313,10 @@ def batch_delete_reports():
     """
     db = get_db()
     uid = get_uid()
+    # 户管 / 管理员一律不可批删（只读角色；developer 仍全权）。
+    _role = _get_role(db, uid)
+    if _role in REPORT_COST_ONLY_ROLES or _role == "admin":
+        return err("无权限：只读角色不可删除数据", 403)
     data = parse_body()
     # 缺键 ⇒ 空列表（既有 200 契约）；显式传 None / 字符串等非列表 ⇒ 400（见下）。
     ids = data.get('ids', [])
@@ -2302,11 +2329,12 @@ def batch_delete_reports():
         return ok({'deleted': 0})
     placeholders = ','.join(['?'] * len(ids))
     # 归属过滤（`user_id` 轴，同 list_reports）：非跨用户角色只删**属于自己**的行，
-    # 别人的行留下 —— 保持「尽量多删自己的」语义，**不整批 403**。跨用户角色不限
-    # （既有行为：可删全部）。
+    # 别人的行留下 —— 保持「尽量多删自己的」语义，**不整批 403**。
+    # ⚠️ 跨用户放行**只剩 developer**（户管/管理员已在函数开头 403）—— 从
+    # `CROSS_USER_ROLES` 收窄，否则「读不到却删得掉」的不一致会从 GET 迁到批删上。
     # `deleted` 取 `cursor.rowcount`（实际删掉的行数），不取 `len(ids)`：后者恒等于
     # 请求条数，被归属过滤掉的他人行也会计入 ⇒ 非跨角色用户请求 3 条只删到 1 条时谎报 3。
-    if _get_role(db, uid) in CROSS_USER_ROLES:
+    if _role in ("developer",):
         cur = db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders})", ids)
     else:
         cur = db.execute(f"DELETE FROM fb_ad_reports WHERE id IN ({placeholders}) "
@@ -2327,8 +2355,14 @@ def reports_stats():
     date_to = request.args.get('date_to', '')
     uid = get_uid()
 
-    where = ["user_id = ?"]
-    params = [uid]
+    # 报表类资源没有 owner_id，归属轴是 user_id（设计 §2.3）。跨用户角色看全部，
+    # 普通 user 仍只看自己；`user_id` 查询参数是「保存人」筛选（跨用户角色才生效，
+    # 不得成为普通用户的越权口 —— 该保证由 helpers.report_scope_where 内部结构给出）。
+    _role = _get_role(db, uid)
+    _scope_sql, _scope_params = report_scope_where(_role, uid,
+                                                   request.args.get("user_id", type=int))
+    where = [_scope_sql]
+    params = list(_scope_params)
     if product_name:
         where.append("product_name = ?")
         params.append(product_name)
@@ -2475,8 +2509,14 @@ def export_reports():
     date_from = request.args.get('date_from', '')
     date_to = request.args.get('date_to', '')
 
-    where = ["user_id = ?"]
-    params = [uid]
+    # 报表类资源没有 owner_id，归属轴是 user_id（设计 §2.3）。跨用户角色看全部，
+    # 普通 user 仍只看自己；`user_id` 查询参数是「保存人」筛选（跨用户角色才生效，
+    # 不得成为普通用户的越权口 —— 该保证由 helpers.report_scope_where 内部结构给出）。
+    _role = _get_role(db, uid)
+    _scope_sql, _scope_params = report_scope_where(_role, uid,
+                                                   request.args.get("user_id", type=int))
+    where = [_scope_sql]
+    params = list(_scope_params)
     if product_name:
         where.append("product_name = ?")
         params.append(product_name)
@@ -2532,8 +2572,8 @@ def list_fb_users():
 # ==================== 工具函数 ====================
 
 def _get_role(db, uid):
-    user = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
-    return user['role'] if user else 'user'
+    """取用户角色 —— 委派到共用的 `helpers.user_role`（避免两份口径漂移）。"""
+    return user_role(db, uid)
 
 
 def _display_name(db, uid):

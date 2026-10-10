@@ -1441,15 +1441,21 @@ class TestFbReportOwnershipClosure:
             assert resp.get_json()["deleted"] == 0
         assert _report_col(s["rid_a"], "id") == s["rid_a"]     # 没删东西
 
-    def test_batch_delete_reports_admin_role_deletes_others(self, client):
-        """跨角色腿（admin）：admin ∈ CROSS_USER_ROLES 但**不在** PLATFORM_SWITCH_ROLES，
-        平台门禁靠 `platform='fb'` 过 —— 与 developer 腿不等价，独立钉一条。"""
+    def test_batch_delete_reports_admin_role_is_readonly(self, client):
+        """**行为已按设计变更**：admin 现在是**只读**角色 ⇒ 批删一律 403（不再删得动）。
+
+        旧行为（admin ∈ CROSS_USER_ROLES ⇒ 可批删他人）被
+        docs/superpowers/specs/2026-10-11-report-data-permission-design.md §3 收紧
+        （户管 / 管理员不得删除 / 批删）。此腿的独立价值仍在：admin 不在
+        PLATFORM_SWITCH_ROLES，平台门禁靠 `platform='fb'` 过 —— 钉住「平台过关也照样 403」，
+        与 developer 腿（仍可删）不等价。
+        """
         s = _seed_two_reports(client, "t_rbd_adm")
         adm = _admin_headers(client, "t_rbd_adm")
         resp = client.post("/api/fb/reports/batch-delete",
                            json={"ids": [s["rid_b"]]}, headers=adm)
-        assert resp.status_code == 200
-        assert _report_col(s["rid_b"], "id") is None
+        assert resp.status_code == 403
+        assert _report_col(s["rid_b"], "id") == s["rid_b"]     # 未被删
 
     def test_missing_reports_keep_existing_contract(self, client):
         """行不存在时保持既有 200（不新增 404）。"""
