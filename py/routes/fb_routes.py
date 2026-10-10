@@ -1743,7 +1743,8 @@ def extract_save():
 
         # 登记一次写表（四期：接入统一治理）。响应里给出 business_key 供前端精确轮询；
         # 不再插 sheets_sync_log 的 pending 行 —— 该表留给 GG 做表那条线。
-        business_key = _register_fb_report_write(uid, product_name, line_name, report_date)
+        business_key = _register_fb_report_write(uid, product_name, line_name,
+                                                 report_date, records)
 
         return ok({'saved': len(records), 'business_key': business_key})
     except Exception as e:
@@ -1790,12 +1791,16 @@ def _get_sheet_config_key(db, user_id):
     return f"google_sheets_fb_{user_id}" if platform == 'fb' else f"google_sheets_{user_id}"
 
 
-def _register_fb_report_write(uid, product_name, line_name, report_date):
+def _register_fb_report_write(uid, product_name, line_name, report_date, records=None):
     """登记一次 FB 报告写表（四期：接入统一治理）。
 
     原先这里起一个自建 daemon 线程直写 Sheets，并把结果写进自己的
     `sheets_sync_log`；现在改为登记到 `sheet_write_log`，由统一机制写表、
     失败可查可重试。**FB 不再写 `sheets_sync_log`**（该表留给 GG 做表那条线）。
+
+    `records` 是**本次解析出来的数据**，随 payload 一起登记 —— 首次写入与重试
+    都从 payload 取它，**不回 `fb_ad_reports` 读整组**（该表按账户 upsert、
+    只增不删，回读会写成历史并集）。老的历史行没有 records，重试时回退到重建。
 
     `db` 用调用方（请求线程）的连接 —— 与三期的四个调用点同形：登记在请求线程
     完成，前端拿到响应就能查到这条记录。
@@ -1805,7 +1810,7 @@ def _register_fb_report_write(uid, product_name, line_name, report_date):
 
     key = _fbt.fb_report_key(product_name, line_name, report_date)
     payload = {"product_name": product_name, "line_name": line_name,
-               "report_date": report_date}
+               "report_date": report_date, "records": records}
     sheet_write.run_write(
         get_db(), user_id=uid, platform="fb", target="fb_report", business_key=key,
         sync_fn=sheet_write.build_sync("fb_report", uid, key, payload), payload=payload)
@@ -1887,14 +1892,17 @@ def fb_retry_sheets_sync():
     """
     import json
 
+    import sheet_write
+    import routes.fb_sheet_targets as _fbt
+
     db = get_db()
     uid = get_uid()
     data = parse_body()
 
-    # 入参闸门（口径照同文件其它收列表的端点，如 batch_delete_accounts /
-    # accounts_batch_lookup 的 `isinstance(..., list)`）：请求体是用户可控 JSON，
-    # 畸形形状若漏到解包处会抛 ValueError / 绑定点会抛 InterfaceError ⇒ 500。
-    triples = []
+    # 每项 = (产品, 线, 日期, records_or_None)。records 非 None ⇒ 直接写它（本次解析
+    # 出来的数据，随 payload 一起登记）；为 None ⇒ 回 `fb_ad_reports` 重建
+    # （历史 payload 没有 records；客户端 `groups` 入参也没有）。
+    entries = []
     if data.get("business_keys"):
         if not isinstance(data["business_keys"], list) or not all(
                 isinstance(k, str) for k in data["business_keys"]):
@@ -1908,13 +1916,20 @@ def fb_retry_sheets_sync():
         for r in rows:
             p = json.loads(r["payload_json"] or "{}")
             # ⚠️ 两种 payload 形状都要认：单组登记是扁平三要素；批量登记
-            # （`run_write_many` 只收**一个** payload）是 {business_key: [产品,线,日期]} 映射。
-            # 只认前者 ⇒ 批量失败的行永远重试不了（自审时抓到的坑）。
-            tri = (p.get("groups") or {}).get(r["business_key"])
-            if tri:
-                triples.append(tuple(tri))
-            elif p.get("product_name"):
-                triples.append((p["product_name"], p.get("line_name"), p.get("report_date")))
+            # （`run_write_many` 只收**一个** payload）是 {business_key: …} 映射，
+            # 值是 `[产品,线,日期]`（旧）或 `{三要素, records}`（新）。只认前者
+            # ⇒ 批量失败的行永远重试不了（自审时抓到的坑）。
+            recs = _fbt._payload_records(p, r["business_key"])
+            if "product_name" in p:
+                entries.append((p.get("product_name"), p.get("line_name"),
+                                p.get("report_date"), recs))
+                continue
+            g = (p.get("groups") or {}).get(r["business_key"])
+            if isinstance(g, dict):
+                entries.append((g.get("product_name"), g.get("line_name"),
+                                g.get("report_date"), recs))
+            elif g:
+                entries.append((g[0], g[1], g[2], recs))
     elif data.get("groups"):
         groups = data["groups"]
         # 元素必须都是 str：下游 `_rebuild_fb_records` 对 report_date/line_name 调
@@ -1924,42 +1939,45 @@ def fb_retry_sheets_sync():
                 isinstance(g, (list, tuple)) and len(g) == 3
                 and all(isinstance(x, str) for x in g) for g in groups):
             return err('groups 格式不正确', 400)
-        triples = [tuple(g) for g in groups]
+        entries = [(g[0], g[1], g[2], None) for g in groups]
 
-    triples = [(p, l, d) for p, l, d in triples if p]
-    if not triples:
+    entries = [(p, l, d, recs) for p, l, d, recs in entries if p]
+    if not entries:
         return err('缺少 groups 或 business_keys', 400)
 
     # 重建前置：不可重建的当场回原因，不进日志
     ok_groups, failed = [], []
-    for p, l, d in triples:
-        records, why = _rebuild_fb_records(db, uid, p, l, d)
-        if records is None:
-            failed.append({'product_name': p, 'line_name': l, 'report_date': d, 'error': why})
-            continue
-        ok_groups.append((p, l, d))
+    for p, l, d, recs in entries:
+        if recs is None:
+            recs, why = _rebuild_fb_records(db, uid, p, l, d)
+            if recs is None:
+                failed.append({'product_name': p, 'line_name': l,
+                               'report_date': d, 'error': why})
+                continue
+        ok_groups.append((p, l, d, recs))
 
     if not ok_groups:
         # 单组形态沿用原来的「400 + 原因」，多组形态回 200 + failed[]（形状与改前一致）
-        if len(triples) == 1:
+        if len(entries) == 1:
             return err(failed[0]['error'], 400)
         return ok({'accepted': 0, 'failed': failed})
 
-    import sheet_write
-    import routes.fb_sheet_targets as _fbt
-
-    keys = [_fbt.fb_report_key(p, l, d) for p, l, d in ok_groups]
+    keys = [_fbt.fb_report_key(p, l, d) for p, l, d, _ in ok_groups]
     if len(ok_groups) == 1:
-        p, l, d = ok_groups[0]
-        payload = {"product_name": p, "line_name": l, "report_date": d}
+        p, l, d, recs = ok_groups[0]
+        payload = {"product_name": p, "line_name": l, "report_date": d,
+                   "records": recs}
         sheet_write.run_write(
             db, user_id=uid, platform="fb", target="fb_report", business_key=keys[0],
             sync_fn=sheet_write.build_sync("fb_report", uid, keys[0], payload),
             payload=payload)
     else:
-        # `run_write_many` 只收**一个** payload ⇒ 三元组按 key 做成映射（design §Task 2）
-        payload = {"groups": {_fbt.fb_report_key(p, l, d): [p, l, d]
-                              for p, l, d in ok_groups}}
+        # `run_write_many` 只收**一个** payload ⇒ 三元组 + records 按 key 做成映射
+        # （design §Task 2）。旧形状 `[产品,线,日期]` 继续能解析（见 `_payload_triple`）。
+        payload = {"groups": {_fbt.fb_report_key(p, l, d):
+                              {"product_name": p, "line_name": l, "report_date": d,
+                               "records": recs}
+                              for p, l, d, recs in ok_groups}}
         sheet_write.run_write_many(
             db, user_id=uid, platform="fb", target="fb_report", business_keys=keys,
             sync_fn=_fbt.fb_report_many_sync(uid, ok_groups), payload=payload)

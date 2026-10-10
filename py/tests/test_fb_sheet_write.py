@@ -348,6 +348,153 @@ def test_extract_save_registers_fb_report_and_stops_writing_sync_log(client, mon
     assert n_sync_log == 0, f"FB 不得再写 sheets_sync_log，实际 {n_sync_log} 行"
 
 
+# ---------- 回归：写表必须用「本次解析出来的数据」，不得回库读整组 ----------
+#
+# 缺陷 `cf6c5bb`：`_register_fb_report_write` 删掉了 records 参数，写表改由
+# `_rebuild_fb_records` 从 `fb_ad_reports` SELECT 整组 —— 而该表按账户 upsert、
+# **只增不删**，同一 (产品,线,日期) 多次导入会累积成并集 ⇒ 本次只解析出 5 行，
+# 写表却写了库里的全部行。
+
+def test_extract_save_writes_parsed_records_not_db_union(client, monkeypatch):
+    """核心用例：库里已有 18 行（13 行不在本次解析里），写表只能喂本次解析的 5 行。"""
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append(
+                            (p, l, d, sorted(r["account_id"] for r in records))))
+
+    hdr, uid = _fb_user(client, "_fbsw_parsed")
+    db = database.get_db()
+    # 上一次导入留下的 13 个账户（都不在本次解析结果里）
+    for i in range(13):
+        _seed_report(db, uid, product="产品甲", line="线A", date="2026-10-01",
+                     acc=f"old_{i}")
+    db.close()
+
+    parsed = [{"account_name": "名", "account_id": f"new_{i}", "cost": 1,
+               "impressions": 2, "clicks": 3, "registrations": 4,
+               "purchases": 5, "cost_per_purchase": 6} for i in range(5)]
+    resp = client.post("/api/fb/extract/save", headers=hdr, json={
+        "product_name": "产品甲", "line_name": "线A", "report_date": "2026-10-01",
+        "records": parsed})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    key = resp.get_json()["business_key"]
+
+    db = database.get_db()
+    r = _settle(db, uid, key)
+    n_db = db.execute(
+        "SELECT COUNT(*) FROM fb_ad_reports WHERE user_id=? AND product_name=? "
+        "AND line_name=? AND report_date=?",
+        (uid, "产品甲", "线A", "2026-10-01")).fetchone()[0]
+    db.close()
+
+    assert r is not None and r["status"] == "synced", r and r["status"]
+    assert written == [("产品甲", "线A", "2026-10-01",
+                        [f"new_{i}" for i in range(5)])], \
+        f"写表必须只用本次解析的 5 行，实际 {written}"
+    # 库一行都不能少：13 行旧的 + 5 行新的 = 18
+    assert n_db == 18, f"fb_ad_reports 不得删行，实际 {n_db} 行"
+
+
+def test_retry_after_save_keeps_parsed_records(client, monkeypatch):
+    """重试路径：payload 里带了 records ⇒ 重试写的仍是那 5 行，不回库读整组。"""
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append(
+                            sorted(r["account_id"] for r in records)))
+
+    hdr, uid = _fb_user(client, "_fbsw_retry_parsed")
+    db = database.get_db()
+    for i in range(13):
+        _seed_report(db, uid, product="产品甲", line="线A", date="2026-10-01",
+                     acc=f"old_{i}")
+    db.close()
+
+    parsed = [{"account_name": "名", "account_id": f"new_{i}", "cost": 1,
+               "impressions": 2, "clicks": 3, "registrations": 4,
+               "purchases": 5, "cost_per_purchase": 6} for i in range(5)]
+    resp = client.post("/api/fb/extract/save", headers=hdr, json={
+        "product_name": "产品甲", "line_name": "线A", "report_date": "2026-10-01",
+        "records": parsed})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    key = resp.get_json()["business_key"]
+
+    db = database.get_db()
+    _settle(db, uid, key)
+    db.close()
+    assert len(written) == 1, f"首次写入应发生一次，实际 {written}"
+
+    # 走「按既有失败行重试」那条路 —— 三元组与 records 都从该行 payload_json 取
+    resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                       json={"business_keys": [key]})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    assert resp.get_json()["accepted"] == 1, resp.get_json()
+
+    for _ in range(300):
+        if len(written) >= 2:
+            break
+        _poll_sleep(0.02)
+    assert len(written) == 2, f"重试应再写一次，实际 {written}"
+    assert written[1] == [f"new_{i}" for i in range(5)], \
+        f"重试必须仍写本次解析的 5 行，实际 {written[1]}"
+
+
+def test_retry_legacy_payload_without_records_falls_back_to_db(client, monkeypatch):
+    """回退兼容：历史 payload 没有 records ⇒ 仍回库重建，不得 400。"""
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append(
+                            sorted(r["account_id"] for r in records)))
+
+    hdr, uid = _fb_user(client, "_fbsw_legacy_fb")
+    db = database.get_db()
+    _seed_report(db, uid, product="产品甲", line="线A", date="2026-10-01", acc="acc_1")
+    _seed_report(db, uid, product="产品甲", line="线A", date="2026-10-01", acc="acc_2")
+    key = __import__("routes.fb_sheet_targets", fromlist=["x"]).fb_report_key(
+        "产品甲", "线A", "2026-10-01")
+    # 历史形状：扁平三要素，**没有** records 键
+    db.execute(
+        "INSERT INTO sheet_write_log (user_id, platform, target, business_key, status, "
+        "payload_json) VALUES (?, 'fb', 'fb_report', ?, 'retry_failed', ?)",
+        (uid, key, json.dumps({"product_name": "产品甲", "line_name": "线A",
+                               "report_date": "2026-10-01"}, ensure_ascii=False)))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/fb/reports/retry-sync", headers=hdr,
+                       json={"business_keys": [key]})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    assert resp.get_json()["accepted"] == 1, resp.get_json()
+    for _ in range(300):
+        if written:
+            break
+        _poll_sleep(0.02)
+    assert written == [["acc_1", "acc_2"]], \
+        f"无 records 的历史行必须回库重建，实际 {written}"
+
+
+def test_payload_triple_and_records_new_groups_dict_shape():
+    """新批量形状：groups[business_key] 是 dict（三要素 + records），三元组/records 都能取。"""
+    import routes.fb_sheet_targets as tgt
+    recs = [{"account_id": "a1"}]
+    payload = {"groups": {"k1": {"product_name": "P1", "line_name": "L1",
+                                 "report_date": "D1", "records": recs}}}
+    assert tgt._payload_triple(payload, "k1") == ("P1", "L1", "D1")
+    assert tgt._payload_records(payload, "k1") == recs
+    # 旧形状（list）仍要能解析，且 records 取不到 ⇒ None
+    old = {"groups": {"k2": ["P2", "L2", "D2"]}}
+    assert tgt._payload_triple(old, "k2") == ("P2", "L2", "D2")
+    assert tgt._payload_records(old, "k2") is None
+    # 扁平新形状（单组 + records）
+    flat = {"product_name": "P3", "line_name": "L3", "report_date": "D3", "records": recs}
+    assert tgt._payload_records(flat, "任意") == recs
+    # 扁平旧形状（无 records）⇒ None
+    assert tgt._payload_records({"product_name": "P", "line_name": "L",
+                                 "report_date": "D"}, "任意") is None
+
+
 def test_retry_malformed_input_returns_400_not_500(client):
     """畸形入参必须 400 —— 请求体是用户可控 JSON，不得在解包/绑定处打成 500。
 
