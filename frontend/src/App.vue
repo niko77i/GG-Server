@@ -38,9 +38,8 @@ const isAuthPage = computed(() => ['/login', '/register'].includes(route.path))
 
 onMounted(async () => {
   auth.initFromStorage()
-  // 平台上下文：**刷新不该改变你正在看的平台**。路由是最终依据（切平台即导航，
-  // 见 AppSidebar.switchPlatform），存储兜底；两者都缺/过期时由这一步自愈。
-  auth.syncPlatformFromRoute(route.meta?.platform)
+  // 平台上下文的路由校正**不在这里**：首帧导航是异步的，此处 route.meta 还是空的（会成空操作）。
+  // 已挪到 main.js 的 router.afterEach（2026-10-11 代码审查）。
   if (auth.isLoggedIn) {
     await auth.fetchMe()
   }

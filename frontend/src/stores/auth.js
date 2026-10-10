@@ -1,6 +1,10 @@
 ﻿import { defineStore } from 'pinia'
 import { authApi } from '../api/auth'
-import { PLATFORM_KEY, sanitizePlatform, platformOnHydrate } from '../utils/platformPrefs.mjs'
+import { PLATFORM_KEY, sanitizePlatform, platformFromPath, resolvePlatform } from '../utils/platformPrefs.mjs'
+
+// 当前路径（hash 路由）：与 api/client.js 的请求平台推导同源。
+const currentPath = () =>
+  (typeof window === 'undefined' ? '' : window.location.hash.replace('#', ''))
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -10,8 +14,10 @@ export const useAuthStore = defineStore('auth', {
     // 平台上下文**必须持久化**。它原先只活在内存里（初始值硬编码 'gg'、setPlatform 不落盘、
     // initFromStorage 不恢复）⇒ 整页刷新后，**可切换平台的角色（户管/开发者）会静默掉回 GG**，
     // 而页面还停在刷新前那张表 ⇒ 侧边栏/导航/路由守卫/筛选器全按 GG 算：看着是 TT、实际是 GG。
-    // 这里先按白名单读回（脏值回落 'gg'），`initFromStorage` 拿到 user 后再按角色归一。
-    currentPlatform: sanitizePlatform(localStorage.getItem(PLATFORM_KEY))
+    // 这里先按「路由 > 存储」播种（首帧即刻正确、不闪一下 GG）；user 要等 initFromStorage 才有，
+    // 届时再按角色归一（非切换角色一律取 user.platform）。
+    currentPlatform: sanitizePlatform(platformFromPath(currentPath())
+                                      || localStorage.getItem(PLATFORM_KEY))
   }),
   getters: {
     isAdmin: (state) => ['developer', 'admin'].includes(state.user?.role),
@@ -21,6 +27,9 @@ export const useAuthStore = defineStore('auth', {
     canSwitchPlatform: (state) => ['developer', 'huguan'].includes(state.user?.role),
     canManageAccounts: (state) => ['developer', 'admin', 'huguan'].includes(state.user?.role),
     canAccessProducts: (state) => ['developer', 'admin', 'viewer', 'user'].includes(state.user?.role),
+    // ⚠️ 下面三个只反映「**当前所看的平台**」（对可切换的角色才有意义）。
+    // 非切换角色请用 `effectivePlatform`（它按 user.platform 推导）—— 直接读 currentPlatform
+    // 会拿到与账号无关的值。
     isFbUser: (state) => state.currentPlatform === 'fb',
     isGgUser: (state) => state.currentPlatform === 'gg',
     isTtUser: (state) => state.currentPlatform === 'tt',
@@ -82,11 +91,14 @@ export const useAuthStore = defineStore('auth', {
         localStorage.setItem(PLATFORM_KEY, this.currentPlatform)
       }
     },
-    /** 路由是平台的**最终依据**（切平台即导航，见 AppSidebar.switchPlatform）⇒ 刷新后按当前
-     *  路由校正一次：存储缺失/过期时靠它自愈；不可切换平台的角色不参与。 */
-    syncPlatformFromRoute(metaPlatform) {
-      if (!this.canSwitchPlatform || !metaPlatform) return
-      if (this.currentPlatform !== metaPlatform) this.setPlatform(metaPlatform)
+    /** 路由是平台的**最终依据**（切平台即导航，见 AppSidebar.switchPlatform）。
+     *  **必须挂在 `router.afterEach` 上**（见 main.js）：首帧导航是异步的（守卫经微任务），
+     *  放在 App.vue 的 onMounted 里那一刻 `route.meta` 还是空的 ⇒ 会是一次**空操作**（踩过）。
+     *  路由"没有意见"（`platformFromPath` 返回 null，如 /admin/users）时不动平台。 */
+    syncPlatformFromRoute(path) {
+      if (!this.canSwitchPlatform) return
+      const p = platformFromPath(path)
+      if (p && this.currentPlatform !== p) this.setPlatform(p)
     },
     logout() {
       this.user = null
@@ -105,8 +117,9 @@ export const useAuthStore = defineStore('auth', {
         this.user = JSON.parse(user)
         this.isLoggedIn = true
         // 拿到 user 才知道能不能切平台 ⇒ 平台按角色在这里归一（判据见 utils/platformPrefs.mjs）
-        this.currentPlatform = platformOnHydrate({
+        this.currentPlatform = resolvePlatform({
           stored: localStorage.getItem(PLATFORM_KEY),
+          routePath: currentPath(),
           canSwitch: this.canSwitchPlatform,
           userPlatform: this.user?.platform,
         })

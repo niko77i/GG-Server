@@ -1,4 +1,5 @@
 ﻿import axios from 'axios'
+import { platformFromPath } from '../utils/platformPrefs.mjs'
 
 const api = axios.create({ baseURL: '/api', timeout: 30000 })
 
@@ -7,15 +8,15 @@ api.interceptors.request.use(config => {
   if (token) {
     config.headers.Authorization = 'Bearer ' + token
   }
-  // 跨平台角色（developer / 户管）请求时传递 platform 参数
+  // 跨平台角色（developer / 户管）请求时传递 platform 参数。
+  // 推导规则与 store（侧边栏/导航）**共用同一份**（`utils/platformPrefs.mjs`）—— 两处口径必须一致，
+  // 否则会出现「数据是 TT、导航是 GG」这种割裂（2026-10-11 修）。路由"没有意见"（null：/admin/users、
+  // 首帧未解析、根路径）时不带该参数，绝不凭空按 GG。
   try {
     const user = JSON.parse(localStorage.getItem('user') || '{}')
     if (['developer', 'huguan'].includes(user.role)) {
-      const path = window.location.hash.replace('#', '')
-      // 用户管理页有自己的平台 Tab 显式控制平台，不由路由推断
-      // （该页路由为 /admin/users，不以 /tt、/fb 开头，会被误判成 gg，导致「全部」看不到其他平台）
-      if (!path.startsWith('/admin/users')) {
-        const platform = path.startsWith('/tt') ? 'tt' : path.startsWith('/fb') ? 'fb' : 'gg'
+      const platform = platformFromPath(window.location.hash.replace('#', ''))
+      if (platform) {
         if (!config.params) config.params = {}
         if (!config.params.platform) config.params.platform = platform
       }
