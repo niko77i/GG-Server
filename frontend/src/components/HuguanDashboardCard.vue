@@ -142,7 +142,9 @@
                         </template>
                         <template v-else-if="hdRowState(row) === 'manual'">
                           <el-tag size="small" type="primary">手工</el-tag>
-                          <span style="font-size:12px;color:#409eff;">已改</span>
+                          <!-- 「已改」= **本次会话**碰过这一行，而不是「配置里存着一条覆盖」：
+                               上一次会话就存好的覆盖未触碰时也该是「手工」，但不该显示「已改」。 -->
+                          <span v-if="row.touched" style="font-size:12px;color:#409eff;">已改</span>
                         </template>
                         <template v-else-if="hdRowState(row) === 'alias'">
                           <el-tag size="small" type="info">别名</el-tag>
@@ -1245,14 +1247,16 @@ const hdHeaderStats = computed(() => {
 function hdStats(t) { return hdHeaderStats.value[hdSheetKey(t)] || { ok: 0, miss: 0, skip: 0 } }
 
 /** 一行的显示档位：manual 手工 / alias 别名 / ignored 不采集 / none 未采集。
- *  判据是**下拉的当前值**（rowsFromColumns 已把自动认出的结果填进 selected）：
+ *  判据是**下拉的当前值**（rowsFromColumns 已把当前有效值填进 selected）：
  *  有值＝已识别，''＝不采集，null＝还没指派。未识别与「识别到了但落选」统一显示「未采集」
- *  —— 与同步报告同一口径，前端不假装能区分（视觉规格的两条决定之 1）。 */
+ *  —— 与同步报告同一口径，前端不假装能区分（视觉规格的两条决定之 1）。
+ *  「手工」的判据是**当前值 ≠ 别名单独会给出的答案**（row.auto = alias_field），
+ *  而不是「有 via==='override'」：后者对「本次会话把覆盖改回别名答案」的行会误标「手工」
+ *  （那条覆盖保存后即被撤掉）。前者的语义与保存后落盘的 columns 一致。 */
 function hdRowState(row) {
   if (row.selected === '') return 'ignored'
   if (row.selected === null || row.selected === undefined) return 'none'
-  const manual = row.touched ? row.selected !== row.auto : row.via === 'override'
-  return manual ? 'manual' : 'alias'
+  return row.selected !== row.auto ? 'manual' : 'alias'
 }
 /** 这一行算不算「未采集」（红左条）：未指派，或表头重复（重复行根本没法安全指派）。 */
 function hdRowMiss(t, row) { return hdRowState(row) === 'none' || hdRowIsDup(t, row) }
