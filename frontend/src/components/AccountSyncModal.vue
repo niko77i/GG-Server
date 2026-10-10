@@ -173,7 +173,11 @@ const canClaim = computed(() => auth.canManageAccounts)
 const updateIds = computed(() => (diff.value?.to_update || []).map(r => r.account_id))
 const claimIds = computed(() => (diff.value?.to_claim || []).map(r => r.account_id))
 const selUpdateIds = computed(() => selectedIds(updateIds.value, updateExcluded.value))
-const selClaimIds = computed(() => claimIds.value.filter(id => claimPicked.value.includes(id)))
+// 先建一次 Set：否则 claimIds × claimPicked 是 O(n·m)（万行时最坏 ~1e8 次比较）。
+const selClaimIds = computed(() => {
+  const picked = new Set(claimPicked.value)
+  return claimIds.value.filter(id => picked.has(id))
+})
 
 // 限行渲染：三张表只画前 PREVIEW_LIMIT 行（DOM 节点数封顶，防上万行崩标签页）。
 const createPrev = computed(() => slicePreview(diff.value?.to_create || [], PREVIEW_LIMIT))
@@ -214,16 +218,16 @@ function toggleClaim(id, on) {
 }
 /** 表头「全选」勾：只作用**本页渲染出来的 ≤100 行**。 */
 function selectAllUpdatePreview(on) {
-  const shownIds = updatePrev.value.shown.map(r => r.account_id)
+  const shownIds = new Set(updatePrev.value.shown.map(r => r.account_id))
   updateExcluded.value = on
-    ? updateExcluded.value.filter(id => !shownIds.includes(id))
+    ? updateExcluded.value.filter(id => !shownIds.has(id))
     : [...new Set([...updateExcluded.value, ...shownIds])]
 }
 function selectAllClaimPreview(on) {
-  const shownIds = claimPrev.value.shown.map(r => r.account_id)
+  const shownIds = new Set(claimPrev.value.shown.map(r => r.account_id))
   claimPicked.value = on
     ? [...new Set([...claimPicked.value, ...shownIds])]
-    : claimPicked.value.filter(id => !shownIds.includes(id))
+    : claimPicked.value.filter(id => !shownIds.has(id))
 }
 /** 脚注「全部选中 / 全部取消」：作用**全量**（不只渲染行）。 */
 function selectAllUpdate(on) {
@@ -284,10 +288,13 @@ async function doSync() {
   try {
     // 请求体形状不变：create 仍是全部新增行；update / claim 仍按「勾选的行」提交，
     // 只是勾选权威从「渲染行数组」换成「id 集合」（限行 100 也不会丢另外上万行的勾选）。
+    // 先建一次 Set：否则 to_update × selUpdateIds 是 O(n·m)（万行时最坏 ~1e8 次比较，
+    // 会在点「确认同步」那一刻明显卡一下）。
+    const sel = new Set(selUpdateIds.value)
     const confirmed = {
       create: diff.value?.to_create || [],
       update: (diff.value?.to_update || [])
-        .filter(u => selUpdateIds.value.includes(u.account_id))
+        .filter(u => sel.has(u.account_id))
         .map(u => ({
           account_id: u.account_id,
           new_status: u.suggested_status,
