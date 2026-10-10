@@ -594,7 +594,7 @@ git commit -m "chore(gg): 退役做表线的两个专属端点 + 前端包装
 - **改动 1** `py/main.py` 登记块：`_payload` 补 `yanghu_rows`（请求 `rows` 里 `is_yanghu` 的行，
   保原顺序、绝不截断）+ `report_date` / `region`（纯养户行时兜底）。
 - **改动 2** `py/routes/gg_zuobiao_target.py`：`gg_zuobiao_kwargs` / `gg_zuobiao_sync` /
-  `_gg_zuobiao_rebuild` 加 `yanghu_rows` / `fallback_report_date` / `fallback_region` 参数；
+  `_gg_zuobiao_rebuild` 加 `yanghu_rows` / `report_date` / `region` 参数；
   空数据判断改为 `if not rows_raw and not yanghu_rows:`；`rows = DB 非养户行 + list(yanghu_rows or [])`。
   老日志行无这些键 ⇒ `.get()` 缺省 ⇒ 行为与现状一致。
 - **改动 3** 测试 `py/tests/test_gg_zuobiao_write.py` 追加 4 条：真入口带养户行 / 重试路径复现 /

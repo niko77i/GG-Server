@@ -597,3 +597,50 @@ def test_gg_zuobiao_kwargs_without_date_no_filter(client):
     accounts = {r["account"] for r in kwargs["rows"]}
     assert accounts == {"acc_sep", "acc_oct"}, \
         f"不带日期时不得过滤月份，实际 {accounts}"
+
+
+def test_update_zuobiao_backfill_prior_month_uses_input_month(client, monkeypatch):
+    """补录旧月（入参月 ≠ DB 最新月）也必须按**入参**月过滤 —— 钉死「按 DB 最新月过滤」退化。
+
+    现有 a/b 用例的测试数据里入参月恰好 = DB 最新月（都是 2026-10）、c 不传日期 ⇒
+    分不清「按入参月过滤」与「按 DB 最新月过滤」两种实现。但 report_date 完全由客户端
+    决定（保存端点无「≥ 最新月」校验）、ad_reports 又无按月清理 ⇒ 客户端可在 10 月已
+    存在后补录 9 月。此时入参月（9 月）≠ DB 最新月（10 月），若实现退化成
+    「按 MAX(report_date) 过滤」，补录的 9 月行被静默丢弃、反而重写 10 月行 —— 与 I1
+    同族的静默数据错误。
+
+    判别力：把 `gg_zuobiao_kwargs` 的过滤值从入参 `report_date` 换成「先查该产品
+    MAX(report_date) 再拿它过滤」⇒ 本用例必红（10 月行漏进来 + report_date 变成 10 月）。
+    """
+    import google_sheets_service as gs
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)   # 成功路径不触发 30s 重试，防御性打桩
+    captured = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda service, **k: captured.append(k))
+
+    hdr, uid = _gg_user(client, "_zb_backfill")
+    _setup_zuobiao_config(client, hdr)
+    # 预种：该产品已有 10 月行（DB 最新月 = 10 月）
+    db = database.get_db()
+    _seed_zuobiao(db, uid, "产品甲", acc="acc_oct", date="2026-10-01")
+    db.close()
+
+    # 经真实 POST 补录 9 月行：入参月（9 月）≠ DB 最新月（10 月）
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-09-01",
+        "rows": [{"account": "acc_sep", "customerId": "c2", "cost": 1, "campaign": "x"}],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+
+    db = database.get_db()
+    _settle(db, uid, "产品甲")
+    db.close()
+
+    assert captured, "必须真的调用 upsert_zuobiao（而非配置早退）"
+    k = captured[0]
+    accounts = [r["account"] for r in k["rows"]]
+    assert "acc_sep" in accounts, f"补录的 9 月行必须写出，实际 {accounts}"
+    assert "acc_oct" not in accounts, f"10 月行不得被误写进 9 月表，实际 {accounts}"
+    assert k["report_date"] == "2026-09-01", \
+        f"report_date 应为入参月 9 月，实际 {k['report_date']}"
