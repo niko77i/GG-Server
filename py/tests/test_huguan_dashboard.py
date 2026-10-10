@@ -6321,6 +6321,45 @@ class TestPerTableSync:
                     json={"platform": "tt", "dry_run": True})
         assert reads == ["企业户", "加白户"]
 
+    def test_apply_snapshot_covers_only_the_named_table(self, client, monkeypatch):
+        """裁定 B 的关键路径：按表**落库**（`dry_run:false`）后，撤回快照**只含被操作的那张表**。
+
+        这是「dry_run:true」系列用例够不到的那一步 —— 落库时后端会**重新读表**，若
+        `only_sheet` 过滤在那里回归，快照会**静默扩张到全部表**，之后一次「撤回上次」就会
+        把别的表也改回去（裁定 B 的实质被破坏）。故本用例经**真实入口** `/sync` 落库一遍，
+        再从库里读回快照断言范围。
+
+        判别力在**两半都断**：目标表的行**在**快照里（只断负向会被「快照恒空」的坏实现假绿），
+        另一张表的账户**不在**（只断正向会被「快照含全部表」的坏实现假绿）。
+        """
+        import google_sheets_service as gs
+        hg = self._conf(client, "_ps_apply", [
+            {"name": "企业户", "sheet_name": "企业户"},
+            {"name": "加白户", "sheet_name": "加白户"}])
+        uid = _uid_of("_ps_apply")
+        # 两张表**各有一行**：若实现把表全读了，加白户的 9001 会混进快照。
+        grids = {"企业户": [["账户ID"], ["7001"]],
+                 "加白户": [["账户ID"], ["9001"]]}
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda svc, sid, sheet, rng: grids[sheet])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "sheet_name": "企业户", "dry_run": False,
+            "confirmed": {"create": ["7001"]}})
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["result"]["created"] == 1
+
+        db = database.get_db()
+        payload = hd.load_undo(db, uid, "tt", "sync")
+        db.close()
+        # 正向：目标表的行在快照里
+        assert payload["sheet_back_sheets"] == {"7001": "企业户"}
+        # 负向：另一张表的账户**不在** —— 快照扩张到全部表时这里必红
+        assert "9001" not in payload["sheet_back_sheets"]
+        # 逐表定位键列同样只含目标表
+        assert list(payload["sheet_key_cols"].keys()) == ["企业户"]
+
 
 class TestPerTablePush:
     """按表回写（设计 §3.1/§3.2）：给了 sheet_name 就只写那一张表。
@@ -6332,8 +6371,9 @@ class TestPerTablePush:
     （`hd.resolve_table_col_map`）与快照读（`hd.snapshot_push_targets`）走的都是
     **`huguan_dashboard.read_sheet_values`**（该模块 `from ... import read_sheet_values`
     的绑定）—— 桩 gs 那个名字拦不住它们。故这里改桩 `hd.read_sheet_values`，语义不变。
-    桩按 range 分流：只有表头读（`A1:ZZ1`）才记进 `headers_read`，写表前的快照读
-    （`A:ZZ`）不计，否则「只解析目标表表头」这条断言会被快照读污染。
+    桩按 range 分流：表头读（`A1:ZZ1`）记进 `headers_read`，写表前的快照读（`A:ZZ`）记进
+    `snapshot_read` —— 两者分开记，既让「只解析目标表表头」不被快照读污染，又能断言
+    「快照也只读目标表」（裁定 B 的 push 半边，此前完全没被断言）。
     """
 
     def _conf(self, client, username, tables):
@@ -6353,11 +6393,15 @@ class TestPerTablePush:
         db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
                    "deleted_at) VALUES('8002','乙','加白户',NULL)")
         db.commit(); db.close()
-        headers_read, written = [], []
+        headers_read, snapshot_read, written = [], [], []
 
         def _fake_read(svc, sid, sheet, rng):
             if rng == "A1:ZZ1":
                 headers_read.append(sheet)
+            elif rng == "A:ZZ":
+                # 写表前的撤回快照读（`snapshot_push_targets`）—— 记它读了哪张表：
+                # 快照范围只该是目标表（裁定 B 的 push 半边）。
+                snapshot_read.append(sheet)
             return [["账户ID"]]
 
         monkeypatch.setattr(hd, "read_sheet_values", _fake_read)
@@ -6370,8 +6414,41 @@ class TestPerTablePush:
                            json={"platform": "tt", "sheet_name": "企业户"})
         assert resp.status_code == 200, resp.get_json()
         assert headers_read == ["企业户"], f"只该解析目标表的表头，实际 {headers_read}"
+        assert snapshot_read == ["企业户"], f"快照只该读目标表，实际 {snapshot_read}"
         assert written and all(s == "企业户" for s, _ in written), f"实际写了 {written}"
         assert all(ids == ["8001"] for _s, ids in written), f"只该写企业户的账户，实际 {written}"
+
+    def test_gg_rejects_sheet_name(self, client, monkeypatch):
+        """push 侧的 gg/fb 拒绝（sync 侧 `TestPerTableSync.test_gg_rejects_sheet_name` 的镜像）。
+
+        旧版没有这条：push 的 `只有 TT 支持按表操作` 一行分支零判别覆盖。本版先把 gg 的
+        非空配置铺好并**种一个 gg 账户**（请求否则本可继续：会真的读表头/快照并写表），
+        再断言错误文案是「只有 TT」且读表/写表路径一次都没走 —— 拿掉 push 里的 gg/fb
+        拒绝即变红（那时 snapshot 会真读、账户会被写）。
+        """
+        import google_sheets_service as gs
+        hg, uid = _create_user(client, "_pp2", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "企业户"}})))
+        _seed_account(db, "GG-1", uid)
+        db.commit(); db.close()
+        reads, writes = [], []
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: reads.append(a) or [])
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda *a, **k: reads.append(a) or [])
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda *a, **k: writes.append(a)
+                            or {"updated": 0, "not_found": []})
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/push", headers=hg,
+                           json={"platform": "gg", "sheet_name": "企业户"})
+        assert resp.status_code == 400
+        assert "只有 TT" in resp.get_json()["error"]
+        assert reads == [] and writes == [], \
+            f"gg 传表名必须在读/写之前拒绝，实际 reads={reads} writes={writes}"
 
 
 # ---------- Task 3（per-sheet-sync）：跨表归属提示（**只查库**） ----------
