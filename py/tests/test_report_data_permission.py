@@ -335,3 +335,51 @@ def test_gg_plain_user_write_paths_unchanged(client, three):
     h, _, own_rid = three["user"]
     assert client.put(f"/api/ad-reports/{own_rid}", json={"cost": 5.0}, headers=h).status_code == 200
     assert client.delete(f"/api/ad-reports/{own_rid}", headers=h).status_code == 200
+
+
+# ---------- GG：写路径清点查出的第二条漏网入口（2026-10-11，用户裁定后收口） ----------
+
+_ZUOBIAO_PAYLOAD = {
+    "product_name": "P1", "region": "R", "report_date": "2026-10-01",
+    "rows": [{"account": "a", "customerId": "c", "campaign": "C1", "cost": 1}],
+}
+
+
+def _gg_report_count():
+    db = database.get_db()
+    n = db.execute("SELECT COUNT(*) FROM ad_reports").fetchone()[0]
+    db.close()
+    return n
+
+
+@pytest.mark.parametrize("who", ["huguan", "admin"])
+def test_gg_zuobiao_save_rejects_readonly_roles(client, three, who):
+    """**写路径清点结论**：`/api/google-sheets/update-zuobiao`（工具箱 → 做表数据）是
+    GG 侧**另一条**写 `ad_reports` 的路径 —— 它既没有 `@no_huguan`，也不在
+    `_GG_ONLY_PREFIXES` 里 ⇒ 平台守卫管不着，两个只读角色原本都能写
+    （`user_id` 恒为调用者自己 ⇒ 是「绕过只读」，非跨用户泄露）。
+    用户裁定按 FB `extract_save` 同款收口 ⇒ 403 且不落库。
+
+    ⚠️ RED 实测口径（别把本用例读强了）：短路守卫后实际拿到的是 **400**
+    （「请先在个人中心配置 Google 表格」）而非 200 —— 测试用户没有 Google 表格配置，
+    配置检查挡在写库之前。「无守卫 ⇒ 会真的写库」是**读代码**得出的
+    （写库那步在配置检查之后，全函数无任何角色判定），未在运行期演示到写库那一步。
+    本用例真正钉住的是：**只读角色的请求在配置检查之前就被 403 掉**。
+    """
+    h, _, _ = three[who]
+    before = _gg_report_count()
+    r = client.post("/api/google-sheets/update-zuobiao", json=_ZUOBIAO_PAYLOAD, headers=h)
+    assert r.status_code == 403, r.get_data(as_text=True)[:300]
+    assert _gg_report_count() == before, "被拒的请求不得落库（守卫须在写入之前）"
+
+
+def test_gg_zuobiao_guard_does_not_fire_for_plain_user(client, three):
+    """回归：守卫**不得误伤普通 user**（真正做表的人）。
+
+    只断言「不是 403」：守卫命中必然是 403，故该断言足以证明它没命中。
+    payload 里的产品在测试库里不存在 ⇒ 后续校验大概率给 400，那是既有行为，
+    与本判定无关（本用例只管「守卫有没有误伤」）。
+    """
+    h, _, _ = three["user"]
+    r = client.post("/api/google-sheets/update-zuobiao", json=_ZUOBIAO_PAYLOAD, headers=h)
+    assert r.status_code != 403, f"普通 user 不得被只读守卫拦下：{r.get_data(as_text=True)[:300]}"

@@ -7562,6 +7562,19 @@ def config_google_sheets_save():
 def google_sheets_update_zuobiao():
     """将做表数据写入用户激活的 Google Sheets 表格（后台异步），并同步到数据库。"""
     user_id = int(get_jwt_identity())
+
+    # 角色守卫（2026-10-11，Task 2 写路径清点 + 用户裁定）：本端点是 GG 侧**另一条**
+    # 写入 `ad_reports` 的路径（工具箱 → 做表数据，`ToolkitView.vue:567`），与数据管理页
+    # 同属「写做表数据」，同受设计 §3 的角色矩阵约束 ⇒ 户管与管理员一律 403。
+    # 普通 user（真正做表的人）与 developer 不受影响。
+    # ⚠️ 放在最前：只读角色无论提交什么 payload 都统一 403，不会先落到校验分支的 400。
+    # 本端点此前连 `@no_huguan` 都没有，且不在 `_GG_ONLY_PREFIXES` 里 ⇒ 平台守卫也不管它，
+    # 两个只读角色都够得着（`user_id` 恒为调用者自己 ⇒ 是「绕过只读」，非跨用户泄露）。
+    # 注：户管导航里本就没有「工具集」入口，被挡不改变他们实际能点的东西。
+    _role = user_role(_yt_db(), user_id)
+    if _role in REPORT_COST_ONLY_ROLES or _role == "admin":
+        return jsonify({"success": False, "error": "无权限：只读角色不可写入数据"}), 403
+
     data = request.get_json(silent=True) or {}
     product_name = (data.get("product_name") or "").strip()
     region = (data.get("region") or "").strip()
