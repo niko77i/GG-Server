@@ -269,8 +269,11 @@ def fb_analysis_dashboard():
     ).fetchone()
 
     def _group(col):
+        # **不别名**：分组键保留原列名（`line_name` / `product_name`），
+        # 与设计 §3.2 的 `by_line: [{line_name, …}]` 一致。
+        # （写成 `AS name` 会让前端按 `name` 取值却取不到，是自审时抓到的矛盾。）
         rows = db.execute(
-            f"SELECT {col} AS name, COALESCE(SUM(cost),0) AS total_cost, "
+            f"SELECT {col}, COALESCE(SUM(cost),0) AS total_cost, "
             f"COALESCE(SUM(impressions),0) AS total_impressions, "
             f"COALESCE(SUM(clicks),0) AS total_clicks, COUNT(*) AS record_count "
             f"FROM fb_ad_reports WHERE {where_clause} "
@@ -479,7 +482,7 @@ const analysisPlatform = computed(() => route.meta?.platform || 'gg')
 
   <!-- 按线花费表 -->
   <el-table :data="fbByLine" stripe border size="small">
-    <el-table-column prop="name" label="线名" min-width="180" show-overflow-tooltip />
+    <el-table-column prop="line_name" label="线名" min-width="180" show-overflow-tooltip />
     <el-table-column prop="total_cost" label="花费" min-width="110" sortable>
       <template #default="{ row }">${{ row.total_cost.toLocaleString() }}</template>
     </el-table-column>
