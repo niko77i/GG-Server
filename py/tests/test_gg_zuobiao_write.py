@@ -499,3 +499,101 @@ def test_zuobiao_no_yanghu_unchanged(client, monkeypatch):
     rows = captured[0]
     assert rows and all(not r.get("is_yanghu") for r in rows), \
         f"无养户行时写出的行不得有养户行，实际 {rows}"
+
+
+# ---------------------------------------------------------------------------
+# 重建只取**当月**行（I1：多月份串月会静默污染当月表）
+#
+# ad_reports 对同一产品累积多个月份的行、且本仓没有任何按月清理逻辑 ⇒ 重建若不按
+# `report_date` 过滤，会把旧月行以当月日期写进当月表（表键含 date，旧月行查不到 ⇒
+# 被 append 成当月日期的重复行）。三条各钉一处：真入口 / 重试路径 / 无日期兼容。
+# ---------------------------------------------------------------------------
+
+def test_update_zuobiao_rebuild_takes_only_current_month(client, monkeypatch):
+    """真入口：多月份不串月。预种 9 月行，再经 POST 保存 10 月行 ⇒ 重建只取 10 月。
+
+    判别力：去掉 `gg_zuobiao_kwargs` 里的 `if report_date: where += " AND report_date=?"`
+    过滤（恢复成全月份查询）⇒ 9 月行（acc_sep）也被写进 10 月表 ⇒ 本用例必红。
+    """
+    import google_sheets_service as gs
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)   # 成功路径不触发 30s 重试，防御性打桩
+    captured = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda service, **k: captured.append(k))
+
+    hdr, uid = _gg_user(client, "_zb_monthonly")
+    _setup_zuobiao_config(client, hdr)
+    # 预种一条 9 月的行 —— 若重建不加月份过滤，它会被以 10 月日期写进 10 月表
+    db = database.get_db()
+    _seed_zuobiao(db, uid, "产品甲", acc="acc_sep", date="2026-09-01")
+    db.close()
+
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-10-01",
+        "rows": [{"account": "acc_oct", "customerId": "c2", "cost": 1, "campaign": "x"}],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+
+    db = database.get_db()
+    _settle(db, uid, "产品甲")
+    db.close()
+
+    assert captured, "必须真的调用 upsert_zuobiao（而非配置早退）"
+    k = captured[0]
+    accounts = [r["account"] for r in k["rows"]]
+    assert "acc_oct" in accounts, f"当月行必须写出，实际 {accounts}"
+    assert "acc_sep" not in accounts, f"旧月行不得串进当月表，实际 {accounts}"
+    assert k["report_date"] == "2026-10-01", f"report_date 应为当月，实际 {k['report_date']}"
+
+
+def test_gg_zuobiao_retry_takes_only_current_month(client, monkeypatch):
+    """重试路径（build_sync）同样只取当月：payload 带 report_date ⇒ 过滤掉旧月行。
+
+    判别力：与真入口同 —— 去掉月份过滤后，9 月行（acc_sep）也会被写出 ⇒ 必红。
+    """
+    import google_sheets_service as gs
+    import routes.gg_zuobiao_target as tgt
+    captured = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda service, **k: captured.append(k))
+
+    hdr, uid = _gg_user(client, "_zb_retry_month")
+    _setup_zuobiao_config(client, hdr)
+    db = database.get_db()
+    _seed_zuobiao(db, uid, "产品甲", acc="acc_sep", date="2026-09-01")
+    _seed_zuobiao(db, uid, "产品甲", acc="acc_oct", date="2026-10-01")
+    db.close()
+
+    key = tgt.gg_zuobiao_key("产品甲")
+    payload = {"product_name": "产品甲", "report_date": "2026-10-01", "region": "US"}
+    sheet_write.build_sync("gg_zuobiao", uid, key, payload)()
+
+    assert captured, "重试必须真的调用 upsert_zuobiao"
+    k = captured[0]
+    accounts = [r["account"] for r in k["rows"]]
+    assert "acc_oct" in accounts, f"当月行必须写出，实际 {accounts}"
+    assert "acc_sep" not in accounts, f"旧月行不得串进当月表，实际 {accounts}"
+    assert k["report_date"] == "2026-10-01", f"report_date 应为当月，实际 {k['report_date']}"
+
+
+def test_gg_zuobiao_kwargs_without_date_no_filter(client):
+    """无 report_date ⇒ 不加月份过滤（兼容「payload 里没有日期」的场合）。
+
+    预种两个月 ⇒ 不带日期时**两个月的行都应重建出来**（证明没被过滤），且不报错。
+    """
+    import routes.gg_zuobiao_target as tgt
+    hdr, uid = _gg_user(client, "_zb_nodate")
+    _setup_zuobiao_config(client, hdr)
+    db = database.get_db()
+    _seed_zuobiao(db, uid, "产品甲", acc="acc_sep", date="2026-09-01")
+    _seed_zuobiao(db, uid, "产品甲", acc="acc_oct", date="2026-10-01")
+    db.close()
+
+    db = database.get_db()
+    kwargs, why = tgt.gg_zuobiao_kwargs(db, uid, "产品甲")
+    db.close()
+    assert why is None, f"应能重建，实际 {why}"
+    accounts = {r["account"] for r in kwargs["rows"]}
+    assert accounts == {"acc_sep", "acc_oct"}, \
+        f"不带日期时不得过滤月份，实际 {accounts}"

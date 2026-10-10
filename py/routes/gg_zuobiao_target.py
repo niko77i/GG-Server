@@ -50,7 +50,7 @@ def _zuobiao_spreadsheet_id(db, user_id, report_date):
 
 
 def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
-                      fallback_report_date="", fallback_region=""):
+                      report_date="", region=""):
     """从 DB 重算 `upsert_zuobiao` 的实参。返回 `(kwargs, None)` 或 `(None, 失败原因)`。
 
     这段重建**逐行搬自退役前的 `/api/google-sheets/retry-sync`**（`py/main.py` 原
@@ -58,29 +58,39 @@ def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
     `log_row["spreadsheet_id"]` 换成 `_zuobiao_spreadsheet_id(db, user_id)`
     （新路径没有 `sheets_sync_log` 行可读）。
 
+    **`report_date` 是月份过滤值**：做表表是**按月切的**（表名按「操作人名 + `YYYY.MM`」
+    匹配），而 `ad_reports` 对同一产品会累积**多个月份**的行（本仓没有任何按月清理逻辑）。
+    若重建不按 `report_date` 过滤，就会把该产品**所有月份**的行都捞出来、再以**最新月**
+    的日期统一写进**最新月那张表** ⇒ 旧月行在表里查不到（表键含 date）⇒ 被 append 成
+    当月日期的重复行、数值还是旧月的 ⇒ **静默数据污染**。所以 `report_date` 非空时必须
+    追加 `AND report_date=?` 只取当月行；为空时**不加过滤**（兼容 payload 里没有日期的
+    场合，行为与改造前一致）。`report_date` 同时还是纯养户行场景的兜底日期（见下）。
+
     **养户行随 payload 携带**：养户行是请求侧数据、不落库（保存端点写库时只落非养户行，
     见 `py/main.py` 的 `db_rows` 过滤），DB 重建不出来 ⇒ 由 `yanghu_rows` 显式传入、
     追加在 `rows` 末尾。顺序取舍：旧行为按**请求原顺序**写；现在非养户行取自 DB
     （T2 已改为 DB 序、已过审），养户行追加在末尾并保持它们之间的原顺序 —— 这是本期
     接受的取舍，不为对齐旧顺序去重排 DB 行。
 
-    纯养户行（DB 无该产品的非养户行）时，`report_date` / `region` 从 `fallback_*` 取 ——
+    纯养户行（DB 无该产品的非养户行）时，`report_date` / `region` 用入参兜底 ——
     表格 ID 解析依赖 `report_date`（做表表按月切），所以纯养户行也必须拿到它。
+    有非养户行时以 DB 行为准（加过滤后两者一致，都是当月）。
     """
+    where = "user_id=? AND product_name=?"
+    params = [user_id, product_name]
+    if report_date:
+        where += " AND report_date=?"
+        params.append(report_date)
     rows_raw = db.execute(
         "SELECT DISTINCT account, customer_id, campaign, cost, impressions, clicks, "
         "installs, in_app_actions, cost_per_in_app, report_date, region "
-        "FROM ad_reports WHERE user_id=? AND product_name=? ORDER BY report_date DESC",
-        (user_id, product_name)).fetchall()
+        f"FROM ad_reports WHERE {where} ORDER BY report_date DESC", tuple(params)).fetchall()
     if not rows_raw and not yanghu_rows:
         return None, "没有找到对应的做表数据"
 
     if rows_raw:
         report_date = rows_raw[0]["report_date"] or ""
         region = rows_raw[0]["region"] or ""
-    else:
-        report_date = fallback_report_date or ""
-        region = fallback_region or ""
 
     # ⚠️ 表格 ID 依赖 report_date（做表表按月切，保存端点按「操作人名 + YYYY.MM」匹配表名）
     spreadsheet_id = _zuobiao_spreadsheet_id(db, user_id, report_date)
@@ -115,7 +125,7 @@ def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
 
 
 def gg_zuobiao_sync(user_id, product_name, yanghu_rows=None,
-                    fallback_report_date="", fallback_region=""):
+                    report_date="", region=""):
     """把该产品的做表数据写进 Google 表格。养户行等参数透传给 `gg_zuobiao_kwargs`。"""
     import database
     import google_sheets_service as gs
@@ -125,8 +135,8 @@ def gg_zuobiao_sync(user_id, product_name, yanghu_rows=None,
     try:
         kwargs, why = gg_zuobiao_kwargs(db, user_id, product_name,
                                         yanghu_rows=yanghu_rows,
-                                        fallback_report_date=fallback_report_date,
-                                        fallback_region=fallback_region)
+                                        report_date=report_date,
+                                        region=region)
         if kwargs is None:
             raise RuntimeError(why)
     finally:
@@ -144,13 +154,13 @@ def _gg_zuobiao_rebuild(user_id, business_key, payload):
     # 养户行不落库 ⇒ 重建时从 payload 取。老日志行没有这些键 ⇒ `.get()` 缺省
     # ⇒ 行为与现状完全一致（不写养户行），不得因此抛错。
     yanghu_rows = (payload or {}).get("yanghu_rows") or []
-    fallback_report_date = (payload or {}).get("report_date") or ""
-    fallback_region = (payload or {}).get("region") or ""
+    report_date = (payload or {}).get("report_date") or ""
+    region = (payload or {}).get("region") or ""
 
     def _sync():
         gg_zuobiao_sync(user_id, product_name, yanghu_rows=yanghu_rows,
-                        fallback_report_date=fallback_report_date,
-                        fallback_region=fallback_region)
+                        report_date=report_date,
+                        region=region)
 
     return _sync
 
