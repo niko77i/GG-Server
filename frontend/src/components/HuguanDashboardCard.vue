@@ -725,10 +725,10 @@
         </div>
         <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">
           <template v-if="syncDlg.mode === 'B'">
-            <template v-if="hdMasterPartial">这些是本次同步计划写入系统字典的 BC / 渠道 / 国家时区；其中未能落库的项，原因见上方错误 / 未落库说明（也可能是对应行未勾选）。</template>
-            <template v-else>这些是本次同步自动写入系统字典的 BC / 渠道 / 国家时区。</template>
+            <template v-if="hdMasterPartial">这些是本次同步计划写入系统字典的 {{ hdMasterKindList }}；其中未能落库的项，原因见上方错误 / 未落库说明（也可能是对应行未勾选）。</template>
+            <template v-else>这些是本次同步自动写入系统字典的 {{ hdMasterKindList }}。</template>
           </template>
-          <template v-else>这些是系统里还没有的 BC / 渠道 / 国家时区，确认同步后会自动创建。</template>
+          <template v-else>这些是系统里还没有的 {{ hdMasterKindList }}，确认同步后会自动创建。</template>
         </div>
         <div v-for="(m, i) in hdPendingMaster" :key="m.kind + '|' + m.name + '|' + i"
              style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
@@ -1195,8 +1195,10 @@ const hdNotAppliedShown = computed(() => (hdResult.value.not_applied || []).slic
 // 形状 [{sheet, headers}]，逐表逐条。gg/fb 恒为空（后端只在 tt 分支产出）。
 const hdUnmatchedColumns = computed(() => (syncDiff.value && syncDiff.value.unmatched_columns) || [])
 
-// 将新增的字典项（Task 4 / 设计 §4.3）。后端**恒**返回该键（无则空数组）；gg/fb 恒空。
-// 形状 [{kind:'bc'|'agent'|'region', name, timezone, rows}]，timezone 仅 region 非空、且已归一化。
+// 将新增的字典项（Task 4 / 设计 §4.3）。后端**恒**返回该键（无则空数组）；gg 恒空
+// （FB 自 2026-10-11 起会产出 channel / asset_type 两类）。
+// 形状 [{kind:'bc'|'agent'|'channel'|'asset_type'|'region', name, timezone, rows}]，
+// timezone 仅 region 非空、且已归一化。
 // 它同时出现在预演（mode A）与结果（mode B）——diff 在确认后不再变化（建成即「已有」）。
 const hdPendingMaster = computed(() => (syncDiff.value && syncDiff.value.pending_master) || [])
 // 内部载荷（后端 build_diff 的 `pending_master_rows`）：孤儿行 —— 已存账户、唯一变化是
@@ -1208,8 +1210,24 @@ const hdPendingMasterRows = computed(() => (syncDiff.value && syncDiff.value.pen
 // 落地结果里被补挂上字典关联的**已有账户**数：既不在 created 也不在 updated 里。
 // 只有结果页（mode B）带它；缺省 0。用它让「只补挂、没新增」的一次同步不至于读成没发生。
 const hdOrphanLinked = computed(() => Number(hdResult.value.orphan_linked) || 0)
-const HD_MASTER_KIND_LABEL = { bc: 'BC', agent: '渠道', region: '国家时区' }
+// kind → 中文名。`agent` 是 **TT** 的「所属渠道」（agents 表）；FB 的走 `channel`
+// （fb_channels 表）—— 两者是不同字典，标签各自对齐自己表里的表头原文，不互相改。
+const HD_MASTER_KIND_LABEL = {
+  bc: 'BC', agent: '渠道', region: '国家时区',
+  channel: '所属渠道', asset_type: '资产类型',
+}
 function hdMasterKindLabel(kind) { return HD_MASTER_KIND_LABEL[kind] || kind }
+// 「将新增的字典项」那一节说明文案里的类别清单，**从本次实际出现的 kind 推导**。
+// 原先写死成「BC / 渠道 / 国家时区」——2026-10-11 加 FB 的两个新类别时它就没跟上，
+// 正是「写死的清单必漂」。改成从数据推就不会有第二次。
+const HD_MASTER_KIND_ORDER = ['bc', 'agent', 'channel', 'asset_type', 'region']
+const hdMasterKindList = computed(() => {
+  const present = new Set((hdPendingMaster.value || []).map(m => m && m.kind))
+  // 兜底：正常不会走到（那一节整体 `v-if="hdPendingMaster.length"`，有空项就至少有一个 kind），
+  // 但万一某条 payload 缺 kind，filter 会把它滤光 ⇒ 空串会写出「系统里还没有的 ，确认…」。
+  return HD_MASTER_KIND_ORDER.filter(k => present.has(k)).map(hdMasterKindLabel).join(' / ')
+    || '字典项'
+})
 // BC 的 name 就是那串 19 位数字：纯数字用等宽数字（tabular-nums），避免逐条对不齐。
 function hdIsDigits(s) { return /^\d+$/.test(String(s == null ? '' : s)) }
 
