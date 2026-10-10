@@ -69,7 +69,11 @@ const routes = [
   {
     path: '/analysis',
     component: () => import('../views/AnalysisView.vue'),
-    meta: { title: '数据分析' }
+    // 补 platform: 'gg' —— 该路由就是 GG 的分析页（与 GG 其它页面无前缀一致）。
+    // 原先是中性路由（meta 无 platform）⇒ 平台守卫跳过 ⇒ **非 GG 用户手输该 URL 能进来**
+    // （虽只读到他自己 uid 的空数据、非泄露，但那是「按平台隔离」唯一没堵住的口子）。
+    // 补上后：GG 用户 / 可切换平台的角色（developer/户管）照常放行，非 GG 用户被弹回自己平台。
+    meta: { title: '数据分析', platform: 'gg' }
   },
   {
     path: '/tt/analysis',
