@@ -228,19 +228,29 @@ def gg_zuobiao_key(product_name):
 def _zuobiao_spreadsheet_id(db, user_id, report_date):
     """解析该用户**该月**的做表表格 ID。
 
-    ⚠️ 这段逻辑**照抄 `py/main.py:7472-7490`**（保存端点的解析）—— 做表表是**按月切的**：
-    先按「**操作人名 + `YYYY.MM`**」在 `sheets[].spreadsheet_name` 里找匹配，找不到退回
-    `active_config`，再退回 `sheets[0]`。**不要简化成"取 active"** —— 那会写到别的月份的表里。
+    做表表是**按月切的**：先按「**操作人名 + `YYYY.MM`**」在 `sheets[].spreadsheet_name`
+    里找匹配，找不到退回 `active_config`，再退回 `sheets[0]`。
+    **不要简化成「取 active」** —— 那会写到别的月份的表里。
 
-    与保存端点的唯一差别：这里用传入的 `report_date` 算月键（保存端点用的是请求体里的
-    `report_date`），并且自己重新取一份配置（重建在后台线程里跑，没有请求上下文）。
-
-    `sheets` / `active_config` 的取法**照抄保存端点上半段**（`py/main.py:7466-7472` 附近那份
-    读取；实施时按现场取同一个读取器，别另写一份）。
+    逻辑等价于 `py/main.py` 的 `google_sheets_update_zuobiao`（`:7471-7490`）里的解析；
+    差别只是配置在这里重新取一份（重建在后台线程里跑，没有请求上下文）。
     """
-    # ⚠️ 实施时按上面说明照抄 :7466-7490 的取配置 + 匹配逻辑；
-    # 返回解析出的 spreadsheet_id（空串表示没解析到，由调用方当失败处理）。
-    raise NotImplementedError("按上句照抄 py/main.py:7466-7490")
+    from main import _get_user_sheets_config
+
+    sheets, active_config = _get_user_sheets_config(user_id)
+    if not sheets:
+        return ""
+    user = db.execute("SELECT display_name, username FROM users WHERE id=?",
+                      (user_id,)).fetchone()
+    operator_name = (user["display_name"] or user["username"]) if user else ""
+    expected = f"{operator_name}{(report_date or '')[:7].replace('-', '.')}"
+    matched = next((s for s in sheets
+                    if expected in (s.get("spreadsheet_name", "") or "")), None)
+    if matched:
+        return matched.get("spreadsheet_id", "") or ""
+    if active_config:
+        return active_config.get("spreadsheet_id", "") or ""
+    return (sheets[0].get("spreadsheet_id", "") or "")
 
 
 def gg_zuobiao_kwargs(db, user_id, product_name):
