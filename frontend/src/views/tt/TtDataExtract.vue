@@ -28,12 +28,14 @@
 
     <!-- 结果区（滚动） -->
     <div style="flex:1;min-height:0;overflow-y:auto;padding:0 20px;">
-      <!-- 原始清洗数据 -->
+      <!-- 原始清洗数据。③ 浏览类 · 前端分页：三张表都与粘贴行数成正比，直通 el-table
+           会按行数建 DOM（Element Plus 不做虚拟滚动）。渲染封在 PAGE_SIZE 以内，
+           复制/导出仍读全量（见 copyTable / exportExcel）。 -->
       <div v-if="raw.length" style="margin-top:20px;">
         <h3>📋 原始清洗数据 <el-tag size="small">{{ raw.length }}</el-tag>
           <el-button link size="small" @click="copyTable('raw')">📋 一键复制</el-button>
         </h3>
-        <el-table :data="raw" size="small" border stripe max-height="300">
+        <el-table :data="rawShown" size="small" border stripe max-height="300">
           <el-table-column prop="account" label="账号" min-width="110" />
           <el-table-column prop="customerId" label="客户ID" min-width="120" />
           <el-table-column prop="campaign" label="广告系列" min-width="160" show-overflow-tooltip />
@@ -59,6 +61,10 @@
             <template #default="{row}">{{ row.costPerInApp ?? '-' }}</template>
           </el-table-column>
         </el-table>
+        <div v-if="raw.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+          <el-pagination v-model:current-page="rawPage" :page-size="PAGE_SIZE"
+            :total="raw.length" layout="prev, pager, next" small background />
+        </div>
       </div>
 
       <!-- 做表数据 -->
@@ -66,13 +72,17 @@
         <h3>📑 做表数据 <el-tag size="small">{{ zuobiao.length }}</el-tag>
           <el-button link size="small" @click="copyTable('zuobiao')">📋 一键复制</el-button>
         </h3>
-        <el-table :data="zuobiao" size="small" border stripe max-height="300">
+        <el-table :data="zuobiaoShown" size="small" border stripe max-height="300">
           <el-table-column prop="account" label="账号" />
           <el-table-column prop="customerId" label="客户ID" />
           <el-table-column prop="cost" label="费用"><template #default="{row}">{{ row.cost.toFixed(2) }}</template></el-table-column>
           <el-table-column width="20" /><el-table-column width="20" /><el-table-column width="20" /><el-table-column width="20" />
           <el-table-column prop="campaign" label="广告系列" />
         </el-table>
+        <div v-if="zuobiao.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+          <el-pagination v-model:current-page="zuobiaoPage" :page-size="PAGE_SIZE"
+            :total="zuobiao.length" layout="prev, pager, next" small background />
+        </div>
       </div>
 
       <!-- 客户表数据 -->
@@ -80,19 +90,23 @@
         <h3>📈 客户表数据 <el-tag size="small">{{ kehu.length }}</el-tag>
           <el-button link size="small" @click="copyTable('kehu')">📋 一键复制</el-button>
         </h3>
-        <el-table :data="kehu" size="small" border stripe max-height="300">
+        <el-table :data="kehuShown" size="small" border stripe max-height="300">
           <el-table-column prop="campaign" label="广告系列" />
           <el-table-column prop="cost" label="费用"><template #default="{row}">{{ row.cost.toFixed(2) }}</template></el-table-column>
           <el-table-column prop="impressions" label="展示次数"><template #default="{row}">{{ row.impressions.toLocaleString() }}</template></el-table-column>
           <el-table-column prop="clicks" label="点击次数"><template #default="{row}">{{ row.clicks.toLocaleString() }}</template></el-table-column>
         </el-table>
+        <div v-if="kehu.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+          <el-pagination v-model:current-page="kehuPage" :page-size="PAGE_SIZE"
+            :total="kehu.length" layout="prev, pager, next" small background />
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue'
 import { ElMessage } from 'element-plus'
 import { copyToClipboard } from '@/utils/clipboard'
 import { parseAdsData } from '@/utils/adsParser'
@@ -106,6 +120,19 @@ const raw = ref([])
 const zuobiao = ref([])
 const kehu = ref([])
 const error = ref('')
+
+// 前端分页（③ 浏览类）：三张表各一套页码，只把当前页交给 el-table 渲染。
+// 权威数据仍是全量 raw / zuobiao / kehu，复制与导出读它们。
+const PAGE_SIZE = 50
+const rawPage = ref(1)
+const zuobiaoPage = ref(1)
+const kehuPage = ref(1)
+const rawShown = computed(() =>
+  raw.value.slice((rawPage.value - 1) * PAGE_SIZE, rawPage.value * PAGE_SIZE))
+const zuobiaoShown = computed(() =>
+  zuobiao.value.slice((zuobiaoPage.value - 1) * PAGE_SIZE, zuobiaoPage.value * PAGE_SIZE))
+const kehuShown = computed(() =>
+  kehu.value.slice((kehuPage.value - 1) * PAGE_SIZE, kehuPage.value * PAGE_SIZE))
 
 // ========== 产品/日期/关键词（本期 UI 占位，为写表预留） ==========
 const selectedProduct = ref('')
@@ -147,6 +174,8 @@ async function loadProducts() {
 function process() {
   error.value = ''
   raw.value = []; zuobiao.value = []; kehu.value = []
+  // 结果集换了 ⇒ 三张表都回第 1 页，否则当前页可能越过新的末页。
+  rawPage.value = 1; zuobiaoPage.value = 1; kehuPage.value = 1
   try {
     const r = parseAdsData(input.value, { isSevenCols: sevenCols.value, includeCampaignId: includeCampaignId.value })
     raw.value = r.raw

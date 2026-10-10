@@ -11,8 +11,12 @@
       <el-button @click="preview" :loading="parsing">🔍 预览解析</el-button>
 
       <div v-if="parsed.length" style="margin-top:8px;">
+        <!-- ③ 前端分页：`parsed` 与粘贴行数成正比，直通 el-table 会按行数建 DOM
+             （Element Plus 不做虚拟滚动）。分页把渲染行数封在 `size` 以内，
+             但**提交仍读全量 `parsed`**（见 submit）—— 没渲染 ≠ 没提交。
+             删除按**行对象**定位，不用渲染下标 `$index`（分页后它只是本页内下标）。 -->
         <p>识别 <strong>{{ parsed.length }}</strong> 个包：</p>
-        <el-table :data="parsed" size="small" max-height="250">
+        <el-table :data="parsedPage" size="small" max-height="250">
           <el-table-column label="类型" width="80">
             <template #default="{ row }">
               <el-select v-model="row.type" size="small" style="width:70px;">
@@ -31,11 +35,15 @@
             <template #default="{ row }"><el-input v-model="row.url" size="small" /></template>
           </el-table-column>
           <el-table-column width="50">
-            <template #default="{ $index }">
-              <el-button size="small" type="danger" @click="parsed.splice($index, 1)">✕</el-button>
+            <template #default="{ row }">
+              <el-button size="small" type="danger" @click="removeRow(row)">✕</el-button>
             </template>
           </el-table-column>
         </el-table>
+        <div v-if="parsed.length > size" style="display:flex;justify-content:flex-end;margin-top:8px;">
+          <el-pagination v-model:current-page="page" :page-size="size"
+            :total="parsed.length" layout="prev, pager, next" background small />
+        </div>
       </div>
 
       <el-divider content-position="left">手动添加</el-divider>
@@ -58,7 +66,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { ttApi } from '@/api/tt'
 import { ElMessage } from 'element-plus'
 
@@ -78,12 +86,19 @@ const saving = ref(false)
 const parsing = ref(false)
 const manualSaving = ref(false)
 const parsed = ref([])
+// ③ 前端分页：只把当前页交给 el-table 渲染（`parsed` 与粘贴行数成正比）。
+// 权威数据始终是全量 `parsed`，提交读它；`parsedPage` 仅用于渲染。
+const page = ref(1)
+const size = ref(20)
+const parsedPage = computed(() =>
+  parsed.value.slice((page.value - 1) * size.value, page.value * size.value))
 const form = reactive({ prefix: '', text: '' })
 const manual = reactive({ type: 'package', series_name: '', package_name: '', url: '' })
 
 function init() {
   Object.assign(form, { prefix: '', text: '' })
   parsed.value = []
+  page.value = 1
   Object.assign(manual, { type: 'package', series_name: '', package_name: '', url: '' })
 }
 
@@ -93,9 +108,23 @@ async function preview() {
   try {
     const res = await ttApi.importText({ text: form.text, prefix: form.prefix })
     parsed.value = (res.parsed || []).map(p => ({ type: p.type || 'package', series_name: p.series_name, package_name: p.package_name, url: p.url }))
+    // 结果集换了 ⇒ 回第 1 页，否则当前页可能越过新的末页（列表空白且分页控件消失）。
+    page.value = 1
     if (!parsed.value.length) ElMessage.warning('未找到有效的 Google Play / App Store 链接')
   } catch (e) { ElMessage.error(e.response?.data?.error || '解析失败') }
   finally { parsing.value = false }
+}
+
+// 删除一行：按**行对象**定位，不用渲染下标 —— 分页后 `$index` 是「本页内的下标」，
+// 拿它 `parsed.splice($index, 1)` 会删到全量数组里位置不同的另一行。
+// `slice` 返回同一批对象引用（浅拷贝数组），故 `indexOf(row)` 能命中全量数组。
+function removeRow(row) {
+  const i = parsed.value.indexOf(row)
+  if (i === -1) return
+  parsed.value.splice(i, 1)
+  // 删掉末页仅剩的行后当前页会越过新末页 ⇒ 回退一页，否则表格空白、分页控件卸载。
+  const maxPage = Math.max(1, Math.ceil(parsed.value.length / size.value))
+  if (page.value > maxPage) page.value = maxPage
 }
 
 async function addManual() {

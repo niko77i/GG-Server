@@ -39,7 +39,7 @@
           <span v-if="warnings.length" style="color:#e6a23c;margin-left:12px;font-size:13px">⚠ {{ warnings.join(', ') }} 的$符号超过2个</span>
           <el-button link size="small" style="float:right" @click="copyTable('rawData')">📋 一键复制</el-button>
         </template>
-        <el-table :data="parsedData" stripe border size="small" max-height="350" ref="rawData">
+        <el-table :data="parsedShown" stripe border size="small" max-height="350" ref="rawData">
           <el-table-column prop="account_name" label="账户名称" min-width="150" />
           <el-table-column prop="account_id" label="广告账户ID" width="170" />
           <el-table-column prop="cost" label="账号消耗" width="110">
@@ -57,6 +57,10 @@
             </el-table-column>
           </template>
         </el-table>
+        <div v-if="parsedData.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+          <el-pagination v-model:current-page="parsedPage" :page-size="PAGE_SIZE"
+            :total="parsedData.length" layout="prev, pager, next" small background />
+        </div>
       </el-card>
 
       <!-- 2. 做表数据（按账户ID累加） -->
@@ -66,7 +70,7 @@
           <span style="margin-left:8px;font-size:13px;color:#6b7280">（按账户ID + 广告系列合并，费用累加）</span>
           <el-button link size="small" style="float:right" @click="copyTable('zbData')">📋 一键复制</el-button>
         </template>
-        <el-table :data="zbData" stripe border size="small" max-height="350" ref="zbData">
+        <el-table :data="zbShown" stripe border size="small" max-height="350" ref="zbData">
           <el-table-column prop="account_name" label="账户名称" min-width="150" />
           <el-table-column prop="account_id" label="广告账户ID" width="170" />
           <el-table-column prop="cost" label="费用" width="110">
@@ -75,6 +79,10 @@
           <el-table-column width="20" /><el-table-column width="20" /><el-table-column width="20" /><el-table-column width="20" />
           <el-table-column prop="campaign" label="线名" min-width="120" />
         </el-table>
+        <div v-if="zbData.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+          <el-pagination v-model:current-page="zbPage" :page-size="PAGE_SIZE"
+            :total="zbData.length" layout="prev, pager, next" small background />
+        </div>
       </el-card>
 
     </template>
@@ -84,7 +92,7 @@
       <div style="margin-bottom:12px;font-size:13px;color:#555">
         产品：<b>{{ selectedProduct?.product_name }}</b> | 线名：<b>{{ selectedLineName }}</b> | 日期：<b>{{ reportDate }}</b>
       </div>
-      <el-table :data="parsedData" stripe border size="small" max-height="400">
+      <el-table :data="parsedShown" stripe border size="small" max-height="400">
         <el-table-column prop="account_name" label="账户名称" min-width="140" />
         <el-table-column prop="account_id" label="账户ID" width="160" />
         <el-table-column prop="cost" label="消耗" width="100"><template #default="{row}">${{ row.cost?.toFixed(2) }}</template></el-table-column>
@@ -118,6 +126,16 @@ const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1)
 const reportDate = ref(yesterday.toISOString().slice(0, 10)); const sortedMode = ref(false)
 const pasteText = ref(''); const parsedData = ref([]); const warnings = ref([])
 const parsing = ref(false); const saving = ref(false)
+
+// 前端分页（③ 浏览类）：`parsedData` / `zbData` 都与粘贴行数成正比，直通 el-table 会按
+// 行数建 DOM（Element Plus 不做虚拟滚动）。渲染封在 PAGE_SIZE 以内，复制/保存读全量。
+const PAGE_SIZE = 50
+const parsedPage = ref(1)
+const zbPage = ref(1)
+const parsedShown = computed(() =>
+  parsedData.value.slice((parsedPage.value - 1) * PAGE_SIZE, parsedPage.value * PAGE_SIZE))
+const zbShown = computed(() =>
+  zbData.value.slice((zbPage.value - 1) * PAGE_SIZE, zbPage.value * PAGE_SIZE))
 
 const selectedLines = computed(() => {
   const p = products.value.find(p => p.id === selectedProductId.value)
@@ -190,6 +208,8 @@ async function handleParse() {
   try {
     const res = await fbApi.parseExtract({ text: pasteText.value, sorted: sortedMode.value })
     parsedData.value = res.data || []
+    // 结果集换了 ⇒ 两张表都回第 1 页，否则当前页可能越过新的末页。
+    parsedPage.value = 1; zbPage.value = 1
     warnings.value = res.warnings || []
     const validation = res.validation
     const count = parsedData.value.length

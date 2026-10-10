@@ -54,12 +54,14 @@
       </div>
 
       <div style="flex:1;min-height:0;overflow-y:auto;">
-        <!-- 原始清洗数据 -->
+        <!-- 原始清洗数据。③ 浏览类 · 前端分页：三张结果表都与粘贴行数成正比，直通
+             el-table 会按行数建 DOM（Element Plus 不做虚拟滚动）。渲染封在 PAGE_SIZE
+             以内，复制/导出/保存仍读全量（见 copyTable / zbExportExcel / saveRows）。 -->
         <div v-if="zbRaw.length" style="margin-top:20px;">
           <h3>📋 原始清洗数据 <el-tag size="small">{{ zbRaw.length }}</el-tag>
             <el-button link size="small" @click="copyTable('zbRaw')">📋 一键复制</el-button>
           </h3>
-          <el-table :data="zbRaw" size="small" border stripe max-height="300" :id="'zbTableRaw'">
+          <el-table :data="zbRawShown" size="small" border stripe max-height="300" :id="'zbTableRaw'">
             <el-table-column prop="account" label="账号" min-width="110" />
             <el-table-column prop="customerId" label="客户ID" min-width="120" />
             <el-table-column prop="campaign" label="广告系列" min-width="160" show-overflow-tooltip />
@@ -85,6 +87,10 @@
               <template #default="{row}">{{ row.costPerInApp ?? '-' }}</template>
             </el-table-column>
           </el-table>
+          <div v-if="zbRaw.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+            <el-pagination v-model:current-page="zbRawPage" :page-size="PAGE_SIZE"
+              :total="zbRaw.length" layout="prev, pager, next" small background />
+          </div>
         </div>
 
         <!-- 做表数据 -->
@@ -92,12 +98,16 @@
           <h3>📑 做表数据 <el-tag size="small">{{ zbZuobiao.length }}</el-tag>
             <el-button link size="small" @click="copyTable('zbZuobiao')">📋 一键复制</el-button>
           </h3>
-          <el-table :data="zbZuobiao" size="small" border stripe max-height="300">
+          <el-table :data="zbZuobiaoShown" size="small" border stripe max-height="300">
             <el-table-column prop="account" label="账号" /><el-table-column prop="customerId" label="客户ID" />
             <el-table-column prop="cost" label="费用"><template #default="{row}">{{ row.cost.toFixed(2) }}</template></el-table-column>
             <el-table-column width="20" /><el-table-column width="20" /><el-table-column width="20" /><el-table-column width="20" />
             <el-table-column prop="campaign" label="广告系列" />
           </el-table>
+          <div v-if="zbZuobiao.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+            <el-pagination v-model:current-page="zbZuobiaoPage" :page-size="PAGE_SIZE"
+              :total="zbZuobiao.length" layout="prev, pager, next" small background />
+          </div>
         </div>
 
         <!-- 客户表数据 -->
@@ -105,12 +115,16 @@
           <h3>📈 客户表数据 <el-tag size="small">{{ zbKehu.length }}</el-tag>
             <el-button link size="small" @click="copyTable('zbKehu')">📋 一键复制</el-button>
           </h3>
-          <el-table :data="zbKehu" size="small" border stripe max-height="300">
+          <el-table :data="zbKehuShown" size="small" border stripe max-height="300">
             <el-table-column prop="campaign" label="广告系列" />
             <el-table-column prop="cost" label="费用"><template #default="{row}">{{ row.cost.toFixed(2) }}</template></el-table-column>
             <el-table-column prop="impressions" label="展示次数"><template #default="{row}">{{ row.impressions.toLocaleString() }}</template></el-table-column>
             <el-table-column prop="clicks" label="点击次数"><template #default="{row}">{{ row.clicks.toLocaleString() }}</template></el-table-column>
           </el-table>
+          <div v-if="zbKehu.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+            <el-pagination v-model:current-page="zbKehuPage" :page-size="PAGE_SIZE"
+              :total="zbKehu.length" layout="prev, pager, next" small background />
+          </div>
         </div>
       </div>
     </div>
@@ -194,7 +208,10 @@
       </div>
       <div style="margin-top:8px;">
         <div style="font-weight:600;margin-bottom:6px;">📋 待保存数据 ({{ saveRows.length }} 条)</div>
-        <el-table :data="saveRows" size="small" border stripe max-height="380">
+        <!-- ③ 前端分页：与粘贴行数成正比。删除按**行对象**定位，不用渲染下标 `$index`
+             （分页后它只是本页内下标，`splice($index,1)` 会删到全量数组里另一行）。
+             保存读全量 `saveRows`。 -->
+        <el-table :data="saveRowsShown" size="small" border stripe max-height="380">
           <el-table-column prop="account" label="账号" min-width="100" />
           <el-table-column prop="customerId" label="客户ID" min-width="120" />
           <el-table-column prop="campaign" label="广告系列" min-width="160" show-overflow-tooltip />
@@ -217,11 +234,15 @@
             <template #default="{row}">{{ row.costPerInApp ?? '-' }}</template>
           </el-table-column>
           <el-table-column label="操作" min-width="60" fixed="right">
-            <template #default="{ $index }">
-              <el-button link size="small" type="danger" @click="removeSaveRow($index)">🗑 删除</el-button>
+            <template #default="{ row }">
+              <el-button link size="small" type="danger" @click="removeSaveRow(row)">🗑 删除</el-button>
             </template>
           </el-table-column>
         </el-table>
+        <div v-if="saveRows.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:6px;">
+          <el-pagination v-model:current-page="savePage" :page-size="PAGE_SIZE"
+            :total="saveRows.length" layout="prev, pager, next" small background />
+        </div>
       </div>
       <template #footer>
         <el-button @click="zbSaveDialogVisible = false">取消</el-button>
@@ -318,6 +339,20 @@ const zbRaw = ref([])
 const zbZuobiao = ref([])
 const zbKehu = ref([])
 const zbError = ref('')
+
+// 前端分页（③ 浏览类）：四张结果表各一套页码，只把当前页交给 el-table 渲染。
+// 权威数据仍是全量数组（复制 / 导出 / 保存读它们）。
+const PAGE_SIZE = 50
+const zbRawPage = ref(1)
+const zbZuobiaoPage = ref(1)
+const zbKehuPage = ref(1)
+const savePage = ref(1)
+const zbRawShown = computed(() =>
+  zbRaw.value.slice((zbRawPage.value - 1) * PAGE_SIZE, zbRawPage.value * PAGE_SIZE))
+const zbZuobiaoShown = computed(() =>
+  zbZuobiao.value.slice((zbZuobiaoPage.value - 1) * PAGE_SIZE, zbZuobiaoPage.value * PAGE_SIZE))
+const zbKehuShown = computed(() =>
+  zbKehu.value.slice((zbKehuPage.value - 1) * PAGE_SIZE, zbKehuPage.value * PAGE_SIZE))
 
 // ========== 外层产品/日期选择（共享给保存弹窗和更新表格） ==========
 const zbSelectedProduct = ref('')
@@ -426,6 +461,9 @@ const zbSelectedRegion = computed(() => {
 const zbSaveDialogVisible = ref(false)
 const zbSaving = ref(false)
 const saveRows = ref([])
+// 待保存数据同样按 PAGE_SIZE 分页渲染（见模板注释）；保存读全量 `saveRows`。
+const saveRowsShown = computed(() =>
+  saveRows.value.slice((savePage.value - 1) * PAGE_SIZE, savePage.value * PAGE_SIZE))
 const zbDupDialogVisible = ref(false)
 const duplicateItems = ref([])
 
@@ -447,10 +485,19 @@ function scheduleZbMidnightRefresh() {
 
 async function onSaveDialogOpen() {
   saveRows.value = [...zbRaw.value]
+  savePage.value = 1
 }
 
-function removeSaveRow(idx) {
-  saveRows.value.splice(idx, 1)
+// 删除一行：按**行对象**定位，不用渲染下标 —— 分页后 `$index` 只是「本页内的下标」，
+// 拿它 `splice($index, 1)` 会删到全量数组里位置不同的另一行。`slice` 返回同一批对象
+// 引用（浅拷贝数组），故 `indexOf(row)` 能命中全量数组。
+function removeSaveRow(row) {
+  const i = saveRows.value.indexOf(row)
+  if (i === -1) return
+  saveRows.value.splice(i, 1)
+  // 删掉末页仅剩的行后当前页会越过新末页 ⇒ 回退一页，否则表格空白、分页控件卸载。
+  const maxPage = Math.max(1, Math.ceil(saveRows.value.length / PAGE_SIZE))
+  if (savePage.value > maxPage) savePage.value = maxPage
 }
 
 async function zbDoSave() {
@@ -621,6 +668,8 @@ async function zbConfirmSave() {
 function zbProcess() {
   zbError.value = ''
   zbRaw.value = []; zbZuobiao.value = []; zbKehu.value = []
+  // 结果集换了 ⇒ 三张表都回第 1 页，否则当前页可能越过新的末页。
+  zbRawPage.value = 1; zbZuobiaoPage.value = 1; zbKehuPage.value = 1
   try {
     const { raw, zuobiao, kehu } = parseAdsData(zbInput.value, {
       isSevenCols: zbSevenCols.value,
