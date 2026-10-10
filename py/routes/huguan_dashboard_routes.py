@@ -28,6 +28,20 @@ def _tick(label: str, t0: float) -> float:
     return time.perf_counter()
 
 
+def _log_sync_summary(scope, t0, parsed_rows, diff, *, dry_run=False) -> None:
+    """一次操作一行汇总（设计 §3.4）：范围 + 总耗时 + 行数。只记日志，不改响应。
+
+    `scope` 是本次操作的按表范围（空串＝全部表）。dry_run 与落库两条返回路径共用它，
+    免得两处各写一份日志格式、日后只改一处。
+    """
+    log.info("户管看板 同步汇总%s 范围=%s 耗时%.2fs 读入行=%d 新建=%d 更新=%d 归属=%d",
+             "（dry_run）" if dry_run else "", scope or "全部表",
+             time.perf_counter() - t0, len(parsed_rows),
+             len((diff or {}).get("to_create", [])),
+             len((diff or {}).get("to_update", [])),
+             len((diff or {}).get("owner_changes", [])))
+
+
 @huguan_dashboard_bp.route("/api/huguan/dashboard", methods=["GET"])
 @jwt_required()
 @huguan_required
@@ -186,9 +200,13 @@ def dashboard_sync():
             if not tables:
                 return err(f"工作表「{only_sheet}」不在你的看板配置里", 400)
 
+        # 计时（设计 §3.4）：从**建服务之前**起表 —— 用户抱怨的是「慢」，而建服务
+        # 与读表前的库操作此前对任何 tick 都不可见。只为定位瓶颈，不改行为/响应。
+        op_t0 = time.perf_counter()
         import google_sheets_service as gs
         from main import _GOOGLE_SHEETS_CONFIG
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        t0 = _tick("建服务完成", op_t0)
 
         # 逐张表各读一次，再**合并成一个列表**进 build_diff —— 跨表去重、冲突检测、
         # 归属变更全部沿用既有逻辑，不另写一套。
@@ -200,8 +218,9 @@ def dashboard_sync():
         # setdefault 钉「首次出现」—— 与 `sheet_from` / `build_diff` 的去重口径一致。
         sheet_col_maps = {}
         spreadsheet_id = _spreadsheet_id(db, uid, platform)
-        # 计时（设计 §3.4）：只为定位「哪一段慢」，不改任何行为/响应。
-        t0 = time.perf_counter()
+        # 阶段 1：逐表**读 + 解析表头**（读走网络、解析表头是 CPU，分开计时才知道谁是
+        # 瓶颈）。先把读到的 grid 收起来，阶段 2 再逐行解析 —— 行为与原先单循环等价。
+        table_grids = []
         for t in tables:
             grid = gs.read_sheet_values(service, spreadsheet_id,
                                         t["sheet_name"], hd.READ_RANGE[platform])
@@ -220,7 +239,12 @@ def dashboard_sync():
                     unmatched_columns.append({"sheet": t["sheet_name"],
                                               "headers": unmatched})
                 sheet_col_maps.setdefault(t["sheet_name"], col_map)
-            # 第 1 行是表头；不跳任何数据行（户管看板没有「是否解绑」列可用作跳过标记）
+            table_grids.append((t, grid, col_map))
+        t0 = _tick("读取完成", t0)
+
+        # 阶段 2：逐行解析（纯 CPU）。第 1 行是表头；不跳任何数据行（户管看板没有
+        # 「是否解绑」列可用作跳过标记）。
+        for t, grid, col_map in table_grids:
             for i, values in enumerate(grid[1:], start=2):
                 parsed = hd.parse_row(values, platform, col_map)
                 parsed["row"] = i
@@ -234,7 +258,7 @@ def dashboard_sync():
                     parsed["_account_type"] = t["name"]
                 parsed_rows.append(parsed)
 
-        t0 = _tick("读取完成", t0)
+        t0 = _tick("解析完成", t0)
         diff = hd.build_diff(db, parsed_rows, platform)
         # 未采集列逐表上报（设计 §4.3）：**空列表也要带** —— 前端据它的存在与否渲染
         # 「N 列未采集」提示。gg/fb 无表头映射 ⇒ 恒为空（行为与改动前一致）。
@@ -245,6 +269,9 @@ def dashboard_sync():
         # (字符串) / 0 全部走只读 dry_run —— 少了这个 is not False，JSON null 会因
         # `None` 为假值而掉进落库分支，等于「传了个空值就把库改了」。
         if data.get("dry_run") is not False:
+            # 一次操作一行汇总（设计 §3.4）：范围 + 总耗时 + 行数。dry_run 只读，
+            # 到这里就返回，故单独记一行（同样是「一次操作一行」）。
+            _log_sync_summary(only_sheet, op_t0, parsed_rows, diff, dry_run=True)
             return ok({"diff": diff})
 
         # confirmed 期望 {"create": [账户ID...], "update": [账户ID...], "owner": [账户ID...]}。
@@ -317,7 +344,7 @@ def dashboard_sync():
         undo["sheet_key_cols"] = sheet_key_cols
         hd.save_undo(db, uid, platform, "sync", undo)
         db.commit()
-        t0 = _tick("落库完成", t0)
+        _tick("落库完成", t0)
 
         # 规格 §8.3 步骤 8：落库后清缓存（账户写入了，代理/列表下拉必须立即刷新）。
         # 只放在路由层 —— 纯逻辑的 apply_diff 不该依赖 cache。
@@ -386,6 +413,8 @@ def dashboard_sync():
     finally:
         db.close()
 
+    # 一次操作一行汇总（设计 §3.4）：范围 + 总耗时 + 行数。只记日志，不改响应。
+    _log_sync_summary(only_sheet, op_t0, parsed_rows, diff)
     return ok({"result": result, "diff": diff})
 
 
@@ -402,6 +431,8 @@ def dashboard_push():
         return err("platform 必须是 gg、tt 或 fb", 400)
 
     uid = get_uid()
+    # 计时（设计 §3.4）：从最开头起表，覆盖「配置/建服务 → 收集 → 快照读 → 写表」。
+    op_t0 = time.perf_counter()
     db = database.get_db()
     try:
         conf = {p: hd.get_platform_config(db, uid, p) for p in (platform,)}
@@ -415,9 +446,27 @@ def dashboard_push():
                 or (platform != "tt" and not c["sheet_name"])):
             return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
 
+        # 按表刷新（设计 §3.1/§3.2）：`sheet_name` 可选。缺省＝全部表（与改动前逐字节
+        # 一致）；gg/fb 只有一张表，按表无意义 ⇒ 直接拒（同 sync，不静默等同全量）。
+        only_sheet = str(data.get("sheet_name") or "").strip()
+        if only_sheet and platform != "tt":
+            return err("只有 TT 支持按表操作", 400)
+        target_type = None
+        if only_sheet:
+            target = next((t for t in tables if t["sheet_name"] == only_sheet), None)
+            if target is None:
+                return err(f"工作表「{only_sheet}」不在你的看板配置里", 400)
+            # ⚠️ 只过滤 tables 不够：group_rows_by_sheet 会**重新读配置取全部表**
+            # ⇒ 必须记住目标户类型，稍后把「行」过滤到它，否则照样写每一张表。
+            target_type = target["name"]
+
         import google_sheets_service as gs
         from main import _GOOGLE_SHEETS_CONFIG
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+        t0 = _tick("建服务完成", op_t0)
+        # 按表时只解析**目标表**的表头（省掉其它表的表头读 = 提速）；缺省＝全部表。
+        target_tables = (tables if target_type is None
+                         else [t for t in tables if t["name"] == target_type])
         # collect / 快照 / 写表三者必须用**同一份**每表 col_map：tt 表头顺序不同时，
         # 固定列字母会把 cells 产出到错列、定位也会落错列 ⇒ 快照记的行集合与真正被写的
         # 行集合对不上（静默串列 + 整批落空）。gg/fb 走合成 map、零额外读，行为逐字节不变。
@@ -425,12 +474,16 @@ def dashboard_push():
             t["sheet_name"]: hd.resolve_table_col_map(
                 service, c["spreadsheet_id"], t["sheet_name"], platform,
                 t.get("columns") or {})
-            for t in tables
+            for t in target_tables
         }
         col_maps_by_type = {t["name"]: col_maps_by_sheet[t["sheet_name"]]
-                            for t in tables}
+                            for t in target_tables}
         rows = hd.collect_rows_for_push(db, platform, col_maps_by_type=col_maps_by_type)
+        if target_type is not None:
+            # 只留目标户类型的账户：写回的是**这张表**，别的表一个格都不碰。
+            rows = [r for r in rows if (r.get("account_type") or "") == target_type]
         groups, skipped = hd.group_rows_by_sheet(db, uid, platform, rows)
+        t0 = _tick("收集完成", t0)
     finally:
         db.close()
     for name in skipped:
@@ -450,6 +503,7 @@ def dashboard_push():
         undo_db.commit()
     finally:
         undo_db.close()
+    t0 = _tick("快照读完成", t0)
 
     total_updated, total_not_found = 0, []
     try:
@@ -475,11 +529,16 @@ def dashboard_push():
         if not total_updated and not total_not_found:
             _discard_push_undo(uid, platform)
         raise
+    t0 = _tick("写表完成", t0)
 
     if not total_updated and not total_not_found:
         # 一个字都没写 ⇒ 没有可撤回的东西，作废快照
         _discard_push_undo(uid, platform)
 
+    # 一次操作一行汇总（设计 §3.4）：范围 + 总耗时 + 行数。只记日志，不改响应。
+    log.info("户管看板 刷新汇总 范围=%s 耗时%.2fs 待写行=%d 已写=%d 未找到=%d",
+             only_sheet or "全部表", time.perf_counter() - op_t0, len(rows),
+             total_updated, len(total_not_found))
     return ok({"result": {"rows": len(rows), "updated": total_updated,
                           "not_found": total_not_found}})
 

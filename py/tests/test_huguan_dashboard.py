@@ -6282,11 +6282,29 @@ class TestPerTableSync:
         assert resp.status_code == 400 and "别人的表" in resp.get_json()["error"]
         assert reads == [], "外来表名不该真的去读"
 
-    def test_gg_rejects_sheet_name(self, client):
-        hg, _ = _create_user(client, "_ps3", role="huguan")
+    def test_gg_rejects_sheet_name(self, client, monkeypatch):
+        """gg 传 `sheet_name` 必须 400，且**一个格都不读**。
+
+        旧版用例给的用户**没有配置**，400 来自「请先在设置页配置…」，与 gg/fb 拒绝那行
+        无关 ⇒ 那条分支零判别覆盖。本版先把非空配置铺好（请求否则本可继续），再断言错误
+        文案是「只有 TT」且读表路径一次都没走 —— 拿掉 sync 里的 gg/fb 拒绝即变红。
+        """
+        import google_sheets_service as gs
+        hg, uid = _create_user(client, "_ps3", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"gg": {"spreadsheet_id": "SS", "sheet_name": "企业户"}})))
+        db.commit(); db.close()
+        reads = []
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: reads.append(a) or [[]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
         resp = client.post("/api/huguan/dashboard/sync", headers=hg, json={
             "platform": "gg", "sheet_name": "企业户", "dry_run": True})
         assert resp.status_code == 400
+        assert "只有 TT" in resp.get_json()["error"]
+        assert reads == []
 
     def test_without_sheet_name_reads_every_table(self, client, monkeypatch):
         """缺省必须与改动前一致：所有表都读、行合并。"""
@@ -6302,3 +6320,55 @@ class TestPerTableSync:
         client.post("/api/huguan/dashboard/sync", headers=hg,
                     json={"platform": "tt", "dry_run": True})
         assert reads == ["企业户", "加白户"]
+
+
+class TestPerTablePush:
+    """按表回写（设计 §3.1/§3.2）：给了 sheet_name 就只写那一张表。
+
+    ⚠️ `group_rows_by_sheet` 内部会**重读配置取全部表**，所以「只过滤 tables」拦不住写表
+    —— 必须把**行**过滤到目标户类型。本用例断言的就是「别的表一个格都不碰」。
+
+    ⚠️ 与 brief 的一处偏差：brief 桩的是 `gs.read_sheet_values`，但 push 的表头读
+    （`hd.resolve_table_col_map`）与快照读（`hd.snapshot_push_targets`）走的都是
+    **`huguan_dashboard.read_sheet_values`**（该模块 `from ... import read_sheet_values`
+    的绑定）—— 桩 gs 那个名字拦不住它们。故这里改桩 `hd.read_sheet_values`，语义不变。
+    桩按 range 分流：只有表头读（`A1:ZZ1`）才记进 `headers_read`，写表前的快照读
+    （`A:ZZ`）不计，否则「只解析目标表表头」这条断言会被快照读污染。
+    """
+
+    def _conf(self, client, username, tables):
+        return TestPerTableSync()._conf(client, username, tables)
+
+    def test_only_the_named_table_is_written(self, client, monkeypatch):
+        import google_sheets_service as gs
+        import huguan_dashboard as hd
+        hg = self._conf(client, "_pp1", [
+            {"name": "企业户", "sheet_name": "企业户"},
+            {"name": "加白户", "sheet_name": "加白户"}])
+        db = database.get_db()
+        # deleted_at 必须 NULL（不是 ''）：collect_rows_for_push 带
+        # `a.deleted_at IS NULL` 过滤，空串会被当成「已软删」而一行都写不出。
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('8001','甲','企业户',NULL)")
+        db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
+                   "deleted_at) VALUES('8002','乙','加白户',NULL)")
+        db.commit(); db.close()
+        headers_read, written = [], []
+
+        def _fake_read(svc, sid, sheet, rng):
+            if rng == "A1:ZZ1":
+                headers_read.append(sheet)
+            return [["账户ID"]]
+
+        monkeypatch.setattr(hd, "read_sheet_values", _fake_read)
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id",
+                            lambda svc, sid, sheet, rows, key_col="C":
+                            written.append((sheet, [r["account_id"] for r in rows]))
+                            or {"updated": len(rows), "not_found": []})
+        resp = client.post("/api/huguan/dashboard/push", headers=hg,
+                           json={"platform": "tt", "sheet_name": "企业户"})
+        assert resp.status_code == 200, resp.get_json()
+        assert headers_read == ["企业户"], f"只该解析目标表的表头，实际 {headers_read}"
+        assert written and all(s == "企业户" for s, _ in written), f"实际写了 {written}"
+        assert all(ids == ["8001"] for _s, ids in written), f"只该写企业户的账户，实际 {written}"
