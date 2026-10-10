@@ -167,6 +167,38 @@ TT 的空状态与 FB 的看板都是**新 UI**。按项目规范，实现前**�
 
 **风险**：`/tt/analysis`、`/fb/analysis` 是**新路由**，需确认路由守卫（`router/index.js:166-246`）对它们放行且不误判——实现时逐一核对管理员/viewer/户管/普通用户四种角色。
 
+### 4.1 守卫实测结论（2026-10-11，实现后补）
+
+无头 Chromium 实测的**四种角色 × 三条分析路由**矩阵：
+
+| 用户（角色, 平台） | `/analysis` | `/tt/analysis` | `/fb/analysis` |
+|---|---|---|---|
+| developer, gg | GG六tab | TT空态 | FB看板 |
+| **admin, gg** | GG六tab | 弹回自己平台 | 弹回自己平台 |
+| **viewer, gg** | GG六tab | 弹回自己平台 | 弹回自己平台 |
+| huguan, gg（可切平台） | GG六tab | TT空态 | FB看板 |
+| **user, tt** | **GG六tab（见下「已知限制」）** | TT空态 | 弹回 `/tt/products` |
+
+**「弹回自己平台」是正确的**：admin/viewer **不在** `PLATFORM_SWITCH_ROLES`（管理员的平台隔离是刻意的），故访问**别的平台**的页面会被 R1 守卫弹回自己平台首页 —— 与 `/tt/products`、`/fb/products` 等**既有平台路由完全同构**，非本次引入。huguan/developer 可切平台 ⇒ 放行。**守卫本身无需改动**（该段无按 `/tt`/`/fb` 裸前缀的硬编码规则）。
+
+### 4.2 已知限制（正式登记，避免日后误报为「又串台了」）
+
+**`/analysis` 没有 `meta.platform`** ⇒ 平台守卫对它跳过 ⇒ **TT / FB 专用的用户手输 `/#/analysis` 能进入 GG 的分析页**。
+
+- **不构成数据泄露**：该页读的 `/api/ad-reports/*` 是 **uid 作用域**的，用户拿到的是**他自己**在 GG 数据集里的行（TT/FB 用户通常是空的），**不是别人的数据**。
+- 属 §4 表格里那条「直接手输 `/analysis` 即 GG 页 —— **刻意的**」的必然结果。
+- 若要堵：给 `/analysis` 补 `meta.platform: 'gg'`。**代价**是 GG 的旧书签行为会变（GG 平台用户不受影响，非 GG 用户会被弹走）。本期**不做**，登记在此。
+
+### 4.3 顺带发现的**既有缺陷**（不在本设计范围）
+
+**`py/main.py` 的 `_guard_gg_platform` before_request 钩子实际不生效。**
+
+实测：`platform=fb`、`role=user` 的账号对 `/api/accounts/list`、`/api/mcc/list`、`/api/products/list`、`/api/ad-reports/dashboard`（四个都在 `_GG_ONLY_PREFIXES` 里）**全部返回 200**；而该钩子 docstring 明写「FB 用户不可访问」。
+
+机制：钩子里调 `get_jwt_identity()`，但在**没有 `@jwt_required()` 的 `before_request` 中** flask-jwt-extended 会抛 `RuntimeError`（要求先 `verify_jwt_in_request()`），被那句宽泛的 `except Exception: return None` **吞掉** ⇒ 守卫被静默跳过。
+
+**影响面**：数据仍 uid 作用域（读到的是自己在那个数据集里的行），**不是跨用户泄露**；但**平台边界形同虚设**，且「守卫看起来在工作、其实不工作」比没有守卫更危险。**未擅自修**，单独报给用户裁定。
+
 ---
 
 ## 5. 测试与验收

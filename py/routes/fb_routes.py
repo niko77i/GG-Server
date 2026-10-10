@@ -1,7 +1,8 @@
 """Facebook 平台 API 路由 — 产品管理 / 账户管理 / BM管理 / 像素BM管理 / 数据提取 / 数据管理"""
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from .helpers import ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES, parse_pagination
+from .helpers import (ok, err, get_uid, get_db, parse_body, CROSS_USER_ROLES,
+                      parse_pagination)
 from .decorators import fb_required, no_huguan
 import huguan_dashboard as hd
 import logging
@@ -1116,6 +1117,7 @@ def account_bm_history(aid):
 @fb_bp.route('/api/fb/products/list', methods=['GET'])
 @jwt_required()
 @fb_required
+@no_huguan
 def list_products():
     db = get_db()
     page, size = parse_pagination(default=50)
@@ -1124,18 +1126,22 @@ def list_products():
     region = request.args.get('region', '')
     runner = request.args.get('runner', '', type=str)
     archived = request.args.get('archived', '0')
-    uid = get_uid()
     offset = (page - 1) * size
 
     where = ["p.is_archived = 1" if archived == '1' else "p.is_archived = 0"]
     params = []
-    role = _get_role(db, uid)
+    # 可见性（2026-10-11 用户裁定：「**同系统的就是产品可见**」）：FB 产品**不按人隔离** ——
+    # 同平台用户之间互相可见，故原先 `elif role not in ('developer','admin')` →
+    # 「只看自己在跑的产品」的收窄已删。`runner` 因此退化为**纯筛选**（可见集本就不受它
+    # 约束，按在跑人筛无信息增量），不需要再给它加角色门禁。
+    #
+    # **户管不在此处判**：它由本端点的 `@no_huguan` 装饰器**域级禁入**（403），与 GG 侧
+    # 产品域全端点一致，也与前端 `router/index.js:109` 把户管导去账户页一致。
+    # 「行级归属判据」（`_fb_product_accessible`）与「域级禁入装饰器」是**两层，不可互替**：
+    # 前者按 `CROSS_USER_ROLES` 判某一行归谁（该常量含户管），后者判这一整个域谁能进。
     if runner and runner.isdigit():
         where.append("p.id IN (SELECT product_id FROM fb_product_runners WHERE user_id=?)")
         params.append(int(runner))
-    elif role not in ('developer', 'admin'):
-        where.append("p.id IN (SELECT product_id FROM fb_product_runners WHERE user_id=?)")
-        params.append(uid)
     if search:
         where.append("p.product_name LIKE ?")
         params.append(f"%{search}%")
@@ -1187,6 +1193,7 @@ def list_products():
 @fb_bp.route('/api/fb/products/runner-products', methods=['GET'])
 @jwt_required()
 @fb_required
+@no_huguan
 def runner_products():
     """获取当前用户的在跑产品（下拉框用），只返回当前用户是在跑人员的产品。"""
     db = get_db()
@@ -1361,6 +1368,7 @@ def restore_product(pid):
 @fb_bp.route('/api/fb/products/<int:pid>/detail', methods=['GET'])
 @jwt_required()
 @fb_required
+@no_huguan
 def product_detail(pid):
     db = get_db()
     # 归属校验：原实现回**任意**产品的完整树（含经 JOIN 带出的 BM 名与像素名/外部号），
@@ -2411,6 +2419,12 @@ def fb_analysis_dashboard():
     ).fetchone()
 
     def _group(col):
+        # ⚠️ `col` 会被插进 SQL 文本（f-string）⇒ **只允许下面这两个写死的字面量**。
+        # 当前两个调用点传的都是字面量、不可注入；这行是**纵深防御**：防止日后有人
+        # 把请求参数接进来，就变成一个真的注入口子（本功能正是在修「动态字符串拼进
+        # SQL」那一族缺陷，形状上不该留这种口子）。
+        if col not in ("line_name", "product_name"):
+            raise ValueError(f"不支持的列: {col!r}")
         # 不别名：分组键**保留原列名**（line_name / product_name）——
         # 设计 §3.2 规定 `by_line: [{line_name, …}]`、`by_product: [{product_name, …}]`，
         # 前端按这两个键取值（同名别名 `name` 会让前端取不到）。
