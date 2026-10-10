@@ -85,9 +85,10 @@
       <template #footer><el-button @click="editVisible=false">取消</el-button><el-button type="primary" :loading="savingEdit" @click="handleSaveEdit">保存</el-button></template>
     </el-dialog>
 
-    <!-- 统计弹窗 -->
+    <!-- 统计弹窗。③ 浏览类 · 前端分页：统计行 = 去重（产品×线名×日期）数，可上千，
+         直通 el-table 会按行数建 DOM（Element Plus 不做虚拟滚动）。 -->
     <el-dialog v-model="statsVisible" title="数据统计" width="700px">
-      <el-table :data="statsData" stripe border>
+      <el-table :data="statsShown" stripe border>
         <el-table-column prop="product_name" label="产品名" />
         <el-table-column prop="line_name" label="线名" />
         <el-table-column prop="report_date" label="日期" width="110" />
@@ -96,12 +97,16 @@
         <el-table-column prop="total_clicks" label="总点击" width="80" />
         <el-table-column prop="account_count" label="账户数" width="80" />
       </el-table>
+      <div v-if="statsData.length > PAGE_SIZE" style="display:flex;justify-content:flex-end;margin-top:8px;">
+        <el-pagination v-model:current-page="statsPage" :page-size="PAGE_SIZE"
+          :total="statsData.length" layout="prev, pager, next" small background />
+      </div>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
 import { sheetWriteApi } from '../../api/sheetWrite'
@@ -112,6 +117,11 @@ const filterProduct = ref(''); const filterLine = ref(''); const dateRange = ref
 const selectedIds = ref([]); const productOptions = ref([]); const lineOptions = ref([])
 const showDetailCols = ref(false)
 const statsVisible = ref(false); const statsData = ref([])
+// 前端分页（③ 浏览类）：见模板注释。权威数据是 `statsData`，这里只切当前页渲染。
+const PAGE_SIZE = 50
+const statsPage = ref(1)
+const statsShown = computed(() =>
+  statsData.value.slice((statsPage.value - 1) * PAGE_SIZE, statsPage.value * PAGE_SIZE))
 
 // 编辑相关
 const editVisible = ref(false); const savingEdit = ref(false)
@@ -229,6 +239,7 @@ async function loadStats() {
   if (dateRange.value) { p.date_from = dateRange.value[0]; p.date_to = dateRange.value[1] }
   const res = await fbApi.reportStats(p)
   statsData.value = res.data || []
+  statsPage.value = 1    // 结果集变了 ⇒ 回第 1 页，否则当前页可能越过新末页
   statsVisible.value = true
 }
 

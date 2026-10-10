@@ -31,8 +31,12 @@
       <span style="font-size:12px;color:#888;margin-left:auto;">已选 {{ cwSelected.length }} 条</span>
     </div>
 
-    <!-- 文案表格（扁平列表，按地区分组排序） -->
-    <el-table ref="cwTableRef" :data="filteredCopywritings" row-key="id"
+    <!-- 文案表格（扁平列表，按地区分组排序）
+         ③ 浏览类 · 前端分页：`store.copywritings` 由 `/api/copywriting/list` 一次全量返回
+         （无 LIMIT），直通 el-table 会按条数建 DOM（Element Plus 不做虚拟滚动）。
+         与相邻的视频表（YoutubeView 的 pagedVideos）同一口径：勾选也随当前页，
+         切换地区标签时回到第 1 页。 -->
+    <el-table ref="cwTableRef" :data="pagedCopywritings" row-key="id"
       @selection-change="v => cwSelected = v" stripe size="small"
       class="cw-table">
       <el-table-column type="selection" width="40" />
@@ -69,6 +73,10 @@
         </template>
       </el-table-column>
     </el-table>
+    <div v-if="filteredCopywritings.length > cwPageSize" style="display:flex;justify-content:flex-end;margin-top:8px;">
+      <el-pagination v-model:current-page="cwPage" :page-size="cwPageSize"
+        :total="filteredCopywritings.length" layout="prev, pager, next" small background />
+    </div>
 
     <!-- 文案编辑弹窗 -->
     <el-dialog v-model="cwEditVisible" title="✏️ 编辑文案" width="500px" top="10vh">
@@ -96,7 +104,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useYoutubeStore } from '@/stores/youtube'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessageBox, ElMessage } from 'element-plus'
@@ -171,6 +179,14 @@ const filteredCopywritings = computed(() => {
     return (a.content || '').localeCompare(b.content || '')
   })
 })
+
+// 前端分页（③ 浏览类）：只把当前页交给 el-table 渲染；权威数据是 `filteredCopywritings`。
+const cwPage = ref(1)
+const cwPageSize = ref(50)
+const pagedCopywritings = computed(() =>
+  filteredCopywritings.value.slice((cwPage.value - 1) * cwPageSize.value, cwPage.value * cwPageSize.value))
+// 切地区标签 ⇒ 回第 1 页，否则当前页码可能越过新结果集的末页（列表空白且分页控件消失）。
+watch(activeRegion, () => { cwPage.value = 1 })
 
 function cwToggleSelectAll() {
   if (!cwTableRef.value) return
