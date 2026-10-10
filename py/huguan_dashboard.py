@@ -10,6 +10,7 @@ import json
 import logging
 
 from google_sheets_service import col_index, read_sheet_values
+from tt_master_data import strip_utc_prefix
 from utils import chunk
 
 log = logging.getLogger("gg-server")
@@ -808,6 +809,31 @@ def resolve_named_id(db, sql: str, params: tuple = ()) -> int | None:
     return rows[0]["id"] if len(rows) == 1 else None
 
 
+def _named_hits(db, platform: str, field: str, value: str) -> int:
+    """该名称命中了**几条**（0 / 1 / ≥2）。只为区分「没有」与「歧义」，不参与取值。
+
+    `resolve_named_id` 对 0 条与 ≥2 条都返回 None，两者的处理却**相反**：
+    0 条 = 系统里没有 ⇒ 产 pending、落库补建；≥2 条 = 歧义 ⇒ 仍警告跳过。
+    本函数只数命中行数，**不改变 `resolve_named_id` 的取值口径**。
+    """
+    if field == "bc_name":
+        sql = _SQL_BC
+    elif field == "agent_name":
+        sql = _AGENT_SQL[platform]
+        if sql is None:
+            # fb 的「所属渠道」不在 agents 表里（走 fb_channels）⇒ 不走本 pending 分支
+            return 0
+    else:
+        return 0
+    return len(db.execute(sql, (value,)).fetchall())
+
+
+def _region_exists(db, country: str) -> bool:
+    """`regions` 里是否已有该国家（tt 命名空间）。只查库、不写。"""
+    return db.execute("SELECT 1 FROM regions WHERE name=? AND platform='tt'",
+                      (country,)).fetchone() is not None
+
+
 def resolve_owner_id(db, name: str):
     """归属名 → users.id。空 display_name 回退 username，唯一命中才返回。
 
@@ -997,6 +1023,10 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
     # 四个产出列表必须在去重循环**之前**建好：去重本身会往 warnings 里塞一条
     to_create, to_update, owner_changes, to_skip = [], [], [], []
     warnings = []
+    # 系统字典里缺的项（tt）：逐行收集（**每行都收**，不只收进 to_create/to_update 的行）——
+    # 否则「已存账户、表里只写了个系统没有的 BC」这行（无字段变更、不进 to_update）
+    # 的 pending 会丢失，违反设计 §4.3「dry_run 必须在差异报告里看得见」。
+    pending_rows = []
 
     # 按账户ID 去重：同一 ID 在表里出现两行时，若两行都进 to_create，落库阶段第二行
     # 会撞唯一约束。取**首次出现**的那行生效，后续行记 warning（户管要能看到并去改表）。
@@ -1051,10 +1081,15 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         if existing is None:
             db_values = _collect_updates(db, platform, p, want_owner_id, row_no, warnings,
                                          create_missing=False)
-            # 只摘 `_pending_status` 这一个合成键（它由报告层的 `pending_status` 字段承载）。
+            # 只摘 `_pending_status` / `_pending_master` 这两个合成键（分别由报告层的
+            # `pending_status` 与 `pending_master` 承载）。
             # `_is_dead` **故意保留在 db_values 里**，别顺手一起 pop —— apply_diff 会
             # 自己 pop 它去同步 death_date；在这里摘掉会让新建账户的死亡标记静默丢失。
             pending = db_values.pop("_pending_status", None)
+            # 系统字典里缺的项（tt）：apply_diff 落库前才补建/挂链（build_diff 只读）。
+            # **必须摘掉**：留着会穿过 `INSERT INTO ...(_pending_master)` 直接报错。
+            pending_master = db_values.pop("_pending_master", None)
+            pending_rows.extend(pending_master or [])
             to_create.append({
                 "row": row_no,
                 "sheet": _sheet_of(p),
@@ -1067,6 +1102,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
                 "db_values": db_values,
                 # 系统里还没有的状态名；apply_diff 落库前才 INSERT（build_diff 只读）
                 "pending_status": pending,
+                "pending_master": pending_master,
             })
             continue
 
@@ -1099,6 +1135,11 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         fields = _collect_updates(db, platform, p, scope_owner, row_no, warnings,
                                   create_missing=False)
         pending = fields.pop("_pending_status", None)
+        # 系统字典里缺的项（tt）：**必须在 `changed = {...}` 推导之前摘掉**，
+        # 否则它会穿过 `sets = [f"{k}=?" ...]` 拼出 `UPDATE tt_accounts SET _pending_master=?`
+        # 直接报错（`_sheet_name` 踩过同款）。apply_diff 落库时才据它补建/挂链。
+        pending_master = fields.pop("_pending_master", None)
+        pending_rows.extend(pending_master or [])
         # `_sheet_name` 是 tt 合成键（表里「账户名称」，只给**新建**账户决定 name）。
         # **必须在这里摘掉**：update 路径不消费它，留着会（a）被 `_same_as_existing`
         # 拿去比库里的列 → 恒判「变了」→ 每行虚报「将更新」；（b）穿过下面
@@ -1117,10 +1158,23 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             to_update.append({"row": row_no, "sheet": _sheet_of(p), "account_id": aid,
                               "existing_id": existing["id"], "fields": changed,
                               "pending_status": pending,
+                              "pending_master": pending_master,
                               # apply_diff 建缺失状态行时用它记 owner（谁先建的）
                               "scope_owner_id": scope_owner,
                               # 新值为空串的文本列：清空是不可逆的，必须让前端显式标注
                               "clears": _blank_columns(platform, changed)})
+
+    # 聚合「将新增的字典项」（设计 §4.3）：按 (kind, name) 去重、`rows` 计数、
+    # 时区取**首次出现**（与既有「首次出现生效」惯例一致）。dry_run 与落库两条
+    # 返回路径共用同一份 diff ⇒ 报告层据此渲染「将新增的字典项」一节。
+    agg, order = {}, []
+    for x in pending_rows:
+        k = (x["kind"], x["name"])
+        if k not in agg:
+            agg[k] = {"kind": x["kind"], "name": x["name"],
+                      "timezone": x.get("timezone"), "rows": 0}
+            order.append(k)
+        agg[k]["rows"] += 1
 
     return {
         "to_create": to_create,
@@ -1128,6 +1182,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         "owner_changes": owner_changes,
         "to_skip": to_skip,
         "warnings": warnings,
+        "pending_master": [agg[k] for k in order],
         "summary": {
             "total_in_sheet": sheet_rows,
             "new_accounts": len(to_create),
@@ -1168,11 +1223,15 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名、
     `_primary_bm_name`（FB 专有，表里填的主 BM 名）、
     `_account_type`（TT 专有，由调用方按「这一行读自哪张表」注入的户类型）、
-    `_sheet_name`（TT 专有，表里「账户名称」列的值，供新建账户决定 `name`）。
+    `_sheet_name`（TT 专有，表里「账户名称」列的值，供新建账户决定 `name`）、
+    `_pending_master`（系统字典里缺的 BC/渠道/国家时区，dry_run 只产不写，落库才补建）。
 
     create_missing 由 build_diff 传 False（dry_run 只读），落库阶段才用默认 True。
     """
     out = {}
+    # 系统字典里缺的项（BC / 渠道 / 国家时区），**只产不写**：dry_run 只读，
+    # 落库阶段（apply_diff）才据它补建。每行一份，见文件末尾 region 判定。
+    pending_master = []
     for f in _PLAIN_TEXT_FIELDS[platform]:
         # **门在「这一列有没有被该表采集」上，不在值上**：`p` 是 `parse_row` 的产出，
         # `f in p` ⇔ 该表的 col_map 映射了这列。未采集的列（如加白户表没有
@@ -1211,6 +1270,16 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
         if not _known:
             continue
         if resolved is None:
+            # 「查不到」与「重名多条」在 resolve_named_id 里都返回 None（0 或 ≥2 ⇒ 不猜）。
+            # 但两者处理**相反**：0 条 = 系统里没有 ⇒ dry_run 产 pending、落库补建；
+            # ≥2 条 = 歧义 ⇒ 仍然只警告跳过（多建一条只会更乱）。
+            # **只 tt 产**（设计 §4.4）：本功能只落 tt 字典，gg/fb 行为逐字不变
+            # （gg 的 0 命中仍记警告；fb 的 agent 查名 SQL 为 None、_named_hits 恒 0）。
+            hits = _named_hits(db, platform, f, value)
+            if hits == 0 and platform == "tt" and f in ("bc_name", "agent_name"):
+                pending_master.append({"kind": "bc" if f == "bc_name" else "agent",
+                                       "name": value, "timezone": None})
+                continue
             warnings.append({"row": row_no, "sheet": _conf_text(p.get("_sheet")),
                              "message": f"{f}「{value}」无法唯一匹配，已跳过该列"})
             continue
@@ -1239,6 +1308,16 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
         # 与 `_account_type` 同理无条件产出（未映射时 `p.get("name")` 为 None →
         # 空串），由 apply_diff 的 create 分支回落账户ID。
         out["_sheet_name"] = _conf_text(p.get("name"))
+    # 国家 → 时区：表里两列都有、而 regions 里没有这个国家 ⇒ 记 pending（**只查库、不写**）。
+    # 国家或时区缺一不建：建出「有国家没时区」的残项会被当成已有、再也补不上。
+    # 只在 tt 产（gg/fb 的国家列本轮不映射、也不补建字典）。
+    country = _conf_text(p.get("country"))
+    tz = _conf_text(p.get("timezone"))
+    if platform == "tt" and country and tz and not _region_exists(db, country):
+        pending_master.append({"kind": "region", "name": country,
+                               "timezone": strip_utc_prefix(tz)})
+    if pending_master:
+        out["_pending_master"] = pending_master
     return out
 
 

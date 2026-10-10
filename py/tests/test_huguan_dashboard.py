@@ -1055,6 +1055,10 @@ class TestBuildDiff:
 
         对照行：同名 BC 只有一条、且已软删 ⇒ 若 SQL 不带 `deleted_at IS NULL`，
         它会成为唯一命中并被写入 bc_id。仓库既有口径见 tt_routes.py:133/198/1054/1058。
+        **2026-10-10 新口径（同步自动补建）**：`_SQL_BC` 过滤软删 ⇒ 按名称查为 0 命中
+        ⇒ 不再是「无法唯一匹配」的警告，而是产 pending；落库时 `ensure_bc` 会**复活**
+        这条软删记录（设计 §4.2「软删同名直接复活」）。`to_update == []` 仍钉住
+        「dry_run 没把账户挂上去」这层。
         """
         from huguan_dashboard import build_diff, parse_row
         db, u1, _ = self._prepare(client)
@@ -1066,7 +1070,7 @@ class TestBuildDiff:
         parsed = [dict(parse_row(row, "tt"), row=2)]
         diff = build_diff(db, parsed, "tt")
         assert diff["to_update"] == []
-        assert any("已删BC" in w["message"] for w in diff["warnings"])
+        assert ("bc", "已删BC") in {(x["kind"], x["name"]) for x in diff["pending_master"]}
         db.close()
 
     def test_tt_diff_uses_advertiser_id_and_reports_pending_status(self, client):
@@ -1220,11 +1224,13 @@ class TestBuildDiff:
             ["", "", "AG-GG", "", "", "TT代理", "张三"], "gg"), row=2)], "gg")
         assert gg_diff["to_update"] == []
         assert any("TT代理" in w["message"] for w in gg_diff["warnings"])
-        # 反向：TT 的表里写 GG 侧代理名 ⇒ 同样不落库
+        # 反向：TT 的表里写 GG 侧代理名 ⇒ 不挂到 GG 的代理上（to_update 为空）。
+        # **2026-10-10 新口径**：tt 侧 0 命中不再是警告，而是产 pending 待补建
+        # （会建成一个**新的 tt 渠道**，不是 gg 的那个「张三代理」）。
         tt_row = ["", "", "AG-TT", "", "", "张三代理", "", "", "", "", "", "", ""]
         tt_diff = build_diff(db, [dict(parse_row(tt_row, "tt"), row=2)], "tt")
         assert tt_diff["to_update"] == []
-        assert any("张三代理" in w["message"] for w in tt_diff["warnings"])
+        assert ("agent", "张三代理") in {(x["kind"], x["name"]) for x in tt_diff["pending_master"]}
         # 各自命中的正例：GG 用 gg 代理、TT 用 tt 代理（不能用上面那两行，那两行
         # 刻意写的是对侧平台的代理名）
         gg_ok = build_diff(db, [dict(parse_row(
@@ -6602,3 +6608,89 @@ class TestCrossSheetNotesWiring:
                                  json=body).get_json()["result"]
             assert "cross_sheet_notes" not in result, f"{body} 不该带该键"
         assert called == [], "push 侧不该调用 cross_sheet_notes"
+
+
+# ---------- Task 2: 同步把「系统字典里缺的项」产成 _pending_master ----------
+
+class TestPendingMasterData:
+    """同步时把「系统字典里没有的项」产成 `_pending_master`（dry_run 只产不写）。
+
+    0 命中（系统里没有）⇒ 产 pending、落库补建；≥2 命中（歧义）⇒ 仍警告跳过。
+    两类在 `resolve_named_id` 里都返回 None，必须靠 `_named_hits` 再数一次才能分开。
+    """
+
+    def _setup(self, client, username, bc=True, agent=True, region=True):
+        hg, uid = _create_user(client, username, role="huguan")
+        db = database.get_db()
+        if bc:
+            db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('BC-有','7000000000000000001')")
+        if agent:
+            db.execute("INSERT INTO agents(name, platform) VALUES('渠道有','tt')")
+        if region:
+            db.execute("INSERT INTO regions(name, timezone, platform) VALUES('美国','+8','tt')")
+        db.commit(); db.close()
+        return hg, uid
+
+    def test_missing_bc_agent_region_are_reported_as_pending(self, client):
+        """三个缺项各产一份 pending；region 的时区须归一化掉 `UTC` 前缀。
+
+        用本文件既有的 `parse_row(row, "tt")`（固定列规格）构造行，而非 brief 里那段
+        内联 `resolve_column_map` —— 列下标：C=账户ID、D=BC、E=国家、F=所属渠道、H=时区。
+        国家用 `阿根廷`：`regions` 初始化会从 `regions` 标签预设 `巴西` 等（且已复制到
+        platform='tt'），brief 原稿写的 `巴西` 在本仓**预置数据里已存在**、产不出 pending。
+        """
+        self._setup(client, "_pm1")
+        db = database.get_db()
+        from huguan_dashboard import _collect_updates, parse_row
+        row = [""] * 13
+        row[2] = "9001"        # C 账户ID
+        row[3] = "BC-没有"      # D BC
+        row[4] = "阿根廷"       # E 国家
+        row[5] = "渠道没有"     # F 所属渠道
+        row[7] = "UTC+8"       # H 时区
+        p = parse_row(row, "tt")
+        out = _collect_updates(db, "tt", p, None, 2, [], create_missing=False)
+        db.close()
+        got = {(x["kind"], x["name"], x.get("timezone")) for x in out["_pending_master"]}
+        assert ("bc", "BC-没有", None) in got, got
+        assert ("agent", "渠道没有", None) in got, got
+        assert ("region", "阿根廷", "+8") in got, got
+        # 采集阶段绝不落 id：账户挂链在 Task 3（落库）才做
+        assert "bc_id" not in out
+
+    def test_existing_entries_do_not_appear(self, client):
+        """三项字典里都已有 ⇒ 不产 `_pending_master`（既有账户照常解析）。"""
+        self._setup(client, "_pm2")
+        db = database.get_db()
+        from huguan_dashboard import _collect_updates
+        out = _collect_updates(db, "tt", {"account_id": "9002", "bc_name": "BC-有",
+                                          "agent_name": "渠道有", "country": "美国",
+                                          "timezone": "+8"}, None, 2, [], create_missing=False)
+        db.close()
+        assert out.get("_pending_master", []) == []
+
+    def test_ambiguous_name_is_still_a_warning_not_a_create(self, client):
+        """同名 ≥2 条 = 歧义 ≠ 没有 ⇒ 仍警告跳过，绝不补建第三条。"""
+        self._setup(client, "_pm3", bc=False)
+        db = database.get_db()
+        db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('BC-歧义','7000000000000000002')")
+        db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('BC-歧义','7000000000000000003')")
+        db.commit()
+        from huguan_dashboard import _collect_updates
+        warns = []
+        out = _collect_updates(db, "tt", {"account_id": "9003", "bc_name": "BC-歧义"},
+                               None, 2, warns, create_missing=False)
+        db.close()
+        assert "bc_id" not in out
+        assert [_ for _ in out.get("_pending_master", []) if _["kind"] == "bc"] == []
+        assert any("无法唯一匹配" in w["message"] for w in warns), warns
+
+    def test_country_without_timezone_is_not_pending(self, client):
+        """国家/时区缺一不建：建出「有国家没时区」的残项会被当成已有、再也补不上。"""
+        self._setup(client, "_pm4")
+        db = database.get_db()
+        from huguan_dashboard import _collect_updates
+        out = _collect_updates(db, "tt", {"account_id": "9004", "country": "秘鲁", "timezone": ""},
+                               None, 2, [], create_missing=False)
+        db.close()
+        assert [x for x in out.get("_pending_master", []) if x["kind"] == "region"] == []
