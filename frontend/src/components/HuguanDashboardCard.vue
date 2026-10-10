@@ -173,11 +173,11 @@
               <span class="hd-sheet-actions">
                 <el-button size="small" plain
                            :loading="!!hdSheetBusy && hdSheetBusy.sheet === hdSheetKey(t) && hdSheetBusy.dir === 'sync'"
-                           :disabled="hdBusy || !hdSheetKey(t)"
+                           :disabled="hdBusy || !hdSheetKey(t) || !hdConfigured"
                            @click="syncHdTable(i)">⬇️ 导入这张表</el-button>
                 <el-button size="small" plain
                            :loading="!!hdSheetBusy && hdSheetBusy.sheet === hdSheetKey(t) && hdSheetBusy.dir === 'push'"
-                           :disabled="hdBusy || !hdSheetKey(t)"
+                           :disabled="hdBusy || !hdSheetKey(t) || !hdConfigured"
                            @click="openPushDlg(hdSheetKey(t))">⬆️ 刷新回这张表</el-button>
               </span>
             </el-tooltip>
