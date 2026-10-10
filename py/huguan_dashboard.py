@@ -1571,6 +1571,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
     """
     conf = confirmed or {}
     created = updated = owner_changed = 0
+    # 孤儿行（缺字典项的既存账户）挂链的计数：这类行既不进 created 也不进 updated，
+    # 一次「只挂链」的同步若两个数都是 0，前端会读成「什么都没发生」。
+    orphan_linked = 0
     errors = []
     # 撤回快照的四个收集容器（collect_undo=False 时全部为空、不进返回值）。
     # owner_changes 与 updates 项**刻意同形状**（{account_id, cols:{列:{old,new}}}）：
@@ -1910,6 +1913,16 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                 else:                                   # region：只建，无 id 可挂
                     _ensure_region(db, x["name"], x.get("timezone"))
             if link:
+                # 撤回快照：挂链列的**旧值必须在 UPDATE 之前读**（写完这一行就读不到了，
+                # 与 update 分支逐字同一条纪律）。形状与 update 分支**完全一致**
+                # `{account_id, cols:{列:{old,new}}}`、追加进**同一个** `undo_updates`
+                # 容器 ⇒ `undo_sync` 的 `_cas_revert` 会一并还原这些列并计入 reverted。
+                # 少了它，孤儿行（常同时有归属变更）会得到「只回滚归属、留下新 bc_id」的
+                # 半截撤回，且不进 reverted。
+                old_cols = {}
+                if collect_undo:
+                    for k in link:
+                        old_cols[k] = _read_old_value(db, table, k, item["existing_id"])
                 # BC 变更留痕：与 update 分支同款，**必须在 UPDATE 之前**（旧值写完读不到）。
                 # 只 tt 有 `_CHANNEL_HISTORY_SPEC`（fb 无此键，且孤儿项本就只在 tt 产）。
                 if platform != "fb" and "bc_id" in link:
@@ -1918,6 +1931,12 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                 db.execute(f"UPDATE {table} SET {', '.join(sets)}, "
                            f"updated_at=datetime('now','localtime') WHERE {key_field}=?",
                            tuple(link.values()) + (item["account_id"],))
+                if old_cols:
+                    undo_updates.append({
+                        "account_id": item["account_id"],
+                        "cols": {k: {"old": v, "new": link[k]}
+                                 for k, v in old_cols.items()}})
+                orphan_linked += 1
         except Exception:
             log.exception("户管同步：补建字典项挂链失败 platform=%s row=%s",
                           platform, item.get("row"))
@@ -1937,6 +1956,9 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
 
     db.commit()
     result = {"created": created, "updated": updated, "owner_changed": owner_changed,
+              # 孤儿行挂链的独立计数（既不进 created 也不进 updated）：让「只挂链」的
+              # 同步在前端也能读出「库确实变了」。前端措辞由后续任务接入。
+              "orphan_linked": orphan_linked,
               "applied_owner_rows": applied_owner_rows, "not_applied": not_applied,
               "remark_m_writeback": remark_m_writeback,
               "remark_operator_push": remark_operator_push,

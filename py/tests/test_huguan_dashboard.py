@@ -6849,3 +6849,40 @@ class TestPendingMasterApply:
         db.close()
         assert got["timezone"] == "+8", "既有国家的时区被同步覆盖了"
 
+    def test_orphan_link_is_covered_by_undo(self, client):
+        """孤儿行挂链必须进撤回快照，否则撤回会留下新 bc_id（半截撤回）且不计 reverted。
+
+        本行的唯一变化就是「挂上系统里没有的 BC」——它既不进 updates / owner_changes /
+        created，若挂链不入快照，撤回时没有任何容器覆盖它：账户会带着新 bc_id 停在半途，
+        `reverted` 也不认。故挂链列的旧值必须在 UPDATE 前读、按 update 分支同形状追加。
+        """
+        from huguan_dashboard import (apply_diff, build_diff, parse_row,
+                                      save_undo, undo_sync)
+        db = database.get_db()
+        u1 = _seed(db, "_pmu_owner", "甲")
+        # 先挂一个旧 BC：撤回必须回到**这个旧 id**（而非 NULL）—— 证明旧值真被读到了
+        db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES('旧BC','7000000000000000009')")
+        old_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        _seed_tt_account(db, "9105", u1, bc_id=old_id)
+        row = ["", "", "9105", "BC-撤回", "", "", "", "", "", "", "", "", ""]
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        assert diff["to_update"] == [], "孤儿行不进 to_update"
+        out = apply_diff(db, diff, "tt", {"create": [], "update": [], "owner": []},
+                         user_id=u1, collect_undo=True)
+        new_id = db.execute("SELECT id FROM tt_bcs WHERE name='BC-撤回'").fetchone()["id"]
+        assert db.execute("SELECT bc_id FROM tt_accounts WHERE advertiser_id='9105'"
+                          ).fetchone()["bc_id"] == new_id, "挂链未生效"
+        assert out["orphan_linked"] == 1, "孤儿挂链应有独立计数"
+        assert {"account_id": "9105",
+                "cols": {"bc_id": {"old": old_id, "new": new_id}}} in out["undo"]["updates"], \
+            "孤儿挂链必须进 updates 快照（否则撤不回）"
+        save_undo(db, u1, "tt", "sync", out["undo"])
+        db.commit()
+        db.close()
+        res = undo_sync(u1, "tt")
+        db = database.get_db()
+        got = db.execute("SELECT bc_id FROM tt_accounts WHERE advertiser_id='9105'").fetchone()
+        db.close()
+        assert got["bc_id"] == old_id, "撤回后 bc_id 应回到挂链前的旧值"
+        assert res["reverted"] >= 1, "挂链行应计入 reverted"
+
