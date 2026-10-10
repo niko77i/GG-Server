@@ -480,8 +480,10 @@ const analysisPlatform = computed(() => route.meta?.platform || 'gg')
     <div class="stat-card"><div class="stat-val">{{ fbSummary.total_clicks.toLocaleString() }}</div><div class="stat-label">总点击 <span style="color:#E6A23C;font-size:11px;">数据不全</span></div></div>
   </div>
 
-  <!-- 按线花费表 -->
-  <el-table :data="fbByLine" stripe border size="small">
+  <!-- 按线花费表。**必须限行**：fbByLine 来自无 LIMIT 的聚合端点，
+       直通 el-table 会在维度爆炸时崩页（本仓库已知缺陷族：
+       「无上限数组直通 el-table」）。取花费前 N 条并声明。 -->
+  <el-table :data="fbByLineTop" stripe border size="small">
     <el-table-column prop="line_name" label="线名" min-width="180" show-overflow-tooltip />
     <el-table-column prop="total_cost" label="花费" min-width="110" sortable>
       <template #default="{ row }">${{ row.total_cost.toLocaleString() }}</template>
@@ -494,6 +496,11 @@ const analysisPlatform = computed(() => route.meta?.platform || 'gg')
   <!-- 花费趋势（命令式 echarts，写法照趋势 tab：init + setOption） -->
   <div v-if="fbTrendPoints.length" ref="fbTrendChart" style="width:100%;height:340px;margin-top:16px;"></div>
   <el-empty v-else description="暂无趋势数据" />
+
+  <!-- 限行的实情要说出来，不做静默截断 -->
+  <p v-if="fbByLine.length > FB_TABLE_LIMIT" style="font-size:12px;color:#909399;margin-top:8px;">
+    仅显示花费前 {{ FB_TABLE_LIMIT }} 条（共 {{ fbByLine.length }} 条）
+  </p>
 </template>
 
 <!-- GG：原样不动 -->
@@ -517,6 +524,12 @@ const fbByLine = ref([])
 const fbTrendPoints = ref([])
 const fbTrendChart = ref(null)
 let fbChart = null
+
+// 表格限行上限。fbByLine 来自无 LIMIT 的聚合端点（`_group` 里没有 LIMIT，
+// 与 GG 同款），直通 el-table 会在维度爆炸时崩页 —— 本仓库已知缺陷族。
+// 这里是**渲染侧**的兜底；服务端加 LIMIT 是更彻底的后续项（已记进账本）。
+const FB_TABLE_LIMIT = 200
+const fbByLineTop = computed(() => fbByLine.value.slice(0, FB_TABLE_LIMIT))
 
 async function loadFbDashboard() {
   // filterParams()（本文件 :581）的参数名与 Task 1 的端点口径是同一套，
