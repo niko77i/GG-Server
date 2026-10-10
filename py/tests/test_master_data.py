@@ -25,7 +25,7 @@ def _fresh_schema_conn_of(_database):
 
 
 def test_strip_utc_prefix():
-    from tt_master_data import strip_utc_prefix
+    from master_data import strip_utc_prefix
     assert strip_utc_prefix("UTC+8") == "+8"
     assert strip_utc_prefix("+8") == "+8"
     assert strip_utc_prefix("") == ""
@@ -33,7 +33,7 @@ def test_strip_utc_prefix():
 
 
 def test_ensure_bc_creates_with_name_as_bc_id_and_revives_soft_deleted():
-    from tt_master_data import ensure_bc
+    from master_data import ensure_bc
     import database
     conn, db_path = _fresh_schema_conn_of(database)
     try:
@@ -58,7 +58,7 @@ def test_ensure_agent_creates_and_clears_cache(monkeypatch):
     import cache
     cleared = []
     monkeypatch.setattr(cache.cache, "clear_prefix", lambda p: cleared.append(p))
-    from tt_master_data import ensure_agent
+    from master_data import ensure_agent
     import database
     conn, db_path = _fresh_schema_conn_of(database)
     try:

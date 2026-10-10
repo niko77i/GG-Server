@@ -10,7 +10,7 @@ import json
 import logging
 
 from google_sheets_service import col_index, read_sheet_values
-from tt_master_data import ensure_agent, ensure_bc, strip_utc_prefix
+from master_data import ensure_agent, ensure_bc, strip_utc_prefix
 from utils import chunk
 
 log = logging.getLogger("gg-server")

@@ -601,7 +601,7 @@ def test_update_same_status_does_not_rewrite_recycle(mock_trigger, client, tt_he
 
 def test_ensure_bc_restores_soft_deleted(app):
     """软删后的 tt_bcs 应被 ensure_bc 恢复复用，避免 bc_id UNIQUE 冲突。"""
-    from tt_master_data import ensure_bc
+    from master_data import ensure_bc
 
     db = database.get_db()
     db.execute("INSERT INTO tt_bcs(name, bc_id) VALUES(?,?)", ("BC-X", "BC-X"))
@@ -880,7 +880,7 @@ def test_recharge_background_callback_updates_sheets_synced(client):
 
 def test_ensure_bc_uses_owner_uid(client, tt_headers):
     """#6 同步新建 BC 时 owner_id 应为当前用户，而非写死 1。"""
-    from tt_master_data import ensure_bc
+    from master_data import ensure_bc
 
     # tt_headers 已注册 ttuser(id=1)；再注册一个用户，取 id != 1 验证未写死 1
     _mk_tt_headers(client, "bcowner")
