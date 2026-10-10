@@ -169,3 +169,107 @@ class TestGgMccLinkDetailOwnership:
         mid = _mk_mcc(a_id, "mcc-0006")
         resp = client.get(f"/api/mcc/{mid}/detail", headers=dev_hdr)
         assert resp.status_code == 200
+
+
+class TestGgMccParentOwnership:
+    """`mcc_create` / `mcc_update` 的 `parent_mcc_id` 归属收口。
+
+    **为什么必须补**：`mcc_link` 与 `mcc_detail` 的闸门（上一条类）只判「能否看见 mid」，
+    但 `_link_mcc_chain_to_user`（`main.py:3324`）会把调用者 uid **递归写进所有祖先**的
+    `shared_user_ids`，且上行时不判归属。而 `mcc_create` / `mcc_update` 对
+    `parent_mcc_id` **只判存在、不判归属** ⇒ 存在一条自服务绕过链：
+
+      ① 把自己新建的「子 MCC」挂到受害者 MCC 下（自己是子 MCC 的 owner，天然可见）
+      ② 对自己这个子 MCC 调 link ⇒ 链式回写把 uid 塞进**受害者**的 shared_user_ids
+      ③ 此时 `_mcc_visible(victim, me)` 为真 ⇒ `GET /api/mcc/<victim>/detail` 放行
+
+    即「两个都收口」若不补父级归属，等于没收。父级校验落在入口端点，风险最低
+    （`_link_mcc_chain_to_user` 为多调用方共用，含管理员分配场景，不宜改其语义）。
+    """
+
+    def test_cannot_create_child_under_others_mcc(self, client):
+        """利用链的**第 ① 步**：这条一堵，后面 ② ③ 都无从谈起。"""
+        _, a_id = _create_user(client, "mp_a")
+        b_hdr, _ = _create_user(client, "mp_b")
+        victim = _mk_mcc(a_id, "mp-victim")
+        resp = client.post("/api/mcc/create",
+                           json={"name": "B的子MCC", "mcc_id": "mp-b-child",
+                                 "parent_mcc_id": victim}, headers=b_hdr)
+        assert resp.status_code == 403
+
+    def test_can_create_child_under_own_mcc(self, client):
+        """防过度收口：挂在自己 MCC 下必须仍能建。"""
+        a_hdr, a_id = _create_user(client, "mp_a2")
+        own = _mk_mcc(a_id, "mp-own2")
+        resp = client.post("/api/mcc/create",
+                           json={"name": "A的子MCC", "mcc_id": "mp-a2-child",
+                                 "parent_mcc_id": own}, headers=a_hdr)
+        assert resp.status_code == 200
+
+    def test_can_create_top_level_mcc(self, client):
+        """防过度收口：不带上级的顶层 MCC 不受影响。"""
+        a_hdr, _ = _create_user(client, "mp_a3")
+        resp = client.post("/api/mcc/create",
+                           json={"name": "顶层MCC", "mcc_id": "mp-top3"}, headers=a_hdr)
+        assert resp.status_code == 200
+
+    def test_dev_can_create_child_under_others_mcc(self, client):
+        """跨用户角色放行腿。"""
+        _, a_id = _create_user(client, "mp_a4")
+        dev_hdr, _ = _create_user(client, "mp_dev4", role="developer")
+        victim = _mk_mcc(a_id, "mp-victim4")
+        resp = client.post("/api/mcc/create",
+                           json={"name": "dev的子MCC", "mcc_id": "mp-dev4-child",
+                                 "parent_mcc_id": victim}, headers=dev_hdr)
+        assert resp.status_code == 200
+
+    def test_cannot_reparent_own_mcc_under_others(self, client):
+        """同族的第二条入口：先建自己的 MCC，再把它的上级改成受害者的 —— 等价于 ①。
+
+        `mcc_update` 原只查自环/子孙环与父级存在性，不查父级归属。
+        """
+        _, a_id = _create_user(client, "mp_a5")
+        b_hdr, b_id = _create_user(client, "mp_b5")
+        victim = _mk_mcc(a_id, "mp-victim5")
+        mine = _mk_mcc(b_id, "mp-mine5")
+        resp = client.put(f"/api/mcc/{mine}", json={"parent_mcc_id": victim}, headers=b_hdr)
+        assert resp.status_code == 403
+        # 证伪：不设限时该 UPDATE 会真的把 mine 的上级改成受害者的 MCC
+        db = database.get_db()
+        parent = db.execute("SELECT parent_mcc_id FROM mcc WHERE id=?", (mine,)).fetchone()[0]
+        db.close()
+        assert parent is None
+
+    def test_can_reparent_under_own_mcc(self, client):
+        """防过度收口：把自己两个 MCC 串起来必须仍能改。"""
+        a_hdr, a_id = _create_user(client, "mp_a6")
+        child = _mk_mcc(a_id, "mp-child6")
+        parent = _mk_mcc(a_id, "mp-parent6")
+        resp = client.put(f"/api/mcc/{child}", json={"parent_mcc_id": parent}, headers=a_hdr)
+        assert resp.status_code == 200
+
+    def test_link_chain_cannot_reach_victim(self, client):
+        """**端到端集成腿**：完整走一遍 ①②③，末态必须仍看不见受害者 MCC。
+
+        可证伪：父级归属校验缺失时，B 能建成子 MCC 并 link，随后 detail 返回 200
+        且带上受害者的账户清单 ⇒ 断言失败。
+        """
+        a_id = _create_user(client, "mp_a7")[1]
+        b_hdr, b_id = _create_user(client, "mp_b7")
+        victim = _mk_mcc(a_id, "mp-victim7")
+        _mk_account(a_id, "mp-acc7")          # 受害者名下有一个户，泄露与否可证
+
+        # ① 试图把子 MCC 挂到受害者下
+        created = client.post("/api/mcc/create",
+                              json={"name": "B的子MCC", "mcc_id": "mp-b7-child",
+                                    "parent_mcc_id": victim}, headers=b_hdr)
+        assert created.status_code == 403
+
+        # ② 即便子 MCC 以别的方式存在，link 也不该把 B 写进受害者的 shared
+        db = database.get_db()
+        shared = db.execute("SELECT shared_user_ids FROM mcc WHERE id=?", (victim,)).fetchone()[0]
+        db.close()
+        assert str(b_id) not in (shared or "")
+
+        # ③ 末态：仍看不见
+        assert client.get(f"/api/mcc/{victim}/detail", headers=b_hdr).status_code == 403

@@ -2356,3 +2356,43 @@ class TestFbProductOwnershipClosure:
                        (s["a_prod"], s["b_px"])).fetchone()[0]
         db.close()
         assert n == 0
+
+
+class TestFbProductListVisibility:
+    """`GET /api/fb/products/list` 的可见性（2026-10-11 用户裁定）。
+
+    裁定原文：「**就是同系统的 就是产品可见，户管另外的**」
+    ⇒ **同平台用户之间产品互相可见** —— FB 产品不按人隔离，故删掉原
+      `elif role not in ('developer', 'admin')` 分支（它把非 developer/admin 一律
+      收窄成「只看自己在跑的产品」）。
+    ⇒ **户管除外**：户管是跨 GG 的角色，`test_huguan_role.py:1436` 明确要求
+      FB **产品域对其不放行**（注释「产品域不放行」，且带变异测试证据）。
+      那条属**既有隔离设计**，本次不动 —— 它由该文件独立守护，故此处不重复实现。
+
+    删掉该分支后 `runner` 参数**退化为纯筛选**（同平台产品本就可全部看见，
+    按在跑人筛不构成信息增量），故不需再为它加角色门禁。
+    """
+
+    def test_same_platform_user_sees_others_product(self, client):
+        """可证伪：保留原收窄分支时，B 的列表里没有 A 的产品 ⇒ 本用例变红。"""
+        s = _seed_two_product_owners(client, "t_fbvis")
+        body = client.get("/api/fb/products/list", query_string={"size": 100},
+                          headers=s["b_hdr"]).get_json()
+        names = {p["product_name"] for p in body["items"]}
+        assert "t_fbvis-A产品" in names     # 同平台可见
+        assert "t_fbvis-B产品" in names     # 自己的当然也在
+
+    def test_runner_param_narrows_within_visible_set(self, client):
+        """`runner` 现在是纯筛选，不再需要权限门 —— 但功能必须还在。"""
+        s = _seed_two_product_owners(client, "t_fbvisr")
+        db = database.get_db()
+        db.execute("INSERT OR IGNORE INTO fb_product_runners(product_id, user_id) VALUES(?,?)",
+                   (s["a_prod"], s["a_id"]))
+        db.commit()
+        db.close()
+        body = client.get("/api/fb/products/list",
+                          query_string={"size": 100, "runner": str(s["a_id"])},
+                          headers=s["b_hdr"]).get_json()
+        names = {p["product_name"] for p in body["items"]}
+        assert "t_fbvisr-A产品" in names
+        assert "t_fbvisr-B产品" not in names   # B 不是 A 产品的在跑人员

@@ -177,6 +177,7 @@ def bc_options():
 @tt_bp.route('/api/tt/products/list', methods=['GET'])
 @jwt_required()
 @tt_required
+@no_huguan
 def list_products():
     db = get_db()
     page, size = parse_pagination(default=50)
@@ -245,6 +246,7 @@ def list_products():
 @tt_bp.route('/api/tt/products/runner-products', methods=['GET'])
 @jwt_required()
 @tt_required
+@no_huguan
 def runner_products():
     """获取当前用户的在跑产品（下拉框用）。"""
     db = get_db()
@@ -410,6 +412,7 @@ def restore_product(pid):
 @tt_bp.route('/api/tt/products/<int:pid>/detail', methods=['GET'])
 @jwt_required()
 @tt_required
+@no_huguan
 def product_detail(pid):
     db = get_db()
     uid = get_uid()
@@ -751,6 +754,7 @@ def check_delist(pid):
 @tt_bp.route('/api/tt/products/delist-status', methods=['GET'])
 @jwt_required()
 @tt_required
+@no_huguan
 def delist_status():
     """获取当前用户可见的掉包检测状态（按归属/在跑人员，无角色特权）。"""
     db = get_db()

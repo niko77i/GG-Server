@@ -6260,6 +6260,16 @@ def mcc_create():
         if not parent_row:
             db.close()
             return jsonify({"success": False, "error": "上级 MCC 不存在"}), 400
+        # 归属校验（2026-10-11 安全审查 Vuln 1）：只能挂到**自己名下或已共享给自己**的 MCC 下。
+        # 少了这道闸，存在一条自服务绕过链：
+        #   ① 攻击者把自建「子 MCC」挂到受害者 MCC 下（自己是子 MCC 的 owner ⇒ 天然可见）
+        #   ② 调 `POST /api/mcc/<child>/link` ⇒ 闸门放行，而 `_link_mcc_chain_to_user`
+        #      会**递归上行**把 uid 写进所有祖先的 shared_user_ids（上行时不判归属）
+        #   ③ 此时受害者的 MCC 对其可见 ⇒ `GET /api/mcc/<victim>/detail` 放行
+        # 即「link 与 detail 两个都收口」若不补父级归属，等于没收。
+        if not _cross_user_actor(user_id) and not _mcc_visible(db, parent_row["id"], user_id):
+            db.close()
+            return jsonify({"success": False, "error": "无权限关联到该上级 MCC"}), 403
 
 
     # --- level_id 兼容处理 ---
@@ -6322,6 +6332,12 @@ def mcc_update(mid):
         if not parent_row:
             db.close()
             return jsonify({"success": False, "error": "上级 MCC 不存在"}), 400
+        # 归属校验（口径同 mcc_create）—— 这是**同族的第二条入口**：先建自己的 MCC，
+        # 再把它的上级改成受害者的，等价于直接挂子节点，可走通同一条链式回写。
+        # 原实现只查自环/子孙环与父级存在性，不查父级归属。
+        if not _cross_user_actor(user_id) and not _mcc_visible(db, new_parent, user_id):
+            db.close()
+            return jsonify({"success": False, "error": "无权限关联到该上级 MCC"}), 403
     _mcc_fields = {"name": "name", "level_id": "level_id", "parent_mcc_id": "parent_mcc_id"}
     for key, col in _mcc_fields.items():
         if key in data:

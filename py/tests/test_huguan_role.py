@@ -1194,11 +1194,13 @@ class TestTtCrossUser:
         assert "别人BC" in names
 
     def test_huguan_cannot_see_other_users_products(self, client):
-        """回归守卫：产品域**不**放行。
+        """户管读 TT 产品列表 → **403 全拒**（对齐 GG 的 `@no_huguan` 语义）。
 
-        `tt_routes.py:158`（`list_products`）在原计划表里被误标为「要改」。若照原表替换，
-        户管将跨用户看到全部产品，直接违反全局约束「huguan 不获得产品/视频的编辑权」。
-        本用例是那条误标的路障：谁把 :158 换成 CROSS_USER_ROLES，这条立刻变红。
+        原用例守的是「受限视图」（户管只看自己在跑的产品）。2026-10-11 用户裁定：
+        「户管不管产品，就是一个管户的，所以都没有产品管理页面权限」——
+        而前端 `router/index.js:154` 早已把户管导去 `/tt/accounts`，产品页对它不可达；
+        GG 侧也一直用 `@no_huguan` 全拒（见本文件 `test_huguan_list_products_denied`）。
+        故本用例改为断言 403，与 GG 同款 —— 这是**加强**守卫，不是放宽。
         """
         hg, _ = _huguan(client, "_tt_prd_hg")
         _, u1 = _create_user(client, "_tt_prd_u1", role="user", platform="tt")
@@ -1207,9 +1209,8 @@ class TestTtCrossUser:
         db.commit()
         db.close()
         resp = client.get("/api/tt/products/list?size=50", headers=hg)
-        assert resp.status_code == 200
-        names = {p["product_name"] for p in resp.get_json()["items"]}
-        assert "别人的产品" not in names
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "户管无产品/素材权限"
 
     def test_huguan_cannot_edit_other_users_product(self, client):
         """回归守卫：`_check_product_owner` / `_check_product_view` 一字不动。
@@ -1229,13 +1230,13 @@ class TestTtCrossUser:
         assert resp.status_code == 403
 
     def test_huguan_cannot_see_other_users_delisted_packages(self, client):
-        """回归守卫：产品域**不**放行（掉包检测）。
+        """户管读 TT 掉包检测 → **403 全拒**（同 `list_products`，见上一条）。
 
-        `tt_routes.py:569`（`delist_status`）与原计划表误标为「要改」的 `:158`（`list_products`）
-        同因同源。本用例是那条误标的路障：谁把 :569 换成 CROSS_USER_ROLES，第二条断言立刻变红。
-
-        第一条断言是反向对照——户管自己的掉包记录**必须**可见，否则「看不到别人的」可以靠
-        「整个接口对户管返回空」蒙混过关，这条守卫就成了假绿。
+        原用例守「受限视图」；按 2026-10-11 裁定改为全拒 —— 掉包检测同属产品域，
+        前端产品页对户管不可达、GG 侧 `/api/products/delist-status` 也一直带
+        `@no_huguan`。改后本用例只断言 403，不再需要「反向对照」那条腿
+        （之所以曾需要它，是因为当时接口对户管**有**响应，「看不到别人的」可以靠
+        「整个接口恒返回空」蒙混 —— 全拒后该风险不复存在）。
         """
         hg, hg_id = _huguan(client, "_tt_dl_hg")
         _, u1 = _create_user(client, "_tt_dl_u1", role="user", platform="tt")
@@ -1251,10 +1252,8 @@ class TestTtCrossUser:
         db.commit()
         db.close()
         resp = client.get("/api/tt/products/delist-status", headers=hg)
-        assert resp.status_code == 200
-        names = {p["product_name"] for p in resp.get_json()["delisted_packages"]}
-        assert "户管的产品" in names       # 反向对照：接口对户管确实有效
-        assert "别人的产品" not in names   # 产品域不放行
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "户管无产品/素材权限"
 
 
 def _mk_fb_bm(db, owner_id, bm_code, name="测试BM"):
@@ -1406,34 +1405,26 @@ class TestFbCrossUser:
         assert {a["account_id"] for a in resp.get_json()["items"]} == {"FB-DEL-1"}
 
     def test_huguan_cannot_see_other_users_fb_products(self, client):
-        """回归守卫：产品域**不**放行（`fb_routes.py:471`）。
+        """户管读 FB 产品列表 → **403 全拒**（对齐 GG / 前端）。
 
-        `:471` 是 `elif role not in ('developer','admin')`，FB 产品列表按 **runner 归属**过滤
-        （不是 owner）。全局约束「huguan 不获得产品/视频的编辑权」要求它保持原样 ——
-        本用例是那条约束的路障：谁把 `:471` 换成 `CROSS_USER_ROLES`，断言立刻变红。
-        与 Task 8 为 `:158`/`:569` 补守卫同因同源。
+        原用例守的是「按 runner 归属过滤的受限视图」。2026-10-11 用户裁定：
+        「户管不管产品，就是一个管户的，所以都没有产品管理页面权限」；
+        前端 `router/index.js:109` 早已把户管导去 `/fb/accounts`，产品页对它不可达；
+        GG 侧一直用 `@no_huguan` 全拒。故改为与 GG 同款的 403。
+
+        ⚠️ 与它同源的 `_fb_product_accessible`（产品写端点的归属判据）取
+        `CROSS_USER_ROLES` 并集轴，本身仍**含**户管 —— 户管之所以进不来，靠的是
+        读端点上的 `@no_huguan` 装饰器，而不是该判据。两处口径不同是有意的：
+        判据管「行级归属」，装饰器管「域级禁入」。
         """
         hg, _, u2 = self._setup(client)
         db = database.get_db()
-        hg_id = db.execute("SELECT id FROM users WHERE username='_fb_cs_hg'").fetchone()["id"]
-        # 正向对照：户管**在跑**的产品必须在结果里，否则「看不到别人的」可以靠
-        # 「接口恒返回空」蒙混过关，这条守卫就成了假绿
-        db.execute("INSERT INTO fb_products(product_name, owner_id) VALUES('户管在跑的产品',?)", (u2,))
-        db.commit()
-        mine = db.execute("SELECT id FROM fb_products WHERE product_name='户管在跑的产品'").fetchone()["id"]
-        db.execute("INSERT INTO fb_product_runners(product_id, user_id) VALUES(?,?)", (mine, hg_id))
-        # 负向目标：u2 拥有并在跑的产品不得出现
         db.execute("INSERT INTO fb_products(product_name, owner_id) VALUES('别人的FB产品',?)", (u2,))
-        db.commit()
-        pid = db.execute("SELECT id FROM fb_products WHERE product_name='别人的FB产品'").fetchone()["id"]
-        db.execute("INSERT INTO fb_product_runners(product_id, user_id) VALUES(?,?)", (pid, u2))
         db.commit()
         db.close()
         resp = client.get("/api/fb/products/list?size=50", headers=hg)
-        assert resp.status_code == 200
-        names = {p["product_name"] for p in resp.get_json()["items"]}
-        assert "户管在跑的产品" in names   # 正向对照：接口对户管确实有效
-        assert "别人的FB产品" not in names  # 产品域不放行
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "户管无产品/素材权限"
 
     # ------------------------------------------------------------------
     # D1：`else` 分支（非跨用户角色只看自己）—— 四个此前无守卫的站点
@@ -2752,3 +2743,79 @@ class TestGgAccountListDropdownScope:
         assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
         assert _agent_names(data) == ["代理S1"]
         assert data["timezone_options"] == ["Asia/Shanghai"]
+
+
+class TestHuguanProductReadDeniedAllPlatforms:
+    """FB / TT 产品域的**读**端点对户管一律 403 —— 与 GG 的 `@no_huguan` 语义对齐。
+
+    2026-10-11 用户裁定：「**户管不管产品，就是一个管户的，所以都没有产品管理页面权限**」。
+
+    三方证据一致指向「域级禁入」而非「受限视图」：
+      - 前端三平台的产品页对户管均不可达（`router/index.js:35`（GG）/`:109`（FB）/`:154`（TT）
+        一律把 `role === 'huguan'` 导去账户页）；
+      - GG 侧产品域**全部**端点一直带 `@no_huguan`（含 `delist-status`、`check-delist`）；
+      - `reject_huguan` 的 docstring 原文即「户管**不参与**产品 / 包 / 素材域」。
+
+    FB / TT 的**写**端点已全部带 `@no_huguan`，**读**端点是漏装 —— 本类把它们钉住。
+    """
+
+    HUGUAN_MSG = "户管无产品/素材权限"
+
+    def _denied(self, resp):
+        assert resp.status_code == 403, resp.get_json()
+        assert resp.get_json()["error"] == self.HUGUAN_MSG
+
+    def _fb_product(self, client):
+        dev, _ = _create_user(client, "_hgpr_fb_dev", role="developer", platform="fb")
+        resp = client.post("/api/fb/products/create", json={"product_name": "户管读靶子"},
+                           headers=dev)
+        assert resp.status_code == 200, resp.get_json()
+        return resp.get_json()["id"]
+
+    def _tt_product(self, client):
+        dev, _ = _create_user(client, "_hgpr_tt_dev", role="developer", platform="tt")
+        resp = client.post("/api/tt/products/create", json={"product_name": "户管读靶子"},
+                           headers=dev)
+        assert resp.status_code == 200, resp.get_json()
+        return resp.get_json()["id"]
+
+    def test_fb_list_denied(self, client):
+        hg, _ = _huguan(client, "_hgpr_fb_list")
+        self._denied(client.get("/api/fb/products/list", headers=hg))
+
+    def test_fb_runner_products_denied(self, client):
+        hg, _ = _huguan(client, "_hgpr_fb_rp")
+        self._denied(client.get("/api/fb/products/runner-products", headers=hg))
+
+    def test_fb_detail_denied(self, client):
+        pid = self._fb_product(client)
+        hg, _ = _huguan(client, "_hgpr_fb_det")
+        self._denied(client.get(f"/api/fb/products/{pid}/detail", headers=hg))
+
+    def test_tt_list_denied(self, client):
+        hg, _ = _huguan(client, "_hgpr_tt_list")
+        self._denied(client.get("/api/tt/products/list", headers=hg))
+
+    def test_tt_runner_products_denied(self, client):
+        hg, _ = _huguan(client, "_hgpr_tt_rp")
+        self._denied(client.get("/api/tt/products/runner-products", headers=hg))
+
+    def test_tt_detail_denied(self, client):
+        pid = self._tt_product(client)
+        hg, _ = _huguan(client, "_hgpr_tt_det")
+        self._denied(client.get(f"/api/tt/products/{pid}/detail", headers=hg))
+
+    def test_tt_delist_status_denied(self, client):
+        hg, _ = _huguan(client, "_hgpr_tt_dl")
+        self._denied(client.get("/api/tt/products/delist-status", headers=hg))
+
+    # ---------------- 防过度收口 ----------------
+
+    def test_regular_fb_user_not_denied(self, client):
+        """普通 FB 用户仍应能进产品列表 —— 禁入只针对户管。"""
+        u, _ = _create_user(client, "_hgpr_u_fb", role="user", platform="fb")
+        assert client.get("/api/fb/products/list", headers=u).status_code != 403
+
+    def test_regular_tt_user_not_denied(self, client):
+        u, _ = _create_user(client, "_hgpr_u_tt", role="user", platform="tt")
+        assert client.get("/api/tt/products/list", headers=u).status_code != 403
