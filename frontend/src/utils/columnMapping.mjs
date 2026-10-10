@@ -10,7 +10,11 @@
 //             写成空串，等于替用户声明了「刻意不采集」，同步报告的「未采集」提示会消失。
 export function rowsFromColumns(columns) {
   return (columns || []).map((c) => {
-    const auto = c.via === 'none' ? null : (c.field ?? '')
+    // 判据只看**字段本身**，绝不看 via：任何将来新增的 via 只要带 `field: null`，
+    // 都必须落成「不写覆盖」的 null。若按 via 判（旧写法 `c.via === 'none' ? null : …`），
+    // 未知 via + `field: null` 会被 `?? ''` 兜成空串 —— 那等于替用户声明「这一列我刻意不采集」，
+    // 而同步报告的「未采集」提示会因此**静默消失**，正是本模块存在的意义所在。
+    const auto = c.field == null ? null : c.field
     return { header: c.header, via: c.via, auto, selected: auto, touched: false }
   })
 }

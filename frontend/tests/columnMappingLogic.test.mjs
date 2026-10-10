@@ -51,3 +51,16 @@ test('columnsFromRows: 已有但已不在表头里的键必须保留（表头以
   const rows = rowsFromColumns([{ header: '账户ID', field: 'advertiser_id', via: 'alias' }])
   assert.deepEqual(columnsFromRows(rows, { 未来列: 'remark' }), { 未来列: 'remark' })
 })
+
+test('rowsFromColumns: 判据只看 field 不看 via —— 未知 via 带 field:null 仍是「不写覆盖」', () => {
+  // 回归钉子：旧写法是 `c.via === 'none' ? null : (c.field ?? '')`，任何将来新增的 via
+  // 只要带 field:null，就被 `?? ''` 兜成空串 = 替用户声明「刻意不采集」，
+  // 同步报告的「未采集」提示会静默消失。判据必须是 field 本身。
+  const rows = rowsFromColumns([{ header: '将来列', field: null, via: '将来才有的档位' }])
+  assert.deepEqual(rows, [
+    { header: '将来列', via: '将来才有的档位', auto: null, selected: null, touched: false },
+  ])
+  assert.notEqual(rows[0].auto, '', '未知 via + field:null 绝不能被兜成空串')
+  // 而且它默认不落盘（touched=false），不会写成空串覆盖
+  assert.deepEqual(columnsFromRows(rows, {}), {})
+})
