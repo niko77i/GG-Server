@@ -166,6 +166,15 @@ def lookup_account():
     advertiser_id = (request.args.get("advertiser_id") or "").strip()
     if not advertiser_id:
         return err("缺少 advertiser_id")
+    # 归属过滤（2026-10-11 全仓复核，HANDOFF §8.5 第 4 条）：非跨用户角色只能查
+    # **自己名下**的户。原实现无 owner 条件、且回传 owner_id / owner_name ⇒
+    # 任意 TT 用户按 advertiser_id 即可探明他人账户的归属与明细。
+    # 口径同 GG `/api/accounts/lookup` 与 FB `/api/fb/accounts/batch-lookup`。
+    uid = get_uid()
+    perm_sql, perm_params = "", []
+    if _get_role(db, uid) not in CROSS_USER_ROLES:
+        perm_sql = " AND a.owner_id = ?"
+        perm_params = [uid]
     row = db.execute(
         "SELECT a.id, a.name, a.advertiser_id, a.bc_id, a.agent_id, a.status_id, "
         "a.timezone, a.acquired_date, a.owner_id, "
@@ -176,7 +185,8 @@ def lookup_account():
         "LEFT JOIN account_statuses st ON a.status_id = st.id "
         "LEFT JOIN agents ag ON a.agent_id = ag.id "
         "LEFT JOIN users u ON a.owner_id = u.id "
-        "WHERE a.advertiser_id = ?", (advertiser_id,)
+        "WHERE a.advertiser_id = ?" + perm_sql,
+        (advertiser_id,) + tuple(perm_params)
     ).fetchone()
     if not row:
         return ok({"found": False})
@@ -199,12 +209,19 @@ def batch_lookup_accounts():
     if not ids or not isinstance(ids, list):
         return err("请提供 account_ids 列表")
     ids = [str(i).strip() for i in ids if str(i).strip()]
+    # 归属过滤：口径必须与单条 `/api/tt/accounts/lookup` 严格一致 ——
+    # 只修单条会让批量成为剩下的探户工具。
+    uid = get_uid()
+    perm_sql, perm_params = "", []
+    if _get_role(db, uid) not in CROSS_USER_ROLES:
+        perm_sql = " AND a.owner_id = ?"
+        perm_params = [uid]
     found, not_found = [], []
     for aid in ids:
         row = db.execute(
             "SELECT a.id, a.advertiser_id, u.display_name, u.username "
             "FROM tt_accounts a LEFT JOIN users u ON a.owner_id = u.id "
-            "WHERE a.advertiser_id = ?", (aid,)
+            "WHERE a.advertiser_id = ?" + perm_sql, [aid] + perm_params
         ).fetchone()
         if row:
             d = dict(row)

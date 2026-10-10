@@ -4286,6 +4286,17 @@ def accounts_lookup():
     if not account_id:
         return jsonify({"success": False, "error": "缺少 account_id"}), 400
     db = _yt_db()
+    # 归属过滤（2026-10-11 全仓复核，HANDOFF §8.5 第 4 条）：非跨用户角色只能查
+    # **自己名下**的户。原实现无 owner 条件、且回传 owner_id / owner_name ⇒
+    # 任意登录用户按 account_id 即可探明他人账户的归属与明细。口径同 FB 侧
+    # `routes/fb_routes.py` 的 accounts 族（batch-lookup）。
+    user_id = int(get_jwt_identity())
+    actor = auth.get_user_by_id(user_id)
+    actor_role = (actor or {}).get("role", "user")
+    perm_sql, perm_params = "", []
+    if actor_role not in CROSS_USER_ROLES:
+        perm_sql = " AND a.owner_id = ?"
+        perm_params = [user_id]
     existing = db.execute(
         "SELECT a.*, m.name AS mcc_name, m.mcc_id AS mcc_code, u.username, u.display_name, "
         "ag.name AS agent_name, st.name AS status_name "
@@ -4294,8 +4305,8 @@ def accounts_lookup():
         "LEFT JOIN users u ON a.owner_id = u.id "
         "LEFT JOIN agents ag ON a.agent_id = ag.id "
         "LEFT JOIN account_statuses st ON a.status_id = st.id "
-        "WHERE a.account_id = ? AND a.deleted_at IS NULL",
-        (account_id,)
+        "WHERE a.account_id = ? AND a.deleted_at IS NULL" + perm_sql,
+        (account_id,) + tuple(perm_params)
     ).fetchone()
     db.close()
     if not existing:
@@ -4353,6 +4364,15 @@ def accounts_batch_lookup():
         return jsonify({"success": True, "found": [], "not_found": []})
 
     db = _yt_db()
+    # 归属过滤：口径与单条 `/api/accounts/lookup` 严格一致 —— 只修单条会让批量
+    # 成为剩下的探户工具。非跨用户角色只能查到**自己名下**的户。
+    user_id = int(get_jwt_identity())
+    actor = auth.get_user_by_id(user_id)
+    actor_role = (actor or {}).get("role", "user")
+    perm_sql, perm_params = "", []
+    if actor_role not in CROSS_USER_ROLES:
+        perm_sql = " AND a.owner_id = ?"
+        perm_params = [user_id]
     # 分块绑定：SQLite 3.45.1 的变量上限是 32766，上万 id 一次绑定会抛
     # `too many SQL variables`。用 chunk 分批，结果合并。
     rows = []
@@ -4366,8 +4386,8 @@ def accounts_batch_lookup():
             f"LEFT JOIN users u ON a.owner_id = u.id "
             f"LEFT JOIN agents ag ON a.agent_id = ag.id "
             f"LEFT JOIN account_statuses st ON a.status_id = st.id "
-            f"WHERE a.account_id IN ({marks})",
-            part
+            f"WHERE a.account_id IN ({marks})" + perm_sql,
+            list(part) + perm_params
         ).fetchall())
 
     found = [_account_row_to_dict(dict(r)) for r in rows]
@@ -6383,6 +6403,33 @@ def mcc_batch_delete():
     return jsonify({"success": True, "deleted": deleted, "skipped": skipped})
 
 
+def _mcc_perm_where(alias: str, user_id: int):
+    """「当前用户能否看见该 MCC」的 (SQL 片段, 参数) —— 口径照抄 `mcc_list`（本文件上方）。
+
+    owner 本人，或 uid 出现在 `shared_user_ids`（JSON 数组）里。四条 LIKE 覆盖
+    uid 位于数组首/中/尾三种位置（`[u]` / `[u,...` / `..., u,...` / `..., u]`）。
+    末尾那条裸 string `= ?` 也是照抄来的：兜住历史上没按 JSON 数组写的脏值。
+
+    抽成助手是为了让 `mcc_link` / `mcc_detail` 与列表页**判据同源** —— 三处若各写
+    一份，日后再改列表口径就会漏掉这两处（本文件已多次栽在这类「漏一处」上）。
+    `mcc_list` 原处未动，避免为重构而改动已验证的代码。
+    """
+    uid_s = str(user_id)
+    return (
+        f"({alias}.owner_id = ? OR {alias}.shared_user_ids = ? "
+        f"OR {alias}.shared_user_ids LIKE ? OR {alias}.shared_user_ids LIKE ? "
+        f"OR {alias}.shared_user_ids LIKE ?)",
+        [user_id, f"[{uid_s}]", f"[{uid_s},%", f"%, {uid_s},%", f"%, {uid_s}]"],
+    )
+
+
+def _mcc_visible(db, mid, user_id) -> bool:
+    """该 MCC 是否对该用户可见（owner 或已共享）。跨用户角色由调用方另行放行。"""
+    sql, params = _mcc_perm_where("m", user_id)
+    return db.execute(f"SELECT 1 FROM mcc m WHERE m.id=? AND {sql}",
+                      [mid] + params).fetchone() is not None
+
+
 @app.route("/api/mcc/<int:mid>/link", methods=["POST"])
 @jwt_required()
 def mcc_link(mid):
@@ -6394,6 +6441,15 @@ def mcc_link(mid):
     if not mcc:
         db.close()
         return jsonify({"success": False, "error": "MCC 不存在"}), 404
+
+    # 归属校验（2026-10-11 用户裁定「两个都收口」）：只能关联**自己名下的**或
+    # **已被共享给自己的** MCC。少了这道闸，任何登录用户可把任意 MCC 关联到自己名下，
+    # 随后 `GET /api/mcc/<mid>/detail` 就能读到它的完整树 —— detail 的闸门随之失效
+    # （两者是耦合的，只收一处等于没收）。
+    actor = auth.get_user_by_id(user_id)
+    if (actor or {}).get("role", "user") not in CROSS_USER_ROLES and not _mcc_visible(db, mid, user_id):
+        db.close()
+        return jsonify({"success": False, "error": "无权限"}), 403
 
     _link_mcc_chain_to_user(db, mid, user_id)
     db.commit()
@@ -6409,6 +6465,14 @@ def mcc_detail(mid):
     if not mcc:
         db.close()
         return jsonify({"success": False, "error": "MCC 不存在"}), 404
+    # 归属校验：原实现回**任意** MCC 的完整树（上级、直属/间接账户、关联产品）。
+    # 口径与 `mcc_list` 同源（owner 或已共享），跨用户角色放行。
+    _uid = int(get_jwt_identity())
+    _actor = auth.get_user_by_id(_uid)
+    if ((_actor or {}).get("role", "user") not in CROSS_USER_ROLES
+            and not _mcc_visible(db, mid, _uid)):
+        db.close()
+        return jsonify({"success": False, "error": "无权限"}), 403
     mcc_data = dict(mcc)
     # 上级 MCC
     if mcc["parent_mcc_id"]:

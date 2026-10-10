@@ -1425,3 +1425,59 @@ def test_recharge_first_failure_does_not_alert(client, monkeypatch, tt_headers):
     captured["on_fail"]("synced", "")
     assert _state() == (1, ""), f"成功应清空错误，实际 {_state()}"
     db.close()
+
+
+# ==================== 两条查户接口的归属收口 ====================
+#
+# 2026-10-11 全仓复核（HANDOFF §8.5 第 4 条，交接单**漏记了 TT 这条腿**）：
+# `/api/tt/accounts/lookup` 与 `/api/tt/accounts/batch-lookup` 的 SQL 里没有 owner
+# 条件，且回传 owner_id / owner_name ⇒ 任意 TT 用户按 advertiser_id 即可探明
+# **他人**账户的归属与明细。与 GG 的 `accounts/lookup`、FB 的
+# `accounts/batch-lookup` 是同一族的镜像缺口（GG/FB 两条同日已修，
+# GG 侧用例在 test_lookup_ownership.py）。
+
+
+def test_tt_lookup_hides_others_account(client, tt_headers):
+    """越权写照：不加 owner 条件时 B 能查到 A 的户，并拿到 owner_id / owner_name。"""
+    assert _mk_account(client, tt_headers, advertiser_id="9100000000001").status_code == 200
+    b_hdr = _mk_tt_headers(client, "ttlk_b")
+    body = client.get("/api/tt/accounts/lookup?advertiser_id=9100000000001",
+                      headers=b_hdr).get_json()
+    assert body["found"] is False          # 证伪：不收紧时 found=True
+
+
+def test_tt_lookup_finds_own_account(client, tt_headers):
+    """防过度收口：查自己的户必须仍能找到。"""
+    _mk_account(client, tt_headers, advertiser_id="9100000000002")
+    body = client.get("/api/tt/accounts/lookup?advertiser_id=9100000000002",
+                      headers=tt_headers).get_json()
+    assert body["found"] is True
+    assert body["advertiser_id"] == "9100000000002"
+
+
+def test_tt_batch_lookup_hides_others_account(client, tt_headers):
+    """批量口径必须与单条一致 —— 只修单条会让批量成为剩下的探户工具。"""
+    _mk_account(client, tt_headers, advertiser_id="9100000000003")
+    b_hdr = _mk_tt_headers(client, "ttbl_b")
+    body = client.post("/api/tt/accounts/batch-lookup",
+                       json={"account_ids": ["9100000000003"]}, headers=b_hdr).get_json()
+    assert body["found"] == []
+    assert body["not_found"] == ["9100000000003"]
+
+
+def test_tt_batch_lookup_finds_own_account(client, tt_headers):
+    _mk_account(client, tt_headers, advertiser_id="9100000000004")
+    body = client.post("/api/tt/accounts/batch-lookup",
+                       json={"account_ids": ["9100000000004", "91000000000nope"]},
+                       headers=tt_headers).get_json()
+    assert [f["advertiser_id"] for f in body["found"]] == ["9100000000004"]
+    assert body["not_found"] == ["91000000000nope"]
+
+
+def test_tt_admin_can_lookup_others_account(client, tt_headers):
+    """跨用户角色放行腿（admin ∈ CROSS_USER_ROLES，按平台隔离故 platform='tt'）。"""
+    _mk_account(client, tt_headers, advertiser_id="9100000000005")
+    adm_hdr = _mk_tt_admin_headers(client, "ttlk_admin")
+    body = client.get("/api/tt/accounts/lookup?advertiser_id=9100000000005",
+                      headers=adm_hdr).get_json()
+    assert body["found"] is True
