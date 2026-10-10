@@ -121,6 +121,9 @@ const huguanNavItems = [
     ]},
     { title: '系统', items: [{ icon:'⚙',label:'设置',path:'/accounts/settings' }]},
   ]},
+  { key: 'data-manage', icon: '📋', label: '数据管理', sections: [
+    { title: '数据', items: [{ icon:'📋',label:'数据管理',path:'/data-manage' }]},
+  ]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [
     { title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users' }]},
   ]},
@@ -133,6 +136,9 @@ const huguanFbNavItems = [
       { icon:'📊',label:'像素管理',path:'/fb/pixels'},
     ]},
     { title: '系统', items: [{ icon:'⚙',label:'FB设置',path:'/fb/settings' }]},
+  ]},
+  { key: 'fb-data', icon: '📊', label: '数据管理', sections: [
+    { title: '数据', items: [{ icon:'📋',label:'FB数据管理',path:'/fb/data-manage' }]},
   ]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [
     { title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users' }]},

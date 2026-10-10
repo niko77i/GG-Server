@@ -233,10 +233,8 @@ router.beforeEach((to, from, next) => {
     next('/fb/accounts')
     return
   }
-  if (auth.isHuguan && (to.path === '/fb/data-manage' || to.path.startsWith('/fb/data-manage/'))) {
-    next('/fb/accounts')
-    return
-  }
+  // 户管进 FB 数据管理页的拦截已移除（2026-10-11「数据管理页开放给管理员/户管」）：
+  // 户管现在可看全部用户的 FB 报表、仅可改「消耗」。GG 的 /data-manage 本来就无拦截。
   if (auth.isHuguan && (to.path === '/tt/extract' || to.path.startsWith('/tt/extract/'))) {
     next('/tt/accounts')
     return

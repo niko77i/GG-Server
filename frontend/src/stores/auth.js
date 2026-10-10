@@ -21,6 +21,17 @@ export const useAuthStore = defineStore('auth', {
     isHuguan: (state) => state.user?.role === 'huguan',
     canSwitchPlatform: (state) => ['developer', 'huguan'].includes(state.user?.role),
     canManageAccounts: (state) => ['developer', 'admin', 'huguan'].includes(state.user?.role),
+    // 报表数据（数据管理页）的权限。与后端 helpers.report_editable_fields 同口径：
+    // developer → 全权；户管 → 仅可改「消耗」；其余（含 admin）→ 只读。
+    canEditReportCost: (state) => state.user?.role === 'huguan',
+    canManageReports: (state) => state.user?.role === 'developer',
+    canFilterReportOwner: (state) => ['developer', 'admin', 'huguan'].includes(state.user?.role),
+    // 数据管理页「新增 / 删除 / 批量删除 / 每行编辑」的可见性。
+    // ⚠️ **不要**拿 canManageReports 顶上 —— 它的口径是「该页的全权管理者」（= developer），
+    // 而普通 user（role='user'）与 viewer 对**自己的行**本来就有增删改权（设计文档 §3 矩阵、
+    // §6：这两类的行为逐字不变，是回归的硬判据）。用它会把普通 user 的按钮一并藏掉。
+    // 这里只挡本需求要收紧的两个角色：管理员（只读）与户管（仅可改「消耗」）。
+    canWriteReportRows: (state) => !['admin', 'huguan'].includes(state.user?.role),
     canAccessProducts: (state) => ['developer', 'admin', 'viewer', 'user'].includes(state.user?.role),
     // ⚠️ 下面三个只反映「**当前所看的平台**」（对可切换的角色才有意义）。
     // 非切换角色请用 `effectivePlatform`（它按 user.platform 推导）—— 直接读 currentPlatform

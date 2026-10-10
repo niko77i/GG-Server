@@ -1,7 +1,15 @@
 <template>
   <div class="fb-panel">
-    <div class="panel-header"><h2>📊 FB数据管理</h2></div>
+    <div class="panel-header"><h2>📊 FB数据管理<!-- 角色标识：只出现于本需求新开放的两个角色，普通 user 界面不受影响 -->
+      <span v-if="auth.user?.role === 'admin'" class="role-chip role-chip--readonly">只读</span>
+      <span v-else-if="auth.canEditReportCost" class="role-chip role-chip--cost">可改「消耗」</span>
+    </h2></div>
     <div class="filter-bar">
+      <!-- 「保存人」筛选：仅跨用户角色（户管/管理员/developer）可见。未选中 = 不传 user_id（看全部） -->
+      <el-select v-if="auth.canFilterReportOwner" v-model="filterOwner" placeholder="全部用户"
+        clearable filterable style="width:150px" @change="onOwnerFilter">
+        <el-option v-for="u in ownerUsers" :key="u.id" :label="u.display_name || u.username" :value="u.id" />
+      </el-select>
       <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:160px" @change="onProductFilter">
         <el-option v-for="p in productOptions" :key="p" :label="p" :value="p" />
       </el-select>
@@ -11,7 +19,10 @@
       <el-date-picker v-model="dateRange" type="daterange" range-separator="~" start-placeholder="开始" end-placeholder="结束"
         value-format="YYYY-MM-DD" style="width:260px" @change="loadData" />
       <el-button @click="loadData">🔄 刷新</el-button>
-      <el-button type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">🗑 批量删除({{ selectedIds.length }})</el-button>
+      <!-- 批量删除：只对「能删自己行的角色」渲染（管理员只读、户管仅可改消耗）。
+           谓词是 canWriteReportRows（developer + 普通 user + viewer），**不是** canManageReports
+           （= developer）—— 后者会把普通 user 的按钮藏掉，破坏回归判据 -->
+      <el-button v-if="auth.canWriteReportRows" type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">🗑 批量删除({{ selectedIds.length }})</el-button>
       <el-checkbox v-model="showDetailCols" style="margin-left:8px">显示详情列</el-checkbox>
       <el-button type="primary" @click="loadStats" style="margin-left:auto">📈 查看统计</el-button>
       <el-button type="success" @click="handleExport">📥 导出CSV</el-button>
@@ -35,22 +46,42 @@
           <span style="font-family:monospace;font-size:12px;color:#374151;flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.business_key }}</span>
         </el-tooltip>
         <span style="font-size:12px;color:#6b7280;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.error_msg || '未知原因' }}</span>
-        <el-button link size="small" :type="sheetWriteTone(f.status)"
+        <el-button v-if="auth.user?.role !== 'admin'" link size="small" :type="sheetWriteTone(f.status)"
                    @click="retryOne(f)">重试</el-button>
       </div>
-      <div style="margin-top:8px;">
+      <!-- 重试写表：管理员只读（后端 /fb/reports/retry-sync 对 admin 403，设计文档 §3 矩阵）。
+           auth.isAdmin 含 developer —— developer 仍可重试，所以这里只判 'admin' 角色。 -->
+      <div v-if="auth.user?.role !== 'admin'" style="margin-top:8px;">
         <el-button size="small" @click="retryAll">重试全部失败的</el-button>
       </div>
     </div>
 
     <el-table :data="items" stripe border v-loading="loading" @selection-change="onSelect">
-      <el-table-column type="selection" width="45" />
+      <!-- 勾选框：只读角色（管理员/户管）没有批量删除动作，留着勾选框是误导 -->
+      <el-table-column v-if="auth.canWriteReportRows" type="selection" width="45" />
       <el-table-column prop="product_name" label="产品名" min-width="100" />
       <el-table-column prop="line_name" label="线名" min-width="100" />
       <el-table-column prop="report_date" label="日期" width="110" />
       <el-table-column prop="account_name" label="账户名称" min-width="120" />
       <el-table-column prop="account_id" label="账户ID" width="160" />
-      <el-table-column label="消耗" width="100"><template #default="{row}">${{ row.cost?.toFixed(2) }}</template></el-table-column>
+      <!-- 列宽 100 逐字不动：改宽会让普通 user 的表格几何发生变化（普通 user 界面必须与改动前一致） -->
+      <el-table-column label="消耗" width="100">
+        <template #default="{row}">
+          <!-- 户管：内联改消耗（仅此角色）。其余角色走 else 分支，与改动前逐字一致 -->
+          <template v-if="auth.canEditReportCost">
+            <div class="inline-edit-cell" v-if="editingCostId === row.id">
+              <el-input v-model="editCostValue" size="small" class="inline-name-input"
+                :ref="el => { if (el) costInputRef = el }"
+                @blur="saveCost(row)" @keyup.enter="saveCost(row)" @keyup.escape="cancelCostEdit" />
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <span class="inline-cell-text">${{ row.cost?.toFixed(2) }}</span>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditCost(row)">✏️</el-button>
+            </div>
+          </template>
+          <template v-else>${{ row.cost?.toFixed(2) }}</template>
+        </template>
+      </el-table-column>
       <el-table-column v-if="showDetailCols" prop="impressions" label="展示" width="90" />
       <el-table-column v-if="showDetailCols" prop="clicks" label="点击" width="80" />
       <el-table-column v-if="showDetailCols" prop="registrations" label="注册" width="80" />
@@ -58,7 +89,9 @@
       <el-table-column v-if="showDetailCols" prop="cost_per_purchase" label="单词购物费用" width="120">
         <template #default="{row}">${{ row.cost_per_purchase?.toFixed(2) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="140" fixed="right">
+      <!-- 每行编辑/删除：只有能改自己整行的角色才渲染（管理员只读、户管仅可改消耗 →
+           他们的改整行/删除走 API 会被后端 403，故整列不渲染） -->
+      <el-table-column v-if="auth.canWriteReportRows" label="操作" width="140" fixed="right">
         <template #default="{row}">
           <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
           <el-popconfirm title="确定删除？" @confirm="handleDelete(row.id)">
@@ -106,14 +139,34 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { fbApi } from '../../api/fb'
 import { ElMessage } from 'element-plus'
 import { sheetWriteApi } from '../../api/sheetWrite'
 import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+import api from '../../api/client'
+import { useAuthStore } from '../../stores/auth'
+
+const auth = useAuthStore()
+// 身份由 App.vue 根组件的 onMounted 水合，而子组件 setup 恒早于父组件 onMounted：
+// 不补这一次，首帧 auth.user 还是 null ⇒ 按角色的 v-if 会算错。同类写法见
+// components/OwnerFilterSelect.vue:22-27。
+if (!auth.user) auth.initFromStorage()
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
 const filterProduct = ref(''); const filterLine = ref(''); const dateRange = ref(null)
+
+// 「保存人」筛选（仅跨用户角色渲染；未选中 = 不传该参数 = 看全部）
+const filterOwner = ref('')
+const ownerUsers = ref([])
+async function loadOwnerUsers() {
+  try {
+    // 用现成的 /api/platform/users（与 OwnerFilterSelect.vue:53 同一个端点），不新造接口
+    const res = await api.get('/platform/users')
+    ownerUsers.value = res.users || []
+  } catch { /* 下拉加载失败不阻塞主流程（同 OwnerFilterSelect.vue:56） */ }
+}
+function onOwnerFilter() { page.value = 1; loadData() }
 const selectedIds = ref([]); const productOptions = ref([]); const lineOptions = ref([])
 const showDetailCols = ref(false)
 const statsVisible = ref(false); const statsData = ref([])
@@ -226,6 +279,7 @@ async function loadData() {
     if (filterProduct.value) p.product_name = filterProduct.value
     if (filterLine.value) p.line_name = filterLine.value
     if (dateRange.value) { p.date_from = dateRange.value[0]; p.date_to = dateRange.value[1] }
+    if (filterOwner.value) p.user_id = filterOwner.value      // 保存人筛选（仅跨用户角色会有值）
     const res = await fbApi.listReports(p)
     items.value = res.items; total.value = res.total
     // 自动检测是否有详情数据
@@ -237,10 +291,55 @@ async function loadStats() {
   if (filterProduct.value) p.product_name = filterProduct.value
   if (filterLine.value) p.line_name = filterLine.value
   if (dateRange.value) { p.date_from = dateRange.value[0]; p.date_to = dateRange.value[1] }
+  if (filterOwner.value) p.user_id = filterOwner.value      // 统计的范围 = 屏幕上看到的范围
   const res = await fbApi.reportStats(p)
   statsData.value = res.data || []
   statsPage.value = 1    // 结果集变了 ⇒ 回第 1 页，否则当前页可能越过新末页
   statsVisible.value = true
+}
+
+// ===== 「消耗」内联编辑（仅户管；谓词 canEditReportCost 与后端 report_editable_fields 同口径）=====
+const editingCostId = ref(null)
+const editCostValue = ref('')
+let costInputRef = null
+let costPending = false
+
+function startEditCost(row) {
+  editingCostId.value = row.id
+  editCostValue.value = row.cost == null ? '' : String(row.cost)
+  nextTick(() => {
+    costInputRef?.focus?.()
+    costInputRef?.select?.()
+  })
+}
+function cancelCostEdit() {
+  editingCostId.value = null
+  editCostValue.value = ''
+  costInputRef = null
+}
+async function saveCost(row) {
+  // blur 与 Enter 都会触发本函数：先落态的那次把 editingCostId 清掉 / 置 pending，
+  // 后到的那次两个守卫之一即拦下，不会重复提交。
+  if (costPending || editingCostId.value !== row.id) return
+  const raw = String(editCostValue.value).trim()
+  const v = Number(raw)
+  if (raw === '' || !Number.isFinite(v) || v < 0) {
+    if (raw !== '') ElMessage.warning('消耗需为不小于 0 的数字')
+    cancelCostEdit(); return
+  }
+  if (row.cost != null && v === Number(row.cost)) { cancelCostEdit(); return }  // 没变，不发请求
+  costPending = true
+  try {
+    // **只发 cost 一个字段**：后端对白名单外的字段回 403（设计文档 §4.2 / §6），整行回传必被拒
+    await fbApi.updateReport(row.id, { cost: v })
+    row.cost = v
+    ElMessage.success('消耗已更新')
+  } catch (e) {
+    ElMessage.error('更新失败：' + (e.response?.data?.error || e.message))
+  } finally {
+    costPending = false
+    cancelCostEdit()
+  }
 }
 
 function openEdit(row) {
@@ -271,6 +370,7 @@ async function handleExport() {
   if (filterProduct.value) p.product_name = filterProduct.value
   if (filterLine.value) p.line_name = filterLine.value
   if (dateRange.value) { p.date_from = dateRange.value[0]; p.date_to = dateRange.value[1] }
+  if (filterOwner.value) p.user_id = filterOwner.value      // 导出的范围 = 屏幕上看到的范围
   try {
     const qs = new URLSearchParams(p).toString()
     const token = localStorage.getItem('access_token')
@@ -287,8 +387,19 @@ async function handleExport() {
   } catch(e) { ElMessage.error('导出失败') }
 }
 
-onMounted(() => { loadFilterOptions(); loadData(); loadFbSwFailures() })
+onMounted(() => { loadFilterOptions(); loadData(); loadFbSwFailures(); if (auth.canFilterReportOwner) loadOwnerUsers() })
 </script>
 <style scoped>
 .fb-panel{padding:20px}.panel-header{margin-bottom:16px}.panel-header h2{margin:0;font-size:18px}.filter-bar{display:flex;gap:12px;margin-bottom:16px;align-items:center;flex-wrap:wrap}
+/* 角色标识（只读 / 仅可改消耗）。只出现在本需求新开放的两个角色上，普通 user 界面无变化。
+   配色沿用本仓既有语汇（薄荷青 #0891b2 = 能力色；中性灰 #6b7280），不引入新色。 */
+.role-chip{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:500;vertical-align:middle}
+.role-chip--readonly{background:#f3f4f6;color:#6b7280;border:1px solid #e5e7eb}
+.role-chip--cost{background:rgba(8,145,178,0.10);color:#0891b2;border:1px solid rgba(8,145,178,0.25)}
+/* 内联编辑：逐字沿用 views/AdsAccountPanel.vue:702-744 的范式（同一套交互心智） */
+.inline-edit-cell{display:flex;align-items:center;gap:4px;min-width:0}
+.inline-cell-text{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto}
+.inline-edit-btn{opacity:0;transition:opacity .15s;font-size:13px;flex-shrink:0}
+.inline-edit-cell:hover .inline-edit-btn{opacity:1}
+.inline-name-input{width:100%}
 </style>

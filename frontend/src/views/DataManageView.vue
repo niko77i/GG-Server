@@ -1,13 +1,24 @@
 <template>
   <div class="data-manage-page">
     <div class="page-header">
-      <h2>📋 数据管理</h2>
+      <h2>📋 数据管理<!-- 角色标识：只出现于本需求新开放的两个角色，普通 user 界面不受影响 -->
+        <span v-if="auth.user?.role === 'admin'" class="role-chip role-chip--readonly">只读</span>
+        <span v-else-if="auth.canEditReportCost" class="role-chip role-chip--cost">可改「消耗」</span>
+      </h2>
       <p class="page-desc">查看、编辑、删除已保存的做表数据</p>
     </div>
 
     <!-- 筛选栏 -->
     <div class="filter-bar">
       <div class="filter-left">
+        <!-- 「保存人」筛选：仅跨用户角色（户管/管理员/developer）可见。未选中 = 不传 user_id（看全部） -->
+        <el-select
+          v-if="auth.canFilterReportOwner"
+          v-model="filterOwner" placeholder="全部用户" clearable filterable
+          style="width:150px" @change="onOwnerFilter"
+        >
+          <el-option v-for="u in ownerUsers" :key="u.id" :label="u.display_name || u.username" :value="u.id" />
+        </el-select>
         <el-select v-model="filterProduct" placeholder="全部产品" clearable style="width:160px" @change="loadData">
           <el-option
             v-for="p in products" :key="p.product_name"
@@ -45,8 +56,11 @@
       <div class="filter-right">
         <el-button @click="loadData">🔄 刷新</el-button>
         <el-button type="primary" @click="handleExport" :loading="exporting">📥 导出CSV</el-button>
-        <el-button type="success" @click="openAddDialog">➕ 新增数据</el-button>
-        <el-button type="danger" :disabled="selectedIds.length === 0" @click="handleBatchDelete">
+        <!-- 新增 / 批量删除：只对「能增删自己行的角色」渲染（管理员只读、户管仅可改消耗）
+             ⚠️ 谓词是 canWriteReportRows（developer + 普通 user + viewer），**不是**
+             canManageReports（= developer）—— 后者会把普通 user 的按钮一并藏掉，破坏回归判据 -->
+        <el-button v-if="auth.canWriteReportRows" type="success" @click="openAddDialog">➕ 新增数据</el-button>
+        <el-button v-if="auth.canWriteReportRows" type="danger" :disabled="selectedIds.length === 0" @click="handleBatchDelete">
           🗑 批量删除 ({{ selectedIds.length }})
         </el-button>
       </div>
@@ -57,18 +71,33 @@
       :data="reports" stripe border style="width:100%" v-loading="loading"
       @selection-change="onSelectionChange" @sort-change="onSortChange"
     >
-      <el-table-column type="selection" width="45" />
+      <!-- 勾选框：只读角色（管理员/户管）没有批量删除动作，留着勾选框是误导 -->
+      <el-table-column v-if="auth.canWriteReportRows" type="selection" width="45" />
       <el-table-column
         v-for="col in visibleColumnDefs" :key="col.prop"
         :prop="col.prop" :label="col.label" :min-width="col.minWidth"
         :sortable="col.sortable ? 'custom' : false" :align="col.align || 'left'"
       >
         <template v-if="col.format" #default="{ row }">
-          <template v-if="col.format === 'cost'">${{ formatNum(row[col.prop]) }}</template>
+          <!-- 「花费」列：户管可内联改（仅此角色）。其余角色走下面两个分支，与改动前逐字一致 -->
+          <template v-if="col.format === 'cost' && auth.canEditReportCost">
+            <div class="inline-edit-cell" v-if="editingCostId === row.id">
+              <el-input v-model="editCostValue" size="small" class="inline-name-input"
+                :ref="el => { if (el) costInputRef = el }"
+                @blur="saveCost(row)" @keyup.enter="saveCost(row)" @keyup.escape="cancelCostEdit" />
+            </div>
+            <div class="inline-edit-cell" v-else>
+              <span class="inline-cell-text">${{ formatNum(row[col.prop]) }}</span>
+              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditCost(row)">✏️</el-button>
+            </div>
+          </template>
+          <template v-else-if="col.format === 'cost'">${{ formatNum(row[col.prop]) }}</template>
           <template v-else>{{ formatNum(row[col.prop]) }}</template>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="140" fixed="right">
+      <!-- 每行编辑/删除：只有能改自己整行的角色才渲染（管理员只读、户管仅可改消耗 →
+           他们的改整行走 API 会被后端 403，故整列不渲染） -->
+      <el-table-column v-if="auth.canWriteReportRows" label="操作" width="140" fixed="right">
         <template #default="{ row }">
           <el-button size="small" type="primary" link @click="openEditDialog(row)">编辑</el-button>
           <el-popconfirm title="确定删除这条数据？" @confirm="handleDelete(row.id)">
@@ -139,9 +168,17 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { reportsApi } from '../api/reports'
+import api from '../api/client'
+import { useAuthStore } from '../stores/auth'
+
+const auth = useAuthStore()
+// 身份由 App.vue 根组件的 onMounted 水合，而子组件 setup 恒早于父组件 onMounted：
+// 不补这一次，首帧 auth.user 还是 null ⇒ 按角色的 v-if 会算错（多渲染一瞬按钮）。
+// 同类教训与写法见 components/OwnerFilterSelect.vue:22-27。
+if (!auth.user) auth.initFromStorage()
 
 // 全部可选列定义
 const COL_STORAGE_KEY = 'gg_data_manage_columns'
@@ -212,6 +249,18 @@ const dateRange = ref(null)
 const searchKeyword = ref('')
 const products = ref([])
 
+// 「保存人」筛选（仅跨用户角色渲染；未选中 = 不传该参数 = 看全部）
+const filterOwner = ref('')
+const ownerUsers = ref([])
+async function loadOwnerUsers() {
+  try {
+    // 用现成的 /api/platform/users（与 OwnerFilterSelect.vue:53 同一个端点），不新造接口
+    const res = await api.get('/platform/users')
+    ownerUsers.value = res.users || []
+  } catch { /* 下拉加载失败不阻塞主流程（同 OwnerFilterSelect.vue:56） */ }
+}
+function onOwnerFilter() { page.value = 1; loadData() }
+
 // 表格状态
 const reports = ref([])
 const loading = ref(false)
@@ -247,6 +296,7 @@ async function loadData() {
       params.to_date = dateRange.value[1]
     }
     if (searchKeyword.value) params.search = searchKeyword.value
+    if (filterOwner.value) params.user_id = filterOwner.value   // 保存人筛选（仅跨用户角色会有值）
 
     const data = await reportsApi.list(params)
     reports.value = (data.reports || []).map(r => ({
@@ -410,6 +460,7 @@ async function handleExport() {
       params.to_date = dateRange.value[1]
     }
     if (searchKeyword.value) params.search = searchKeyword.value
+    if (filterOwner.value) params.user_id = filterOwner.value   // 导出的范围 = 屏幕上看到的范围
 
     const blob = await reportsApi.export(params)
     const url = window.URL.createObjectURL(blob)
@@ -435,6 +486,51 @@ function formatNum(v) {
   return Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 })
 }
 
+// ===== 「花费/消耗」内联编辑（仅户管；谓词 canEditReportCost 与后端 report_editable_fields 同口径）=====
+const editingCostId = ref(null)
+const editCostValue = ref('')
+let costInputRef = null
+let costPending = false
+
+function startEditCost(row) {
+  editingCostId.value = row.id
+  editCostValue.value = row.cost == null ? '' : String(row.cost)
+  nextTick(() => {
+    costInputRef?.focus?.()
+    costInputRef?.select?.()
+  })
+}
+function cancelCostEdit() {
+  editingCostId.value = null
+  editCostValue.value = ''
+  costInputRef = null
+}
+async function saveCost(row) {
+  // blur 与 Enter 都会触发本函数（见 AdsAccountPanel.vue 的同类范式）：先落态的那次把
+  // editingCostId 清掉 / 置 pending，后到的那次两个守卫之一即拦下，不会重复提交。
+  if (costPending || editingCostId.value !== row.id) return
+  const raw = String(editCostValue.value).trim()
+  const v = Number(raw)
+  if (raw === '' || !Number.isFinite(v) || v < 0) {
+    if (raw !== '') ElMessage.warning('消耗需为不小于 0 的数字')
+    cancelCostEdit(); return
+  }
+  if (row.cost != null && v === Number(row.cost)) { cancelCostEdit(); return }  // 没变，不发请求
+  costPending = true
+  try {
+    // **只发 cost 一个字段**：后端对白名单外的字段回 403（设计文档 §4.2 / §6），整行回传必被拒
+    await reportsApi.update(row.id, { cost: v })
+    row.cost = v
+    if (sortProp.value) applyClientSort()
+    ElMessage.success('消耗已更新')
+  } catch (e) {
+    ElMessage.error('更新失败：' + (e.response?.data?.error || e.message))
+  } finally {
+    costPending = false
+    cancelCostEdit()
+  }
+}
+
 async function loadProducts() {
   try {
     const res = await reportsApi.products()
@@ -445,6 +541,7 @@ async function loadProducts() {
 onMounted(() => {
   loadProducts()
   loadData()
+  if (auth.canFilterReportOwner) loadOwnerUsers()
 })
 </script>
 
@@ -464,4 +561,21 @@ onMounted(() => {
   display: flex; flex-direction: column; gap: 6px;
   max-height: 300px; overflow-y: auto;
 }
+
+/* 角色标识（只读 / 仅可改消耗）。只出现在本需求新开放的两个角色上，普通 user 界面无变化。
+   配色沿用本仓既有语汇：薄荷青 #0891b2 是本应用唯一的能力色（按钮/激活态），
+   中性灰 #6b7280 与下方 .page-desc 同值 —— 不引入新色。 */
+.role-chip {
+  display: inline-block; margin-left: 8px; padding: 1px 8px;
+  border-radius: 10px; font-size: 12px; font-weight: 500; vertical-align: middle;
+}
+.role-chip--readonly { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
+.role-chip--cost { background: rgba(8,145,178,0.10); color: #0891b2; border: 1px solid rgba(8,145,178,0.25); }
+
+/* 内联编辑：逐字沿用 views/AdsAccountPanel.vue:702-744 的范式（同一套交互心智） */
+.inline-edit-cell { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.inline-cell-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
+.inline-edit-btn { opacity: 0; transition: opacity 0.15s; font-size: 13px; flex-shrink: 0; }
+.inline-edit-cell:hover .inline-edit-btn { opacity: 1; }
+.inline-name-input { width: 100%; }
 </style>
