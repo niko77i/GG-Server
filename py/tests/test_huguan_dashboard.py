@@ -5348,11 +5348,33 @@ class TestResolveColumnMap:
         m, _u = hd.resolve_column_map(["账户ID", "日期"], {"日期": "remark"})
         assert m["remark"] == "B" and "acquired_date" not in m
 
-    def test_duplicate_field_takes_leftmost_and_reports(self):
-        """两列都叫「日期」→ 取最左，另一个记未采集（不静默）。"""
+    def test_duplicate_field_takes_leftmost_without_reporting(self):
+        """两列都叫「日期」→ 取最左那列，后一个**不报未采集**。
+
+        同名表头的后一个输给的只是**它自己这个名字**：`columns` 按名字存键，用户按名字
+        指派也只能认领最左那列 ⇒ 报它＝每条同步报告都挂一行永远解不掉的未采集（永久噪音，
+        与「位置」哨兵同款的陷阱，会把「未采集」这个信号训练成被忽略）。
+        """
         m, unmatched = hd.resolve_column_map(["账户ID", "日期", "日期"], {})
         assert m["acquired_date"] == "B"
-        assert unmatched == ["日期"]
+        assert unmatched == [], f"同名后一个不该报未采集，实际={unmatched}"
+
+    def test_assigned_duplicate_name_is_still_not_reported(self):
+        """同名表头两列都**已指派**（= 同一份映射，指派按名字生效）⇒ 仍不报未采集。"""
+        m, unmatched = hd.resolve_column_map(["账户ID", "备注二", "备注二"],
+                                             {"备注二": "remark"})
+        assert m["remark"] == "B"
+        assert unmatched == [], f"已指派的同名列不该报未采集，实际={unmatched}"
+
+    def test_cross_name_field_conflict_is_still_reported(self):
+        """两个**不同名**的表头被覆盖指到同一个字段 ⇒ 后一个仍报未采集（真冲突，用户能改）。
+
+        这条形状 POST 层会拒（同一字段出现两遍），但纯函数仍必须如实报 —— 它就是
+        「输给了**别的名字**」那一档，与同名落选本质不同（后者用户永远解不掉）。
+        """
+        m, unmatched = hd.resolve_column_map(["甲", "乙"], {"甲": "remark", "乙": "remark"})
+        assert m["remark"] == "A"
+        assert unmatched == ["乙"], f"真冲突必须报，实际={unmatched}"
 
     def test_blank_header_ignored(self):
         m, unmatched = hd.resolve_column_map(["账户ID", "", "  "], {})
@@ -5409,23 +5431,39 @@ class TestDescribeHeaderColumns:
     def test_alias_and_ignored_and_none_are_distinguished(self):
         rows, _u = self._describe(["账户ID", "位置", "备注二"], {})
         assert rows == [
-            {"header": "账户ID", "field": "advertiser_id", "via": "alias"},
-            {"header": "位置", "field": "", "via": "ignored"},
-            {"header": "备注二", "field": None, "via": "none"},
+            {"header": "账户ID", "field": "advertiser_id", "via": "alias",
+             "alias_field": "advertiser_id"},
+            {"header": "位置", "field": "", "via": "ignored", "alias_field": ""},
+            {"header": "备注二", "field": None, "via": "none", "alias_field": None},
         ]
 
     def test_override_reported_as_override_and_empty_override_as_ignored(self):
         rows, _u = self._describe(["账户ID", "负责人", "备注二"],
                                   {"负责人": "owner_name", "备注二": ""})
-        assert rows[1] == {"header": "负责人", "field": "owner_name", "via": "override"}
-        assert rows[2] == {"header": "备注二", "field": "", "via": "ignored"}
+        assert rows[1] == {"header": "负责人", "field": "owner_name", "via": "override",
+                           "alias_field": None}
+        assert rows[2] == {"header": "备注二", "field": "", "via": "ignored",
+                           "alias_field": None}
 
-    def test_duplicate_header_loser_is_reported_as_none(self):
-        """同表头出现两次：后一个落选 ⇒ 报 none（规范只有四档，没有「落选」档）。"""
+    def test_duplicate_header_loser_is_none_and_not_reported(self):
+        """同表头出现两次：后一个落选 ⇒ 落 none 档、且**不报未采集**（详见 resolve_column_map）。
+
+        它仍在 none 档（这一列确实不被采集 —— 只取最左那列），但**不是因为**它进了 unmatched；
+        这个判定必须显式（记住每个名字的第一列），否则会掉进 ignored 档被显示成「（不采集）」的假命题。
+        后一个的 alias_field 沿用同名第一列：别名按名字认列 ⇒ 两列答案相同，前端「改回自动」要用它。
+        """
         rows, unmatched = self._describe(["账户ID", "账户ID"], {})
-        assert unmatched == ["账户ID"]
+        assert unmatched == [], f"同名后一个不该报未采集，实际={unmatched}"
         assert [r["via"] for r in rows] == ["alias", "none"]
         assert rows[1]["field"] is None
+        assert [r["alias_field"] for r in rows] == ["advertiser_id", "advertiser_id"]
+
+    def test_cross_name_conflict_still_shows_as_none(self):
+        """不同名表头被指到同一字段：后一个仍是 none（未采集）—— 真冲突要能被用户看见。"""
+        rows, unmatched = self._describe(["甲", "乙"], {"甲": "remark", "乙": "remark"})
+        assert unmatched == ["乙"]
+        assert rows[1] == {"header": "乙", "field": None, "via": "none",
+                           "alias_field": None}
 
     def test_blank_headers_are_skipped(self):
         rows, _u = self._describe(["账户ID", "", "  "], {})
@@ -5436,6 +5474,44 @@ class TestDescribeHeaderColumns:
         assert unmatched == []
         assert [r["via"] for r in rows] == ["alias"] * len(self.ENTERPRISE)
         assert [r["field"] for r in rows][:3] == ["acquired_date", "_dead_flag", "advertiser_id"]
+        # 零覆盖时别名目标就是当前值。
+        assert [r["alias_field"] for r in rows] == [r["field"] for r in rows]
+
+    # ----- alias_field：别名单独会把这一列认成什么（前端「改回自动」的落点） -----
+
+    def test_alias_field_keeps_alias_target_while_field_is_the_override(self):
+        """覆盖指向的字段**不同于**别名会自动给的那个 ⇒ field=覆盖值，alias_field=别名目标。
+
+        这正是 I1 的数据形状：override 行的 field 是覆盖本身，不能拿它当「自动值」。
+        「日期」别名会自动认成入库时间（acquired_date），这里被手工改指到 remark。
+        """
+        rows, _u = self._describe(["账户ID", "日期"], {"日期": "remark"})
+        b = rows[1]
+        assert b["header"] == "日期"
+        assert b["field"] == "remark" and b["via"] == "override"
+        assert b["alias_field"] == "acquired_date", "别名单独仍会认成入库时间"
+
+    def test_alias_field_is_none_when_alias_does_not_recognize(self):
+        """别名根本不认识的表头（如「备注二」）被手工指派 ⇒ alias_field 为 None
+        （＝去掉覆盖会回落「未采集」）。"""
+        rows, _u = self._describe(["账户ID", "备注二"], {"备注二": "remark"})
+        assert rows[1] == {"header": "备注二", "field": "remark", "via": "override",
+                           "alias_field": None}
+
+    def test_alias_field_empty_for_the_catalog_sentinel(self):
+        """目录哨兵「位置」：别名单独也会说「刻意不采集」⇒ alias_field == ""。"""
+        rows, _u = self._describe(["账户ID", "位置"], {})
+        assert rows[1]["alias_field"] == ""
+
+    def test_alias_field_is_kept_for_empty_string_override(self):
+        """空串覆盖（刻意不采集）压在别名认得的列上：field="" 但 alias_field=别名目标。
+
+        前端据此把「改回别名目标」判成真正回到自动（撤掉空串覆盖）。
+        """
+        rows, _u = self._describe(["账户ID", "日期"], {"日期": ""})
+        b = rows[1]
+        assert b["field"] == "" and b["via"] == "ignored"
+        assert b["alias_field"] == "acquired_date"
 
 
 class TestFieldCatalogExposure:
@@ -6127,10 +6203,12 @@ class TestSheetHeadersEndpoint:
         res = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
                          query_string={"platform": "tt", "sheet_name": "企业户"}).get_json()
         assert res["columns"] == [
-            {"header": "账户ID", "field": "advertiser_id", "via": "alias"},
-            {"header": "备注二", "field": "remark", "via": "override"},
-            {"header": "位置", "field": "", "via": "ignored"},
-            {"header": "陌生列", "field": None, "via": "none"},
+            {"header": "账户ID", "field": "advertiser_id", "via": "alias",
+             "alias_field": "advertiser_id"},
+            {"header": "备注二", "field": "remark", "via": "override",
+             "alias_field": None},
+            {"header": "位置", "field": "", "via": "ignored", "alias_field": ""},
+            {"header": "陌生列", "field": None, "via": "none", "alias_field": None},
         ]
         assert res["unmatched"] == ["陌生列"]
 

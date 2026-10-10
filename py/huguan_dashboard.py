@@ -132,7 +132,10 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
     优先级：**手工覆盖 > 别名自动匹配 > 不采集**（设计 §4.2）。
 
     - 表头文本 strip() 后匹配；空表头跳过。
-    - 多列命中同一字段 ⇒ 取**最左**那列，其余记入未采集（不静默）。
+    - 多列命中同一字段 ⇒ 取**最左**那列。其余列**只有输给了别的名字**（真冲突，用户改指派
+      就能解）才记入未采集；**同名表头的后一个不报** —— `columns` 按表头名存键，用户按名字
+      指派也只能认领最左那列，报它＝每条同步报告都挂一行**永远解不掉**的未采集，把「未采集」
+      这个信号训练成被忽略（与「位置」哨兵同款的永久噪音陷阱）。
     - 覆盖指向的字段key 非法 ⇒ 忽略该条并记入未采集（校验已在 HTTP 层拦，这里是纵深防御）。
     - **覆盖值可以是空串**：= 用户显式「刻意不采集」（设计 §3.3），占用该列但既不映射
       也不上报 —— 与目录里的空串哨兵同档，只是由覆盖手工指定。
@@ -143,6 +146,8 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
     # （覆盖**值**取空串是另一回事：那合法，见下方第一轮。）
     catalog_fields = {f for f, _l, _a, _d, _k, _s in TT_FIELD_CATALOG if f}
     out, unmatched, taken = {}, [], set()
+    # 已被**成功认领**的表头名（跨两轮累计）：同名表头的后一个落选时不再报未采集。
+    claimed_names = set()
 
     def _claim(field, col_letter):
         if field in out:
@@ -150,6 +155,14 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
         out[field] = col_letter
         taken.add(col_letter)
         return True
+
+    def _report(name):
+        """记一条未采集 —— 只在「这个名字还没被认领过」且尚未报过时。
+
+        报出来的都是**输给了别的名字**的真冲突（用户改指派就能解）；同名表头的后一个
+        没输给任何**新**名字，报它只会产生永久噪音（见函数 docstring）。"""
+        if name not in claimed_names and name not in unmatched:
+            unmatched.append(name)
 
     # 第一轮：手工覆盖
     for i, raw in enumerate(headers):
@@ -163,8 +176,13 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
         if field == "":
             taken.add(_col_letter(i))
             continue
-        if field not in catalog_fields or not _claim(field, _col_letter(i)):
-            unmatched.append(name)
+        if field not in catalog_fields:
+            _report(name)          # 指向的字段非法：报（这不是同名落选，用户能改）
+            continue
+        if _claim(field, _col_letter(i)):
+            claimed_names.add(name)
+        else:
+            _report(name)
 
     # 第二轮：别名自动匹配（跳过已被覆盖占用的列）
     for i, raw in enumerate(headers):
@@ -175,15 +193,16 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
         if field is None:
             # 完全不认识 ⇒ 报出来（设计 §4.3）；同一个未知表头只报一次
             if name not in (overrides or {}):
-                if name not in unmatched:
-                    unmatched.append(name)
+                _report(name)
             continue
         if field == "":
             # 认识、但刻意不采集（如「位置」）：既不映射也不上报
             taken.add(_col_letter(i))
             continue
-        if not _claim(field, _col_letter(i)):
-            unmatched.append(name)
+        if _claim(field, _col_letter(i)):
+            claimed_names.add(name)
+        else:
+            _report(name)
     return out, unmatched
 
 
@@ -200,39 +219,77 @@ def describe_header_columns(headers: list, overrides: dict,
                             col_map: dict, unmatched: list) -> list:
     """把一次表头解析的结果摊成「逐列一行」，供前端列映射 UI 显示（设计 §3.1）。
 
-    每项：{"header": strip 后的表头原文, "field": 字段key | "" | None, "via": 四档}
+    每项：{"header": strip 后的表头原文, "field": 字段key | "" | None, "via": 四档,
+           "alias_field": 字段key | "" | None}
 
       via = "override" 该表手工指派 / "alias" 别名自动认出 /
             "ignored" 认识但刻意不采集（目录哨兵「位置」，或覆盖值为空串）/
-            "none" 该列没被采集到任何字段（完全不认识，**或识别到了但落选**——如同表头重复的后一个）
+            "none" 该列没被采集到任何字段（完全不认识，**或同名表头的后一个**——同名只采集
+                   最左那列，其余同名列不采集；这一档与 unmatched 无关，见下）
       field = "" 只与 "ignored" 同现；field = None 只与 "none" 同现。
+      alias_field = **去掉手工覆盖后**这一列会被别名单独认成什么（同 field 的三值约定）：
+        字段key 别名能认出 / "" 别名说刻意不采集（目录哨兵「位置」）/ None 别名不认识。
+        前端「改回自动」的落点取它是**必要的**：override 行的 field 就是那条覆盖本身，
+        若拿 field 当「自动值」，用户「改一下又改回原值」会被误判成「改回自动」而静默删掉覆盖（I1）。
 
-    **不重新解析**：全部从 resolve_column_map 的三个产出（col_map / unmatched / overrides）
-    反推，避免第二套「认列」逻辑（那是本批最容易漂的地方）。空表头列不列出
-    —— 与 resolve_column_map 的跳过口径一致。
+    **不重新解析**：主结果全部从 resolve_column_map 的三个产出（col_map / unmatched / overrides）
+    反推，避免第二套「认列」逻辑（那是本批最容易漂的地方）；alias_field 另调一次同一个
+    `resolve_column_map(headers, {})`（＝「无覆盖」的解析），判据与主解析逐行同款
+    （缺席 ⟺ 未识别 → None；在场且非空 ⟺ 别名档；在场且空 ⟺ 哨兵档）。
+    空表头列不列出 —— 与 resolve_column_map 的跳过口径一致。
     """
     field_by_letter = {col: field for field, col in col_map.items()}
     ov = overrides or {}
     unknown = set(unmatched)
+    # 别名单独（无覆盖）的解析：只回答「这列去掉覆盖会是什么」，不是第二套认列逻辑。
+    alias_map, alias_unmatched = resolve_column_map(headers, {})
+    alias_by_letter = {col: field for field, col in alias_map.items()}
+    alias_unknown = set(alias_unmatched)
+
+    def _alias_field(i: int, name: str):
+        """这一列别名单独会认成什么：与主解析同款判据（不看 via）。"""
+        f = alias_by_letter.get(_col_letter(i))
+        if f is None:
+            # 别名 col_map 里没有这一列：不认识 ⇒ None；否则是哨兵（刻意不采集）⇒ ""
+            return None if name in alias_unknown else ""
+        return f
+
     rows = []
+    # 每个表头名**第一次出现**时的 alias_field：同名表头的后一个按**名字**共享它
+    # （别名是按名字认列的，两个同名列的答案相同）。它的在场与否即「这一列是不是后一个」。
+    first_alias_field = {}
     for i, raw in enumerate(headers):
         name = ("" if raw is None else str(raw)).strip()
         if not name:
             continue
+        # 同名表头的**后一个**（落选列）：只采集最左那列 ⇒ 本列不采集、也不报未采集
+        # （见 resolve_column_map 的同名口径）。这里**显式**落 none 档，且**不看 unmatched**
+        # —— 它已不在 unmatched 里，若仍走下面的反推会被误判成 ignored（「（不采集）」这个假命题）。
+        # alias_field 沿用同名第一列的值：前端「改回自动」要用它当落点，而别名按名字认列。
+        if name in first_alias_field:
+            rows.append({"header": name, "field": None, "via": "none",
+                         "alias_field": first_alias_field[name]})
+            continue
+        alias_field = _alias_field(i, name)
+        first_alias_field[name] = alias_field
         if name in ov and ov[name] == "":
             # 覆盖空串：认识但刻意不采集（占用该列，不在 col_map 里）
-            rows.append({"header": name, "field": "", "via": "ignored"})
+            rows.append({"header": name, "field": "", "via": "ignored",
+                         "alias_field": alias_field})
             continue
         field = field_by_letter.get(_col_letter(i))
         if field is None:
             # 该列没进 col_map：要么根本不认识（在 unmatched 里），要么是目录哨兵那一档
             if name in unknown:
-                rows.append({"header": name, "field": None, "via": "none"})
+                rows.append({"header": name, "field": None, "via": "none",
+                             "alias_field": alias_field})
             else:
-                rows.append({"header": name, "field": "", "via": "ignored"})
+                rows.append({"header": name, "field": "", "via": "ignored",
+                             "alias_field": alias_field})
             continue
         via = "override" if ov.get(name) == field else "alias"
-        rows.append({"header": name, "field": field, "via": via})
+        rows.append({"header": name, "field": field, "via": via,
+                     "alias_field": alias_field})
     return rows
 
 
