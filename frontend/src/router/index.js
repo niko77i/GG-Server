@@ -72,6 +72,16 @@ const routes = [
     meta: { title: '数据分析' }
   },
   {
+    path: '/tt/analysis',
+    component: () => import('../views/AnalysisView.vue'),
+    meta: { title: '数据分析', platform: 'tt' }
+  },
+  {
+    path: '/fb/analysis',
+    component: () => import('../views/AnalysisView.vue'),
+    meta: { title: '数据分析', platform: 'fb' }
+  },
+  {
     path: '/data-manage',
     component: () => import('../views/DataManageView.vue'),
     meta: { title: '数据管理', platform: 'gg' }
