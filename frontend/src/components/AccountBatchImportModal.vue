@@ -361,9 +361,12 @@ const alreadyMine = computed(() =>
 const PREVIEW_LIMIT = DEFAULT_PREVIEW_LIMIT
 const claimPrev = computed(() => slicePreview(existingAccounts.value, PREVIEW_LIMIT))
 const claimPickedIds = ref([])
-const claimSelection = computed(() =>
-  existingAccounts.value.filter(a => claimPickedIds.value.includes(a.account_id))
-)
+// 先建一次 Set：否则 existingAccounts × claimPickedIds 是 O(n·m)（万行时最坏 ~1e8 次比较，
+// 每次勾选都会明显卡一下）。与 AccountSyncModal 的 selClaimIds 同款写法。
+const claimSelection = computed(() => {
+  const picked = new Set(claimPickedIds.value)
+  return existingAccounts.value.filter(a => picked.has(a.account_id))
+})
 
 function toggleClaimRow(id, on) {
   claimPickedIds.value = on
@@ -372,10 +375,10 @@ function toggleClaimRow(id, on) {
 }
 /** 表头「全选」勾：只作用**本页渲染出来的 ≤100 行**。 */
 function selectAllClaimPreview(on) {
-  const shownIds = claimPrev.value.shown.map(a => a.account_id)
+  const shownIds = new Set(claimPrev.value.shown.map(a => a.account_id))
   claimPickedIds.value = on
     ? [...new Set([...claimPickedIds.value, ...shownIds])]
-    : claimPickedIds.value.filter(x => !shownIds.includes(x))
+    : claimPickedIds.value.filter(x => !shownIds.has(x))
 }
 /** 脚注「全部选中 / 全部取消」：作用**全量**（不只渲染行）。 */
 function selectAllClaim(on) {
