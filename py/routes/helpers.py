@@ -4,6 +4,16 @@ HUGUAN_ROLE = "huguan"
 # 可跨用户查看/编辑账户类数据的角色（账户、MCC、BC、BM、像素）
 CROSS_USER_ROLES = ("developer", "admin", HUGUAN_ROLE)
 
+# 报表类资源（ad_reports / fb_ad_reports）：
+# ⚠️ 这两张表**没有 owner_id 列**，归属轴是 **user_id（谁保存的这条）** ——
+#    与账户类的 owner_id 不是一回事，**不能**套用本文件按 owner 的 scope_where / can_modify。
+# 可跨用户查看报表数据的角色（与账户类同集合）。
+REPORT_VIEW_ALL_ROLES = CROSS_USER_ROLES
+
+# 在数据管理页**只能改「消耗」一个字段**的角色。
+# ⚠️ admin **不在**其中 ⇒ 管理员只读（本设计最核心的一条，改动前请先读设计 §3）。
+REPORT_COST_ONLY_ROLES = (HUGUAN_ROLE,)
+
 # 可编辑平台级下拉选项的角色（代理名、账户状态、MCC等级、地区时区、商务人员）
 GLOBAL_OPTION_ROLES = ("developer", "admin", HUGUAN_ROLE)
 
@@ -172,3 +182,43 @@ def can_modify_user(actor: dict, target: dict) -> bool:
     if actor["role"] == "developer":
         return True
     return target["role"] in ("user", "viewer", "hidden")
+
+
+def user_role(db, uid) -> str:
+    """取用户角色，查不到回落 'user'（**不是 None** —— 调用方一律按"最低权限"处理）。
+
+    FB 侧原有一个同义的 `_get_role`；本函数落地后它改为委派到这里，避免两份。
+    """
+    row = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
+    return row["role"] if row else "user"
+
+
+def report_scope_where(role, uid, owner_uid=None, alias=None):
+    """报表类资源的可见作用域 → (SQL 片段, 参数列表)。
+
+    - 非跨用户角色 → `user_id = ?` + [uid]（**与各端点原有写法逐字等价**）
+    - 跨用户角色   → 不加 user_id 限定（看全部）；owner_uid 非空时收窄到该人
+      （前端「保存人」筛选）
+
+    ⚠️ **非跨用户角色即使传了 owner_uid 也只返回自己的行** —— 该参数不得成为越权口。
+    """
+    col = f"{alias}." if alias else ""
+    if role in REPORT_VIEW_ALL_ROLES:
+        if owner_uid is not None:
+            return f"{col}user_id = ?", [owner_uid]
+        return "1=1", []
+    return f"{col}user_id = ?", [uid]
+
+
+def report_editable_fields(role):
+    """该角色在数据管理页可改的字段集合。**None = 不设白名单（全字段可改）**。
+
+    - developer → None
+    - 户管      → {"cost"}
+    - 其余（含 **admin**）→ set() ⇒ 空集 = **只读**
+    """
+    if role == "developer":
+        return None
+    if role in REPORT_COST_ONLY_ROLES:
+        return {"cost"}
+    return set()
