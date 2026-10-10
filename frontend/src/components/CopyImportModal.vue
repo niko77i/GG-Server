@@ -24,11 +24,16 @@
       <el-button @click="preview" :loading="parsing">🔍 预览解析结果</el-button>
 
       <div v-if="parsed.length" style="margin-top:8px;">
+        <!-- ③ 前端分页：`parsed` 与粘贴行数成正比，直通 el-table 会按行数建 DOM
+             （Element Plus 不做虚拟滚动）。分页把渲染行数封在 `size` 以内，
+             但**提交仍读全量 `parsed`** —— 没渲染 ≠ 没提交。
+             逐行输入/删除一律按**行对象**定位，不用渲染下标 `$index`：分页后
+             `$index` 只是「本页内的下标」，拿它去读写会静默改错行/删错行。 -->
         <p>识别 <strong>{{ parsed.length }}</strong> 个包：</p>
-        <el-table :data="parsed" size="small" max-height="250">
+        <el-table :data="parsedPage" size="small" max-height="250">
           <el-table-column prop="series_name" label="系列名">
-            <template #default="{ row, $index }">
-              <el-input v-model="parsed[$index].series_name" size="small" />
+            <template #default="{ row }">
+              <el-input v-model="row.series_name" size="small" />
             </template>
           </el-table-column>
           <el-table-column prop="package_name" label="包名" />
@@ -38,11 +43,15 @@
             </template>
           </el-table-column>
           <el-table-column width="50">
-            <template #default="{ $index }">
-              <el-button size="small" type="danger" @click="parsed.splice($index, 1)">✕</el-button>
+            <template #default="{ row }">
+              <el-button size="small" type="danger" @click="removeRow(row)">✕</el-button>
             </template>
           </el-table-column>
         </el-table>
+        <div v-if="parsed.length > size" style="display:flex;justify-content:flex-end;margin-top:8px;">
+          <el-pagination v-model:current-page="page" :page-size="size" :total="parsed.length"
+            layout="prev, pager, next" background small />
+        </div>
       </div>
     </el-form>
     <template #footer>
@@ -53,7 +62,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useProductStore } from '@/stores/products'
 import { ElMessage } from 'element-plus'
 import api from '@/api/client'
@@ -64,6 +73,12 @@ const store = useProductStore()
 const saving = ref(false)
 const parsing = ref(false)
 const parsed = ref([])
+// ③ 前端分页：只把当前页交给 el-table 渲染（`parsed` 与粘贴行数成正比）。
+// 权威数据始终是全量 `parsed`，提交读它；`parsedPage` 仅用于渲染。
+const page = ref(1)
+const size = ref(20)
+const parsedPage = computed(() =>
+  parsed.value.slice((page.value - 1) * size.value, page.value * size.value))
 const productNames = ref([])
 const regionOptions = ref([])
 
@@ -85,6 +100,7 @@ async function loadRegions() {
 function init() {
   Object.assign(form, { product_name: '', kpi: '', region: '', prefix: '', text: '' })
   parsed.value = []
+  page.value = 1
 }
 
 async function preview() {
@@ -97,6 +113,8 @@ async function preview() {
       prefix: form.prefix, suffix: '',
     })
     parsed.value = res.parsed || []
+    // 结果集换了 ⇒ 回第 1 页，否则当前页可能越过新的末页（列表空白且分页控件消失）。
+    page.value = 1
     if (!parsed.value.length) {
       ElMessage.warning('未找到有效的 Google Play 链接')
     }
@@ -105,6 +123,18 @@ async function preview() {
   } finally {
     parsing.value = false
   }
+}
+
+// 删除一行：按**行对象**定位，不用渲染下标 —— 分页后 `$index` 是「本页内的下标」，
+// 拿它去 `parsed.splice($index, 1)` 会删到全量数组里位置不同的另一行。
+// `slice` 返回的是同一批对象引用（浅拷贝数组），故 `indexOf(row)` 能命中全量数组。
+function removeRow(row) {
+  const i = parsed.value.indexOf(row)
+  if (i === -1) return
+  parsed.value.splice(i, 1)
+  // 删掉末页仅剩的行后，当前页会越过新末页 ⇒ 回退一页，否则表格空白、分页控件卸载。
+  const maxPage = Math.max(1, Math.ceil(parsed.value.length / size.value))
+  if (page.value > maxPage) page.value = maxPage
 }
 
 async function submit() {
