@@ -196,11 +196,17 @@ def user_role(db, uid) -> str:
 def report_scope_where(role, uid, owner_uid=None, alias=None):
     """报表类资源的可见作用域 → (SQL 片段, 参数列表)。
 
-    - 非跨用户角色 → `user_id = ?` + [uid]（**与各端点原有写法逐字等价**）
+    - 非跨用户角色 → `user_id = ?` + [uid]（**与各端点原有写法语义等价**；
+      端点原文是不带空格的 `"user_id=?"`，SQL 对 `=` 两侧空白不敏感，故可整段替换）
     - 跨用户角色   → 不加 user_id 限定（看全部）；owner_uid 非空时收窄到该人
       （前端「保存人」筛选）
 
     ⚠️ **非跨用户角色即使传了 owner_uid 也只返回自己的行** —— 该参数不得成为越权口。
+
+    ⚠️ **契约：表示"不筛"必须传 `None`，不能传 `0`**。实现用 `0 is not None` 判定，
+    故 `0` 会被当成一个真实（且不存在）的 owner ⇒ 结果集为空。
+    调用方从 `request.args.get("user_id", type=int)` 取值时天然是 None（参数缺失），
+    但**不要让任何路径把 0 当作"未选"的哨兵值**传进来。
     """
     col = f"{alias}." if alias else ""
     if role in REPORT_VIEW_ALL_ROLES:
