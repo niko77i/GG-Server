@@ -31,43 +31,24 @@
         </div>
         <div v-if="zbError" style="color:#dc2626;margin-top:8px;">{{ zbError }}</div>
 
-        <!-- 表格同步状态提示条 -->
-        <div v-if="zbSyncStatus && (zbSyncStatus.status === 'failed' || zbSyncStatus.status === 'retry_failed')"
-          :style="{ marginTop: '10px', padding: '10px 14px', borderRadius: '8px', background: zbSyncStatus.status === 'retry_failed' ? '#fef2f2' : '#fffbeb', border: '1px solid ' + (zbSyncStatus.status === 'retry_failed' ? '#fecaca' : '#fde68a') }">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span style="font-weight:600;">
-              {{ zbSyncStatus.status === 'retry_failed' ? '❌ 重试失败，请手动操作' : '⚠️ 填表失败' }}
-            </span>
-            <span v-if="zbSyncStatus.status === 'failed' && zbRetryCountdown > 0" style="color:#d97706;font-size:13px;">
-              {{ zbRetryCountdown }}秒后自动重试...
-            </span>
-            <span v-if="zbSyncStatus.error_msg" style="font-size:12px;color:#999;">{{ zbSyncStatus.error_msg }}</span>
-            <el-button link size="small" type="primary" @click="zbRetrySheetsSync">🔄 重新同步</el-button>
-            <el-button link size="small" @click="zbShowSyncData = !zbShowSyncData">
-              {{ zbShowSyncData ? '收起数据' : '📋 查看数据' }}
-            </el-button>
+        <!-- 写表失败汇总（五期）。复用 FB 数据管理页 / 户管看板卡片已 /frontend-design
+             定稿的视觉语法：3px 琥珀左脊柱 + warning 色调（gg_zuobiao 零回滚 ⇒ 只可能是
+             retry_failed，「表中未写入」不等于数据坏了）。有失败才渲染，无失败时连占位都没有。
+             margin 取 10px（本页提示条原有位置）而非 FB 的 margin-bottom：本块接在按钮行之下。 -->
+        <div v-if="zbSwFailures.length"
+             style="background:var(--el-color-warning-light-9);border-left:3px solid var(--el-color-warning);border-radius:8px;padding:10px 12px;margin-top:10px;">
+          <div style="font-weight:600;font-size:13px;color:#92400e;margin-bottom:6px;">
+            ⚠️ {{ zbSwFailures.length }} 项没写进表
           </div>
-          <!-- 展开的数据表格 -->
-          <div v-if="zbShowSyncData && zbSyncStatus.rows && zbSyncStatus.rows.length" style="margin-top:10px;max-height:300px;overflow:auto;">
-            <div style="display:flex;justify-content:flex-end;margin-bottom:4px;">
-              <el-button link size="small" @click="copySyncRows">📋 复制 TSV</el-button>
-            </div>
-            <table style="width:100%;font-size:11px;border-collapse:collapse;">
-              <thead>
-                <tr style="background:#f1f5f9;">
-                  <th v-for="h in ['日期','运营','账号','客户ID','费用','','产品','商务','地区','广告系列','','代投比例','M','N']" :key="h"
-                    style="padding:4px 6px;border:1px solid #e2e8f0;text-align:left;white-space:nowrap;">{{ h }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(row, i) in zbSyncStatus.rows" :key="i">
-                  <td v-for="(cell, j) in row" :key="j"
-                    style="padding:3px 6px;border:1px solid #e2e8f0;white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis;">
-                    {{ cell ?? '' }}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div v-for="(f, i) in zbSwFailures" :key="f.business_key"
+               :style="{ display:'flex', alignItems:'baseline', gap:'8px', padding:'5px 0',
+                         borderTop: i ? '1px solid var(--el-color-warning-light-7)' : 'none' }">
+            <el-tooltip placement="top" :content="sheetWriteHint(f)">
+              <span style="font-family:monospace;font-size:12px;color:#374151;flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.business_key }}</span>
+            </el-tooltip>
+            <span style="font-size:12px;color:#6b7280;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.error_msg || '未知原因' }}</span>
+            <el-button link size="small" :type="sheetWriteTone(f.status)"
+                       @click="retryZbSw(f)">重试</el-button>
           </div>
         </div>
       </div>
@@ -315,6 +296,8 @@ import { parseAdsData } from '@/utils/adsParser'
 import { translateApi } from '@/api/youtube'
 import { videoApi } from '@/api/video'
 import { googleSheetsApi } from '@/api/google-sheets'
+import { sheetWriteApi } from '@/api/sheetWrite'
+import { sheetWriteTone, sheetWriteHint, SHEET_WRITE_TOAST } from '@/utils/sheetWriteUi'
 import api from '@/api/client'
 
 const router = useRouter()
@@ -348,60 +331,84 @@ const zbProductsLoading = ref(false)
 const zbShowPaused = ref(false)
 const zbProductOptions = computed(() => visibleProducts(zbProducts.value, zbShowPaused.value))
 const zbUpdatingSheet = ref(false)
-const zbSyncStatus = ref(null)        // { status, error_msg, rows, retry_count, updated_at }
-const zbSyncChecking = ref(false)
-const zbRetryCountdown = ref(0)       // 30s 倒计时
-const zbShowSyncData = ref(false)
-let _zbSyncTimer = null
-let _zbCountdownTimer = null
+let _zbSyncTimer = null               // 「保存后轮询」的在途定时器
+let _zbSyncGen = 0                    // 每轮保存 +1：作废上一轮在途的 tick，防两条链并行
 let _zbMidnightTimer = null
 
-// 选择产品时查询是否有未同步记录
-watch(zbSelectedProduct, (name) => {
-  clearZbSyncState()
-  if (name) checkZbSyncStatus()
-})
+// ---------- 写表失败汇总（五期） ----------
+const ZB_SW_TARGET = 'gg_zuobiao'
+const zbSwFailures = ref([])
 
-function clearZbSyncState() {
-  zbSyncStatus.value = null
-  zbRetryCountdown.value = 0
+// 轮询本次写表结果：pending / failed 静默续查（**不得提示中间态**）；
+// 上限必须 > 后端 30s 重试窗口，否则终态 retry_failed 在 40s 前落不了库（四期栽过）。
+// 重试提交后也按同一节奏刷新汇总区 —— 重试后该行转 `pending`，而不带 businessKey 的
+// status **只回需要提示的终态** ⇒ 汇总区立刻少一项（看着像成功）；若再次失败，那一项
+// 要到手动刷新才回来（假成功）。两条链共用同一预算。
+const ZB_SW_POLL_MS = 3000
+const ZB_SW_POLL_MAX = 15          // ~45s，覆盖 30s 重试窗口
+
+let zbSwPollTimer = null
+let zbSwPollLeft = 0
+let zbSwPollGen = 0        // 每轮重试 +1：作废上一轮在途的 tick，防两条链并行
+
+/** 停掉「保存后轮询」：作废在途 tick（它会在 await 回来后自行退出）+ 清在途定时器。 */
+function stopZbSyncPoll() {
+  _zbSyncGen++
   if (_zbSyncTimer) { clearTimeout(_zbSyncTimer); _zbSyncTimer = null }
-  if (_zbCountdownTimer) { clearInterval(_zbCountdownTimer); _zbCountdownTimer = null }
 }
 
-async function checkZbSyncStatus() {
-  if (!zbSelectedProduct.value) return
-  zbSyncChecking.value = true
+/** 停掉「重试后汇总轮询」：同上（照 FbDataManage 的世代号 + 清定时器做法）。 */
+function stopZbSwPoll() {
+  zbSwPollGen++
+  zbSwPollLeft = 0
+  if (zbSwPollTimer) { clearTimeout(zbSwPollTimer); zbSwPollTimer = null }
+}
+
+/** 汇总区数据源：只取本 target 的终态；拉不到不该打扰用户，保持上一次结果。 */
+async function loadZbSwFailures() {
   try {
-    const res = await googleSheetsApi.syncStatus(zbSelectedProduct.value)
-    if (res.retry_failed) {
-      // 重试也失败了 → 一次性弹窗
-      ElMessage.error('重试失败，请联系管理')
-      zbSyncStatus.value = null
-      return
-    }
-    zbSyncStatus.value = res.log
-    if (res.log && res.log.status === 'failed') {
-      // 显示 30s 重试中状态
-      zbRetryCountdown.value = 30
-      startZbCountdown()
-    }
-  } catch { zbSyncStatus.value = null }
-  finally { zbSyncChecking.value = false }
+    const res = await sheetWriteApi.status({ platform: 'gg', target: ZB_SW_TARGET })
+    // 显式跳过中间态 **且** 不展示 synced：端点本就只回需要提示的终态，这里再兜一层，
+    // 防「中间态 / 成功态误入汇总区」被当成已落定的失败（本功能反复踩过的坑）。
+    zbSwFailures.value = (res.items || []).filter(
+      f => f.status !== 'pending' && f.status !== 'failed' && f.status !== 'synced')
+  } catch { /* 汇总拉不到不该打扰用户，保持上一次结果 */ }
 }
 
-function startZbCountdown() {
-  if (_zbCountdownTimer) clearInterval(_zbCountdownTimer)
-  zbRetryCountdown.value = 30
-  _zbCountdownTimer = setInterval(() => {
-    zbRetryCountdown.value--
-    if (zbRetryCountdown.value <= 0) {
-      clearInterval(_zbCountdownTimer)
-      _zbCountdownTimer = null
-      checkZbSyncStatus()  // 检查重试结果
-    }
-  }, 1000)
+/** 重试提交后按固定节奏刷新汇总区，有界（15 次后自动停）。
+ *  全程不弹任何提示 —— 中间态与终态都由汇总区自身呈现，避免打断 / 重复提示。 */
+function scheduleZbSwRefresh() {
+  const gen = ++zbSwPollGen                       // 开新一轮：作废上一轮（连点重试不叠链）
+  if (zbSwPollTimer) { clearTimeout(zbSwPollTimer); zbSwPollTimer = null }
+  zbSwPollLeft = ZB_SW_POLL_MAX
+  const tick = async () => {
+    zbSwPollTimer = null
+    if (gen !== zbSwPollGen || zbSwPollLeft <= 0) return   // 已被新一轮取代 / 到顶 / 已卸载即停
+    zbSwPollLeft--
+    await loadZbSwFailures()
+    if (gen !== zbSwPollGen || zbSwPollLeft <= 0) return
+    zbSwPollTimer = setTimeout(tick, ZB_SW_POLL_MS)
+  }
+  zbSwPollTimer = setTimeout(tick, ZB_SW_POLL_MS)
 }
+
+/** 逐条重试：提交 → 立即刷新 → 起有界轮询跟结果。 */
+async function retryZbSw(f) {
+  try {
+    await sheetWriteApi.retry({ platform: 'gg', target: ZB_SW_TARGET,
+                                businessKey: f.business_key })
+    ElMessage.success('已重新提交，请稍后查看结果')
+    await loadZbSwFailures()
+    scheduleZbSwRefresh()
+  } catch (e) { ElMessage.error(e.response?.data?.error || '重试失败') }
+}
+
+// 选择产品时刷新失败汇总区（沿用本页「切产品即查一次」的既有节奏），
+// 并停掉上一条保存后的轮询（它跟的是上一个产品的结果）。
+watch(zbSelectedProduct, () => {
+  stopZbSyncPoll()
+  loadZbSwFailures()
+})
 
 // 养户关键词（localStorage 持久化，默认值可随时增删）
 const ZB_YANGHU_KEY = 'zb_yanghu_keywords'
@@ -510,7 +517,6 @@ async function zbUpdateSheet() {
       costPerInApp: row.costPerInApp,
       is_yanghu: keywords.some(kw => (row.campaign || '').toLowerCase().includes(kw.toLowerCase())),
     }))
-    zbSyncStatus.value = null  // 清除旧状态
     const res = await googleSheetsApi.updateZuobiao({
       product_name: zbSelectedProduct.value,
       region: zbSelectedRegion.value,
@@ -532,73 +538,49 @@ async function zbUpdateSheet() {
   zbUpdatingSheet.value = false
 }
 
+// 保存后按 business_key（= 产品名）轮询本次写表结果 —— 与四期 FB 提取页同形。
+// 中间态（pending / failed）静默续查、**只在终态提示**：后端首次失败先落中间态 failed
+// → 睡 30s → 重试 → 终态最早 ~30s 才落库，窗口短于 30s 会把「走过后端重试」的终态全
+// 排除在提示之外（四期栽过）。失败文案复用 sheetWriteUi 的唯一文案源；成功确认是本页
+// 自己的一句（成功不属于「失败治理三态语汇」，见 sheetWriteUi.js 自述）。
 function startZbSyncPolling() {
+  const businessKey = zbSelectedProduct.value
+  if (!businessKey) return
+  stopZbSyncPoll()                 // 作废上一轮在途 tick（连点保存不叠链）
+  const gen = _zbSyncGen           // 本轮世代号
   let attempts = 0
-  const maxAttempts = 40  // 最多轮询 2 分钟
-  if (_zbSyncTimer) clearTimeout(_zbSyncTimer)
   const poll = async () => {
-    if (attempts >= maxAttempts) return
+    if (gen !== _zbSyncGen) return // 已被新一轮 / 卸载取代
+    if (attempts >= ZB_SW_POLL_MAX) {
+      // 非「中间态报警」，而是「无法确认结果」的告知：把用户指到能查看 / 重试的地方
+      ElMessage.warning('写表结果未返回，请稍后在本页汇总区查看或重试')
+      loadZbSwFailures()
+      return
+    }
     attempts++
     try {
-      const res = await googleSheetsApi.syncStatus(zbSelectedProduct.value)
-      // 重试失败 → 弹窗
-      if (res.retry_failed) {
-        ElMessage.error('重试失败，请联系管理')
-        zbSyncStatus.value = null
+      const res = await sheetWriteApi.status({
+        platform: 'gg', target: ZB_SW_TARGET, businessKey,
+      })
+      if (gen !== _zbSyncGen) return
+      const it = res.item
+      if (!it) return                             // 无记录 = 这条路径没触发写表
+      if (it.target !== ZB_SW_TARGET) return      // 被同期其它 target 遮蔽时误判
+      if (it.status === 'synced') { loadZbSwFailures(); ElMessage.success('✅ 写表成功'); return }
+      if (it.status === 'pending' || it.status === 'failed') {
+        _zbSyncTimer = setTimeout(poll, ZB_SW_POLL_MS)
         return
       }
-      const log = res.log
-      if (!log) {
-        // 同步成功（无失败记录）
-        zbSyncStatus.value = null
-        return
-      }
-      zbSyncStatus.value = log
-      if (log.status === 'failed') {
-        ElMessage.warning({ message: '填表失败，30秒后自动重试...', duration: 0, showClose: true })
-        zbRetryCountdown.value = 30
-        startZbCountdown()
-        return  // 等待倒计时结束后再检查
-      }
-      if (log.status === 'retry_failed') {
-        ElMessage.error({ message: '重试失败，请手动操作', duration: 0, showClose: true })
-        return
-      }
-      // 其他状态，继续轮询
-      _zbSyncTimer = setTimeout(poll, 3000)
+      // 需提示的终态（retry_failed 等）：文案与汇总区 / 工具提示同源
+      SHEET_WRITE_TOAST[sheetWriteTone(it.status)](sheetWriteHint(it))
+      loadZbSwFailures()
     } catch {
-      _zbSyncTimer = setTimeout(poll, 3000)
+      if (gen !== _zbSyncGen) return                  // 已被新一轮 / 卸载取代即停
+      _zbSyncTimer = setTimeout(poll, ZB_SW_POLL_MS)  // 查询失败不打扰用户，续查
     }
   }
   // 3 秒后开始第一次检查（给后台线程一点时间）
-  _zbSyncTimer = setTimeout(poll, 3000)
-}
-
-async function zbRetrySheetsSync() {
-  if (!zbSelectedProduct.value) return
-  try {
-    await googleSheetsApi.retrySync({ product_name: zbSelectedProduct.value })
-    ElMessage.success('表格同步成功')
-    zbSyncStatus.value = null
-    zbRetryCountdown.value = 0
-    zbShowSyncData.value = false
-    if (_zbCountdownTimer) { clearInterval(_zbCountdownTimer); _zbCountdownTimer = null }
-  } catch (e) {
-    ElMessage.error('重试失败: ' + (e.response?.data?.error || e.message))
-    checkZbSyncStatus()
-  }
-}
-
-function copySyncRows() {
-  if (!zbSyncStatus.value?.rows?.length) return
-  const tsv = zbSyncStatus.value.rows.map(row =>
-    row.map(cell => (cell ?? '')).join('\t')
-  ).join('\n')
-  navigator.clipboard.writeText(tsv).then(() => {
-    ElMessage.success('已复制 ' + zbSyncStatus.value.rows.length + ' 行 TSV 数据')
-  }).catch(() => {
-    ElMessage.error('复制失败，请手动选择表格内容')
-  })
+  _zbSyncTimer = setTimeout(poll, ZB_SW_POLL_MS)
 }
 
 function resolveDuplicate(idx, decision) {
@@ -703,7 +685,12 @@ function _revokeAudioBlobs() {
   if (audioVideoBlobUrl.value) { URL.revokeObjectURL(audioVideoBlobUrl.value); audioVideoBlobUrl.value = '' }
   if (audioSourceBlobUrl.value) { URL.revokeObjectURL(audioSourceBlobUrl.value); audioSourceBlobUrl.value = '' }
 }
-onUnmounted(() => { _revokeAudioBlobs(); clearZbSyncState(); if (_zbMidnightTimer) clearTimeout(_zbMidnightTimer) })
+onUnmounted(() => {
+  _revokeAudioBlobs()
+  stopZbSyncPoll()               // 保存后轮询：作废在途 tick + 清掉在途定时器
+  stopZbSwPoll()                 // 重试后汇总轮询：同上
+  if (_zbMidnightTimer) clearTimeout(_zbMidnightTimer)
+})
 
 function onAudioVideoFileChange(e) {
   audioVideoFile.value = e.target.files?.[0] || null
@@ -767,7 +754,7 @@ function audioHistoryDownload(item) {
   window.open(item.download_url || `/api/audio-replace/download?path=${encodeURIComponent(item.output_path)}`, '_blank')
 }
 
-onMounted(() => { audioLoadHistory(); loadZbProducts(); scheduleZbMidnightRefresh() })
+onMounted(() => { audioLoadHistory(); loadZbProducts(); loadZbSwFailures(); scheduleZbMidnightRefresh() })
 
 // ========== 翻译工具 ==========
 const TL_LANGS = [
