@@ -600,7 +600,7 @@
         <el-alert type="success" show-icon :closable="false">
           <template #title>同步完成</template>
           <div style="font-size:12px;">
-            新增 {{ hdResult.created }} 个账户，更新 {{ hdResult.updated }} 处，归属变更 {{ hdResult.owner_changed }} 个。
+            新增 {{ hdResult.created }} 个账户，更新 {{ hdResult.updated }} 处，归属变更 {{ hdResult.owner_changed }} 个<template v-if="hdOrphanLinked">，另有 {{ hdOrphanLinked }} 个已有账户补上了字典关联</template>。
           </div>
         </el-alert>
 
@@ -647,6 +647,28 @@
             …另有 {{ hdResult.not_applied.length - 20 }} 条
           </div>
         </template>
+      </div>
+
+      <!-- 将新增的字典项（Task 4 / 设计 §4.3）。字典项一旦建成就「存在」了、不会自愈，差异报告是
+           唯一的人工拦截点。橙左竖条＝「将写入」（沿用卡片既有的警告橙，不是「出错了」）。
+           放在模式开关**之外**：预演（A）与结果（B）都要显示 —— A 里它紧随「未采集列」，
+           B 里改口径为「已补建」（已确认 → 已落库）。 -->
+      <div v-if="hdPendingMaster.length"
+           style="border-left:3px solid #e6a23c;padding-left:10px;margin:16px 0;">
+        <div style="font-weight:600;font-size:14px;color:#374151;margin-bottom:6px;">
+          {{ syncDlg.mode === 'B' ? '已补建的字典项' : '将新增的字典项' }}
+        </div>
+        <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">
+          <template v-if="syncDlg.mode === 'B'">这些是本次同步自动写入系统字典的 BC / 渠道 / 国家时区。</template>
+          <template v-else>这些是系统里还没有的 BC / 渠道 / 国家时区，确认同步后会自动创建。</template>
+        </div>
+        <div v-for="(m, i) in hdPendingMaster" :key="m.kind + '|' + m.name + '|' + i"
+             style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+          <el-tag size="small" type="info">{{ hdMasterKindLabel(m.kind) }}</el-tag>
+          <span :style="hdIsDigits(m.name) ? 'font-variant-numeric:tabular-nums;' : ''">{{ m.name }}</span>
+          <span style="font-size:12px;color:#6b7280;">{{ m.rows }} 行</span>
+          <span v-if="m.kind === 'region'" style="font-size:12px;color:#6b7280;">→ {{ m.timezone }}</span>
+        </div>
       </div>
     </div>
 
@@ -1088,6 +1110,18 @@ const hdNotAppliedShown = computed(() => (hdResult.value.not_applied || []).slic
 // 未采集列（第二批 §3.4）：第一批只把 `unmatched_columns` 放进了 diff 载荷，前端一直没渲染它。
 // 形状 [{sheet, headers}]，逐表逐条。gg/fb 恒为空（后端只在 tt 分支产出）。
 const hdUnmatchedColumns = computed(() => (syncDiff.value && syncDiff.value.unmatched_columns) || [])
+
+// 将新增的字典项（Task 4 / 设计 §4.3）。后端**恒**返回该键（无则空数组）；gg/fb 恒空。
+// 形状 [{kind:'bc'|'agent'|'region', name, timezone, rows}]，timezone 仅 region 非空、且已归一化。
+// 它同时出现在预演（mode A）与结果（mode B）——diff 在确认后不再变化（建成即「已有」）。
+const hdPendingMaster = computed(() => (syncDiff.value && syncDiff.value.pending_master) || [])
+// 落地结果里被补挂上字典关联的**已有账户**数：既不在 created 也不在 updated 里。
+// 只有结果页（mode B）带它；缺省 0。用它让「只补挂、没新增」的一次同步不至于读成没发生。
+const hdOrphanLinked = computed(() => Number(hdResult.value.orphan_linked) || 0)
+const HD_MASTER_KIND_LABEL = { bc: 'BC', agent: '渠道', region: '国家时区' }
+function hdMasterKindLabel(kind) { return HD_MASTER_KIND_LABEL[kind] || kind }
+// BC 的 name 就是那串 19 位数字：纯数字用等宽数字（tabular-nums），避免逐条对不齐。
+function hdIsDigits(s) { return /^\d+$/.test(String(s == null ? '' : s)) }
 
 // ---------- 撤回结果的派生数据（与差异报告同一渲染口径） ----------
 // 结果体按方向形状不同：push {updated, not_found}；sync {reverted, conflicts, kept, not_found}。
