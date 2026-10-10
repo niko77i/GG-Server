@@ -6479,31 +6479,34 @@ class TestCrossSheetNotesWiring:
         assert "cross_sheet_notes" not in diff
         assert called == [], "缺省路径不得为跨表提示多查一次库"
 
-    def test_push_attaches_notes_with_sheet_name(self, client, monkeypatch):
+    def test_sync_same_type_or_unknown_accounts_are_not_noted(self, client, monkeypatch):
+        """负向：库内同类型（`account_type == 本次表名`）与库里查不到的账户，都不得提示。
+
+        与正向用例配对 —— 没有它，「恒返回某个 non-empty」的坏实现也会绿。
+        """
         import google_sheets_service as gs
-        # 户类型名与工作表名**故意不同**：push 的行过滤按 `account_type`（=类型名），
-        # 而提示按工作表名比对 ⇒ 只有二者不同时提示才非空（见 task-3-report「顾虑」）。
-        # 这样才证明该键的值真来自库（活的连接），而不是硬写的空壳。
-        hg = self._conf(client, "_csn3", [{"name": "企业户", "sheet_name": "企业户表"}])
+        hg = self._conf(client, "_csn5", [{"name": "企业户", "sheet_name": "企业户"}])
         db = database.get_db()
         db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
-                   "deleted_at) VALUES('8001','甲','企业户',NULL)")
+                   "deleted_at) VALUES('7001','甲','企业户',NULL)")
         db.commit(); db.close()
-        monkeypatch.setattr(hd, "read_sheet_values",
-                            lambda svc, sid, sheet, rng: [["账户ID"]])
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda svc, sid, sheet, rng: [["账户ID"], ["7001"], ["7099"]])
         monkeypatch.setattr(gs, "build_service", lambda p: object())
-        monkeypatch.setattr(gs, "update_rows_by_account_id",
-                            lambda svc, sid, sheet, rows, key_col="C":
-                            {"updated": len(rows), "not_found": []})
-        result = client.post("/api/huguan/dashboard/push", headers=hg, json={
-            "platform": "tt", "sheet_name": "企业户表"}).get_json()["result"]
-        assert result["cross_sheet_notes"] == {
-            "count": 1, "notes": [{"account_id": "8001", "current_type": "企业户",
-                                   "this_sheet": "企业户表"}]}
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "sheet_name": "企业户", "dry_run": True}).get_json()["diff"]
+        assert diff["cross_sheet_notes"] == {"count": 0, "notes": []}
 
-    def test_push_default_path_has_no_notes_key(self, client, monkeypatch):
+    def test_push_never_emits_cross_sheet_notes(self, client, monkeypatch):
+        """push 侧**刻意不接**跨表提示（与 sync 不同，理由见 task-3-report「Fix pass」）。
+
+        push 的行已被过滤到 `account_type == 目标户类型`，而该提示拿**工作表名**去比
+        `account_type` —— 正常配置里「户类型名 == 工作表名」⇒ 按构造永不命中（死代码）；
+        若人为把二者改成不同，则每一行都命中 ⇒ 恒错的告警。故 push 的响应**无论带不带
+        `sheet_name`** 都不该出现该键。本用例是**防重新加回**的守卫。
+        """
         import google_sheets_service as gs
-        hg = self._conf(client, "_csn4", [{"name": "企业户", "sheet_name": "企业户"}])
+        hg = self._conf(client, "_csn3", [{"name": "企业户", "sheet_name": "企业户"}])
         db = database.get_db()
         db.execute("INSERT INTO tt_accounts(advertiser_id, name, account_type, "
                    "deleted_at) VALUES('8001','甲','企业户',NULL)")
@@ -6517,7 +6520,8 @@ class TestCrossSheetNotesWiring:
         monkeypatch.setattr(gs, "update_rows_by_account_id",
                             lambda svc, sid, sheet, rows, key_col="C":
                             {"updated": len(rows), "not_found": []})
-        result = client.post("/api/huguan/dashboard/push", headers=hg,
-                             json={"platform": "tt"}).get_json()["result"]
-        assert "cross_sheet_notes" not in result
-        assert called == [], "缺省路径不得为跨表提示多查一次库"
+        for body in ({"platform": "tt"}, {"platform": "tt", "sheet_name": "企业户"}):
+            result = client.post("/api/huguan/dashboard/push", headers=hg,
+                                 json=body).get_json()["result"]
+            assert "cross_sheet_notes" not in result, f"{body} 不该带该键"
+        assert called == [], "push 侧不该调用 cross_sheet_notes"

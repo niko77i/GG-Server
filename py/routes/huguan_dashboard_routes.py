@@ -498,13 +498,11 @@ def dashboard_push():
         if target_type is not None:
             # 只留目标户类型的账户：写回的是**这张表**，别的表一个格都不碰。
             rows = [r for r in rows if (r.get("account_type") or "") == target_type]
-        # 跨表归属提示（设计 §3.3，A1 的补偿）：只有按表时算。
-        # ⚠️ **必须在这条连接关掉之前**算 —— 下面的 `finally: db.close()`（以及快照用的
-        # `undo_db`）都早于响应组装，那里已无活着的连接可用。只查库、不读表（读表会抵消
-        # 按表提速）。缺省路径 ⇒ None ⇒ 响应里不加键、也不查库（逐字节不变）。
-        cross_sheet_notes = (hd.cross_sheet_notes(
-            db, platform, [r["account_id"] for r in rows], only_sheet)
-            if only_sheet else None)
+        # 跨表归属提示（设计 §3.3）**只接在 sync 侧，push 侧刻意不接**：push 的 rows 已被
+        # 过滤到 `account_type == 目标户类型`，而提示拿**工作表名**去比 `account_type` ——
+        # 正常配置里「户类型名 == 工作表名」⇒ 按构造永不命中（死代码）；若二者被人为改成
+        # 不同，则每一行都命中 ⇒ 变成一条恒错的告警。有意义的那一侧只有 sync
+        # （行来自表、库里的 account_type 才可能真的不同）。详见 task-3-report.md。
         groups, skipped = hd.group_rows_by_sheet(db, uid, platform, rows)
         t0 = _tick("收集完成", t0)
     finally:
@@ -563,12 +561,8 @@ def dashboard_push():
     _log_summary("刷新", only_sheet, op_t0,
                  ("待写行", len(rows)), ("已写", total_updated),
                  ("未找到", len(total_not_found)))
-    result = {"rows": len(rows), "updated": total_updated,
-              "not_found": total_not_found}
-    # 跨表归属提示（设计 §3.3）：只在按表时挂上；缺省路径不加键（逐字节不变）。
-    if cross_sheet_notes is not None:
-        result["cross_sheet_notes"] = cross_sheet_notes
-    return ok({"result": result})
+    return ok({"result": {"rows": len(rows), "updated": total_updated,
+                          "not_found": total_not_found}})
 
 
 def _discard_undo(uid: int, platform: str, direction: str) -> None:
