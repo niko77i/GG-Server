@@ -1,12 +1,17 @@
 ﻿import { defineStore } from 'pinia'
 import { authApi } from '../api/auth'
+import { PLATFORM_KEY, sanitizePlatform, platformOnHydrate } from '../utils/platformPrefs.mjs'
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     user: null,
     token: localStorage.getItem('token') || '',
     isLoggedIn: !!localStorage.getItem('token'),
-    currentPlatform: 'gg'  // developer 可切换，普通用户登录后根据 user.platform 设置
+    // 平台上下文**必须持久化**。它原先只活在内存里（初始值硬编码 'gg'、setPlatform 不落盘、
+    // initFromStorage 不恢复）⇒ 整页刷新后，**可切换平台的角色（户管/开发者）会静默掉回 GG**，
+    // 而页面还停在刷新前那张表 ⇒ 侧边栏/导航/路由守卫/筛选器全按 GG 算：看着是 TT、实际是 GG。
+    // 这里先按白名单读回（脏值回落 'gg'），`initFromStorage` 拿到 user 后再按角色归一。
+    currentPlatform: sanitizePlatform(localStorage.getItem(PLATFORM_KEY))
   }),
   getters: {
     isAdmin: (state) => ['developer', 'admin'].includes(state.user?.role),
@@ -48,8 +53,10 @@ export const useAuthStore = defineStore('auth', {
       if (this.canSwitchPlatform) {
         this.currentPlatform = 'gg' // developer 默认进 GG
       } else {
-        this.currentPlatform = res.user?.platform || 'gg'
+        this.currentPlatform = sanitizePlatform(res.user?.platform)
       }
+      // 落盘：刷新后要恢复成同一个平台（见 state 上方注释）
+      localStorage.setItem(PLATFORM_KEY, this.currentPlatform)
       localStorage.setItem('token', res.access_token)
       localStorage.setItem('user', JSON.stringify(res.user))
       return res
@@ -71,14 +78,22 @@ export const useAuthStore = defineStore('auth', {
     },
     setPlatform(platform) {
       if (this.canSwitchPlatform) {
-        this.currentPlatform = platform
+        this.currentPlatform = sanitizePlatform(platform)
+        localStorage.setItem(PLATFORM_KEY, this.currentPlatform)
       }
+    },
+    /** 路由是平台的**最终依据**（切平台即导航，见 AppSidebar.switchPlatform）⇒ 刷新后按当前
+     *  路由校正一次：存储缺失/过期时靠它自愈；不可切换平台的角色不参与。 */
+    syncPlatformFromRoute(metaPlatform) {
+      if (!this.canSwitchPlatform || !metaPlatform) return
+      if (this.currentPlatform !== metaPlatform) this.setPlatform(metaPlatform)
     },
     logout() {
       this.user = null
       this.token = ''
       this.isLoggedIn = false
       this.currentPlatform = 'gg'
+      localStorage.removeItem(PLATFORM_KEY)
       localStorage.removeItem('token')
       localStorage.removeItem('user')
     },
@@ -89,6 +104,12 @@ export const useAuthStore = defineStore('auth', {
         this.token = token
         this.user = JSON.parse(user)
         this.isLoggedIn = true
+        // 拿到 user 才知道能不能切平台 ⇒ 平台按角色在这里归一（判据见 utils/platformPrefs.mjs）
+        this.currentPlatform = platformOnHydrate({
+          stored: localStorage.getItem(PLATFORM_KEY),
+          canSwitch: this.canSwitchPlatform,
+          userPlatform: this.user?.platform,
+        })
       }
     }
   }
