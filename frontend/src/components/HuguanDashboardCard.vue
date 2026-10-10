@@ -651,15 +651,19 @@
 
       <!-- 将新增的字典项（Task 4 / 设计 §4.3）。字典项一旦建成就「存在」了、不会自愈，差异报告是
            唯一的人工拦截点。橙左竖条＝「将写入」（沿用卡片既有的警告橙，不是「出错了」）。
-           放在模式开关**之外**：预演（A）与结果（B）都要显示 —— A 里它紧随「未采集列」，
-           B 里改口径为「已补建」（已确认 → 已落库）。 -->
+           放在模式开关**之外**：预演（A）与结果（B）都要显示 —— A 里它紧随「未采集列」。
+           B 里只在**确实全部落库**时才敢写「已补建」；有出错 / 未落库 / 带字典项的行没勾时，
+           降级为「本次要补建」（`hdMasterPartial`）—— 否则会对未建成的项过度声称。 -->
       <div v-if="hdPendingMaster.length"
            style="border-left:3px solid #e6a23c;padding-left:10px;margin:16px 0;">
         <div style="font-weight:600;font-size:14px;color:#374151;margin-bottom:6px;">
-          {{ syncDlg.mode === 'B' ? '已补建的字典项' : '将新增的字典项' }}
+          {{ syncDlg.mode === 'B' ? (hdMasterPartial ? '本次要补建的字典项' : '已补建的字典项') : '将新增的字典项' }}
         </div>
         <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">
-          <template v-if="syncDlg.mode === 'B'">这些是本次同步自动写入系统字典的 BC / 渠道 / 国家时区。</template>
+          <template v-if="syncDlg.mode === 'B'">
+            <template v-if="hdMasterPartial">这些是本次同步计划写入系统字典的 BC / 渠道 / 国家时区；其中未能落库的项，原因见上方错误 / 未落库说明（也可能是对应行未勾选）。</template>
+            <template v-else>这些是本次同步自动写入系统字典的 BC / 渠道 / 国家时区。</template>
+          </template>
           <template v-else>这些是系统里还没有的 BC / 渠道 / 国家时区，确认同步后会自动创建。</template>
         </div>
         <div v-for="(m, i) in hdPendingMaster" :key="m.kind + '|' + m.name + '|' + i"
@@ -676,7 +680,8 @@
       <div style="display:flex;align-items:center;">
         <template v-if="syncDlg.mode === 'A'">
           <span style="font-size:12px;color:#6b7280;margin-right:auto;">
-            <template v-if="selectedCount === 0">还没有勾选任何项</template>
+            <template v-if="selectedCount === 0 && hdPendingMasterRows.length">本次只有字典项要补建（将新增 {{ hdPendingMaster.length }} 项）</template>
+            <template v-else-if="selectedCount === 0">还没有勾选任何项</template>
             <template v-else-if="selOwner.length === 0 && hdOwnerChanges.length">已选 {{ selectedCount }} 项（归属变更未勾选，这些账户的归属人不会变）</template>
             <template v-else>已选 {{ selectedCount }} 项（其中归属变更 {{ selOwner.length }} 项）</template>
           </span>
@@ -688,8 +693,9 @@
           <template v-else>
             <el-button ref="syncCancelBtn" @click="syncDlg.visible = false">取消</el-button>
             <el-button :type="confirmType" :loading="syncDlg.applying"
-                       :disabled="selectedCount === 0 || syncDlg.applying" @click="applySync">
-              <template v-if="selectedCount === 0">确认同步（请先勾选）</template>
+                       :disabled="!hdCanApply || syncDlg.applying" @click="applySync">
+              <template v-if="selectedCount === 0 && hdPendingMasterRows.length">确认同步（将补建 {{ hdPendingMaster.length }} 项字典）</template>
+              <template v-else-if="selectedCount === 0">确认同步（请先勾选）</template>
               <template v-else>确认同步（已选 {{ selectedCount }} 项）</template>
             </el-button>
           </template>
@@ -853,7 +859,8 @@ const updateTblRef = ref(null)
 const pushDlg = reactive({ visible: false, sheet: null })
 // sheet = 这次差异报告是**哪张表**的按表同步（空串 = 平台级/全部表）。它同时决定：
 // 弹窗标题带不带表名、「表」列藏不藏、落库那一步带不带 sheet_name（见 applySync）。
-const syncDlg = reactive({ visible: false, mode: 'A', applyError: '', applying: false, sheet: '' })
+const syncDlg = reactive({ visible: false, mode: 'A', applyError: '', applying: false,
+                           sheet: '', pendingUnpicked: false })
 
 // 撤回（子项目 ③，spec §八）：hdUndo 是「两个方向各有没有可撤的快照」，
 // 平铺取自 GET /huguan/dashboard/undo 的 res.push / res.sync（各为 {count, created_at} 或 null）。
@@ -1115,6 +1122,12 @@ const hdUnmatchedColumns = computed(() => (syncDiff.value && syncDiff.value.unma
 // 形状 [{kind:'bc'|'agent'|'region', name, timezone, rows}]，timezone 仅 region 非空、且已归一化。
 // 它同时出现在预演（mode A）与结果（mode B）——diff 在确认后不再变化（建成即「已有」）。
 const hdPendingMaster = computed(() => (syncDiff.value && syncDiff.value.pending_master) || [])
+// 内部载荷（后端 build_diff 的 `pending_master_rows`）：孤儿行 —— 已存账户、唯一变化是
+// 系统里没有的字典名 —— 的「账户 → 缺失字典项」。它**不参与渲染**（展示用上面聚合过的
+// `pending_master`），但它是「这次同步一定会补建什么」的**唯一可信信号**：apply_diff 的
+// 孤儿循环不看 `confirmed`、无条件执行；而 `pending_master` 里来自 create/update 行的那部分
+// 受勾选门控（没勾就不建）。⇒ 据此判断「点下去有没有效果」不会把未勾选行算进去。
+const hdPendingMasterRows = computed(() => (syncDiff.value && syncDiff.value.pending_master_rows) || [])
 // 落地结果里被补挂上字典关联的**已有账户**数：既不在 created 也不在 updated 里。
 // 只有结果页（mode B）带它；缺省 0。用它让「只补挂、没新增」的一次同步不至于读成没发生。
 const hdOrphanLinked = computed(() => Number(hdResult.value.orphan_linked) || 0)
@@ -1147,6 +1160,26 @@ const selectedCount = computed(() => selCreate.value.length + selUpdate.value.le
 // 只有「这次点下去会不可逆地清空字段」才染红（永远染红等于没染）
 const willClear = computed(() => selUpdate.value.some(x => (x.clears || []).length))
 const confirmType = computed(() => willClear.value ? 'danger' : 'primary')
+
+// 「确认落库」能不能点：勾选的东西 **或** 孤儿行的字典补建（后者无条件执行、不依赖勾选）。
+// 只有后者时 selectedCount 恒为 0，但落库确实会建字典项 + 挂链 —— 不把按钮置灰（否则纯孤儿
+// 的 diff 永远点不动，后端的孤儿循环从 UI 走不到）。
+const hdCanApply = computed(() => selectedCount.value > 0 || hdPendingMasterRows.value.length > 0)
+// 结果页（mode B）口径：带字典项的「新增 / 更新」行若有没勾的，该行的字典项不会落库，
+// 此时区标题就不能写「已补建」（会过度声称）。孤儿行的字典项不受此影响（无条件执行）。
+// 必须在**点确认的那一刻**从当前勾选快照算出来存下（`syncDlg.pendingUnpicked`）：
+// 切到 mode B 后预演用的表会被卸载，`selCreate`/`selUpdate` 不再可靠。
+function computePendingUnpicked() {
+  const sel = new Set([...selCreate.value, ...selUpdate.value].map(x => x.account_id))
+  return hdCreate.value.some(r => (r.pending_master || []).length && !sel.has(r.account_id))
+    || hdUpdate.value.some(r => (r.pending_master || []).length && !sel.has(r.account_id))
+}
+// 有出错的行、有勾了却没落库的项、或有带字典项的行没勾 ⇒ 这次「补建」未必都落库，
+// 结果页措辞降级为「本次要补建」，别对未建成的项声称「已补建」。
+const hdMasterPartial = computed(() =>
+  (hdResult.value.errors || []).length > 0
+  || (hdResult.value.not_applied || []).length > 0
+  || syncDlg.pendingUnpicked)
 
 const syncTitle = computed(() => {
   // 按表同步（本期）：标题带表名（视觉规格「单表差异弹窗」），与平台级区分。结果页也带 ——
@@ -1575,6 +1608,7 @@ async function openSyncDialog(diff, sheet = '') {
   syncResult.value = null
   syncDlg.applyError = ''
   syncDlg.mode = 'A'
+  syncDlg.pendingUnpicked = false
   syncDlg.sheet = sheet
   clearingExpanded.value = false
   selOwner.value = []
@@ -1601,6 +1635,8 @@ async function openSyncDialog(diff, sheet = '') {
 async function applySync() {
   syncDlg.applying = true
   syncDlg.applyError = ''
+  // 结果页口径的快照：此刻预演表还在，勾选可靠；晚了（切 mode B 后）表卸载、勾选不可信。
+  syncDlg.pendingUnpicked = computePendingUnpicked()
   try {
     // 落库这一步必须带**同一个** sheet_name（按表同步时）。不带的话后端会把所有表重读
     // 一遍：一是「其它表缺账户ID」这类问题会误拒这一次按表落库，二是撤回快照会覆盖
