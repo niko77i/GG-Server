@@ -53,15 +53,111 @@
           每一行是一张账户表。左边的名字就是「户类型」，会出现在账户页的筛选按钮上，
           也是系统里区分账户的依据；右边选这张表在 Google 表格里对应的工作表。
         </div>
-        <div v-for="(t, i) in hdForm.tables" :key="i"
-             style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
-          <el-input v-model="t.name" placeholder="户类型名，如 加白户" style="width:180px;"
-                    :disabled="hdBusy" />
-          <el-select v-model="t.sheet_name" filterable allow-create default-first-option
-                     placeholder="选择或输入工作表名" style="flex:1;" :disabled="hdBusy">
-            <el-option v-for="name in hdSheets" :key="name" :label="name" :value="name" />
-          </el-select>
-          <el-button :disabled="hdBusy" @click="removeHdTable(i)">删除</el-button>
+        <div v-for="(t, i) in hdForm.tables" :key="i" style="margin-bottom:8px;">
+          <div style="display:flex;gap:8px;align-items:center;">
+            <el-input v-model="t.name" placeholder="户类型名，如 加白户" style="width:180px;"
+                      :disabled="hdBusy" />
+            <el-select v-model="t.sheet_name" filterable allow-create default-first-option
+                       placeholder="选择或输入工作表名" style="flex:1;" :disabled="hdBusy">
+              <el-option v-for="name in hdSheets" :key="name" :label="name" :value="name" />
+            </el-select>
+            <el-button :disabled="hdBusy" @click="removeHdTable(i)">删除</el-button>
+          </div>
+
+          <!-- 列映射（第二批 §3.4）：每张表各自的「读表头 → 逐列指派」面板。
+               改动只落进 t.columns，跟卡片既有的「💾 保存配置」一起提交 —— 不新增第二条写路径。 -->
+          <div :ref="el => setHdPanelEl(i, el)" style="margin-top:6px;">
+            <el-collapse :model-value="hdIsOpen(t) ? ['map'] : []" @change="v => hdSetOpen(t, v)">
+              <el-collapse-item name="map">
+                <template #title>
+                  <span style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+                    <span style="font-weight:600;font-size:14px;color:#374151;">列映射</span>
+                    <span v-if="hdStats(t).ok || hdStats(t).miss || hdStats(t).skip"
+                          style="font-size:12px;color:#6b7280;white-space:nowrap;">
+                      {{ hdStats(t).ok }} 列已识别 · {{ hdStats(t).miss }} 列未采集 · {{ hdStats(t).skip }} 列不采集
+                    </span>
+                    <span v-if="hdColsDirty(t)"
+                          style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:#e6a23c;white-space:nowrap;">
+                      <span aria-hidden="true"
+                            style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#e6a23c;"></span>未保存
+                    </span>
+                    <!-- 读表头按钮在标题行最右；点它不能连带展开/收起（stop） -->
+                    <el-tooltip content="先在左边填这张表的工作表名" placement="top" :disabled="!!hdSheetKey(t)">
+                      <span style="margin-left:auto;" @click.stop>
+                        <el-button size="small" type="primary"
+                                   :loading="!!hdHeaderLoading[hdSheetKey(t)]"
+                                   :disabled="hdBusy || !hdSheetKey(t)"
+                                   @click.stop="hdReadHeaders(i)">读取表头</el-button>
+                      </span>
+                    </el-tooltip>
+                  </span>
+                </template>
+
+                <div style="padding:2px 2px 4px;">
+                  <!-- 读失败：就地显示，不弹全局错误 -->
+                  <el-alert v-if="hdHeaderError[hdSheetKey(t)]" type="error" show-icon :closable="false"
+                            style="margin-bottom:8px;" :title="hdHeaderError[hdSheetKey(t)]" />
+
+                  <!-- 未读表头（空态） -->
+                  <div v-if="!hdHeaderLoading[hdSheetKey(t)] && !hdHeaderError[hdSheetKey(t)]
+                              && !(hdHeaderRows[hdSheetKey(t)] || []).length"
+                       style="text-align:center;font-size:12px;color:#6b7280;padding:12px 0;">
+                    点「读取表头」看看这张表每一列会被认成什么。
+                  </div>
+
+                  <!-- 读取中：两行骨架 -->
+                  <el-skeleton v-else-if="hdHeaderLoading[hdSheetKey(t)]" :rows="2" />
+
+                  <template v-else>
+                    <div v-for="(row, ri) in hdHeaderRows[hdSheetKey(t)]" :key="row.header + '#' + ri"
+                         class="hd-map-row"
+                         :class="{ 'hd-map-row--none': hdRowMiss(t, row),
+                                   'hd-map-row--ignored': !hdRowIsDup(t, row) && hdRowState(row) === 'ignored' }">
+                      <span class="hd-map-head" :title="row.header">{{ row.header }}</span>
+                      <span style="display:flex;align-items:center;gap:6px;min-width:0;">
+                        <!-- empty-values 去掉默认的空串档：否则选中「（不采集）」(= '') 会被当成
+                             「没有值」而只显示占位符，看不出这一列是刻意不采集。 -->
+                        <el-select :model-value="row.selected" :empty-values="[null, undefined]"
+                                   size="small" placeholder="选择字段…" style="width:14em;flex:none;"
+                                   :disabled="hdBusy || hdRowIsDup(t, row)"
+                                   @change="v => hdOnColumnPick(i, row, v)">
+                          <el-option v-for="o in hdColumnOptions" :key="o.value"
+                                     :label="o.label" :value="o.value">
+                            <span>{{ o.label }}</span>
+                            <el-tooltip v-if="o.keyCol" placement="right"
+                                        content="这张表必须有「账户ID」列，否则整次同步会被拒绝">
+                              <span class="hd-map-mark">（{{ o.mark }}）</span>
+                            </el-tooltip>
+                            <span v-else-if="o.mark" class="hd-map-mark">（{{ o.mark }}）</span>
+                          </el-option>
+                          <el-option label="（不采集）" value="" />
+                        </el-select>
+                        <!-- 表头重复的行只读：columns 按表头名存键，指派第二个同名表头会静默作用于最左列 -->
+                        <template v-if="hdRowIsDup(t, row)">
+                          <el-tag size="small" type="danger">未采集</el-tag>
+                          <span style="font-size:12px;color:#f56c6c;white-space:nowrap;">表头重复，先在表里改名</span>
+                        </template>
+                        <template v-else-if="hdRowState(row) === 'none'">
+                          <el-tag size="small" type="danger">未采集</el-tag>
+                        </template>
+                        <template v-else-if="hdRowState(row) === 'manual'">
+                          <el-tag size="small" type="primary">手工</el-tag>
+                          <span style="font-size:12px;color:#409eff;">已改</span>
+                        </template>
+                        <template v-else-if="hdRowState(row) === 'alias'">
+                          <el-tag size="small" type="info">别名</el-tag>
+                        </template>
+                      </span>
+                    </div>
+                    <div v-if="(hdHeaderRows[hdSheetKey(t)] || []).length"
+                         style="font-size:12px;color:#6b7280;margin-top:8px;">
+                      ⓘ 未指派的列会在同步报告的「未采集列」里提醒你；不想采集的列请选「（不采集）」。
+                    </div>
+                  </template>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
         </div>
         <el-button size="small" :disabled="hdBusy" @click="addHdTable">＋ 新增户类型</el-button>
         <div v-if="!hdForm.tables.length" style="font-size:12px;color:#e6a23c;margin-top:6px;">
@@ -416,6 +512,26 @@
             </el-table>
           </el-collapse-item>
         </el-collapse>
+
+        <!-- 未采集列（第二批 §3.4）。第一批只把 unmatched_columns 放进了 diff 载荷，前端一直
+             没渲染它 —— 这里把它变成「报告 → 去指派」的入口：点「去指派」关弹窗、展开那张表的
+             列映射区、自动读一次表头并滚到可见。红色左竖条沿用「未采集」的语义色。
+             只在 tt 出现：gg/fb 没有表头映射，后端也恒返回空数组。 -->
+        <div v-if="HD_PLATFORM === 'tt' && hdUnmatchedColumns.length"
+             style="border-left:3px solid #f56c6c;padding-left:10px;margin:16px 0;">
+          <div style="font-weight:600;font-size:14px;color:#374151;margin-bottom:6px;">未采集列</div>
+          <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">
+            这些列不会被同步。点「去指派」告诉系统它是什么字段。
+          </div>
+          <div v-for="g in hdUnmatchedColumns" :key="g.sheet">
+            <div v-for="h in (g.headers || [])" :key="g.sheet + '|' + h"
+                 style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+              <el-tag size="small" type="info" effect="plain">{{ g.sheet }}</el-tag>
+              <el-tag size="small" type="danger" effect="plain">{{ h }}</el-tag>
+              <el-button size="small" style="margin-left:auto;" @click="hdGoAssign(g.sheet)">去指派</el-button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Mode B · 结果报告（停在这里不自动关，not_applied 不能被 toast 吞掉） -->
@@ -587,6 +703,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '@/api/client'
 import { sheetWriteApi } from '@/api/sheetWrite'
 import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
+// 列映射的纯换算（表头响应 ↔ 下拉行状态）。**不要在组件里重推一遍映射** —— 三值约定
+// （字段key / "" 刻意不采集 / null 未指派）只有这一份实现，node --test 覆盖的就是它。
+import { rowsFromColumns, columnsFromRows } from '@/utils/columnMapping.mjs'
 
 const authStore = useAuthStore()
 
@@ -627,6 +746,22 @@ let hdSavedTimer = null
 const pushCancelBtn = ref(null)
 const syncCancelBtn = ref(null)
 const ownerTblRef = ref(null)
+
+// ---------------------------------------------------------------------------
+// 列映射（第二批设计 §3.4）：tt 每张表一个「读表头 → 逐列指派」折叠区。
+//
+// 全部状态按**工作表名**作键 —— POST 层校验保证同一份配置里工作表名互不重复
+// （routes/huguan_dashboard_routes.py 的 seen_sheets），所以它比下标稳：
+// 删掉中间一行不会让状态整体错位。
+// ---------------------------------------------------------------------------
+const hdFieldCatalog = ref([])      // GET 配置的 config.tt.tt_field_catalog（下拉数据源）
+const hdHeaderRows = ref({})        // { [sheet]: [{header, via, auto, selected, touched}] }
+const hdHeaderLoading = ref({})     // { [sheet]: true }
+const hdHeaderError = ref({})       // { [sheet]: 就地错误文案 }
+const hdHeaderOpen = ref({})        // { [sheet]: 折叠区展开态 }
+// 「未保存」标记的基线：各表上一次**从服务器读回 / 保存成功**时的 columns 规范化串。
+const hdColumnsBaseline = ref({})
+const hdPanelEls = {}               // 下标 → 折叠区根元素（「去指派」时 scrollIntoView 用）
 const createTblRef = ref(null)
 const updateTblRef = ref(null)
 
@@ -855,6 +990,9 @@ const hdClearing = computed(() => hdUpdate.value.filter(x => (x.clears || []).le
 const hdClearingShown = computed(() => clearingExpanded.value ? hdClearing.value : hdClearing.value.slice(0, 20))
 const hdResult = computed(() => syncResult.value || {})
 const hdNotAppliedShown = computed(() => (hdResult.value.not_applied || []).slice(0, 20))
+// 未采集列（第二批 §3.4）：第一批只把 `unmatched_columns` 放进了 diff 载荷，前端一直没渲染它。
+// 形状 [{sheet, headers}]，逐表逐条。gg/fb 恒为空（后端只在 tt 分支产出）。
+const hdUnmatchedColumns = computed(() => (syncDiff.value && syncDiff.value.unmatched_columns) || [])
 
 // ---------- 撤回结果的派生数据（与差异报告同一渲染口径） ----------
 // 结果体按方向形状不同：push {updated, not_found}；sync {reverted, conflicts, kept, not_found}。
@@ -901,15 +1039,25 @@ async function loadHdConfig() {
   try {
     const res = await huguanApi.getConfig()
     const conf = (res.config && res.config[HD_PLATFORM]) || {}
+    // 字段目录只加在 tt 分支（gg/fb 载荷形状不变）⇒ 这里也要兜成 []，别让 gg/fb 拿到 undefined。
+    hdFieldCatalog.value = Array.isArray(conf.tt_field_catalog) ? conf.tt_field_catalog : []
     hdForm.value = {
       spreadsheet_id: conf.spreadsheet_id || '',
       sheet_name: conf.sheet_name || '',
       // tt 的多表：后端对没有 tables 的存量配置会返回单条「加白户」兜底，
       // 但 gg/fb 完全不返回 tables ⇒ 这里必须兜成 []
       tables: Array.isArray(conf.tables)
-        ? conf.tables.map(t => ({ name: t.name || '', sheet_name: t.sheet_name || '' }))
+        ? conf.tables.map(t => ({
+            name: t.name || '',
+            sheet_name: t.sheet_name || '',
+            // 手工覆盖 {表头名: 字段key}（tt 独有）。必须读回来：一是保存时要原样带回去
+            // （否则改一次配置就把已有覆盖**静默清掉**），二是「未保存」标记的基线。
+            columns: (t.columns && typeof t.columns === 'object') ? { ...t.columns } : {},
+          }))
         : [],
     }
+    // 基线 = 刚从服务器读回的样子 ⇒ 此刻什么都是「已保存」。
+    hdSnapshotColumns()
   } catch (e) {
     ElMessage.error(e?.response?.data?.error || '读取看板配置失败')
   } finally {
@@ -986,10 +1134,153 @@ async function readHdSheets() {
 }
 
 function addHdTable() {
-  hdForm.value.tables.push({ name: '', sheet_name: '' })
+  hdForm.value.tables.push({ name: '', sheet_name: '', columns: {} })
 }
 function removeHdTable(i) {
   hdForm.value.tables.splice(i, 1)
+}
+
+// ---------- 列映射：读表头 / 逐列指派（第二批设计 §3.4） ----------
+// 「表头 → 下拉行状态」的换算在 @/utils/columnMapping.mjs（纯逻辑，node --test 覆盖）。
+// 这里只做渲染数据与事件绑定。
+
+/** 该表的工作表名（去空白）。空名不作键 —— 没填工作表名的草稿行没有可读的表。 */
+function hdSheetKey(t) { return ((t && t.sheet_name) || '').trim() }
+
+/** columns 的规范化串：与键序无关，只用于「和基线一样吗」的比较。 */
+function hdColsKey(cols) {
+  const o = (cols && typeof cols === 'object') ? cols : {}
+  return JSON.stringify(Object.keys(o).sort().map(k => [k, o[k]]))
+}
+
+/** 记下各表 columns 的基线。读配置成功、保存成功后各调一次。 */
+function hdSnapshotColumns() {
+  const snap = {}
+  hdForm.value.tables.forEach((t) => {
+    const k = hdSheetKey(t)
+    if (k) snap[k] = hdColsKey(t.columns)
+  })
+  hdColumnsBaseline.value = snap
+}
+
+/** 该表有没有**还没保存**的列映射改动（与基线比）。只在真有差异时才亮标记。 */
+function hdColsDirty(t) {
+  const k = hdSheetKey(t)
+  if (!k) return false
+  return hdColsKey(t.columns) !== (hdColumnsBaseline.value[k] || '[]')
+}
+
+function hdIsOpen(t) { return !!hdHeaderOpen.value[hdSheetKey(t)] }
+function hdSetOpen(t, value) {
+  const k = hdSheetKey(t)
+  if (!k) return
+  hdHeaderOpen.value = { ...hdHeaderOpen.value, [k]: Array.isArray(value) ? value.includes('map') : !!value }
+}
+
+/** ⌖ 去指派要滚到的那块面板。 */
+function setHdPanelEl(i, el) { hdPanelEls[i] = el }
+
+/** 读某张表的第 1 行表头，摊成逐列一行（消费 Task 4 的端点）。
+ *  失败**就地**显示（hdHeaderError），不弹全局错误 —— 读表头失败不该打断用户已经配好的
+ *  列映射的保存，两件事互不阻塞（设计 §3.6）。 */
+async function hdReadHeaders(i) {
+  const t = hdForm.value.tables[i]
+  const name = hdSheetKey(t)
+  if (!name) return                      // 按钮已禁用，这里是兜底
+  hdHeaderLoading.value = { ...hdHeaderLoading.value, [name]: true }
+  hdHeaderError.value = { ...hdHeaderError.value, [name]: '' }
+  try {
+    const res = await huguanApi.getSheetHeaders('tt', name)
+    hdHeaderRows.value = { ...hdHeaderRows.value, [name]: rowsFromColumns(res.columns || []) }
+    hdHeaderOpen.value = { ...hdHeaderOpen.value, [name]: true }
+  } catch (e) {
+    hdHeaderError.value = { ...hdHeaderError.value, [name]:
+      (e && e.response && e.response.data && e.response.data.error) || '读取表头失败，稍后重试。' }
+  } finally {
+    hdHeaderLoading.value = { ...hdHeaderLoading.value, [name]: false }
+  }
+}
+
+/** 改了某列的指派 ⇒ 写回该表的 columns（只认碰过的行；没碰过的键原样保留）。 */
+function hdOnColumnPick(i, row, value) {
+  row.selected = value
+  row.touched = true
+  const t = hdForm.value.tables[i]
+  t.columns = columnsFromRows(hdHeaderRows.value[hdSheetKey(t)] || [], t.columns)
+}
+
+/** 某张表的表头里出现**两次**的名字。columns 按表头名存键 ⇒ 指派第二个同名表头会
+ *  静默作用于最左那一列，所以这些行在 UI 上只读（视觉规格的两条决定之 2）。 */
+const hdDupHeaders = computed(() => {
+  const out = {}
+  Object.keys(hdHeaderRows.value).forEach((name) => {
+    const seen = new Set(), dup = new Set()
+    ;(hdHeaderRows.value[name] || []).forEach((r) => {
+      if (seen.has(r.header)) dup.add(r.header)
+      else seen.add(r.header)
+    })
+    out[name] = dup
+  })
+  return out
+})
+function hdRowIsDup(t, row) {
+  const dup = hdDupHeaders.value[hdSheetKey(t)]
+  return !!dup && dup.has(row.header)
+}
+
+/** 标题行统计：按**当前选择值**分档，与三值约定一一对应。 */
+const hdHeaderStats = computed(() => {
+  const out = {}
+  Object.keys(hdHeaderRows.value).forEach((name) => {
+    let ok = 0, miss = 0, skip = 0
+    ;(hdHeaderRows.value[name] || []).forEach((r) => {
+      if (r.selected === null || r.selected === undefined) miss++
+      else if (r.selected === '') skip++
+      else ok++
+    })
+    out[name] = { ok, miss, skip }
+  })
+  return out
+})
+function hdStats(t) { return hdHeaderStats.value[hdSheetKey(t)] || { ok: 0, miss: 0, skip: 0 } }
+
+/** 一行的显示档位：manual 手工 / alias 别名 / ignored 不采集 / none 未采集。
+ *  判据是**下拉的当前值**（rowsFromColumns 已把自动认出的结果填进 selected）：
+ *  有值＝已识别，''＝不采集，null＝还没指派。未识别与「识别到了但落选」统一显示「未采集」
+ *  —— 与同步报告同一口径，前端不假装能区分（视觉规格的两条决定之 1）。 */
+function hdRowState(row) {
+  if (row.selected === '') return 'ignored'
+  if (row.selected === null || row.selected === undefined) return 'none'
+  const manual = row.touched ? row.selected !== row.auto : row.via === 'override'
+  return manual ? 'manual' : 'alias'
+}
+/** 这一行算不算「未采集」（红左条）：未指派，或表头重复（重复行根本没法安全指派）。 */
+function hdRowMiss(t, row) { return hdRowState(row) === 'none' || hdRowIsDup(t, row) }
+
+/** 下拉选项 = 字段目录（按中文名显示；定位键标「定位键」、只读回标「只读回」）
+ *  + 末尾的「（不采集）」= 空串。目录来自后端，与 POST 校验同源（设计 §3.2）。 */
+const hdColumnOptions = computed(() => (hdFieldCatalog.value || [])
+  .filter(c => c && c.key)
+  .map(c => ({
+    value: c.key,
+    label: c.label || c.key,
+    mark: c.key_col ? '定位键' : (c.direction === 'r' ? '只读回' : ''),
+    keyCol: !!c.key_col,
+  })))
+
+/** 同步报告里「未采集列」的「去指派」：关弹窗 → 展开该表列映射区 → 读出表头 → 滚到可见。
+ *  滚动放在读回来之后：那时面板已是完整高度，滚过去的落点是稳的。 */
+async function hdGoAssign(sheet) {
+  syncDlg.visible = false
+  const i = hdForm.value.tables.findIndex(t => hdSheetKey(t) === sheet)
+  if (i < 0) {
+    ElMessage.warning(`没找到工作表「${sheet}」对应的账户表，请先在配置里补上。`)
+    return
+  }
+  hdHeaderOpen.value = { ...hdHeaderOpen.value, [sheet]: true }
+  await hdReadHeaders(i)
+  await nextTick()
+  hdPanelEls[i]?.scrollIntoView?.({ block: 'center' })
 }
 
 async function saveHdConfig() {
@@ -1003,7 +1294,15 @@ async function saveHdConfig() {
       // tt 走多表。空行（用户点了「+ 新增」还没填完）在这里被过滤掉 ——
       // 后端会 400，但用户在填的过程中不该被拦，所以只要有一条完整就发。
       const tables = hdForm.value.tables
-        .map(t => ({ name: (t.name || '').trim(), sheet_name: (t.sheet_name || '').trim() }))
+        .map((t) => {
+          const item = { name: (t.name || '').trim(), sheet_name: (t.sheet_name || '').trim() }
+          // 列映射（手工覆盖）搭这同一条 POST 一起存 —— 不另开写路径（第二批的硬约束）。
+          // 值可能是字段key 或空串（刻意不采集），两种都由后端校验放行。
+          // 空 dict 不带：保持「没配 columns」时落盘的配置文本与改动前一致。
+          const cols = t.columns
+          if (cols && typeof cols === 'object' && Object.keys(cols).length) item.columns = { ...cols }
+          return item
+        })
         .filter(t => t.name && t.sheet_name)
       body.tables = tables
     } else {
@@ -1016,6 +1315,8 @@ async function saveHdConfig() {
     await huguanApi.saveConfig(body)
     ElMessage.success('配置已保存')
     hdSaved.value = true
+    // 刚存下的就是服务器上的样子 ⇒ 重取基线，「未保存」标记随之熄灭。
+    hdSnapshotColumns()
     clearTimeout(hdSavedTimer)
     hdSavedTimer = setTimeout(() => { hdSaved.value = false }, 2000)
     if (hdConfigured.value) hdHintMsg.value = ''
@@ -1067,7 +1368,11 @@ async function syncHd() {
     // 产生警告，不产生 new_accounts / updates / owner_changes 任何一条。漏掉它
     // 就会把「表里有行没同步上」当成「已经一致」整份丢掉 —— 既不弹警告面板，
     // 用户也永远不知道表里有行没同步上。
-    if (!s.new_accounts && !s.updates && !s.owner_changes && !s.warnings) {
+    // unmatched_columns 同理要一起判：表里多了一列没见过的表头、又恰好没有别的差异
+    // （例如新列整列是空的）时，它同样**只**产生未采集、不产生任何其它条目。不判它，
+    // 「加了一列 ⇒ 报告里出现「未采集列」⇒ 点去指派」这条闭环就会在这类表上整条消失。
+    if (!s.new_accounts && !s.updates && !s.owner_changes && !s.warnings
+        && !(d.unmatched_columns || []).length) {
       setHdHint('看板与系统已经一致，没有需要同步的改动。', 'info')
       return
     }
@@ -1235,3 +1540,45 @@ onDeactivated(stopHdSwPoll)
 // 兜底：组件被真正销毁时（onDeactivated 不覆盖这条路径）也要停。
 onUnmounted(stopHdSwPoll)
 </script>
+
+<style scoped>
+/* 列映射的列行（第二批视觉规格）：两列 grid、无边框，靠留白分组。
+   表头原文固定 12em、下拉固定 14em（宽度在模板里给）—— 这里只补规格里无法用行内
+   样式表达的两件事：整行降饱和（要穿透到 el-select 内部）与未采集行的红左条。 */
+.hd-map-row {
+  display: grid;
+  grid-template-columns: 12em 1fr;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  margin-bottom: 4px;
+}
+.hd-map-head {
+  color: #303133;
+  font-weight: 500;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 未采集行：红左条，把「这一列不会被同步」变成绕不过去的信号 */
+.hd-map-row--none {
+  border-left: 3px solid #f56c6c;
+  padding-left: 8px;
+}
+/* 刻意不采集：整行文字降饱和（连下拉里选中的那段文本一起） */
+.hd-map-row--ignored .hd-map-head {
+  color: #c0c4cc;
+}
+.hd-map-row--ignored :deep(.el-select__selected-item),
+.hd-map-row--ignored :deep(.el-select__placeholder) {
+  color: #c0c4cc;
+}
+/* 下拉里「定位键 / 只读回」的标注 */
+.hd-map-mark {
+  margin-left: 6px;
+  font-size: 12px;
+  color: #909399;
+}
+</style>
+
