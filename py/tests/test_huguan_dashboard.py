@@ -6667,7 +6667,10 @@ class TestPendingMasterData:
                                           "agent_name": "渠道有", "country": "美国",
                                           "timezone": "+8"}, None, 2, [], create_missing=False)
         db.close()
-        assert out.get("_pending_master", []) == []
+        # 实现只在**有缺项时**才挂该键（`_collect_updates` 末尾 `if pending_master:`）——
+        # 用 `"_pending_master" not in out` 同时钉住「没有缺项」与「不挂空键」两半；
+        # 原句 `out.get(..., []) == []` 在键整体缺失时也通过，钉不住后半。
+        assert "_pending_master" not in out
 
     def test_ambiguous_name_is_still_a_warning_not_a_create(self, client):
         """同名 ≥2 条 = 歧义 ≠ 没有 ⇒ 仍警告跳过，绝不补建第三条。"""
@@ -6694,3 +6697,155 @@ class TestPendingMasterData:
                                None, 2, [], create_missing=False)
         db.close()
         assert [x for x in out.get("_pending_master", []) if x["kind"] == "region"] == []
+
+
+# ---------- Task 3: 落库补建缺的字典项并挂到账户上 ----------
+
+class TestPendingMasterApply:
+    """确认落库时**真的补建** BC / 渠道 / 国家时区，并把账户挂到新建的项上。
+
+    dry_run 只报不建；落库时「报告里列出的每一项」都必须建成，
+    「表里要了它的每个账户」都必须被挂上 —— 包括既不新建也不更新的**孤儿行**
+    （见 `build_diff` 的 `pending_master_rows`）。
+    """
+
+    # 只列企业户会用到的几列；顺序即 D/E/F/H 的落点。用 11 列而非 brief 原稿的
+    # 「巴西」：`巴西` 是本仓 regions 预设值（已复制到 platform='tt'），
+    # 照抄会让 region 断言恒假；`阿根廷` 不在预设里。
+    HDR = ["入库时间", "是否回收", "账户ID", "BC", "主体名称", "账户名称",
+           "国家", "所属渠道", "接户运营", "时区", "下户链接"]
+
+    def _dashboard(self, client, username):
+        """建户管 + 写一份「单张企业户表」的看板配置，返回认证头。"""
+        hg, uid = _create_user(client, username, role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"tt": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": "企业户", "sheet_name": "企业户"}]}})))
+        db.commit()
+        db.close()
+        return hg
+
+    def test_dry_run_reports_but_creates_nothing(self, client, monkeypatch):
+        """dry_run：三项都进 `diff.pending_master`（region 时区归一化），库纹丝不动。"""
+        import google_sheets_service as gs
+        hg = self._dashboard(client, "_pma1")
+        row = ["2026-10-01", "否", "9101", "BC-新", "主体X", "甲",
+               "阿根廷", "渠道新", "张三", "UTC+8", ""]
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [self.HDR, row])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True}).get_json()["diff"]
+        kinds = {(x["kind"], x["name"]) for x in diff["pending_master"]}
+        assert ("bc", "BC-新") in kinds and ("agent", "渠道新") in kinds, kinds
+        assert ("region", "阿根廷") in kinds, kinds
+        # region 条目的时区必须已归一化（dry_run 报告显示的就是落库会写的值）
+        assert next(x for x in diff["pending_master"] if x["kind"] == "region")["timezone"] == "+8"
+        db = database.get_db()
+        assert db.execute("SELECT COUNT(*) c FROM tt_bcs WHERE name='BC-新'").fetchone()["c"] == 0, \
+            "dry_run 绝不写库（BC）"
+        assert db.execute("SELECT COUNT(*) c FROM agents WHERE name='渠道新' "
+                          "AND platform='tt'").fetchone()["c"] == 0, "dry_run 绝不写库（渠道）"
+        assert db.execute("SELECT COUNT(*) c FROM regions WHERE name='阿根廷' "
+                          "AND platform='tt'").fetchone()["c"] == 0, "dry_run 绝不写库（国家）"
+        db.close()
+
+    def test_apply_creates_and_links(self, client, monkeypatch):
+        """确认落库：新建三项字典项，并把新建账户挂到新建的 BC / 渠道上。"""
+        import google_sheets_service as gs
+        hg = self._dashboard(client, "_pma2")
+        row = ["2026-10-01", "否", "9102", "BC-新2", "主体X", "甲",
+               "阿根廷", "渠道新2", "张三", "UTC+8", ""]
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [self.HDR, row])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": False,
+                                 "confirmed": {"create": ["9102"]}})
+        assert resp.status_code == 200, resp.get_json()
+        db = database.get_db()
+        bc = db.execute("SELECT id, bc_id FROM tt_bcs WHERE name='BC-新2'").fetchone()
+        ag = db.execute("SELECT id FROM agents WHERE name='渠道新2' AND platform='tt'").fetchone()
+        rg = db.execute("SELECT timezone FROM regions WHERE name='阿根廷' "
+                        "AND platform='tt'").fetchone()
+        acc = db.execute("SELECT bc_id, agent_id FROM tt_accounts "
+                         "WHERE advertiser_id='9102'").fetchone()
+        db.close()
+        assert bc and bc["bc_id"] == "BC-新2", "BC 应被补建且 bc_id = name"
+        assert ag, "渠道应被补建"
+        assert rg and rg["timezone"] == "+8", "时区应归一化去 UTC 前缀"
+        assert acc["bc_id"] == bc["id"] and acc["agent_id"] == ag["id"], \
+            "账户必须挂到新建的项上"
+
+    def test_orphan_row_links_existing_account(self, client):
+        """孤儿行：已存账户、表侧唯一变化是「系统没有的 BC」。
+
+        这行既不新建也不更新（其余列与库里逐字相同）⇒ 不进 to_create/to_update，
+        apply 的两个分支都够不到它。若不给 `pending_master_rows` 一条收尾路径，
+        dry_run 报「将新增 BC X」、落库却一个都不建 —— 报告与落库不一致。
+        """
+        from huguan_dashboard import apply_diff, build_diff, parse_row
+        db = database.get_db()
+        u1 = _seed(db, "_pmo_owner", "甲")
+        # 除 BC 外全空，与下面那行逐字相同；account_type 走默认空串 ⇒ 也不虚报将更新
+        _seed_tt_account(db, "9103", u1)
+        row = ["", "", "9103", "BC-孤儿", "", "", "", "", "", "", "", "", ""]
+        diff = build_diff(db, [dict(parse_row(row, "tt"), row=2)], "tt")
+        assert ("bc", "BC-孤儿") in {(x["kind"], x["name"]) for x in diff["pending_master"]}
+        assert diff["to_create"] == [] and diff["to_update"] == [], \
+            "孤儿行不该进 create/update（否则会虚报）"
+        res = apply_diff(db, diff, "tt", {"create": [], "update": [], "owner": []},
+                         user_id=u1)
+        assert res["errors"] == []
+        bc = db.execute("SELECT id FROM tt_bcs WHERE name='BC-孤儿'").fetchone()
+        acc = db.execute("SELECT bc_id FROM tt_accounts WHERE advertiser_id='9103'").fetchone()
+        db.close()
+        assert bc is not None, "孤儿行的 BC 必须真被补建（否则报告撒谎）"
+        assert acc["bc_id"] == bc["id"], "已存账户必须被挂到新建的 BC 上"
+
+    def test_ensure_region_never_overwrites_existing(self, client):
+        """`_ensure_region` 的 `_region_exists` 门：已存在的国家绝不覆盖。
+
+        字典是别的功能在用的权威值；覆盖会把别人维护的时区冲掉。空 name / 空 timezone
+        一律 no-op（残项会被后续当成已有、再也补不上）。
+        """
+        from huguan_dashboard import _ensure_region
+        db = database.get_db()
+        db.execute("INSERT INTO regions(name, timezone, platform) VALUES('阿根廷','+8','tt')")
+        db.commit()
+        _ensure_region(db, "阿根廷", "+9")      # 既有 ⇒ 不动
+        _ensure_region(db, "", "+9")            # 空 name ⇒ 不建
+        _ensure_region(db, "秘鲁", "")          # 空 timezone ⇒ 不建
+        db.commit()
+        got = db.execute("SELECT timezone FROM regions WHERE name='阿根廷' "
+                         "AND platform='tt'").fetchone()
+        n = db.execute("SELECT COUNT(*) c FROM regions WHERE name='秘鲁'").fetchone()["c"]
+        db.close()
+        assert got["timezone"] == "+8", "已存在的时区被覆盖了"
+        assert n == 0, "缺 name / timezone 时不该建残项"
+
+    def test_existing_region_not_reported_nor_overwritten(self, client, monkeypatch):
+        """既有国家：dry_run 不报、落库不改（与上一条分钉 build_diff 侧的 `not _region_exists` 门）。"""
+        import google_sheets_service as gs
+        hg = self._dashboard(client, "_pma4")
+        db = database.get_db()
+        db.execute("INSERT INTO regions(name, timezone, platform) VALUES('阿根廷','+8','tt')")
+        db.commit()
+        db.close()
+        row = ["2026-10-01", "否", "9104", "BC-新4", "主体X", "甲",
+               "阿根廷", "渠道新4", "张三", "UTC+3", ""]
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [self.HDR, row])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "tt", "dry_run": True}).get_json()["diff"]
+        assert ("region", "阿根廷") not in {(x["kind"], x["name"])
+                                            for x in diff["pending_master"]}, "既有国家不该报 pending"
+        client.post("/api/huguan/dashboard/sync", headers=hg,
+                    json={"platform": "tt", "dry_run": False,
+                          "confirmed": {"create": ["9104"]}})
+        db = database.get_db()
+        got = db.execute("SELECT timezone FROM regions WHERE name='阿根廷' "
+                         "AND platform='tt'").fetchone()
+        db.close()
+        assert got["timezone"] == "+8", "既有国家的时区被同步覆盖了"
+

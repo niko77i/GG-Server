@@ -10,7 +10,7 @@ import json
 import logging
 
 from google_sheets_service import col_index, read_sheet_values
-from tt_master_data import strip_utc_prefix
+from tt_master_data import ensure_agent, ensure_bc, strip_utc_prefix
 from utils import chunk
 
 log = logging.getLogger("gg-server")
@@ -834,6 +834,26 @@ def _region_exists(db, country: str) -> bool:
                       (country,)).fetchone() is not None
 
 
+def _ensure_region(db, name: str, timezone: str) -> None:
+    """国家 → 时区：缺则补建（**已存在绝不覆盖** —— 字典是别的功能在用的权威值）。
+
+    `regions` 有 UNIQUE(name, platform)：同一国家的多行同步会各自产一份 pending、
+    落到这里各调一次 —— 少了 `_region_exists` 门，第二次 INSERT 直接撞唯一约束、
+    把该行整条记进 errors。门同时兑现设计 §4.2「绝不覆盖已存在的国家」。
+
+    name 或 timezone 为空一律 no-op：建出「有国家没时区」的残项会被后续
+    `_region_exists` 当成已有、再也补不上（build_diff 的门同样要求两者都有）。
+    """
+    name = _conf_text(name)
+    timezone = _conf_text(timezone)
+    if not name or not timezone:
+        return
+    if _region_exists(db, name):
+        return
+    db.execute("INSERT INTO regions(name, timezone, platform) VALUES(?,?,'tt')",
+               (name, timezone))
+
+
 def resolve_owner_id(db, name: str):
     """归属名 → users.id。空 display_name 回退 username，唯一命中才返回。
 
@@ -1027,6 +1047,13 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
     # 否则「已存账户、表里只写了个系统没有的 BC」这行（无字段变更、不进 to_update）
     # 的 pending 会丢失，违反设计 §4.3「dry_run 必须在差异报告里看得见」。
     pending_rows = []
+    # 「孤儿行」：既存的账户，其表侧唯一变化是「系统字典里缺的 BC/渠道/国家」——
+    # 其余列与库里逐字相同 ⇒ `changed` 为空、也没有待建状态 ⇒ **不进 to_update**，
+    # apply_diff 的 create/update 两个分支都够不到它。但它的 pending 已被上面收进聚合
+    # （dry_run 报告里看得见）—— 若不在这里单独记一份「按账户」的清单交给 apply_diff
+    # 收尾补建并挂链，就会「报告说将新增、落库一个都不建」。**键名 `pending_master_rows`
+    # 与展示键 `pending_master` 是两回事**：后者是给前端渲染的聚合，这里是内部载荷。
+    pending_master_rows = []
 
     # 按账户ID 去重：同一 ID 在表里出现两行时，若两行都进 to_create，落库阶段第二行
     # 会撞唯一约束。取**首次出现**的那行生效，后续行记 warning（户管要能看到并去改表）。
@@ -1163,6 +1190,13 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
                               "scope_owner_id": scope_owner,
                               # 新值为空串的文本列：清空是不可逆的，必须让前端显式标注
                               "clears": _blank_columns(platform, changed)})
+        elif pending_master:
+            # 孤儿行（见上方 `pending_master_rows` 的定义）：既不新建也不更新，
+            # 但字典里缺了它要的项。单列一份交 apply_diff 收尾补建 + 定向挂链。
+            pending_master_rows.append({
+                "row": row_no, "sheet": _sheet_of(p), "account_id": aid,
+                "existing_id": existing["id"], "scope_owner_id": scope_owner,
+                "pending_master": pending_master})
 
     # 聚合「将新增的字典项」（设计 §4.3）：按 (kind, name) 去重、`rows` 计数、
     # 时区取**首次出现**（与既有「首次出现生效」惯例一致）。dry_run 与落库两条
@@ -1183,6 +1217,9 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         "to_skip": to_skip,
         "warnings": warnings,
         "pending_master": [agg[k] for k in order],
+        # 内部载荷：孤儿行的「账户 → 缺失字典项」。apply_diff 收尾据此补建并挂链。
+        # 前端渲染的展示键是上面的 `pending_master`（聚合），本键不参与渲染。
+        "pending_master_rows": pending_master_rows,
         "summary": {
             "total_in_sheet": sheet_rows,
             "new_accounts": len(to_create),
@@ -1616,6 +1653,16 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             if pending:
                 src[_target_column(platform, "status_name")] = _ensure_status(
                     pending, item.get("owner_id"))
+            # 系统字典里缺的 BC / 渠道 / 国家（build_diff 只在 tt 产，见设计 §4.4）：
+            # 到这一步才补建。BC / 渠道把新建的 id 挂进 `src` ⇒ 随下面的 INSERT 一起写。
+            # region 是纯 INSERT，没有 id 要挂（国家 → 时区字典）。
+            for x in item.get("pending_master") or []:
+                if x["kind"] == "bc":
+                    src["bc_id"] = ensure_bc(db, x["name"], item.get("owner_id"))
+                elif x["kind"] == "agent":
+                    src["agent_id"] = ensure_agent(db, x["name"], item.get("owner_id"))
+                else:
+                    _ensure_region(db, x["name"], x.get("timezone"))
             src[key_field] = item["account_id"]
             # 设计 §4.6：表里有「账户名称」列就用它；没有（如加白户表）仍回落账户 ID。
             # `_sheet_name` 是合成键（不是数据库列），必须先 pop 再拼 INSERT；未映射时
@@ -1697,6 +1744,17 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             if pending:
                 fields[_target_column(platform, "status_name")] = _ensure_status(
                     pending, item.get("scope_owner_id"))
+            # 系统字典里缺的 BC / 渠道 / 国家（build_diff 只在 tt 产）：补建并把新建的
+            # id 放进 `fields` ⇒（a）进下面的 `sets` 子句写进账户；
+            # （b）`_record_channel_change` 据 `bc_id` 记上 BC 变更留痕。
+            # **必须在 `sets = [...]` 与历史留痕之前**，否则 id 落不进 SET。
+            for x in item.get("pending_master") or []:
+                if x["kind"] == "bc":
+                    fields["bc_id"] = ensure_bc(db, x["name"], item.get("scope_owner_id"))
+                elif x["kind"] == "agent":
+                    fields["agent_id"] = ensure_agent(db, x["name"], item.get("scope_owner_id"))
+                else:
+                    _ensure_region(db, x["name"], x.get("timezone"))
             # 状态真的变了（build_diff 只在状态真变了才把它放进 fields）⇒
             # 「状态变更时间」必须跟着刷新，否则前端显示的永远是旧值。
             # 注意 `datetime('now','localtime')` 是 SQL 表达式不是值：只能作为
@@ -1831,6 +1889,40 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
                           platform, item["row"])
             errors.append({"row": item["row"], "sheet": item.get("sheet", ""),
                            "error": "归属变更失败，详情见服务端日志"})
+
+    # 缺字典项的「孤儿行」收尾（见 build_diff 的 `pending_master_rows`）：这些既存账户
+    # 既不新建也不更新（其余列与库里逐字相同），上面的 create/update 两个分支都够不到
+    # 它们 —— 若不在**这里**补建并定向挂链，dry_run 报告里列出的「将新增 BC/渠道」
+    # 落库时一个都不兑现，「已存账户要挂新字典项」也永远挂不上。
+    # 与其它分支同：逐行 try，异常只回固定中文文案（result 会被路由整体回出，CWE-209）。
+    for item in diff.get("pending_master_rows", []):
+        try:
+            link = {}
+            for x in item.get("pending_master") or []:
+                if x["kind"] == "bc":
+                    bc_id = ensure_bc(db, x["name"], item.get("scope_owner_id"))
+                    if bc_id is not None:
+                        link["bc_id"] = bc_id
+                elif x["kind"] == "agent":
+                    agent_id = ensure_agent(db, x["name"], item.get("scope_owner_id"))
+                    if agent_id is not None:
+                        link["agent_id"] = agent_id
+                else:                                   # region：只建，无 id 可挂
+                    _ensure_region(db, x["name"], x.get("timezone"))
+            if link:
+                # BC 变更留痕：与 update 分支同款，**必须在 UPDATE 之前**（旧值写完读不到）。
+                # 只 tt 有 `_CHANNEL_HISTORY_SPEC`（fb 无此键，且孤儿项本就只在 tt 产）。
+                if platform != "fb" and "bc_id" in link:
+                    _record_channel_change(db, platform, item["existing_id"], link, user_id)
+                sets = [f"{k}=?" for k in link]
+                db.execute(f"UPDATE {table} SET {', '.join(sets)}, "
+                           f"updated_at=datetime('now','localtime') WHERE {key_field}=?",
+                           tuple(link.values()) + (item["account_id"],))
+        except Exception:
+            log.exception("户管同步：补建字典项挂链失败 platform=%s row=%s",
+                          platform, item.get("row"))
+            errors.append({"row": item.get("row"), "sheet": item.get("sheet", ""),
+                           "error": "字典项挂链失败，详情见服务端日志"})
 
     # 「勾了却没作用上」是独立信号，不进 errors —— 差异报告变了不是出错，
     # 但户管必须知道自己的勾选没生效。
