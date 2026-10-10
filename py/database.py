@@ -158,6 +158,10 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "videos", "review_status", "review_status TEXT DEFAULT '能过审'")
     _add_column_if_missing(conn, "videos", "channel_name", "channel_name TEXT DEFAULT ''")
     _add_column_if_missing(conn, "accounts", "death_date", "death_date TEXT DEFAULT ''")
+    # 音频替换历史的归属列（2026-10-11）。存量行留 NULL —— 不凭空编造归属，
+    # 普通用户看不到它们（跨用户角色仍可见）。见 `audio_replace_history` 建表处注释。
+    _add_column_if_missing(conn, "audio_replace_history", "owner_id",
+                           "owner_id INTEGER REFERENCES users(id)")
     _add_column_if_missing(conn, "accounts", "status_changed_date", "status_changed_date TEXT DEFAULT ''")
     _add_column_if_missing(conn, "videos", "owner_id", "owner_id INTEGER REFERENCES users(id)")
     _add_column_if_missing(conn, "videos", "is_public", "is_public INTEGER DEFAULT 0")
@@ -706,7 +710,12 @@ def _ensure_schema(conn: sqlite3.Connection):
             output_name TEXT    NOT NULL,
             output_path TEXT    NOT NULL,
             size_mb     REAL    NOT NULL,
-            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+            -- 归属人（2026-10-11 加）：原表**没有**这列 ⇒ 列表对全员可见、
+            -- 单删/清空对全员开放（可删他人记录并连带删掉磁盘产物）。
+            -- **存量行为 NULL**（当时无法推断是谁做的）⇒ 普通用户不可见，
+            -- 跨用户角色仍可见。与 `video_tasks` 同形，仍是纯增量列。
+            owner_id    INTEGER REFERENCES users(id)
         );
 
         -- 审计日志（产品删除等关键操作）

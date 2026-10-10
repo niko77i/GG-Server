@@ -1005,8 +1005,14 @@ def _download_authorized(endpoint: str, path: str) -> bool:
     - 有合法 JWT ⇒ 放行（保持既有「登录即可下载」语义，本次不改归属模型）
     - 无 JWT ⇒ 必须有有效签名，否则 False（调用方返回 401）
 
-    注意：本函数**不判定归属**。`video_tasks` / `audio_replace_history`
-    无用户字段，产物在设计上是全局共享的。
+    注意：本函数**不判定归属** —— 产物在设计上是**可凭链接共享**的。但这句话的
+    适用范围自 2026-10-11 起收窄了，别照字面推广：
+
+    - `audio_replace_history` **已有** `owner_id`：列表 / 单删 / 清空三条腿都已按
+      归属收窄（见各端点注释）。**唯独下载这条腿刻意保持原样** —— 签名分享是有意
+      功能（形如「不公开列出、可凭签名链接访问」），且列表已不再把他人
+      `output_path` 泄露给普通用户，签名因而是唯一可达路径。
+    - `video_tasks` 仍**无**用户字段，其产物确为全局共享。
     """
     # ⚠️ 必须判返回值，**不能**靠 try/except：
     # 本端点是 @jwt_required(optional=True)，无 token 时 get_jwt_identity() 返回 None
@@ -1467,8 +1473,11 @@ def audio_replace():
         # 写入历史
         db = database.get_db()
         db.execute(
-            "INSERT INTO audio_replace_history (video_name, audio_name, output_name, output_path, size_mb) VALUES (?,?,?,?,?)",
-            (video_file.filename, audio_file.filename, output_filename, output_path, size_mb),
+            "INSERT INTO audio_replace_history "
+            "(video_name, audio_name, output_name, output_path, size_mb, owner_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (video_file.filename, audio_file.filename, output_filename, output_path, size_mb,
+             int(get_jwt_identity())),
         )
         db.commit()
 
@@ -1515,10 +1524,19 @@ def audio_replace_download():
 def audio_replace_history_list():
     """列出音频替换历史（按时间倒序）。"""
     db = database.get_db()
-    rows = db.execute(
-        "SELECT id, video_name, audio_name, output_name, output_path, size_mb, created_at "
-        "FROM audio_replace_history ORDER BY id DESC LIMIT 100"
-    ).fetchall()
+    # 归属收窄（2026-10-11，安全审查 item-7）：原实现回**所有人**的记录，还带
+    # `output_path`（服务端绝对路径）与指向它的 `download_url` —— 任何人据此即可
+    # 取到他人产物的下载地址。非跨用户角色只看自己名下的。
+    # 存量行（加列前写入、owner_id 为 NULL）对它们**不可见**：不凭空编造归属
+    # （用户裁定），跨用户角色仍看得到。
+    uid = int(get_jwt_identity())
+    sql = ("SELECT id, video_name, audio_name, output_name, output_path, size_mb, created_at "
+           "FROM audio_replace_history")
+    params = []
+    if not _cross_user_actor(uid):
+        sql += " WHERE owner_id = ?"
+        params.append(uid)
+    rows = db.execute(sql + " ORDER BY id DESC LIMIT 100", params).fetchall()
     items = []
     for r in rows:
         items.append({
@@ -1541,7 +1559,16 @@ def audio_replace_history_list():
 def audio_replace_history_delete(hid):
     """删除单条历史记录（同时删除对应文件）。"""
     db = database.get_db()
-    row = db.execute("SELECT output_path FROM audio_replace_history WHERE id = ?", (hid,)).fetchone()
+    # 归属收窄：原实现按 id 就删 ⇒ 任何登录用户可删**任何人**的记录，并**连带
+    # 删掉磁盘上的产物文件**（不可逆）。按归属过滤后，这里的 404 同时覆盖
+    # 「不存在」与「不是你的」，不泄露后者（端点原有契约就是 404）。
+    uid = int(get_jwt_identity())
+    sql = "SELECT output_path FROM audio_replace_history WHERE id = ?"
+    params = [hid]
+    if not _cross_user_actor(uid):
+        sql += " AND owner_id = ?"
+        params.append(uid)
+    row = db.execute(sql, params).fetchone()
     if not row:
         return jsonify({"success": False, "error": "记录不存在"}), 404
     path = row["output_path"]
@@ -1559,9 +1586,20 @@ def audio_replace_history_delete(hid):
 @jwt_required()
 @no_huguan
 def audio_replace_history_clear():
-    """清空全部历史记录（同时删除所有文件）。"""
+    """清空历史记录（同时删除对应文件）。
+
+    归属收窄（2026-10-11，安全审查 item-7）：原实现 `DELETE FROM audio_replace_history`
+    **无 WHERE**，任何登录用户一次即可抹掉**全公司**的历史并把所有产物文件从磁盘删掉。
+    现在非跨用户角色**只清自己的**（存量无主行也不动）；跨用户角色仍是全局清空。
+    """
     db = database.get_db()
-    rows = db.execute("SELECT output_path FROM audio_replace_history").fetchall()
+    uid = int(get_jwt_identity())
+    cross = _cross_user_actor(uid)
+    if cross:
+        rows = db.execute("SELECT output_path FROM audio_replace_history").fetchall()
+    else:
+        rows = db.execute("SELECT output_path FROM audio_replace_history WHERE owner_id = ?",
+                          (uid,)).fetchall()
     for r in rows:
         path = r["output_path"]
         if path and os.path.isfile(path):
@@ -1569,7 +1607,10 @@ def audio_replace_history_clear():
                 os.remove(path)
             except OSError:
                 pass
-    db.execute("DELETE FROM audio_replace_history")
+    if cross:
+        db.execute("DELETE FROM audio_replace_history")
+    else:
+        db.execute("DELETE FROM audio_replace_history WHERE owner_id = ?", (uid,))
     db.commit()
     return jsonify({"success": True})
 
