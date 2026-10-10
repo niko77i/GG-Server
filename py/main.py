@@ -7107,9 +7107,6 @@ def sales_persons_delete(sid):
 # ---------- 账户设置 API ----------
 
 # 内置 sheet 映射 key（全局共享，admin 可修改）
-# 记录重试失败事件，供 sync-status 一次性通知前端弹窗
-_retry_failed_events = {}  # {(user_id, product_name): timestamp}
-
 _BUILTIN_SHEET_MAPPING_KEYS = {"recharge", "received_accounts"}
 _BUILTIN_SHEET_DEFAULTS = {
     "recharge": "充值表",
@@ -7577,7 +7574,7 @@ def google_sheets_update_zuobiao():
     #
     # 旧实现（自建回调 _on_fail）有两个缺陷，随本次改造消失：
     #  A 中间态 failed 就 INSERT 一条失败记录 ⇒ 30s 重试窗口内就报警
-    #  B 终态失败只记进程内字典 _retry_failed_events 且消费端 pop 一次性 ⇒ 重启即丢
+    #  B 终态失败只记进程内字典且消费端 pop 一次性 ⇒ 重启即丢
     #
     # ⚠️ 这里**新开**一条连接，而不是复用请求级的 `db`/`db2`：写库那一段末尾的
     # `db2.close()`（:7560）关掉的正是 `_yt_db()` 返回的 g 共享连接（`db` 与 `db2`
@@ -7605,135 +7602,6 @@ def google_sheets_update_zuobiao():
     if product_warning:
         resp["warning"] = product_warning
     return jsonify(resp)
-
-
-@app.route("/api/google-sheets/sync-status", methods=["GET"])
-@jwt_required()
-def google_sheets_sync_status():
-    """查询当前用户指定产品的 Sheets 同步失败记录（含行数据用于展示）。"""
-    user_id = int(get_jwt_identity())
-    product_name = (request.args.get("product_name") or "").strip()
-    if not product_name:
-        return jsonify({"success": False, "error": "product_name 不能为空"}), 400
-    db = _yt_db()
-    row = db.execute(
-        "SELECT id, status, error_msg, rows_json, retry_count, updated_at "
-        "FROM sheets_sync_log WHERE user_id=? AND product_name=? "
-        "ORDER BY updated_at DESC LIMIT 1",
-        (user_id, product_name)
-    ).fetchone()
-    db.close()
-    if row:
-        d = dict(row)
-        if d.get("rows_json"):
-            try: d["rows"] = json.loads(d["rows_json"])
-            except: d["rows"] = []
-        return jsonify({"success": True, "log": d})
-    # 无日志时，检查是否有重试失败事件（一次性通知前端弹窗）
-    event_key = (user_id, product_name)
-    ts = _retry_failed_events.pop(event_key, None)
-    if ts:
-        return jsonify({"success": True, "log": None, "retry_failed": True})
-    return jsonify({"success": True, "log": None})
-
-
-@app.route("/api/google-sheets/retry-sync", methods=["POST"])
-@jwt_required()
-def google_sheets_retry_sync():
-    """手动重试做表数据的 Sheets 同步。"""
-    user_id = int(get_jwt_identity())
-    data = request.get_json(silent=True) or {}
-    product_name = (data.get("product_name") or "").strip()
-    if not product_name:
-        return jsonify({"success": False, "error": "product_name 不能为空"}), 400
-
-    db = _yt_db()
-    log_row = db.execute(
-        "SELECT * FROM sheets_sync_log WHERE user_id=? AND product_name=?",
-        (user_id, product_name)
-    ).fetchone()
-    if not log_row:
-        db.close()
-        return jsonify({"success": False, "error": "没有待同步的记录"}), 404
-
-    # 取数据库中的做表原始数据重新汇总
-    report_date = ""
-    region = ""
-    rows_raw = db.execute(
-        "SELECT DISTINCT account, customer_id, campaign, cost, impressions, clicks, "
-        "installs, in_app_actions, cost_per_in_app, report_date, region "
-        "FROM ad_reports WHERE user_id=? AND product_name=? ORDER BY report_date DESC",
-        (user_id, product_name)
-    ).fetchall()
-    if not rows_raw:
-        db.close()
-        return jsonify({"success": False, "error": "没有找到对应的做表数据"}), 404
-
-    report_date = rows_raw[0]["report_date"] or ""
-    region = rows_raw[0]["region"] or ""
-
-    rows = []
-    for r in rows_raw:
-        rows.append({
-            "account": r["account"] or "",
-            "customerId": str(r["customer_id"] or ""),
-            "campaign": r["campaign"] or "",
-            "cost": r["cost"] or 0,
-        })
-
-    # 取产品信息
-    prod = db.execute(
-        "SELECT COALESCE(sp.name, '') AS sales_person, agency_ratio FROM products p "
-        "LEFT JOIN sales_persons sp ON p.sales_person_id = sp.id "
-        "WHERE p.product_name=? AND (p.is_archived IS NULL OR p.is_archived=0) LIMIT 1",
-        (product_name,)
-    ).fetchone()
-    sales_person = (prod["sales_person"] or "") if prod else ""
-    agency_ratio = prod["agency_ratio"] if prod else None
-
-    spreadsheet_id = log_row["spreadsheet_id"] or ""
-
-    if not spreadsheet_id:
-        return jsonify({"success": False, "error": "表格 ID 为空"}), 400
-
-    # 从用户表获取 operator_name
-    user = db.execute(
-        "SELECT display_name, username FROM users WHERE id=?", (user_id,)
-    ).fetchone()
-    operator_name = (user['display_name'] or user['username']) if user else ''
-
-    try:
-        from google_sheets_service import build_service, upsert_zuobiao, GoogleSheetsServiceError
-        service = build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-        result = upsert_zuobiao(
-            service=service,
-            spreadsheet_id=spreadsheet_id,
-            rows=rows, product_name=product_name,
-            region=region, report_date=report_date,
-            sales_person=sales_person, agency_ratio=agency_ratio,
-            operator_name=operator_name,
-        )
-
-        # 成功 → 删除日志（用独立连接，避免 db 已被关闭的问题）
-        db2 = database.get_db()
-        db2.execute("DELETE FROM sheets_sync_log WHERE id=?", (log_row["id"],))
-        db2.commit(); db2.close()
-
-        return jsonify({
-            "success": True,
-            "updated": result["updated"],
-            "inserted": result["inserted"],
-        })
-    except Exception as e:
-        db2 = database.get_db()
-        db2.execute(
-            "UPDATE sheets_sync_log SET error_msg=?, retry_count=retry_count+1, "
-            "updated_at=datetime('now','localtime') WHERE id=?",
-            (_SHEETS_SYNC_FAILED_MSG, log_row["id"])
-        )
-        db2.commit(); db2.close()
-        log.exception("投手看板表格写入失败")
-        return jsonify({"success": False, "error": "服务器内部错误，请查看控制台日志"}), 500
 
 
 # ---------- 文件浏览 API ----------
@@ -8117,10 +7985,9 @@ _GOOGLE_SHEETS_CONFIG = {
 }
 
 
-# 落库的 Sheets 同步失败文案 —— `sheets_error` / `sheets_sync_log.error_msg` 会被
-# 读取端点原样回进响应体（`/api/accounts/<aid>/recharge-records`、
-# `/api/google-sheets/sync-status`），故**不得**写异常原文；详情由
-# `_sync_sheets_background` 的 log.warning/log.error 承担。
+# 落库的 Sheets 同步失败文案 —— `sheets_error` 会被读取端点原样回进响应体
+# （`/api/accounts/<aid>/recharge-records`、`/api/tt/accounts/<aid>/recharge-records`），
+# 故**不得**写异常原文；详情由 `_sync_sheets_background` 的 log.warning/log.error 承担。
 _SHEETS_SYNC_FAILED_MSG = "表格同步失败，详情见服务端日志"
 
 

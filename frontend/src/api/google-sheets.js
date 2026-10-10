@@ -21,16 +21,6 @@ export const googleSheetsApi = {
     return api.post('/google-sheets/update-zuobiao', body)
   },
 
-  /** 查询指定产品的 Sheets 同步状态（含失败行数据） */
-  syncStatus(productName) {
-    return api.get('/google-sheets/sync-status', { params: { product_name: productName } })
-  },
-
-  /** 手动重试做表数据 Sheets 同步 */
-  retrySync(body) {
-    return api.post('/google-sheets/retry-sync', body)
-  },
-
   /** 读取指定 spreadsheet 中的所有 sheet 列表 */
   listSheets(spreadsheetId) {
     return api.get('/google-sheets/sheets', { params: { spreadsheet_id: spreadsheetId } })

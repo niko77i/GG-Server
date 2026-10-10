@@ -1731,37 +1731,59 @@ class TestE11TtRechargeSheetsErrorSink:
         assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
 
 
-class TestE11SheetsSyncLogErrorMsgSink:
-    """item-4：`sheets_sync_log.error_msg` 由 retry-sync 写入、被 GET sync-status 回出。"""
+class TestE11ZuobiaoSheetsErrorSink:
+    """item-4：做表写表失败文案的落点 —— 五期起由 `sheets_sync_log` 换成 `sheet_write_log`。
 
-    def test_retry_sync_sanitizes_db_error_msg(self, client, monkeypatch, caplog):
-        import main as main_mod
+    旧形态：做表线的两个专属端点（写 `sheets_sync_log.error_msg` + 读回，已随五期
+    退役）把异常原文落库并原样回给客户端。新形态：写点并入统一写表治理，落
+    `sheet_write_log.error_msg`、由 `GET /api/sheet-write/status` 回出。
+    **安全属性不变**：异常原文不得经任何回给客户端的字段外泄 —— 落库的必须是固定
+    文案，详情只进服务端日志。
+    """
+
+    def test_update_zuobiao_failure_sanitizes_sheet_write_log(self, client, monkeypatch, caplog, inline_bg):
+        import sheet_write
         import google_sheets_service as gs
 
-        hdr, uid = _create_user(client, "_e11_rs", role="user")
-        db = database.get_db()
-        db.execute("INSERT INTO sheets_sync_log (user_id, product_name, spreadsheet_id, status, rows_json) "
-                   "VALUES (?, 'P-E11', 'SHEET-E11', 'failed', '[]')", (uid,))
-        db.execute("INSERT INTO ad_reports (user_id, product_name, region, report_date, account, "
-                   "customer_id, campaign, cost) VALUES (?, 'P-E11', 'US', '2026-01-01', 'acc', '1', 'c', 1)",
-                   (uid,))
-        db.commit(); db.close()
+        hdr, uid = _create_user(client, "_e11_zb", role="user")
+        # 配好该用户的 Google 表格 —— 保存端点靠它解析 spreadsheet_id（否则端点早退、不登记）
+        resp = client.post("/api/config/google-sheets", headers=hdr, json={
+            "sheets": [{"id": "m1", "spreadsheet_id": "SHEET-E11"}], "active_id": "m1"})
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
 
         monkeypatch.setattr(gs, "build_service", lambda path: object())
         monkeypatch.setattr(gs, "upsert_zuobiao", _boom_sheets)
 
         with caplog.at_level(logging.ERROR, logger="gg-server"):
-            resp = client.post("/api/google-sheets/retry-sync",
-                               json={"product_name": "P-E11"}, headers=hdr)
-        assert resp.status_code == 500
-        assert resp.get_json()["error"] == SANITIZED_500
+            resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+                "product_name": "P-E11", "region": "US", "report_date": "2026-01-01",
+                "rows": [{"account": "acc", "customerId": "1", "cost": 1, "campaign": "c"}],
+            })
+        # 新语义：保存提交后立即返回（后台写表），不再同步 500
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
         _assert_no_e11_leak(resp)
 
-        log_resp = client.get("/api/google-sheets/sync-status?product_name=P-E11", headers=hdr)
-        entry = log_resp.get_json()["log"]
-        _assert_no_e11_leak(log_resp)
-        assert entry["error_msg"] == main_mod._SHEETS_SYNC_FAILED_MSG, (
-            f"error_msg 落进了异常原文：{entry['error_msg']!r}")
+        # 安全属性①：失败落统一机制，且**落库的是固定文案**（异常原文不外泄）
+        db = database.get_db()
+        log_row = db.execute(
+            "SELECT * FROM sheet_write_log WHERE user_id=? AND target='gg_zuobiao' "
+            "AND business_key='P-E11'", (uid,)).fetchone()
+        db.close()
+        assert log_row is not None, "做表写表失败必须登记进统一写表机制"
+        assert log_row["status"] == "retry_failed", log_row["status"]
+        assert log_row["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+            f"落库文案应为固定文案，实际 {log_row['error_msg']!r}")
+        _assert_no_e11_leak(log_row["error_msg"] or "")
+
+        # 安全属性②：该文案**回给客户端**时同样不得夹带原文（旧 sync-status 的回出腿）
+        st = client.get("/api/sheet-write/status?platform=gg&target=gg_zuobiao"
+                        "&business_key=P-E11", headers=hdr)
+        _assert_no_e11_leak(st)
+        item = st.get_json()["item"]
+        assert item["error_msg"] == sheet_write._WRITE_FAILED_MSG, (
+            f"回出的 error_msg 应为固定文案，实际 {item['error_msg']!r}")
+
+        # 异常详情不得被一并砍掉
         assert "sheets.googleapis.com" in caplog.text, "异常详情没进日志"
 
 
