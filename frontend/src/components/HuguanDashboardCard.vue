@@ -542,56 +542,72 @@
           </div>
         </div>
 
-        <!-- ⑤ 跳过（折叠） -->
+        <!-- ⑤ 跳过（折叠，默认收起：这是「系统里已删除的账户，本次不动」，不是问题）。
+             T2b：按原因聚合（同一 reason 归一组），不再逐行铺 el-table。 -->
         <el-collapse v-if="hdSkip.length" style="margin-top:8px;">
           <el-collapse-item name="skip">
             <template #title>
               <span style="font-weight:600;">④ 跳过 · {{ hdSkip.length }} 个</span>
               <span style="margin-left:12px;font-size:12px;color:#6b7280;">系统里已删除的账户，本次不动。</span>
             </template>
-            <el-table :data="hdSkip" size="small" border>
-              <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
-                <template #default="{ row }">
-                  <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
-                  <span v-else>—</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="表行" width="86">
-                <template #default="{ row }">
-                  <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="account_id" label="账户ID" min-width="150" show-overflow-tooltip />
-              <el-table-column prop="reason" label="原因" min-width="160" />
-            </el-table>
+            <div v-for="(g, gi) in hdSkipPrev.shown" :key="'skip' + gi" style="margin-bottom:8px;">
+              <div style="font-size:13px;color:#374151;line-height:1.8;">
+                {{ g.label }}
+                <span v-if="g.count === 1 && g.sampleRow != null"> · 第 {{ g.sampleRow }} 行</span>
+                <span v-else-if="g.count > 1"> · 影响 {{ g.count }} 行<template v-if="g.sampleRow != null"> · 例：第 {{ g.sampleRow }} 行</template></span>
+                <el-button link type="primary" size="small" style="margin-left:8px;"
+                           @click="hdToggleGroup('skip', gi)">{{ hdGroupIsOpen('skip', gi) ? '收起' : '展开' }}</el-button>
+              </div>
+              <div v-if="hdGroupIsOpen('skip', gi)" style="padding:2px 0 2px 22px;">
+                <div v-for="(r, ri) in hdGroupRows(g).shown" :key="'skiprow' + gi + '-' + ri"
+                     style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6b7280;line-height:1.9;">
+                  <el-tag v-if="hdShowSheetCol && r.sheet" size="small" type="info" effect="plain">{{ r.sheet }}</el-tag>
+                  <span>第 {{ r.row }} 行</span>
+                  <span style="font-family:monospace;">{{ r.account_id }}</span>
+                </div>
+                <div v-if="hdGroupRows(g).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
+                  …另有 {{ hdGroupRows(g).hiddenCount }} 行
+                </div>
+              </div>
+            </div>
+            <div v-if="hdSkipPrev.hiddenCount > 0" style="font-size:12px;color:#6b7280;">
+              …另有 {{ hdSkipPrev.hiddenCount }} 类原因
+            </div>
           </el-collapse-item>
         </el-collapse>
 
-        <!-- ⑥ 警告（折叠） -->
-        <el-collapse v-if="hdWarnings.length" style="margin-top:8px;">
+        <!-- ⑥ 警告（按原因聚合 + 有警告时默认展开）。这一节是「要你去表里改的问题」，
+             不能靠截断埋掉 —— 上千条重复警告压成几条可读信号，用 v-for 而非 el-table。
+             v-model 初始 ['warn']：不能让字段识别不对的户藏在默认收起的区里。
+             ⚠️ 折叠（v-show）不等于不渲染，这条改动的意义是「让人看得见」，性能靠聚合。 -->
+        <el-collapse v-if="hdWarnings.length" v-model="hdWarnOpen" style="margin-top:8px;">
           <el-collapse-item name="warn">
             <template #title>
               <span style="font-weight:600;">⑤ 警告 · {{ hdWarnings.length }} 条</span>
               <span style="margin-left:12px;font-size:12px;color:#6b7280;">这些行没能同步，需要你去表里改。</span>
             </template>
-            <el-table :data="hdWarnings" size="small" border>
-              <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
-                <template #default="{ row }">
-                  <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
-                  <span v-else>—</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="表行" width="86">
-                <template #default="{ row }">
-                  <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="说明" min-width="220">
-                <template #default="{ row }">
-                  <el-tag size="small" type="warning" effect="plain" style="margin-right:6px;">⚠</el-tag>{{ hdWarnText(row.message) }}
-                </template>
-              </el-table-column>
-            </el-table>
+            <div v-for="(g, gi) in hdWarnPrev.shown" :key="'warn' + gi" style="margin-bottom:8px;">
+              <div style="font-size:13px;color:#374151;line-height:1.8;">
+                <el-tag size="small" type="warning" effect="plain" style="margin-right:6px;">⚠</el-tag>{{ hdWarnText(g.label) }}
+                <span v-if="g.count === 1 && g.sampleRow != null"> · 第 {{ g.sampleRow }} 行</span>
+                <span v-else-if="g.count > 1"> · 影响 {{ g.count }} 行<template v-if="g.sampleRow != null"> · 例：第 {{ g.sampleRow }} 行</template></span>
+                <el-button link type="primary" size="small" style="margin-left:8px;"
+                           @click="hdToggleGroup('warn', gi)">{{ hdGroupIsOpen('warn', gi) ? '收起' : '展开' }}</el-button>
+              </div>
+              <div v-if="hdGroupIsOpen('warn', gi)" style="padding:2px 0 2px 22px;">
+                <div v-for="(r, ri) in hdGroupRows(g).shown" :key="'warnrow' + gi + '-' + ri"
+                     style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6b7280;line-height:1.9;">
+                  <el-tag v-if="hdShowSheetCol && r.sheet" size="small" type="info" effect="plain">{{ r.sheet }}</el-tag>
+                  <span>第 {{ r.row }} 行</span>
+                </div>
+                <div v-if="hdGroupRows(g).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
+                  …另有 {{ hdGroupRows(g).hiddenCount }} 行
+                </div>
+              </div>
+            </div>
+            <div v-if="hdWarnPrev.hiddenCount > 0" style="font-size:12px;color:#6b7280;">
+              …另有 {{ hdWarnPrev.hiddenCount }} 类原因
+            </div>
           </el-collapse-item>
         </el-collapse>
 
@@ -635,21 +651,29 @@
           <template #title>有 {{ hdResult.errors.length }} 行出错，没有写入</template>
           <div style="font-size:12px;">下面这些行在落库时报错，系统没有写入它们，请检查后重试。</div>
         </el-alert>
-        <el-table v-if="(hdResult.errors || []).length" :data="hdResult.errors" size="small"
-                  border style="margin-top:8px;">
-          <el-table-column v-if="hdShowSheetCol" label="表" min-width="120" show-overflow-tooltip>
-            <template #default="{ row }">
-              <el-tag v-if="row.sheet" size="small" type="info" effect="plain">{{ row.sheet }}</el-tag>
-              <span v-else>—</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="表行" width="86">
-            <template #default="{ row }">
-              <el-tag size="small" type="info" effect="plain">第 {{ row.row }} 行</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="error" label="错误" min-width="220" show-overflow-tooltip />
-        </el-table>
+        <!-- 按原因聚合（T2b）。这一区**不许默认收起**（原本就是直接铺开的）。 -->
+        <div v-for="(g, gi) in hdErrPrev.shown" :key="'err' + gi" style="margin-top:8px;">
+          <div style="font-size:13px;color:#374151;line-height:1.8;">
+            <el-tag size="small" type="danger" effect="plain" style="margin-right:6px;">⚠</el-tag>{{ g.label }}
+            <span v-if="g.count === 1 && g.sampleRow != null"> · 第 {{ g.sampleRow }} 行</span>
+            <span v-else-if="g.count > 1"> · 影响 {{ g.count }} 行<template v-if="g.sampleRow != null"> · 例：第 {{ g.sampleRow }} 行</template></span>
+            <el-button link type="primary" size="small" style="margin-left:8px;"
+                       @click="hdToggleGroup('err', gi)">{{ hdGroupIsOpen('err', gi) ? '收起' : '展开' }}</el-button>
+          </div>
+          <div v-if="hdGroupIsOpen('err', gi)" style="padding:2px 0 2px 22px;">
+            <div v-for="(r, ri) in hdGroupRows(g).shown" :key="'errrow' + gi + '-' + ri"
+                 style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6b7280;line-height:1.9;">
+              <el-tag v-if="hdShowSheetCol && r.sheet" size="small" type="info" effect="plain">{{ r.sheet }}</el-tag>
+              <span>第 {{ r.row }} 行</span>
+            </div>
+            <div v-if="hdGroupRows(g).hiddenCount > 0" style="font-size:12px;color:#6b7280;">
+              …另有 {{ hdGroupRows(g).hiddenCount }} 行
+            </div>
+          </div>
+        </div>
+        <div v-if="hdErrPrev.hiddenCount > 0" style="margin-top:8px;font-size:12px;color:#6b7280;">
+          …另有 {{ hdErrPrev.hiddenCount }} 类原因
+        </div>
 
         <template v-if="(hdResult.not_applied || []).length">
           <el-alert type="warning" show-icon :closable="false" style="margin-top:12px;">
@@ -818,7 +842,7 @@ import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 import { rowsFromColumns, columnsFromRows, pickColumn } from '@/utils/columnMapping.mjs'
 // 大批量结果的「预览」纯逻辑（T1 已交付，node --test 覆盖）。slicePreview 限行、selectedIds
 // 把「默认全选」用「全量 − 排除集」表示 —— 这样只渲染前 100 行也不会丢掉另外几千行的勾选。
-import { DEFAULT_PREVIEW_LIMIT, slicePreview, selectedIds } from '@/utils/previewRows.mjs'
+import { DEFAULT_PREVIEW_LIMIT, slicePreview, selectedIds, groupWarnings } from '@/utils/previewRows.mjs'
 
 const authStore = useAuthStore()
 
@@ -1210,6 +1234,37 @@ const confirmType = computed(() => willClear.value ? 'danger' : 'primary')
 const hdCreatePrev = computed(() => slicePreview(hdCreate.value, HD_PREVIEW_LIMIT))
 const hdUpdatePrev = computed(() => slicePreview(hdUpdate.value, HD_PREVIEW_LIMIT))
 const hdOwnerPrev  = computed(() => slicePreview(hdOwnerChanges.value, HD_PREVIEW_LIMIT))
+
+// 预警类三桶（警告 / 跳过 / 落库报错）：它们的语义是「要你去处理的问题」，**不能靠截断埋掉**
+// —— 用户不知道被截掉的哪几行有问题 ⇒ 按原因聚合，把上千条重复警告压成几条可读信号
+// （shape 形如「BC · 7677… · 128 行」的 hdPendingMaster 那一节）。聚合后条数本来就很少，
+// 用 v-for 而非 el-table；每组最多 HD_GROUP_LIMIT 条，多余的折叠成「…另有 N 类原因」。
+const HD_GROUP_LIMIT = 50
+const hdWarnGroups = computed(() => groupWarnings(hdWarnings.value))
+const hdWarnPrev = computed(() => slicePreview(hdWarnGroups.value, HD_GROUP_LIMIT))
+// 跳过：字段名先归一（reason → message），其余原样 —— 展开的明细仍是原条目（带 account_id/sheet/row）。
+const hdSkipGroups = computed(() => groupWarnings(
+  hdSkip.value.map(r => ({ ...r, message: r.reason || '' }))))
+const hdSkipPrev = computed(() => slicePreview(hdSkipGroups.value, HD_GROUP_LIMIT))
+// 落库报错（结果页 Mode B）：同上，error → message。
+const hdErrGroups = computed(() => groupWarnings(
+  (hdResult.value.errors || []).map(r => ({ ...r, message: r.error || '' }))))
+const hdErrPrev = computed(() => slicePreview(hdErrGroups.value, HD_GROUP_LIMIT))
+
+// 警告区有内容时**默认展开**（用户问过「字段识别不对的户会不会被看不见」）。
+// ⚠️ el-collapse-item 用 v-show，折叠 ≠ 不渲染 —— 这条改动的意义是「让人看得见」，
+// 不是性能手段（性能靠上面的聚合）。
+const hdWarnOpen = ref(['warn'])
+// 各组的「展开明细」态（键 = 作用域:下标）。用 v-if（而非折叠的 v-show）控住明细 DOM：
+// 明细上限 HD_PREVIEW_LIMIT，但最多 HD_GROUP_LIMIT 组，全渲染是 5000 行 —— 只有展开的才该有 DOM。
+const hdGroupOpen = ref({})
+function hdGroupIsOpen(scope, i) { return !!hdGroupOpen.value[scope + ':' + i] }
+function hdToggleGroup(scope, i) {
+  const k = scope + ':' + i
+  hdGroupOpen.value = { ...hdGroupOpen.value, [k]: !hdGroupOpen.value[k] }
+}
+/** 某一组的逐行明细预览（行数上限 HD_PREVIEW_LIMIT，超出显示「…另有 N 行」）。 */
+function hdGroupRows(g) { return slicePreview(g.rows, HD_PREVIEW_LIMIT) }
 
 // 「确认落库」能不能点：勾选的东西 **或** 孤儿行的字典补建（后者无条件执行、不依赖勾选）。
 // 只有后者时 selectedCount 恒为 0，但落库确实会建字典项 + 挂链 —— 不把按钮置灰（否则纯孤儿
@@ -1733,6 +1788,8 @@ async function openSyncDialog(diff, sheet = '') {
   syncDlg.pendingUnpicked = false
   syncDlg.sheet = sheet
   clearingExpanded.value = false
+  hdWarnOpen.value = ['warn']      // 有警告就默认展开（T2b：别让问题藏在收起的区里）
+  hdGroupOpen.value = {}           // 每次重开清掉上一次的分组展开态
   hdExcludedCreate.value = []      // 默认全选
   hdExcludedUpdate.value = []
   hdPickedOwner.value = []         // 归属变更默认不勾（既有语义，别改）
