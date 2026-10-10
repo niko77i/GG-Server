@@ -6233,3 +6233,72 @@ class TestSheetHeadersEndpoint:
         r2 = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
                         query_string={"platform": "tt"})
         assert r2.status_code == 400
+
+
+# ---------- Task 1（per-sheet-sync）：按表同步 ----------
+
+class TestPerTableSync:
+    """按表导入（设计 §3.1）：给了 sheet_name 就只读那一张表。"""
+
+    def _conf(self, client, username, tables):
+        hg, _ = _create_user(client, username, role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of(username)}", json.dumps(
+                       {"tt": {"spreadsheet_id": "SS", "tables": tables}})))
+        db.commit(); db.close()
+        return hg
+
+    def test_only_reads_the_named_table(self, client, monkeypatch):
+        import google_sheets_service as gs
+        hg = self._conf(client, "_ps1", [
+            {"name": "企业户", "sheet_name": "企业户"},
+            {"name": "加白户", "sheet_name": "加白户"}])
+        reads = []
+
+        def _fake_read(svc, sid, sheet, rng):
+            reads.append(sheet)
+            if sheet == "企业户":
+                return [["账户ID", "备注二"], ["7001", ""]]
+            return [["入库时间", "是否回收", "账户ID", "BC", "国家", "所属渠道",
+                     "接户运营", "时区", "状态", "消耗", "位置", "换绑情况", "产品信息"],
+                    ["2026-10-01", "否", "9001", "", "", "", "", "", "", "", "", "", ""]]
+
+        monkeypatch.setattr(gs, "read_sheet_values", _fake_read)
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        diff = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "sheet_name": "企业户", "dry_run": True}).get_json()["diff"]
+        assert reads == ["企业户"], f"只该读一张表，实际读了 {reads}"
+        assert [x["account_id"] for x in diff["to_create"]] == ["7001"]
+
+    def test_foreign_sheet_name_rejected_without_reading(self, client, monkeypatch):
+        import google_sheets_service as gs
+        hg = self._conf(client, "_ps2", [{"name": "企业户", "sheet_name": "企业户"}])
+        reads = []
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: reads.append(a) or [[]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "tt", "sheet_name": "别人的表", "dry_run": True})
+        assert resp.status_code == 400 and "别人的表" in resp.get_json()["error"]
+        assert reads == [], "外来表名不该真的去读"
+
+    def test_gg_rejects_sheet_name(self, client):
+        hg, _ = _create_user(client, "_ps3", role="huguan")
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg, json={
+            "platform": "gg", "sheet_name": "企业户", "dry_run": True})
+        assert resp.status_code == 400
+
+    def test_without_sheet_name_reads_every_table(self, client, monkeypatch):
+        """缺省必须与改动前一致：所有表都读、行合并。"""
+        import google_sheets_service as gs
+        hg = self._conf(client, "_ps4", [
+            {"name": "企业户", "sheet_name": "企业户"},
+            {"name": "加白户", "sheet_name": "加白户"}])
+        reads = []
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda svc, sid, sheet, rng: reads.append(sheet) or
+                            [["账户ID"], ["7001" if sheet == "企业户" else "9001"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        client.post("/api/huguan/dashboard/sync", headers=hg,
+                    json={"platform": "tt", "dry_run": True})
+        assert reads == ["企业户", "加白户"]

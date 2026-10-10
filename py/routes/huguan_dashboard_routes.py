@@ -5,6 +5,7 @@
 Sheets I/O 在 google_sheets_service.py。
 """
 import logging
+import time
 
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
@@ -19,6 +20,12 @@ from .decorators import huguan_required
 huguan_dashboard_bp = Blueprint("huguan_dashboard", __name__)
 
 log = logging.getLogger("gg-server")
+
+
+def _tick(label: str, t0: float) -> float:
+    """计时日志（设计 §3.4）：只为定位「慢」，不改任何行为。返回新的起点。"""
+    log.info("户管看板 %s 阶段耗时 %.2fs", label, time.perf_counter() - t0)
+    return time.perf_counter()
 
 
 @huguan_dashboard_bp.route("/api/huguan/dashboard", methods=["GET"])
@@ -154,6 +161,13 @@ def dashboard_sync():
     if platform not in hd.PLATFORMS:
         return err("platform 必须是 gg、tt 或 fb", 400)
 
+    # 按表操作（设计 §3.1）：`sheet_name` 可选。给了就只处理那一张表；缺省＝全部表
+    # （与改动前逐字节一致）。gg/fb 只有一张表，按表无意义 ⇒ 直接拒，避免「静默等同全量」
+    # 让前端 bug 变成哑巴。
+    only_sheet = str(data.get("sheet_name") or "").strip()
+    if only_sheet and platform != "tt":
+        return err("只有 TT 支持按表操作", 400)
+
     uid = get_uid()
     db = database.get_db()
     try:
@@ -164,6 +178,13 @@ def dashboard_sync():
         tables = [t for t in tables if t["sheet_name"]]
         if not tables:
             return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
+
+        # 归属门禁：只能按自己配置里的表操作（与读表头端点同款）；不在里面就 400，
+        # 绝不据此去读任意工作表。
+        if only_sheet:
+            tables = [t for t in tables if t["sheet_name"] == only_sheet]
+            if not tables:
+                return err(f"工作表「{only_sheet}」不在你的看板配置里", 400)
 
         import google_sheets_service as gs
         from main import _GOOGLE_SHEETS_CONFIG
@@ -179,6 +200,8 @@ def dashboard_sync():
         # setdefault 钉「首次出现」—— 与 `sheet_from` / `build_diff` 的去重口径一致。
         sheet_col_maps = {}
         spreadsheet_id = _spreadsheet_id(db, uid, platform)
+        # 计时（设计 §3.4）：只为定位「哪一段慢」，不改任何行为/响应。
+        t0 = time.perf_counter()
         for t in tables:
             grid = gs.read_sheet_values(service, spreadsheet_id,
                                         t["sheet_name"], hd.READ_RANGE[platform])
@@ -211,10 +234,12 @@ def dashboard_sync():
                     parsed["_account_type"] = t["name"]
                 parsed_rows.append(parsed)
 
+        t0 = _tick("读取完成", t0)
         diff = hd.build_diff(db, parsed_rows, platform)
         # 未采集列逐表上报（设计 §4.3）：**空列表也要带** —— 前端据它的存在与否渲染
         # 「N 列未采集」提示。gg/fb 无表头映射 ⇒ 恒为空（行为与改动前一致）。
         diff["unmatched_columns"] = unmatched_columns
+        t0 = _tick("build_diff 完成", t0)
 
         # fail-safe：只有**显式布尔 False** 才落库。缺省 / true / null / "false"
         # (字符串) / 0 全部走只读 dry_run —— 少了这个 is not False，JSON null 会因
@@ -292,6 +317,7 @@ def dashboard_sync():
         undo["sheet_key_cols"] = sheet_key_cols
         hd.save_undo(db, uid, platform, "sync", undo)
         db.commit()
+        t0 = _tick("落库完成", t0)
 
         # 规格 §8.3 步骤 8：落库后清缓存（账户写入了，代理/列表下拉必须立即刷新）。
         # 只放在路由层 —— 纯逻辑的 apply_diff 不该依赖 cache。
