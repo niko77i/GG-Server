@@ -133,34 +133,22 @@ _EXTRACT_PAYLOAD = {
 }
 
 
-def _fb_report_count():
-    db = database.get_db()
-    n = db.execute("SELECT COUNT(*) FROM fb_ad_reports").fetchone()[0]
-    db.close()
-    return n
+@pytest.mark.parametrize("who", ["user", "huguan", "admin"])
+def test_fb_extract_save_not_blocked_for_any_role(client, fb_three, monkeypatch, who):
+    """**撤回记录（2026-10-11）**：本端点曾被加上「户管 / 管理员 → 403」的角色守卫
+    （`e84fe94`，理由是它与数据管理页同属「写 FB 报表数据」）。**那条守卫是错的** ——
+    「数据提取」页是做表数据的**录入入口**，谁在做表谁就得能存；设计里
+    「管理员只读 / 户管仅可改消耗」是**数据管理页这个页面**的约束，不该延伸到录入页。
+    实测后果：管理员在 FB 做表页保存直接 403，正常工作流被打断 ⇒ 已撤回。
 
-
-@pytest.mark.parametrize("who", ["huguan", "admin"])
-def test_fb_extract_save_rejects_readonly_roles(client, fb_three, who):
-    """**审查 🔴**：`/api/fb/extract/save` 是 FB 侧**另一条**写 `fb_ad_reports` 的路径
-    （「数据提取」页的新增 / 回填）。它的装饰器只过平台门禁、不判角色 ——
-    户管与 FB 管理员曾能直接 200 新增行并写全字段（实测复现）。
-    它与数据管理页同属「写 FB 报表数据」，同受设计 §3 矩阵约束 ⇒ 只读角色 403。
+    本用例钉住撤回后的行为：**任何角色**走这个录入入口都必须能保存（此处断言 200）。
+    若将来确需限制某角色进本页，应在**前端导航 / 路由层**做，不要在这里拦。
     """
-    h, _, _ = fb_three[who]
-    before = _fb_report_count()
-    r = client.post("/api/fb/extract/save", json=_EXTRACT_PAYLOAD, headers=h)
-    assert r.status_code == 403, r.get_data(as_text=True)[:300]
-    assert _fb_report_count() == before, "被拒的请求不得落库（守卫须在 INSERT 之前）"
-
-
-def test_fb_extract_save_still_allows_plain_user(client, fb_three, monkeypatch):
-    """回归：普通 user 用数据提取页保存**自己名下**的数据不受影响（收窄不得误伤）。"""
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "upsert_fb_reports", lambda *a, **k: None)
-    h, _, _ = fb_three["user"]
+    h, _, _ = fb_three[who]
     r = client.post("/api/fb/extract/save", json=_EXTRACT_PAYLOAD, headers=h)
-    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    assert r.status_code == 200, f"{who} 应能保存：{r.get_data(as_text=True)[:300]}"
 
 
 def test_fb_stats_owner_filter_cannot_widen_plain_user(client, fb_three):
@@ -345,41 +333,17 @@ _ZUOBIAO_PAYLOAD = {
 }
 
 
-def _gg_report_count():
-    db = database.get_db()
-    n = db.execute("SELECT COUNT(*) FROM ad_reports").fetchone()[0]
-    db.close()
-    return n
+@pytest.mark.parametrize("who", ["user", "huguan", "admin"])
+def test_gg_zuobiao_not_blocked_for_any_role(client, three, who):
+    """**撤回记录（2026-10-11）**：本端点曾被加上「户管 / 管理员 → 403」的角色守卫
+    （`c1d6eeb`）。**那条守卫是错的** —— 「工具箱 → 做表数据」是做表数据的**录入入口**，
+    谁做表谁就得能存；「管理员只读 / 户管仅可改消耗」是**数据管理页**的页面级约束。
+    与 FB 侧那条同源、同时撤回。
 
-
-@pytest.mark.parametrize("who", ["huguan", "admin"])
-def test_gg_zuobiao_save_rejects_readonly_roles(client, three, who):
-    """**写路径清点结论**：`/api/google-sheets/update-zuobiao`（工具箱 → 做表数据）是
-    GG 侧**另一条**写 `ad_reports` 的路径 —— 它既没有 `@no_huguan`，也不在
-    `_GG_ONLY_PREFIXES` 里 ⇒ 平台守卫管不着，两个只读角色原本都能写
-    （`user_id` 恒为调用者自己 ⇒ 是「绕过只读」，非跨用户泄露）。
-    用户裁定按 FB `extract_save` 同款收口 ⇒ 403 且不落库。
-
-    ⚠️ RED 实测口径（别把本用例读强了）：短路守卫后实际拿到的是 **400**
-    （「请先在个人中心配置 Google 表格」）而非 200 —— 测试用户没有 Google 表格配置，
-    配置检查挡在写库之前。「无守卫 ⇒ 会真的写库」是**读代码**得出的
-    （写库那步在配置检查之后，全函数无任何角色判定），未在运行期演示到写库那一步。
-    本用例真正钉住的是：**只读角色的请求在配置检查之前就被 403 掉**。
+    本用例钉住撤回后的行为：任何角色都**不得**在本入口拿到 403。
+    （只断言「不是 403」而不要求 200：payload 里的产品在测试库里不存在 ⇒ 后续
+    产品校验会给 400，那是与本判定无关的既有行为；守卫若命中必然是 403。）
     """
     h, _, _ = three[who]
-    before = _gg_report_count()
     r = client.post("/api/google-sheets/update-zuobiao", json=_ZUOBIAO_PAYLOAD, headers=h)
-    assert r.status_code == 403, r.get_data(as_text=True)[:300]
-    assert _gg_report_count() == before, "被拒的请求不得落库（守卫须在写入之前）"
-
-
-def test_gg_zuobiao_guard_does_not_fire_for_plain_user(client, three):
-    """回归：守卫**不得误伤普通 user**（真正做表的人）。
-
-    只断言「不是 403」：守卫命中必然是 403，故该断言足以证明它没命中。
-    payload 里的产品在测试库里不存在 ⇒ 后续校验大概率给 400，那是既有行为，
-    与本判定无关（本用例只管「守卫有没有误伤」）。
-    """
-    h, _, _ = three["user"]
-    r = client.post("/api/google-sheets/update-zuobiao", json=_ZUOBIAO_PAYLOAD, headers=h)
-    assert r.status_code != 403, f"普通 user 不得被只读守卫拦下：{r.get_data(as_text=True)[:300]}"
+    assert r.status_code != 403, f"{who} 不得被只读守卫拦下：{r.get_data(as_text=True)[:300]}"

@@ -1908,16 +1908,12 @@ def extract_parse():
 def extract_save():
     db = get_db()
     uid = get_uid()
-    # 角色守卫（2026-10-11，Task 3 审查 🔴）：本端点是 FB 侧**另一条**写入
-    # `fb_ad_reports` 的路径（「数据提取」页的新增 / 回填），不在数据管理页的七端点
-    # 清单里，但同属「写 FB 报表数据」⇒ 同样受设计 §3 的角色矩阵约束。
-    # 户管与管理员是只读角色：户管只能改「消耗」、管理员一律不可写。
-    # 户管的这条守卫与**既有**前端意图一致（`router/index.js` 本来就把户管从
-    # `/fb/extract` 弹走），不是新限制。developer 与普通 user 不受影响 ——
-    # 后者写的 `user_id` 恒为自己（`ON CONFLICT` 键含 `user_id`）。
-    _role = _get_role(db, uid)
-    if _role in REPORT_COST_ONLY_ROLES or _role == "admin":
-        return err("无权限：只读角色不可写入数据", 403)
+    # ⚠️ 2026-10-11 **撤回**角色守卫（原 `e84fe94` 加的「户管 / 管理员 → 403」）。
+    # 那条守卫是**错的**：「数据提取」页是做表数据的**录入入口**，谁做表谁就得能存；
+    # 设计里的「管理员只读 / 户管仅可改消耗」是**数据管理页**这个页面的约束，
+    # 不该延伸到录入页。实测后果：管理员在 FB 做表页保存直接 403，正常工作流被打断。
+    # 本端点写入的 `user_id` 恒为调用者自己（`ON CONFLICT` 键含 `user_id`）
+    # ⇒ 不构成跨用户读写面。若确需限制某角色**进入本页**，应在前端导航 / 路由层做。
     data = parse_body()
     product_name = data.get('product_name', '').strip()
     line_name = data.get('line_name', '')

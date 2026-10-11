@@ -249,13 +249,10 @@ router.beforeEach((to, from, next) => {
     next('/accounts/ads')
     return
   }
-  // 户管不进音频替换入口（仅此子页）。
-  // ⚠️ 原注释写「/toolkit/zuobiao 按裁定放行」—— 那条放行已被 2026-10-11
-  // 「数据管理页开放给户管/管理员」的裁定覆盖：`/api/google-sheets/update-zuobiao`
-  // 是另一条写 `ad_reports` 的路径，现与数据管理页同口径，对**户管与管理员一律 403**
-  // （后端守卫，见 py/main.py 的 google_sheets_update_zuobiao）。
-  // 此处**刻意不加**重定向：户管导航里本就没有「工具集」入口 ⇒ 点不到；
-  // 页面即便被直接打开，保存也会被后端拒（前端藏入口 + 后端拒，两层）。
+  // 户管不进音频替换入口（仅此子页；/toolkit/zuobiao 按裁定放行）
+  // ⚠️ 2026-10-11 补记：曾一度给 `/api/google-sheets/update-zuobiao` 加过后端角色守卫
+  // 把户管/管理员挡在「做表数据」页外，**已撤回** —— 做表数据页是**录入入口**，
+  // 数据管理页的「只读」是页面级约束，不该延伸到这里。本行注释维持原判：zuobiao 放行。
   if (auth.isHuguan && (to.path === '/toolkit/audio' || to.path.startsWith('/toolkit/audio/'))) {
     next('/accounts/ads')
     return
