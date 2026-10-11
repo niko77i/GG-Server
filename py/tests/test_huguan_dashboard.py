@@ -4951,6 +4951,44 @@ class TestPlatformTables:
         assert hd._default_account_type(db, 9) == "企业户"
         db.close()
 
+    # ---- 2026-10-11（子项目 A）：FB 的列映射覆盖随配置存取 ----
+
+    def test_fb_carries_columns_and_gg_does_not(self, client):
+        """fb 带 columns（缺省 {}，与 tt 同口径）；**gg 不带** —— 载荷形状逐字节不变。"""
+        db = self._db()
+        hd.save_config(db, 9, "fb", "SS1", "账户管理分配",
+                       columns={"时区": "consumption"})
+        hd.save_config(db, 9, "gg", "SS2", "看板G")
+        assert hd.get_platform_tables(db, 9, "fb") == [
+            {"name": "", "sheet_name": "账户管理分配",
+             "columns": {"时区": "consumption"}}]
+        assert hd.get_platform_tables(db, 9, "gg") == [
+            {"name": "", "sheet_name": "看板G"}]
+        db.close()
+
+    def test_fb_columns_default_to_empty_dict(self, client):
+        db = self._db()
+        hd.save_config(db, 9, "fb", "SS1", "账户管理分配")
+        assert hd.get_platform_tables(db, 9, "fb")[0]["columns"] == {}
+        db.close()
+
+    def test_fb_empty_columns_do_not_touch_the_stored_text(self, client):
+        """传空 dict ⇒ 落盘的配置文本与改动前一致（多一个键都不行）。"""
+        db = self._db()
+        hd.save_config(db, 9, "fb", "SS1", "账户管理分配", columns={})
+        raw = db.execute("SELECT value FROM config WHERE key='huguan_dashboard_9'").fetchone()[0]
+        assert json.loads(raw)["fb"] == {"spreadsheet_id": "SS1", "sheet_name": "账户管理分配"}
+        db.close()
+
+    def test_fb_columns_survive_a_round_trip(self, client):
+        """存了再读回来一模一样 —— 否则改一次配置就把已有覆盖**静默清掉**。"""
+        db = self._db()
+        hd.save_config(db, 9, "fb", "SS1", "账户管理分配", columns={"时区": "consumption"})
+        got = hd.get_platform_tables(db, 9, "fb")[0]["columns"]
+        hd.save_config(db, 9, "fb", "SS1", "账户管理分配", columns=got)
+        assert hd.get_platform_tables(db, 9, "fb")[0]["columns"] == {"时区": "consumption"}
+        db.close()
+
 
 class TestGroupRowsBySheet:
     def test_tt_splits_by_type_and_skips_unknown(self, client):
@@ -7217,3 +7255,35 @@ class TestFbWritePathColMap:
         row = hd.parse_row(values, "fb", cm)
         assert row["timezone"] == "UTC+8"
         assert row["account_id"] == "1234567890"
+
+
+class TestFbColumnsPostValidation:
+    """POST 层放行 fb 的顶层 columns，白名单按平台取（设计 §4.7）。"""
+
+    def _save(self, client, username, cols):
+        hg, _uid = _create_user(client, username, role="huguan")
+        body = {"platform": "fb", "spreadsheet_id": "SS", "sheet_name": "账户管理分配"}
+        if cols is not None:
+            body["columns"] = cols
+        return client.post("/api/huguan/dashboard", json=body, headers=hg)
+
+    def test_fb_accepts_a_known_field(self, client):
+        assert self._save(client, "_fbcols1", {"备注二": "consumption"}).status_code == 200
+
+    def test_fb_rejects_an_unknown_field(self, client):
+        assert self._save(client, "_fbcols2", {"某列": "不存在的字段"}).status_code == 400
+
+    def test_fb_rejects_a_tt_only_field_name(self, client):
+        """白名单按**该平台**的目录取：tt 的定位键名 fb 目录里没有。"""
+        assert self._save(client, "_fbcols3", {"某列": "advertiser_id"}).status_code == 400
+
+    def test_fb_rejects_two_columns_on_one_field(self, client):
+        assert self._save(client, "_fbcols4",
+                          {"甲": "consumption", "乙": "consumption"}).status_code == 400
+
+    def test_fb_empty_string_is_allowed_and_repeatable(self, client):
+        """空串 = 刻意不采集：合法，且允许多列同指（与 tt 同口径）。"""
+        assert self._save(client, "_fbcols5", {"甲": "", "乙": ""}).status_code == 200
+
+    def test_fb_columns_must_be_an_object(self, client):
+        assert self._save(client, "_fbcols6", ["consumption"]).status_code == 400

@@ -149,9 +149,29 @@ def dashboard_config_save():
                 item["columns"] = cols
             tables.append(item)
 
+    # fb 的列映射覆盖在**顶层** `columns`（fb 仍是单表，没有 tables[]）。规则与 tt 的
+    # `tables[].columns` 逐字同款：空串合法（刻意不采集，允许多列同指）、非字符串一律 400、
+    # 同一字段被两列指定 ⇒ 400、白名单按**该平台**的目录取（fb 目录里没有 tt 的
+    # advertiser_id，反之亦然 —— 用错平台的字段名必须当场拒）。
+    fb_cols = data.get("columns")
+    if platform == "fb" and fb_cols is not None:
+        if not isinstance(fb_cols, dict):
+            return err("columns 必须是对象", 400)
+        allowed = hd._catalog_fields(platform)
+        seen_fields = set()
+        for header, field in fb_cols.items():
+            if isinstance(field, str) and field == "":
+                continue
+            if not isinstance(field, str) or field not in allowed:
+                return err(f"列「{header}」指向了未知字段「{field}」", 400)
+            if field in seen_fields:
+                return err(f"字段「{field}」被两列同时指定", 400)
+            seen_fields.add(field)
+
     db = database.get_db()
     try:
-        hd.save_config(db, get_uid(), platform, ss_id, sheet_name, tables=tables)
+        hd.save_config(db, get_uid(), platform, ss_id, sheet_name, tables=tables,
+                       columns=fb_cols if isinstance(fb_cols, dict) else None)
     finally:
         db.close()
     return ok({"message": "配置已保存"})

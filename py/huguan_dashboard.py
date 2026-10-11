@@ -667,8 +667,8 @@ def get_platform_tables(db, user_id: int, platform: str) -> list:
       取它，前端也据此渲染，缺省 `{}` 让前端无需判 None。
     - tt 只有旧的 `sheet_name`（2026-10-08 之前的存量配置）→ 当成单条「加白户」。
       **只读不改写磁盘**：写回发生在用户下次点保存时，这样出问题能一眼看出是读的还是写的。
-    - gg / fb → 单元素列表，`name` 为空串，**不带 `columns`**（columns 是 tt 专属概念，
-      gg/fb 走固定列规格，载荷必须逐字节不变）。
+    - gg → 单元素列表、`name` 为空串、**不带 `columns`**；fb → 单元素列表、**带 `columns`**
+      （fb 已有表头映射，与 tt 同口径；gg 没有，载荷形状必须逐字节不变）。
     """
     entry = load_config(db, user_id).get(platform)
     if not isinstance(entry, dict):
@@ -692,6 +692,12 @@ def get_platform_tables(db, user_id: int, platform: str) -> list:
                 return out
         legacy = _conf_text(entry.get("sheet_name"))
         return [{"name": TT_DEFAULT_ACCOUNT_TYPE, "sheet_name": legacy}] if legacy else []
+    if platform == "fb":
+        # fb 有了表头映射 ⇒ 与 tt 一样带 `columns`（手工覆盖）。**gg 不带** ——
+        # gg 没有表头映射，载荷形状必须逐字节不变（前端也据此分流）。
+        cols = entry.get("columns")
+        return [{"name": "", "sheet_name": _conf_text(entry.get("sheet_name")),
+                 "columns": cols if isinstance(cols, dict) else {}}]
     return [{"name": "", "sheet_name": _conf_text(entry.get("sheet_name"))}]
 
 
@@ -707,12 +713,13 @@ def _default_account_type(db, user_id: int) -> str:
 
 
 def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name: str,
-                *, tables=None) -> None:
+                *, tables=None, columns=None) -> None:
     """写入某平台的看板配置，另一个平台的配置保持不变。
 
     `tables=None`（默认）→ 写旧格式 `{spreadsheet_id, sheet_name}`，行为与改动前**逐字节一致**
     （gg / fb 走这条路）。`tables` 非 None → 只允许 tt，写新格式
     `{spreadsheet_id, tables:[{name, sheet_name}]}`，并按类型名改名**级联**回填账户表。
+    `columns` 只对 fb 生效（tt 的覆盖挂在 `tables[]` 每一项上）。
     """
     if platform not in PLATFORMS:
         raise ValueError(f"不支持的平台: {platform}")
@@ -724,6 +731,10 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
             "spreadsheet_id": _conf_text(spreadsheet_id),
             "sheet_name": _conf_text(sheet_name),
         }
+        # 列映射覆盖（仅 fb；`{表头名: 字段key}`）。空 dict / None 都**不落盘** ——
+        # 保持「没配 columns」时的配置文本与改动前逐字节一致（gg 永远走这一支）。
+        if platform == "fb" and isinstance(columns, dict) and columns:
+            conf[platform]["columns"] = dict(columns)
     else:
         clean = []
         for t in tables:
