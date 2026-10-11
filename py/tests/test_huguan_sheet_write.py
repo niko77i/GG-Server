@@ -444,14 +444,32 @@ def test_tt_resolve_table_col_map_reads_header_key_column(monkeypatch):
     assert reads == [("SS", "企业户", "A1:ZZ1")], f"表头读取必须恰为 A1:ZZ1 一次：{reads}"
 
 
-def test_resolve_table_col_map_gg_fb_performs_no_read(monkeypatch):
-    """gg/fb 的 col_map 就是合成规格，解析时**零额外读**（行为逐字节不变）。"""
+def test_resolve_table_col_map_gg_performs_no_read(monkeypatch):
+    """gg 的 col_map 就是合成规格，解析时**零额外读**（行为逐字节不变）。
+
+    fb 在本任务（Task 5）已放行到「读表头解析」侧，故这里不再断言 fb 零额外读；
+    fb 改为按表头解析（断言见下一条 test_fb_resolve_table_col_map_reads_header）。
+    """
     def _boom(*a, **k):
-        raise AssertionError("gg/fb 不得发起任何读表")
+        raise AssertionError("gg 不得发起任何读表")
 
     monkeypatch.setattr(hd, "read_sheet_values", _boom)
     assert hd.resolve_table_col_map(object(), "SS", "看板", "gg") == hd.spec_column_map("gg")
-    assert hd.resolve_table_col_map(object(), "SS", "看板", "fb") == hd.spec_column_map("fb")
+
+
+def test_fb_resolve_table_col_map_reads_header(monkeypatch):
+    """FB 表的资产UID不在 D 列时，写表前解析的 col_map 必须按表头定为那一列
+    —— 否则整批静默写空（与 tt 同款口径，Task 5 放行 fb）。"""
+    reads = []
+
+    def _fake_read(svc, spreadsheet_id, sheet_name, range_str):
+        reads.append((spreadsheet_id, sheet_name, range_str))
+        return [["资产UID", "产品信息"]]          # 资产UID 在 **A 列**
+
+    monkeypatch.setattr(hd, "read_sheet_values", _fake_read)
+    cm = hd.resolve_table_col_map(object(), "SS", "账户管理分配", "fb")
+    assert cm["account_id"] == "A", f"应按表头定为 A 列，实际={cm}"
+    assert reads == [("SS", "账户管理分配", "A1:ZZ1")], f"表头读取必须恰为 A1:ZZ1 一次：{reads}"
 
 
 def test_resolve_table_col_map_raises_when_key_column_missing(monkeypatch):

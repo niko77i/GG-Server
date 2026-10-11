@@ -430,25 +430,24 @@ def key_col_of_col_map(col_map: dict, platform: str) -> str:
 
 def resolve_table_col_map(service, spreadsheet_id: str, sheet_name: str,
                           platform: str, overrides: dict | None = None) -> dict:
-    """写表前解析**这张表**的 col_map（tt 读一次表头行）。
+    """写表前解析**这张表**的 col_map（tt / fb 读一次表头行）。
 
-    - gg / fb：直接返回 `spec_column_map(platform)`，**零额外读**，行为与改动前
-      逐字节相同（它们继续走固定列规格）。
-    - tt：读一次表头行（`A1:ZZ1`）再 `resolve_column_map`。表头顺序与加白户不同
+    - gg：直接返回 `spec_column_map("gg")`，**零额外读**，行为与改动前逐字节相同。
+    - tt / fb：读一次表头行（`A1:ZZ1`）再 `resolve_column_map`。表头顺序与固定列规格不同
       （户管每加一张表表头都不同）⇒ 固定列字母会静默串列，必须按表头定位。
-    - 定位键（账户ID）解析不到时**抛错** —— 绝不退回任何默认列：那会让整批
-      静默写到错行（读路径同样拒同步，两侧口径一致）。
+    - 定位键解析不到时**抛错** —— 绝不退回任何默认列：那会让整批静默写到错行
+      （读路径同样拒同步，两侧口径一致）。
 
     `overrides` 是该表的手工覆盖 `{表头名: 字段key}`，必须与读路径
     （`dashboard_sync` 的 `t.get("columns")`）**同源** —— 否则同一次同步里读与写
     对「哪一列是定位键」的认识不一致，写就会落到错行。
     """
-    if platform != "tt":
+    if platform == "gg":
         return spec_column_map(platform)
     grid = read_sheet_values(service, spreadsheet_id, sheet_name, "A1:ZZ1")
     headers = grid[0] if grid else []
     col_map, _unmatched = resolve_column_map(headers, overrides or {}, platform)
-    if not (col_map.get("advertiser_id") or col_map.get(TT_KEY_FIELD)):
+    if not (col_map.get(ACCOUNT_KEY_FIELD[platform]) or col_map.get(TT_KEY_FIELD)):
         raise ValueError(
             f"工作表「{sheet_name}」里找不到「{KEY_COL_LABEL[platform]}」列，无法写表")
     return col_map
@@ -570,8 +569,12 @@ def parse_row(values: list, platform: str, col_map: dict | None = None) -> dict:
     # 与 ACCOUNT_KEY_FIELD 里的 DB 列名是两个命名空间：消费解析结果用
     # account_id，拼 SQL / 写库用 ACCOUNT_KEY_FIELD[platform]，勿混用。
     # lstrip("'") 假定该值只带 _text() 加的那一个前缀。
-    key_col = cm.get(TT_KEY_FIELD) or cm.get(ACCOUNT_KEY_FIELD[platform]) \
-        or KEY_COL[platform]
+    # **不再有列字母兜底**（设计 §4.8）：col_map 里没有定位键 ⇒ 抛错，绝不静默落到
+    # KEY_COL[platform]（fb 是 D 列）—— 那正是「表头一挪就写错行」的入口。
+    # 路由的前置校验已先拦一道，这里是纵深防御（gg 走 spec_column_map 恒有定位键，抛不出来）。
+    # 顺带复用 key_col_of_col_map：定位键在 tt 有两个命名空间（advertiser_id / account_id），
+    # 自己再写一遍 `or` 迟早漏一个。
+    key_col = key_col_of_col_map(cm, platform)
     key_i = col_index(key_col)
     raw_key = values[key_i] if len(values) > key_i else ""
     out["account_id"] = ("" if raw_key is None else str(raw_key)).strip().lstrip("'").strip()

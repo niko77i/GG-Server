@@ -1406,6 +1406,10 @@ class TestBuildDiff:
 # 「表头行读取」（Task 6 写表前解析 col_map 用）。
 _TT_STD_HEADER = [c[1] for c in hd.COLUMN_SPEC["tt"]]
 
+# 标准 FB 表头（A=日期 … Q=产品信息）。FB 写路径自 Task 5 起也按表头名解析 col_map，
+# 故 fb 用例的「表头行读取」必须回 FB 表头 —— 回 TT 表头会让「资产UID」认不出、整批 400。
+_FB_STD_HEADER = [c[1] for c in hd.COLUMN_SPEC["fb"]]
+
 
 def _stub_header_read(monkeypatch):
     """桩掉写表前的「表头行读取」（Task 6）。未走 `_stub_sheets` 的用例调它。"""
@@ -1414,8 +1418,12 @@ def _stub_header_read(monkeypatch):
                         if rng == "A1:ZZ1" else [])
 
 
-def _stub_sheets(monkeypatch, captured):
-    """把 update_rows_by_account_id 换成桩，记录调用（同步执行，见下）。"""
+def _stub_sheets(monkeypatch, captured, header=None):
+    """把 update_rows_by_account_id 换成桩，记录调用（同步执行，见下）。
+
+    `header` 是「表头行读取」（`A1:ZZ1`）回的列头，默认 TT 标准表头（tt/gg 用例）。
+    fb 用例传 `_FB_STD_HEADER` —— Task 5 起 fb 写路径也读表头解析 col_map。
+    """
     import google_sheets_service as gs
     import huguan_dashboard as hd
     import main as m
@@ -1435,12 +1443,13 @@ def _stub_sheets(monkeypatch, captured):
     # 会把它们的表冲掉。这里回空表即可 —— `/push` 的用例只断言 HTTP 契约
     # （状态码 / rows 计数），快照内容的断言在 tests/test_huguan_undo.py。
     #
-    # 例外：**表头行读取**（`A1:ZZ1`，Task 6 写表前解析 col_map 用）必须回标准
-    # 「加白户」表头 —— 它解析出的 col_map 与既有固定列规格逐列等价（A=入库时间…
-    # M=产品信息），故各用例按列字母的断言逐字不变；回空表会让每张 tt 表都「找不到
-    # 账户ID列」而写失败。其余范围（整片快照等）仍回空。
+    # 例外：**表头行读取**（`A1:ZZ1`，Task 6 写表前解析 col_map 用）必须回标准表头
+    # —— 它解析出的 col_map 与既有固定列规格逐列等价，故各用例按列字母的断言逐字不变；
+    # 回空表会让每张表都「找不到定位键列」而写失败。tt 用例默认回「加白户」表头，
+    # fb 用例传 `header=_FB_STD_HEADER`（Task 5 起 fb 也读表头）。其余范围仍回空。
+    _hdr = list(_TT_STD_HEADER if header is None else header)
     monkeypatch.setattr(hd, "read_sheet_values",
-                        lambda svc, sid, name, rng: [list(_TT_STD_HEADER)]
+                        lambda svc, sid, name, rng: [list(_hdr)]
                         if rng == "A1:ZZ1" else [])
     # 端点经 main._sync_sheets_background 起**后台线程**写表。不拦住它，断言就会
     # 和后台线程抢时间 —— 本机快时偶然通过、CI 慢时红，是最难查的一类间歇失败。
@@ -2617,7 +2626,7 @@ class TestPushKeyColumn:
         db.close()
 
         captured = []
-        _stub_sheets(monkeypatch, captured)
+        _stub_sheets(monkeypatch, captured, header=_FB_STD_HEADER)
         resp = client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "fb"})
         assert resp.status_code == 200
         assert captured, "对照：写入器必须被调用过，否则下面的断言是空集上的恒真式"
@@ -2737,7 +2746,7 @@ class TestWritebackRowsKeyColumn:
         db.close()
 
         captured = []
-        _stub_sheets(monkeypatch, captured)
+        _stub_sheets(monkeypatch, captured, header=_FB_STD_HEADER)
 
         import huguan_dashboard as hd
         hd.writeback_rows(uid, "fb", ["WB-KC-FB-1"])
@@ -7092,3 +7101,39 @@ class TestFbSyncReadPath:
         assert "账户ID" not in msg
         assert "账户管理分配" in msg
 
+
+# ---------- Task 5: FB 写路径按表解析 col_map ----------
+
+class TestFbWritePathColMap:
+    """FB 写路径按表解析 col_map（设计 §4.5）。"""
+
+    def test_resolve_table_col_map_reads_header_for_fb(self, monkeypatch):
+        """fb 不再返回固定合成 map，而是读表头行后解析。"""
+        headers = list(reversed([c[1] for c in hd.COLUMN_SPEC["fb"]]))
+        monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: [headers])
+        cm = hd.resolve_table_col_map(object(), "SS", "账户管理分配", "fb", {})
+        assert cm["account_id"] == "N"          # 表头反排 ⇒ 资产UID 落到 N
+        assert cm["acquired_date"] == "Q"
+
+    def test_resolve_table_col_map_gg_untouched(self):
+        """gg 仍是零额外读的合成 map（逐字节不变）。"""
+        assert hd.resolve_table_col_map(object(), "SS", "看板", "gg", {}) \
+            == hd.spec_column_map("gg")
+
+    def test_parse_row_never_falls_back_to_fixed_key_column(self, monkeypatch):
+        """col_map 里没有定位键 ⇒ 抛错，**绝不**静默用 KEY_COL["fb"]（D 列）。"""
+        import pytest
+        cm = {f: c for f, c in hd.spec_column_map("fb").items() if f != "account_id"}
+        with pytest.raises(ValueError):
+            hd.parse_row(["x"] * 17, "fb", cm)
+
+    def test_parse_row_follows_reordered_header(self):
+        """换序后 parse_row 读到的字段值跟着列走。"""
+        headers = list(reversed([c[1] for c in hd.COLUMN_SPEC["fb"]]))
+        cm, _u = hd.resolve_column_map(headers, {}, "fb")
+        values = [""] * 17
+        values[hd.col_index(cm["timezone"])] = "UTC+8"
+        values[hd.col_index(cm["account_id"])] = "1234567890"
+        row = hd.parse_row(values, "fb", cm)
+        assert row["timezone"] == "UTC+8"
+        assert row["account_id"] == "1234567890"
