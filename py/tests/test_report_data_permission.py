@@ -143,9 +143,16 @@ def test_fb_extract_save_not_blocked_for_any_role(client, fb_three, monkeypatch,
 
     本用例钉住撤回后的行为：**任何角色**走这个录入入口都必须能保存（此处断言 200）。
     若将来确需限制某角色进本页，应在**前端导航 / 路由层**做，不要在这里拦。
+
+    ⚠️ **测试卫生（2026-10-11 实测踩过）**：本用例会让请求**真的走到写表路径**，
+    必须把写表机制整条挡掉（`run_write` 一律 no-op），否则会留下后台线程与写表登记 ——
+    实测这会把 `test_scrape_dn_history_migration` 那条**毫秒级 ctime 时序**用例掀翻
+    （全量里连挂两轮，单独跑却全绿）。本用例只验证「守卫已撤」，写表机制另有其用例覆盖。
     """
     import google_sheets_service as gs
+    import sheet_write
     monkeypatch.setattr(gs, "upsert_fb_reports", lambda *a, **k: None)
+    monkeypatch.setattr(sheet_write, "run_write", lambda *a, **k: None)
     h, _, _ = fb_three[who]
     r = client.post("/api/fb/extract/save", json=_EXTRACT_PAYLOAD, headers=h)
     assert r.status_code == 200, f"{who} 应能保存：{r.get_data(as_text=True)[:300]}"
@@ -334,7 +341,7 @@ _ZUOBIAO_PAYLOAD = {
 
 
 @pytest.mark.parametrize("who", ["user", "huguan", "admin"])
-def test_gg_zuobiao_not_blocked_for_any_role(client, three, who):
+def test_gg_zuobiao_not_blocked_for_any_role(client, three, monkeypatch, who):
     """**撤回记录（2026-10-11）**：本端点曾被加上「户管 / 管理员 → 403」的角色守卫
     （`c1d6eeb`）。**那条守卫是错的** —— 「工具箱 → 做表数据」是做表数据的**录入入口**，
     谁做表谁就得能存；「管理员只读 / 户管仅可改消耗」是**数据管理页**的页面级约束。
@@ -343,7 +350,14 @@ def test_gg_zuobiao_not_blocked_for_any_role(client, three, who):
     本用例钉住撤回后的行为：任何角色都**不得**在本入口拿到 403。
     （只断言「不是 403」而不要求 200：payload 里的产品在测试库里不存在 ⇒ 后续
     产品校验会给 400，那是与本判定无关的既有行为；守卫若命中必然是 403。）
+
+    ⚠️ **测试卫生（2026-10-11 实测踩过）**：把写表机制整条挡掉（`run_write` no-op），
+    否则本用例会留下后台线程与写表登记，实测会掀翻
+    `test_scrape_dn_history_migration` 那条毫秒级 ctime 时序用例
+    （全量连挂两轮、单独跑全绿）。本用例只验证「守卫已撤」。
     """
+    import sheet_write
+    monkeypatch.setattr(sheet_write, "run_write", lambda *a, **k: None)
     h, _, _ = three[who]
     r = client.post("/api/google-sheets/update-zuobiao", json=_ZUOBIAO_PAYLOAD, headers=h)
     assert r.status_code != 403, f"{who} 不得被只读守卫拦下：{r.get_data(as_text=True)[:300]}"
