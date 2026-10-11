@@ -25,6 +25,21 @@ def fb_user(client):
     return uid
 
 
+# ---------- 撤回路径的「表头行读取」桩 ----------
+# 撤回在**旧快照**（没有逐表 `key_col` / `sheet_key_cols`）时要回落到「按该表表头解析
+# col_map」取定位键。Task 5 起 **fb 也读表头**（此前只有 tt 读、gg/fb 零读），故本桩
+# 必须**按平台回对应表头** —— 只回 tt 表头会让 fb 认不出「资产UID」⇒ 撤回 500。
+# gg 零读，回什么都无所谓。
+_TT_HEADER = ["入库时间", "是否回收", "账户ID"]      # 账户ID → C 列
+_FB_HEADER = [c[1] for c in hd.COLUMN_SPEC["fb"]]   # 资产UID → D 列（标准顺序）
+
+
+def _stub_header(monkeypatch, platform="tt"):
+    """把 `hd.read_sheet_values`（表头行）桩成**该平台**的标准表头。"""
+    header = list(_FB_HEADER if platform == "fb" else _TT_HEADER)
+    monkeypatch.setattr(hd, "read_sheet_values", lambda *a, **k: [header])
+
+
 class TestUndoPrimitives:
     def test_table_exists(self, client):
         db = database.get_db()
@@ -280,6 +295,7 @@ class TestPushUndoRoute:
                             calls.append({"sid": sid, "name": name,
                                           "rows": rows, "key_col": key_col})
                             or {"updated": len(rows), "not_found": []})
+        _stub_header(monkeypatch, "fb")     # 旧快照无 key_col ⇒ 回落按 fb 表头解析
         out = hd.undo_push(fb_user, "fb")
         assert calls and calls[0]["rows"][0]["account_id"] == "U9"
         assert calls[0]["rows"][0]["cells"] == {"C": "旧名"}
@@ -323,6 +339,7 @@ class TestPushUndoRoute:
         monkeypatch.setattr(gs, "build_service", lambda path: object())
         monkeypatch.setattr(gs, "update_rows_by_account_id",
                             lambda *a, **k: {"updated": 1, "not_found": []})
+        _stub_header(monkeypatch, "fb")     # 旧快照无 key_col ⇒ 回落按 fb 表头解析
         hd.undo_push(fb_user, "fb")
         db = database.get_db()
         assert hd.load_undo(db, fb_user, "fb", "push") is None
@@ -859,21 +876,23 @@ def _empty_sync_payload(**over):
     return p
 
 
-def _sync_env(monkeypatch, conf=None, calls=None, result=None):
+def _sync_env(monkeypatch, conf=None, calls=None, result=None, platform="tt"):
     """undo_sync 的通用打桩。
 
     - `_open_db` 走到真库：`undo_sync` 会开三条连接（读快照 / 库事务 / 删快照），
       每次必须拿到**新**连接（`database.get_db()` 每次新建，不复用）
     - `conf` 缺省 = 未配置看板 ⇒ 表侧那步不做，专测库侧
     - 表侧写入换成记账 writer，返回的 calls 用来断言写了几列、定位列是哪个
+    - `platform` 决定表头桩回哪张表头（见 `_stub_header`）：tt→C / fb→D。gg 零读无所谓。
     """
     monkeypatch.setattr(hd, "_open_db", lambda: database.get_db())
     monkeypatch.setattr(hd, "get_platform_config",
                         lambda db_, uid, p: conf or {"spreadsheet_id": "", "sheet_name": ""})
-    # 表侧回退前解析 col_map 要读表头行（Task 6）：gg/fb 零读、只有 tt 走这条。
-    # 回标准「加白户」表头 ⇒ 账户ID 在 C 列（与下面断言里的 key_col 一致）。
-    monkeypatch.setattr(hd, "read_sheet_values",
-                        lambda *a, **k: [["入库时间", "是否回收", "账户ID"]])
+    # 表侧回退前解析 col_map 要读表头行（Task 6）：**tt 与 fb 都走这条**，gg 零读。
+    # 回该平台的**标准**表头 ⇒ 定位键落在固定列规格那一列（tt→C / fb→D），
+    # 与下面断言里的 key_col 一致。
+    # （原写「gg/fb 零读、只有 tt 走这条」—— Task 5 起 fb 也读表头，那句已失实。）
+    _stub_header(monkeypatch, platform)
     calls = [] if calls is None else calls
     import google_sheets_service as gs
     monkeypatch.setattr(gs, "build_service", lambda path: object())
@@ -1159,7 +1178,8 @@ class TestSyncUndoExec:
 
         不传 key_col ⇒ FB（账户ID 在 D 列）按默认 "C"（账户名称）定位，整批静默写空。
         """
-        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"},
+                          platform=platform)
         db = database.get_db()
         hd.save_undo(db, fb_user, platform, "sync", _empty_sync_payload(
             sheet_back=[{"account_id": "SB1", "cells": cells}]))
@@ -1172,7 +1192,8 @@ class TestSyncUndoExec:
 
     def test_sheet_back_empty_cells_skips_table_write(self, client, fb_user, monkeypatch):
         """没有可回退的表侧内容（cells 空）⇒ 一个字都不写表。"""
-        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"},
+                          platform="fb")
         db = database.get_db()
         hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
             sheet_back=[{"account_id": "SB0", "cells": {}}]))
@@ -1184,7 +1205,7 @@ class TestSyncUndoExec:
     def test_table_not_found_is_reported(self, client, fb_user, monkeypatch):
         """表里找不到的行进 not_found 报告，不算错误（spec §6.1 同口径）。"""
         _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"},
-                  result={"updated": 0, "not_found": ["NF1"]})
+                  result={"updated": 0, "not_found": ["NF1"]}, platform="fb")
         db = database.get_db()
         hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
             sheet_back=[{"account_id": "NF1", "cells": {"J": "x"}}]))
@@ -1202,7 +1223,8 @@ class TestSyncUndoExec:
         库那步的失败用「old 指向不存在的用户」造出来：CAS 通过后 UPDATE 撞
         `owner_id REFERENCES users(id)`。
         """
-        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"},
+                          platform="fb")
         db = database.get_db()
         pk = _seed_fb_account(db, "OR1", fb_user)
         hd.save_undo(db, fb_user, "fb", "sync", _empty_sync_payload(
@@ -1301,7 +1323,8 @@ class TestSyncUndoExec:
 
     def test_no_snapshot_returns_full_key_set(self, client, fb_user, monkeypatch):
         """没有快照 ⇒ 全零，键集与成功路径一致，且一个字都不写表。"""
-        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"})
+        calls = _sync_env(monkeypatch, conf={"spreadsheet_id": "SID", "sheet_name": "N"},
+                          platform="fb")
         out = hd.undo_sync(fb_user, "fb")
         assert out == {"reverted": 0, "conflicts": [], "kept": [], "not_found": []}
         assert calls == []
@@ -1754,6 +1777,7 @@ class TestPushUndoNotFoundPassthrough:
         monkeypatch.setattr(gs, "update_rows_by_account_id",
                             lambda *a, **k: {"updated": 0, "not_found": ["X1"]})
 
+        _stub_header(monkeypatch, "fb")     # 旧快照无 key_col ⇒ 回落按 fb 表头解析
         out = hd.undo_push(fb_user, "fb")
         assert out["not_found"] == ["X1"]
         assert out["updated"] == 0
