@@ -84,6 +84,16 @@ COLUMN_SPEC = {
     ],
 }
 
+KEY_COL = {"gg": "C", "tt": "C", "fb": "D"}
+OWNER_COL = {"gg": "G", "tt": "G", "fb": "J"}
+OWNER_CHANNEL_COL = {"gg": "H", "tt": "L"}      # 刻意不含 fb，见 spec §6.5
+# tt 读 A:ZZ：表头映射后列数不定（户管每加一张表表头都不同，且「认识但刻意不采集」
+# 的列也占位），固定 A:M 会读漏右侧列。gg/fb 仍走各自固定范围（逐字节不变）。
+READ_RANGE = {"gg": "A:N", "tt": "A:ZZ", "fb": "A:Q"}
+
+# 系统里「账户ID」列在两张表下的实际字段名
+ACCOUNT_KEY_FIELD = {"gg": "account_id", "tt": "advertiser_id", "fb": "account_id"}
+
 # ---------- TT 表头映射（2026-10-09 设计 §4.1）----------
 #
 # 每项：(字段key, 中文名, 别名元组, 方向, 是否定位键, 空值是否跳过回写)
@@ -120,6 +130,40 @@ TT_FIELD_CATALOG = [
 #   - 拼 SQL / 写库用的 DB 列名 → ACCOUNT_KEY_FIELD["tt"]（也是 "advertiser_id"）
 # 注意：`col_map[TT_KEY_FIELD]` 对 tt 会 KeyError —— col_map 里没有 "account_id" 这个键。
 TT_KEY_FIELD = "account_id"
+
+# 方向 → (可写, 可读)。"w" = 只写不读回（FB 的「操作人」是冻结字段、「资产UID」是定位键）；
+# "r" = 只读回（FB 的「接户运营」）。哨兵条目用的 "ignore" **不在这张表里** —— 它不是字段。
+_DIRECTION = {"rw": (True, True), "w": (True, False), "r": (False, True)}
+
+
+def _derive_catalog(platform: str) -> list:
+    """由既有 `COLUMN_SPEC[platform]` 推导字段目录（设计 §4.1）。
+
+    **只用于 fb。** tt 的目录是手写的 `TT_FIELD_CATALOG` —— 它需要多别名
+    （`日期` 也是 `入库时间`）与「认识但刻意不采集」的哨兵，`COLUMN_SPEC` 表达不了。
+    fb 这 17 列既没有第二别名、也没有哨兵，于是从 `COLUMN_SPEC` 推导即可：
+    这样「表头名 ↔ 字段」的分配**只有一份真相**，改 `COLUMN_SPEC` 别名跟着改，不会两份漂。
+
+    推导规则（逐位对应，见设计 §4.1 的表）：
+      第2项 表头       → label（下拉显示）+ 别名元组 (表头,)
+      第3项 字段名     → 字段key
+      第4/5项 可写可读 → 方向（`_DIRECTION` 反查）
+      字段名 == ACCOUNT_KEY_FIELD[platform] → 是否定位键
+      空值跳过回写恒 False（COLUMN_SPEC 没有这个语义）
+    """
+    key_field = ACCOUNT_KEY_FIELD[platform]
+    out = []
+    for _col, header, field, writable, readable in COLUMN_SPEC[platform]:
+        if field is None:
+            continue
+        d = next(k for k, v in _DIRECTION.items()
+                 if v == (bool(writable), bool(readable)))
+        out.append((field, header, (header,), d, field == key_field, False))
+    return out
+
+
+# 字段目录：按平台一份。tt 手写、fb 从 COLUMN_SPEC 推导（设计 §4.1）。
+FIELD_CATALOG = {"tt": TT_FIELD_CATALOG, "fb": _derive_catalog("fb")}
 
 # 别名 → 字段key（同名字段只取最先出现的那个别名条目）
 _TT_ALIAS_TO_FIELD = {}
@@ -298,17 +342,23 @@ def describe_header_columns(headers: list, overrides: dict,
 def field_spec(platform: str) -> dict:
     """字段key → {writable, readable, key, skip_empty_write}。
 
-    tt 来自 TT_FIELD_CATALOG；gg/fb 由既有 COLUMN_SPEC 推导（保证行为逐字不变）。
-    `key` 对 gg/fb 恒为 `ACCOUNT_KEY_FIELD` 那个字段名。
+    tt / fb 来自 `FIELD_CATALOG`（tt 手写、fb 由 `COLUMN_SPEC` 推导）；
+    gg 由既有 `COLUMN_SPEC` 推导（保证行为逐字不变）。
+    `key` 对 gg 恒为 `ACCOUNT_KEY_FIELD` 那个字段名。
     """
-    spec = {}
-    if platform == "tt":
-        for f, _l, _a, d, is_key, skip in TT_FIELD_CATALOG:
+    catalog = FIELD_CATALOG.get(platform)
+    if catalog is not None:
+        spec = {}
+        for f, _l, _a, d, is_key, skip in catalog:
+            # 「认识但刻意不采集」的哨兵（空串字段key，如 tt 的「位置」）不是字段。
+            # **必须在查 _DIRECTION 之前跳过** —— 它的方向是 "ignore"，不在那张表里。
             if not f:
-                continue          # 「认识但刻意不采集」的条目不是字段
-            spec[f] = {"writable": d == "rw", "readable": True,
+                continue
+            writable, readable = _DIRECTION[d]
+            spec[f] = {"writable": writable, "readable": readable,
                        "key": is_key, "skip_empty_write": skip}
         return spec
+    spec = {}
     key_field = ACCOUNT_KEY_FIELD[platform]
     for _col, _header, field, writable, readable in COLUMN_SPEC[platform]:
         if field is None:
@@ -387,16 +437,6 @@ def resolve_table_col_map(service, spreadsheet_id: str, sheet_name: str,
         raise ValueError(f"工作表「{sheet_name}」里找不到「账户ID」列，无法写表")
     return col_map
 
-
-KEY_COL = {"gg": "C", "tt": "C", "fb": "D"}
-OWNER_COL = {"gg": "G", "tt": "G", "fb": "J"}
-OWNER_CHANNEL_COL = {"gg": "H", "tt": "L"}      # 刻意不含 fb，见 spec §6.5
-# tt 读 A:ZZ：表头映射后列数不定（户管每加一张表表头都不同，且「认识但刻意不采集」
-# 的列也占位），固定 A:M 会读漏右侧列。gg/fb 仍走各自固定范围（逐字节不变）。
-READ_RANGE = {"gg": "A:N", "tt": "A:ZZ", "fb": "A:Q"}
-
-# 系统里「账户ID」列在两张表下的实际字段名
-ACCOUNT_KEY_FIELD = {"gg": "account_id", "tt": "advertiser_id", "fb": "account_id"}
 
 # 「归属相关的**单格定向写**」用到的列 —— 按**角色**取，不按调用点各自写死字母。
 # 只有这一个解析点：后续「按表头识别 + 手工映射」改造（2026-10-08 另一方向）

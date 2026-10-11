@@ -6886,3 +6886,68 @@ class TestPendingMasterApply:
         assert got["bc_id"] == old_id, "撤回后 bc_id 应回到挂链前的旧值"
         assert res["reverted"] >= 1, "挂链行应计入 reverted"
 
+
+class TestFieldCatalogPerPlatform:
+    """FB 的字段目录从 COLUMN_SPEC["fb"] 推导（设计 §4.1）。分配只有一份真相。"""
+
+    def test_derived_catalog_matches_column_spec_item_by_item(self):
+        from huguan_dashboard import COLUMN_SPEC, FIELD_CATALOG, ACCOUNT_KEY_FIELD
+        derived = FIELD_CATALOG["fb"]
+        assert len(derived) == len(COLUMN_SPEC["fb"]) == 17
+        dirs = {"r": (False, True), "w": (True, False), "rw": (True, True)}
+        for (col, header, field, writable, readable), entry in zip(COLUMN_SPEC["fb"], derived):
+            key, label, aliases, d, is_key, skip = entry
+            assert key == field, f"{col} 列的字段key 推导错了"
+            assert label == header, f"{col} 列的中文名必须是表头原文"
+            assert aliases == (header,), f"{col} 列的别名就是表头原文"
+            assert dirs[d] == (writable, readable), f"{col} 列的方向推导错了"
+            assert is_key == (field == ACCOUNT_KEY_FIELD["fb"]), f"{col} 列的定位键标志错了"
+            assert skip is False
+
+    def test_field_spec_fb_equivalent_to_column_spec(self):
+        """fb 改走目录后，field_spec("fb") 必须与从 COLUMN_SPEC 推导的逐字段相同。"""
+        from huguan_dashboard import COLUMN_SPEC, ACCOUNT_KEY_FIELD, field_spec
+        key_field = ACCOUNT_KEY_FIELD["fb"]
+        legacy = {}
+        for _col, _h, field, writable, readable in COLUMN_SPEC["fb"]:
+            if field is None:
+                continue
+            legacy[field] = {"writable": writable, "readable": readable,
+                             "key": field == key_field, "skip_empty_write": False}
+        assert field_spec("fb") == legacy
+
+    def test_field_spec_fb_three_directions(self):
+        """三个方向都要推对：只写 / 只读回 / 读写。"""
+        from huguan_dashboard import field_spec
+        s = field_spec("fb")
+        assert s["operator"] == {"writable": True, "readable": False,
+                                 "key": False, "skip_empty_write": False}
+        assert s["account_id"] == {"writable": True, "readable": False,
+                                   "key": True, "skip_empty_write": False}
+        assert s["acceptor"] == {"writable": False, "readable": True,
+                                 "key": False, "skip_empty_write": False}
+        assert s["timezone"] == {"writable": True, "readable": True,
+                                 "key": False, "skip_empty_write": False}
+
+    def test_field_spec_gg_still_from_column_spec(self):
+        """gg 不走目录，仍由 COLUMN_SPEC 推导 —— 逐字段不变。"""
+        from huguan_dashboard import COLUMN_SPEC, ACCOUNT_KEY_FIELD, FIELD_CATALOG, field_spec
+        assert "gg" not in FIELD_CATALOG
+        key_field = ACCOUNT_KEY_FIELD["gg"]
+        legacy = {}
+        for _col, _h, field, writable, readable in COLUMN_SPEC["gg"]:
+            if field is None:
+                continue
+            legacy[field] = {"writable": writable, "readable": readable,
+                             "key": field == key_field, "skip_empty_write": False}
+        assert field_spec("gg") == legacy
+
+    def test_field_spec_tt_unchanged(self):
+        """TT 走目录前后逐字段相同（含 landing_url 的「空值跳过回写」）。"""
+        from huguan_dashboard import field_spec
+        s = field_spec("tt")
+        assert s["landing_url"]["skip_empty_write"] is True
+        assert s["owner_change_note"] == {"writable": False, "readable": True,
+                                         "key": False, "skip_empty_write": False}
+        assert s["advertiser_id"]["key"] is True
+
