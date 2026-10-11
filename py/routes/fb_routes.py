@@ -1928,7 +1928,46 @@ def extract_save():
         return err('产品名和数据不能为空', 400)
 
     try:
+        # 本次解析内按 account_id 累加（同户多行求和，account_name 取第一次出现值）；
+        # 跨解析仍由下方 ON CONFLICT ... DO UPDATE 覆盖（符合「新解析覆盖旧值」口径）。
+        _agg = {}
+        _order = []
         for rec in records:
+            account_id = str(rec.get('account_id', '')).strip()
+            if account_id not in _agg:
+                _agg[account_id] = {
+                    "account_name": rec.get('account_name', ''),
+                    "account_id": account_id,
+                    "cost": 0.0,
+                    "impressions": 0,
+                    "clicks": 0,
+                    "registrations": 0,
+                    "purchases": 0,
+                }
+                _order.append(account_id)
+            a = _agg[account_id]
+            a["cost"] += float(rec.get('cost', 0) or 0)
+            a["impressions"] += int(rec.get('impressions', 0) or 0)
+            a["clicks"] += int(rec.get('clicks', 0) or 0)
+            a["registrations"] += int(rec.get('registrations', 0) or 0)
+            a["purchases"] += int(rec.get('purchases', 0) or 0)
+
+        aggregated_records = []
+        for account_id in _order:
+            a = _agg[account_id]
+            cpp = (a["cost"] / a["purchases"]) if a["purchases"] else 0.0
+            aggregated_records.append({
+                "account_name": a["account_name"],
+                "account_id": a["account_id"],
+                "cost": a["cost"],
+                "impressions": a["impressions"],
+                "clicks": a["clicks"],
+                "registrations": a["registrations"],
+                "purchases": a["purchases"],
+                "cost_per_purchase": cpp,
+            })
+
+        for rec in aggregated_records:
             db.execute(
                 "INSERT INTO fb_ad_reports "
                 "(user_id, product_name, line_name, report_date, account_name, account_id, "
@@ -1952,10 +1991,11 @@ def extract_save():
 
         # 登记一次写表（四期：接入统一治理）。响应里给出 business_key 供前端精确轮询；
         # 不再插 sheets_sync_log 的 pending 行 —— 该表留给 GG 做表那条线。
+        # 写表喂的是**累加后**的记录（一账户一行），与 FB 表键 (日期,账户ID,产品,线名) 对齐。
         business_key = _register_fb_report_write(uid, product_name, line_name,
-                                                 report_date, records)
+                                                 report_date, aggregated_records)
 
-        return ok({'saved': len(records), 'business_key': business_key})
+        return ok({'saved': len(aggregated_records), 'business_key': business_key})
     except Exception as e:
         db.rollback()
         log.exception("FB 保存提取数据失败 product_name=%s", product_name)

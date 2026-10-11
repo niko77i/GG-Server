@@ -343,6 +343,10 @@ def test_update_zuobiao_rolls_back_when_write_block_raises(client, monkeypatch):
 
     db = database.get_db()
     r = _row(db, uid, "产品甲")
+    # 排干后台写表线程再收尾：写库块抛异常后登记仍在进行，而做表现在经 zb_rows 路径
+    # 会真调 upsert_zuobiao（不再因回库重算无数据而早退）⇒ 不排干会与下一条用例的
+    # monkeypatch 竞态（残留线程把数据塞进下一条的 captured）。
+    _settle(db, uid, "产品甲")
     db.close()
     assert r is not None, "写库块抛异常后仍必须登记（异常路径必须收事务，不得留写锁）"
 
@@ -644,3 +648,188 @@ def test_update_zuobiao_backfill_prior_month_uses_input_month(client, monkeypatc
     assert "acc_oct" not in accounts, f"10 月行不得被误写进 9 月表，实际 {accounts}"
     assert k["report_date"] == "2026-09-01", \
         f"report_date 应为入参月 9 月，实际 {k['report_date']}"
+
+
+# ---------------------------------------------------------------------------
+# 做表数据「预览里有的行/金额，写到 Google 表上对不上、漏了很多」—— 三处口径统一
+# ---------------------------------------------------------------------------
+
+def test_update_zuobiao_accumulates_same_key_rows(client, monkeypatch):
+    """入库同键（日期+产品+账户+客户ID+系列）的多行必须**求和**，不得后写覆盖前写。
+
+    判别力：两行同 account/customerId/campaign、不同 cost/impressions 等 ⇒ 若仍是
+    覆盖，库里 cost 只剩后一行 5 ⇒ 本用例断言 15 / 150 / 7 / 4 / 4 / 3.75 必红。
+    """
+    import google_sheets_service as gs
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda **k: None)
+
+    hdr, uid = _gg_user(client, "_zb_accum")
+    _setup_zuobiao_config(client, hdr)
+
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-10-01",
+        "rows": [
+            {"account": "acc_1", "customerId": "c1", "campaign": "x", "cost": 10,
+             "impressions": 100, "clicks": 5, "installs": 3, "inAppActions": 1,
+             "costPerInApp": 2},
+            {"account": "acc_1", "customerId": "c1", "campaign": "x", "cost": 5,
+             "impressions": 50, "clicks": 2, "installs": 1, "inAppActions": 3,
+             "costPerInApp": 4},
+        ],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    assert resp.get_json()["db_saved"] == 1, resp.get_json()
+
+    db = database.get_db()
+    row = db.execute(
+        "SELECT cost, impressions, clicks, installs, in_app_actions, cost_per_in_app "
+        "FROM ad_reports WHERE user_id=? AND product_name=? AND report_date=?",
+        (uid, "产品甲", "2026-10-01")).fetchone()
+    db.close()
+    assert row is not None, "同键两行应累加成一行"
+    assert row["cost"] == 15, f"cost 应累加为 15，实际 {row['cost']}"
+    assert row["impressions"] == 150, row["impressions"]
+    assert row["clicks"] == 7, row["clicks"]
+    assert row["installs"] == 4, row["installs"]
+    assert row["in_app_actions"] == 4, row["in_app_actions"]
+    assert abs(row["cost_per_in_app"] - 3.75) < 1e-9, \
+        f"cost_per_in_app 应重算为 15/4=3.75，实际 {row['cost_per_in_app']}"
+
+
+def test_update_zuobiao_sheet_uses_preview_rows_not_db(client, monkeypatch):
+    """做表必须用本次解析的预览 rows（含养户），不回库重算 raw_rows 的细粒度行。
+
+    判别力：raw_rows 两行（同 客户ID+系列、不同账户）入库成 2 行；rows 是聚合后的
+    1 行预览。若写表仍回库重算 ⇒ 写出 2 行（细粒度）⇒ 本用例断言 1 行 ⇒ 必红。
+    """
+    import google_sheets_service as gs
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    captured = []
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    monkeypatch.setattr(gs, "upsert_zuobiao", lambda service, **k: captured.append(k["rows"]))
+
+    hdr, uid = _gg_user(client, "_zb_preview")
+    _setup_zuobiao_config(client, hdr)
+
+    resp = client.post("/api/google-sheets/update-zuobiao", headers=hdr, json={
+        "product_name": "产品甲", "region": "US", "report_date": "2026-10-01",
+        "rows": [{"account": "", "customerId": "c1", "cost": 10, "campaign": "x"}],
+        "raw_rows": [
+            {"account": "acc_1", "customerId": "c1", "cost": 6, "campaign": "x"},
+            {"account": "acc_2", "customerId": "c1", "cost": 4, "campaign": "x"},
+        ],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+
+    db = database.get_db()
+    _settle(db, uid, "产品甲")
+    db.close()
+
+    assert captured, "必须真的调用 upsert_zuobiao"
+    rows = captured[0]
+    assert len(rows) == 1, f"做表必须用预览 1 行，实际 {len(rows)} 行：{rows}"
+    assert float(rows[0]["cost"]) == 10, rows
+
+
+def test_gg_zuobiao_kwargs_uses_zb_rows_when_present(client):
+    """payload 带 zb_rows ⇒ `gg_zuobiao_kwargs` 直接用它做 rows，不回库重算、不追加养户行。"""
+    import routes.gg_zuobiao_target as tgt
+    hdr, uid = _gg_user(client, "_zb_zbrows")
+    _setup_zuobiao_config(client, hdr)
+    db = database.get_db()
+    # 库里种一条无关的非养户行：若实现回库重算，它会混进 rows ⇒ 本用例必红
+    _seed_zuobiao(db, uid, "产品甲", acc="acc_from_db")
+
+    zb_rows = [{"account": "acc_zb", "customerId": "c1", "campaign": "x", "cost": 1,
+                "is_yanghu": False},
+               {"account": "acc_yh", "customerId": "cyh", "campaign": "养户",
+                "cost": 0, "is_yanghu": True}]
+    kwargs, why = tgt.gg_zuobiao_kwargs(db, uid, "产品甲", zb_rows=zb_rows,
+                                        report_date="2026-10-01", region="US")
+    db.close()
+    assert why is None, f"应能重建，实际 {why}"
+    assert kwargs["rows"] == zb_rows, \
+        f"必须直接用 zb_rows（不得回库重算/追加养户行），实际 {kwargs['rows']}"
+
+
+class _FakeExec:
+    def __init__(self, data):
+        self._data = data
+
+    def execute(self):
+        return self._data
+
+
+class _FakeSheetsService:
+    """挡掉真实 Google API 的假 service，记录 values().update / batchUpdate 的 body。"""
+
+    def __init__(self, existing_values):
+        self.existing_values = existing_values
+        self.value_batch = []     # values().batchUpdate（更新既有行）
+        self.value_update = []    # values().update（追加新行）
+        self.format_batch = []    # spreadsheets().batchUpdate（格式化）
+
+    def spreadsheets(self):
+        return _FakeSpreadsheets(self)
+
+
+class _FakeSpreadsheets:
+    def __init__(self, svc):
+        self._svc = svc
+
+    def get(self, spreadsheetId):
+        return _FakeExec({
+            "properties": {"title": "op202610"},
+            "sheets": [{"properties": {"title": "Sheet1", "sheetId": 0,
+                                       "gridProperties": {"rowCount": 1000}}}],
+        })
+
+    def values(self):
+        return _FakeValues(self._svc)
+
+    def batchUpdate(self, spreadsheetId, body):
+        self._svc.format_batch.append(body)
+        return _FakeExec({})
+
+
+class _FakeValues:
+    def __init__(self, svc):
+        self._svc = svc
+
+    def get(self, spreadsheetId, range):
+        return _FakeExec({"values": self._svc.existing_values})
+
+    def batchUpdate(self, spreadsheetId, body):
+        self._svc.value_batch.append(body)
+        return _FakeExec({})
+
+    def update(self, spreadsheetId, range, valueInputOption, body):
+        self._svc.value_update.append(body)
+        return _FakeExec({})
+
+
+def test_upsert_zuobiao_key_includes_product():
+    """写表行键必须含产品列（G 列）：同（日期,客户ID,系列）但产品不同（普通 vs 养户）
+    不得互相覆盖 —— 一更新一追加，而不是两行都挤到同一行。
+
+    判别力：键漏掉产品 ⇒ 普通行与养户行都命中同一已有行、双双 UPDATE ⇒
+    updated=2 / inserted=0 ⇒ 本用例断言 updated=1 / inserted=1 必红。
+    """
+    import google_sheets_service as gs
+    # A日期 B操作人 C账户 D客户ID E消耗 F空 G产品 H商务 I区域 J系列 K空 L代投 M N
+    existing = [["2026-10-01", "op", "acc", "c1", "5", "", "产品甲", "商务", "US",
+                 "x", "", "0%", "", ""]]
+    svc = _FakeSheetsService(existing)
+
+    rows = [
+        {"account": "acc", "customerId": "c1", "cost": 10, "campaign": "x"},
+        {"account": "acc_yh", "customerId": "c1", "cost": 7, "campaign": "x",
+         "is_yanghu": True},
+    ]
+    result = gs.upsert_zuobiao(
+        service=svc, spreadsheet_id="S", rows=rows, product_name="产品甲",
+        region="US", report_date="2026-10-01", sales_person="商务",
+        agency_ratio=10, operator_name="op")
+    assert result == {"updated": 1, "inserted": 1}, result

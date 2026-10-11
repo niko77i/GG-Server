@@ -585,3 +585,75 @@ def test_retry_sync_failure_reads_sanitized_error_msg(client, monkeypatch, caplo
     _assert_no_leak(st)
     _assert_no_leak(resp)
     assert "sheets.googleapis.com" in caplog.text, "异常原文没进日志"
+
+
+# ---------------------------------------------------------------------------
+# 提取保存：同账户多行在本次解析内**累加**，写表喂累加后的记录（一账户一行）
+# ---------------------------------------------------------------------------
+
+def test_extract_save_accumulates_same_account_and_writes_aggregated(client, monkeypatch):
+    """同账户多行在本次解析内累加；写表喂的是累加后的记录（一账户一行）。
+
+    判别力：两行同 account_id、不同 cost ⇒ 若仍是覆盖 / 未聚合就喂写表，写表收到
+    2 行（或只剩后一行）⇒ 本用例断言写表收到 1 行、cost 累加 15 ⇒ 必红。
+    """
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append(
+                            [(r["account_id"], r["cost"], r["cost_per_purchase"])
+                             for r in records]))
+
+    hdr, uid = _fb_user(client, "_fbsw_accum")
+    records = [
+        {"account_name": "名", "account_id": "acc_1", "cost": 10, "impressions": 100,
+         "clicks": 5, "registrations": 4, "purchases": 5, "cost_per_purchase": 2},
+        {"account_name": "名", "account_id": "acc_1", "cost": 5, "impressions": 50,
+         "clicks": 2, "registrations": 1, "purchases": 3, "cost_per_purchase": 1},
+    ]
+    resp = client.post("/api/fb/extract/save", headers=hdr, json={
+        "product_name": "产品甲", "line_name": "线A", "report_date": "2026-10-01",
+        "records": records})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    assert resp.get_json()["saved"] == 1, resp.get_json()
+    key = resp.get_json()["business_key"]
+
+    db = database.get_db()
+    r = _settle(db, uid, key)
+    db.close()
+
+    assert r is not None and r["status"] == "synced", r and r["status"]
+    assert written == [[("acc_1", 15.0, 15.0 / 8)]], \
+        f"写表必须喂累加后的记录（cost=15, cpp=15/8），实际 {written}"
+
+
+def test_extract_save_accumulates_multiple_accounts_independently(client, monkeypatch):
+    """不同账户**各自**累加、不混到同一行；写表收到每账户一行。"""
+    import google_sheets_service as gs
+    written = []
+    monkeypatch.setattr(gs, "upsert_fb_reports",
+                        lambda db, uid, p, l, d, records: written.append(
+                            sorted((r["account_id"], r["cost"]) for r in records)))
+
+    hdr, uid = _fb_user(client, "_fbsw_accum2")
+    records = [
+        {"account_name": "名A", "account_id": "acc_1", "cost": 10, "purchases": 2,
+         "cost_per_purchase": 5},
+        {"account_name": "名A", "account_id": "acc_1", "cost": 5, "purchases": 3,
+         "cost_per_purchase": 1},
+        {"account_name": "名B", "account_id": "acc_2", "cost": 7, "purchases": 1,
+         "cost_per_purchase": 7},
+    ]
+    resp = client.post("/api/fb/extract/save", headers=hdr, json={
+        "product_name": "产品甲", "line_name": "线A", "report_date": "2026-10-01",
+        "records": records})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    assert resp.get_json()["saved"] == 2, resp.get_json()
+    key = resp.get_json()["business_key"]
+
+    db = database.get_db()
+    _settle(db, uid, key)
+    db.close()
+
+    assert written == [[("acc_1", 15.0), ("acc_2", 7.0)]], \
+        f"两账户各自累加成一行，实际 {written}"

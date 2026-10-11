@@ -269,14 +269,15 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
             last_date = (row[0] or "").strip() if len(row) > 0 else ""
             break
 
-    # 3. 构建索引：（日期, 客户ID, 广告系列）→ 行号
+    # 3. 构建索引：（日期, 产品, 客户ID, 广告系列）→ 行号
     existing_index = {}
     for i, row in enumerate(existing):
         d = (row[0] or "").strip() if len(row) > 0 else ""
+        prod = (row[6] or "").strip() if len(row) > 6 else ""
         cid = (row[3] or "").strip() if len(row) > 3 else ""
         cam = (row[9] or "").strip() if len(row) > 9 else ""
-        if d or cid or cam:
-            existing_index[(d, cid, cam)] = i
+        if d or prod or cid or cam:
+            existing_index[(d, prod, cid, cam)] = i
 
     # 4. 构建新行，养户行覆盖 G(客户名称)、H(商务)、L(代投比例=0%)
     percent_str = f"{int(agency_ratio)}%" if agency_ratio is not None else ""
@@ -298,7 +299,7 @@ def upsert_zuobiao(service, spreadsheet_id: str, rows: list, product_name: str,
     updates = []
     appends = []
     for new_row in new_rows:
-        key = (new_row[0].strip(), new_row[3].strip(), new_row[9].strip())
+        key = (new_row[0].strip(), new_row[6].strip(), new_row[3].strip(), new_row[9].strip())
         if key in existing_index:
             updates.append((existing_index[key], new_row))
         else:

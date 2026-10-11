@@ -7652,18 +7652,31 @@ def google_sheets_update_zuobiao():
                 if not customer_id or not campaign:
                     continue
                 key = (report_date, product_name, account, customer_id, campaign)
-                # 相同键直接覆盖，不累加
-                aggregated[key] = {
-                    "account": account,
-                    "customer_id": customer_id,
-                    "campaign": campaign,
-                    "cost": float(row.get("cost", 0) or 0),
-                    "impressions": int(row.get("impressions", 0) or 0),
-                    "clicks": int(row.get("clicks", 0) or 0),
-                    "installs": float(row.get("installs", 0) or 0),
-                    "in_app_actions": float(row.get("inAppActions", 0) or 0),
-                    "cost_per_in_app": float(row.get("costPerInApp", 0) or 0),
-                }
+                # 同键（日期+产品+账户+客户ID+系列）在**本次解析内累加**求和；
+                # 跨解析仍由下方的 SELECT→UPDATE 覆盖（符合「新解析覆盖旧值」口径）。
+                if key not in aggregated:
+                    aggregated[key] = {
+                        "account": account,
+                        "customer_id": customer_id,
+                        "campaign": campaign,
+                        "cost": 0.0,
+                        "impressions": 0,
+                        "clicks": 0,
+                        "installs": 0.0,
+                        "in_app_actions": 0.0,
+                        "cost_per_in_app": 0.0,
+                    }
+                ag = aggregated[key]
+                ag["cost"] += float(row.get("cost", 0) or 0)
+                ag["impressions"] += int(row.get("impressions", 0) or 0)
+                ag["clicks"] += int(row.get("clicks", 0) or 0)
+                ag["installs"] += float(row.get("installs", 0) or 0)
+                ag["in_app_actions"] += float(row.get("inAppActions", 0) or 0)
+
+            # cost_per_in_app 由累加后的 cost / 累加后的 in_app_actions 重算（分母 0 取 0）
+            for ag in aggregated.values():
+                denom = ag["in_app_actions"]
+                ag["cost_per_in_app"] = (ag["cost"] / denom) if denom else 0.0
 
             for ag in aggregated.values():
                 existing = db2.execute(
@@ -7733,9 +7746,14 @@ def google_sheets_update_zuobiao():
     # 否则 ad_reports 里没有养户行、重建不出来 ⇒ 养户行不再被写进做表表（功能回退）。
     _payload = {
         "product_name": product_name,
+        # 做表必须用**本次解析出来的做表数据**（前端预览那张表），不是回库重算的
+        # 未聚合原始行 —— 否则预览里求和后的行/金额写到表上会漏（同键后写覆盖）。
         # 形状与 upsert_zuobiao 吃的完全一致，`is_yanghu` 必须原样保留
-        # （丢了会静默写成普通行：产品名/商务/代投比例）。
-        # ⚠️ 绝不截断（FB 线栽过 `rows_json[:10000]` 截断 ⇒ 重试必坏）。
+        # （丢了会静默写成普通行：产品名/商务/代投比例）。⚠️ 绝不截断
+        # （FB 线栽过 `rows_json[:10000]` 截断 ⇒ 重试必坏）。
+        "zb_rows": rows,
+        # 老日志行没有 zb_rows 时，重建才回库重算；养户行是请求侧数据、不落库，
+        # 回库重算不出来 ⇒ 仍随 payload 携带（与 zb_rows 同形状，含 is_yanghu 标记）。
         "yanghu_rows": [r for r in rows if r.get("is_yanghu")],
         # 仅当 ad_reports 里没有该产品的非养户行时兜底（产品全是养户行）：
         "report_date": report_date,

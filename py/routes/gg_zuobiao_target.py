@@ -3,9 +3,10 @@
 设计见 docs/superpowers/specs/2026-10-09-sheet-write-governance-phase5-gg-zuobiao-design.md
 
 镜像类（表 = 系统状态的投影，`upsert_zuobiao` 幂等）⇒ **不注册 `rollback`**，
-最终失败落 `retry_failed`。rebuild 一律**从 DB 重算**（不重放 `rows_json` 快照），
-**唯一例外**：养户行是请求侧产生、不落库的数据，DB 重算不出来 ⇒ 随 payload 携带
-（见 `gg_zuobiao_kwargs` 与 `_gg_zuobiao_rebuild`），且绝不截断。
+最终失败落 `retry_failed`。rebuild **优先用本次解析出来的做表数据**（payload 的
+`zb_rows`，即前端预览那张表，含养户行，绝不截断）；**只有老日志行没有 `zb_rows`**
+时才回库重算，并从 payload 的 `yanghu_rows` 追加养户行（养户行是请求侧产生、
+不落库的数据，DB 重算不出来）—— 见 `gg_zuobiao_kwargs` 与 `_gg_zuobiao_rebuild`。
 
 线程约束：所有 service 与 DB 连接都在**函数/闭包内**新建 —— 这些代码会在后台线程里跑。
 """
@@ -50,9 +51,15 @@ def _zuobiao_spreadsheet_id(db, user_id, report_date):
 
 
 def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
-                      report_date="", region=""):
-    """从 DB 重算 `upsert_zuobiao` 的实参。返回 `(kwargs, None)` 或 `(None, 失败原因)`。
+                      report_date="", region="", zb_rows=None):
+    """重算 `upsert_zuobiao` 的实参。返回 `(kwargs, None)` 或 `(None, 失败原因)`。
 
+    **优先用 `zb_rows`**（本次解析出来的做表数据，含养户行）：非空时直接作为要写的
+    `rows`，**不再回库重算、也不再追加 `yanghu_rows`**（否则养户行会被重复写）。做表
+    表要的就是「解析完的做表数据」，回库重算会退化成未聚合的原始行 ⇒ 预览里求和后的
+    行/金额写到表上漏掉。
+
+    **老日志行没有 `zb_rows`** 时才回库重算（下面的 DB 分支），并追加 `yanghu_rows`。
     这段重建**逐行搬自退役前的 `/api/google-sheets/retry-sync`**（`py/main.py` 原
     `:7697-7745`）—— 它本来就是唯一真相源。**唯一改动**：`spreadsheet_id` 的来源从
     `log_row["spreadsheet_id"]` 换成 `_zuobiao_spreadsheet_id(db, user_id)`
@@ -78,33 +85,39 @@ def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
     表格 ID 解析依赖 `report_date`（做表表按月切），所以纯养户行也必须拿到它。
     有非养户行时以 DB 行为准（加过滤后两者一致，都是本次的 `report_date`）。
     """
-    where = "user_id=? AND product_name=?"
-    params = [user_id, product_name]
-    if report_date:
-        where += " AND report_date=?"
-        params.append(report_date)
-    rows_raw = db.execute(
-        "SELECT DISTINCT account, customer_id, campaign, cost, impressions, clicks, "
-        "installs, in_app_actions, cost_per_in_app, report_date, region "
-        f"FROM ad_reports WHERE {where} ORDER BY report_date DESC", tuple(params)).fetchall()
-    if not rows_raw and not yanghu_rows:
-        return None, "没有找到对应的做表数据"
+    if zb_rows:
+        # 优先用本次解析出来的做表数据（含养户行）：直接作为要写的 rows，不回库重算、
+        # 不追加 yanghu_rows（否则养户行重复写）。report_date / region 由入参（payload）给出。
+        rows = list(zb_rows)
+    else:
+        where = "user_id=? AND product_name=?"
+        params = [user_id, product_name]
+        if report_date:
+            where += " AND report_date=?"
+            params.append(report_date)
+        rows_raw = db.execute(
+            "SELECT DISTINCT account, customer_id, campaign, cost, impressions, clicks, "
+            "installs, in_app_actions, cost_per_in_app, report_date, region "
+            f"FROM ad_reports WHERE {where} ORDER BY report_date DESC", tuple(params)).fetchall()
+        if not rows_raw and not yanghu_rows:
+            return None, "没有找到对应的做表数据"
 
-    if rows_raw:
-        report_date = rows_raw[0]["report_date"] or ""
-        region = rows_raw[0]["region"] or ""
+        if rows_raw:
+            report_date = rows_raw[0]["report_date"] or ""
+            region = rows_raw[0]["region"] or ""
+
+        rows = [{
+            "account": r["account"] or "",
+            "customerId": str(r["customer_id"] or ""),
+            "campaign": r["campaign"] or "",
+            "cost": r["cost"] or 0,
+        } for r in rows_raw]
+        rows = rows + list(yanghu_rows or [])
 
     # ⚠️ 表格 ID 依赖 report_date（做表表按月切，保存端点按「操作人名 + YYYY.MM」匹配表名）
     spreadsheet_id = _zuobiao_spreadsheet_id(db, user_id, report_date)
     if not spreadsheet_id:
         return None, "表格 ID 为空"
-    rows = [{
-        "account": r["account"] or "",
-        "customerId": str(r["customer_id"] or ""),
-        "campaign": r["campaign"] or "",
-        "cost": r["cost"] or 0,
-    } for r in rows_raw]
-    rows = rows + list(yanghu_rows or [])
 
     prod = db.execute(
         "SELECT COALESCE(sp.name, '') AS sales_person, agency_ratio FROM products p "
@@ -127,8 +140,8 @@ def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
 
 
 def gg_zuobiao_sync(user_id, product_name, yanghu_rows=None,
-                    report_date="", region=""):
-    """把该产品的做表数据写进 Google 表格。养户行等参数透传给 `gg_zuobiao_kwargs`。"""
+                    report_date="", region="", zb_rows=None):
+    """把该产品的做表数据写进 Google 表格。养户行 / zb_rows 等参数透传给 `gg_zuobiao_kwargs`。"""
     import database
     import google_sheets_service as gs
     from main import _GOOGLE_SHEETS_CONFIG
@@ -138,7 +151,8 @@ def gg_zuobiao_sync(user_id, product_name, yanghu_rows=None,
         kwargs, why = gg_zuobiao_kwargs(db, user_id, product_name,
                                         yanghu_rows=yanghu_rows,
                                         report_date=report_date,
-                                        region=region)
+                                        region=region,
+                                        zb_rows=zb_rows)
         if kwargs is None:
             raise RuntimeError(why)
     finally:
@@ -156,13 +170,16 @@ def _gg_zuobiao_rebuild(user_id, business_key, payload):
     # 养户行不落库 ⇒ 重建时从 payload 取。老日志行没有这些键 ⇒ `.get()` 缺省
     # ⇒ 行为与现状完全一致（不写养户行），不得因此抛错。
     yanghu_rows = (payload or {}).get("yanghu_rows") or []
+    # 本次解析出来的做表数据（新路径）：优先用它写表；老日志行没有 ⇒ None ⇒ 回库重算。
+    zb_rows = (payload or {}).get("zb_rows")
     report_date = (payload or {}).get("report_date") or ""
     region = (payload or {}).get("region") or ""
 
     def _sync():
         gg_zuobiao_sync(user_id, product_name, yanghu_rows=yanghu_rows,
                         report_date=report_date,
-                        region=region)
+                        region=region,
+                        zb_rows=zb_rows)
 
     return _sync
 
