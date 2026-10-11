@@ -858,7 +858,7 @@ import { sheetWriteApi } from '@/api/sheetWrite'
 import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 // 列映射的纯换算（表头响应 ↔ 下拉行状态）。**不要在组件里重推一遍映射** —— 三值约定
 // （字段key / "" 刻意不采集 / null 未指派）只有这一份实现，node --test 覆盖的就是它。
-import { rowsFromColumns, columnsFromRows, pickColumn } from '@/utils/columnMapping.mjs'
+import { rowsFromColumns, columnsFromRows, pickColumn, seedTables, flattenColumns } from '@/utils/columnMapping.mjs'
 // 大批量结果的「预览」纯逻辑（T1 已交付，node --test 覆盖）。slicePreview 限行、selectedIds
 // 把「默认全选」用「全量 − 排除集」表示 —— 这样只渲染前 100 行也不会丢掉另外几千行的勾选。
 import { DEFAULT_PREVIEW_LIMIT, slicePreview, selectedIds, groupWarnings } from '@/utils/previewRows.mjs'
@@ -960,6 +960,10 @@ const hdConfigured = computed(() => {
   if (!hdForm.value.spreadsheet_id) return false
   if (HD_PLATFORM === 'tt') {
     return hdForm.value.tables.some(t => (t.name || '').trim() && (t.sheet_name || '').trim())
+  }
+  if (HD_PLATFORM === 'fb') {
+    // fb 没有户类型名，只看工作表名
+    return hdForm.value.tables.some(t => (t.sheet_name || '').trim())
   }
   return !!hdForm.value.sheet_name
 })
@@ -1389,22 +1393,14 @@ async function loadHdConfig() {
   try {
     const res = await huguanApi.getConfig()
     const conf = (res.config && res.config[HD_PLATFORM]) || {}
-    // 字段目录只加在 tt 分支（gg/fb 载荷形状不变）⇒ 这里也要兜成 []，别让 gg/fb 拿到 undefined。
-    hdFieldCatalog.value = Array.isArray(conf.tt_field_catalog) ? conf.tt_field_catalog : []
+    // 字段目录按平台取（tt 的键名 `tt_field_catalog` 逐字不变；gg 没有这个键 ⇒ 兜成 []）
+    const catalogKey = `${HD_PLATFORM}_field_catalog`
+    hdFieldCatalog.value = Array.isArray(conf[catalogKey]) ? conf[catalogKey] : []
     hdForm.value = {
       spreadsheet_id: conf.spreadsheet_id || '',
       sheet_name: conf.sheet_name || '',
-      // tt 的多表：后端对没有 tables 的存量配置会返回单条「加白户」兜底，
-      // 但 gg/fb 完全不返回 tables ⇒ 这里必须兜成 []
-      tables: Array.isArray(conf.tables)
-        ? conf.tables.map(t => ({
-            name: t.name || '',
-            sheet_name: t.sheet_name || '',
-            // 手工覆盖 {表头名: 字段key}（tt 独有）。必须读回来：一是保存时要原样带回去
-            // （否则改一次配置就把已有覆盖**静默清掉**），二是「未保存」标记的基线。
-            columns: (t.columns && typeof t.columns === 'object') ? { ...t.columns } : {},
-          }))
-        : [],
+      // tt 的多表 / fb 的单表（扁平配置摊成一条）都在 seedTables 里；gg 得到 []（没有表格列表）。
+      tables: seedTables(conf, HD_PLATFORM),
     }
     // 基线 = 刚从服务器读回的样子 ⇒ 此刻什么都是「已保存」。
     hdSnapshotColumns()
@@ -1540,7 +1536,7 @@ async function hdReadHeaders(i) {
   hdHeaderLoading.value = { ...hdHeaderLoading.value, [name]: true }
   hdHeaderError.value = { ...hdHeaderError.value, [name]: '' }
   try {
-    const res = await huguanApi.getSheetHeaders('tt', name)
+    const res = await huguanApi.getSheetHeaders(HD_PLATFORM, name)
     hdHeaderRows.value = { ...hdHeaderRows.value, [name]: rowsFromColumns(res.columns || []) }
     hdHeaderOpen.value = { ...hdHeaderOpen.value, [name]: true }
   } catch (e) {
@@ -1663,6 +1659,9 @@ async function saveHdConfig() {
         })
         .filter(t => t.name && t.sheet_name)
       body.tables = tables
+    } else if (HD_PLATFORM === 'fb') {
+      // fb 仍是单表：摊平的 sheet_name + columns 在顶层（设计 §4.6）
+      Object.assign(body, flattenColumns('fb', hdForm.value.tables))
     } else {
       body.sheet_name = hdForm.value.sheet_name
     }

@@ -60,3 +60,38 @@ export function columnsFromRows(rows, existing) {
   }
   return out
 }
+
+/** 后端配置 → 渲染用的 tables 列表（设计 §4.9）。
+ *  - tt：后端给 tables（存量单表配置后端已兜成单条）⇒ 逐项复制
+ *  - fb：后端给**扁平**的 sheet_name + columns（fb 仍是单表）⇒ 包成一条；
+ *        没配过也给一条空行 —— 用户得有地方填工作表名
+ *  - gg：没有列映射，返回 []（该分支不渲染表格列表）
+ *  columns 一律复制成新对象：它是「未保存」标记的基线，共享引用会让基线跟着改。 */
+export function seedTables(conf, platform) {
+  const c = conf || {}
+  if (Array.isArray(c.tables)) {
+    return c.tables.map(t => ({
+      name: t.name || '',
+      sheet_name: t.sheet_name || '',
+      columns: (t.columns && typeof t.columns === 'object') ? { ...t.columns } : {},
+    }))
+  }
+  if (platform === 'fb') {
+    return [{
+      name: '',
+      sheet_name: c.sheet_name || '',
+      columns: (c.columns && typeof c.columns === 'object') ? { ...c.columns } : {},
+    }]
+  }
+  return []
+}
+
+/** 渲染用的 tables → 后端的扁平配置（fb 专用，设计 §4.6）。
+ *  空 columns **不上送** —— 保持「没配覆盖」时的配置文本与改动前一致。 */
+export function flattenColumns(platform, tables) {
+  const t = (tables || [])[0] || {}
+  const out = { sheet_name: (t.sheet_name || '').trim() }
+  const cols = t.columns
+  if (cols && typeof cols === 'object' && Object.keys(cols).length) out.columns = { ...cols }
+  return out
+}
