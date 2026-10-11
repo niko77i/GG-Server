@@ -11,8 +11,8 @@ export const huguanApi = {
    *  gg/fb 传单个 `sheet_name`。 */
   saveConfig: (body) => api.post('/huguan/dashboard', body),
 
-  /** 读某张 tt 表的第 1 行，摊成逐列「表头 → 字段 + 来源」，供列映射区显示。
-   * 只有 TT 支持（gg/fb 调会 400）；sheet_name 必须是该户管自己配置里的某张表。 */
+  /** 读某张规格表（tt / fb）的第 1 行，摊成逐列「表头 → 字段 + 来源」，供列映射区显示。
+   * 只有 TT / FB 支持（gg 调会 400）；sheet_name 必须是该户管自己配置里的某张表。 */
   getSheetHeaders: (platform, sheetName) =>
     api.get('/huguan/dashboard/sheet-headers', { params: { platform, sheet_name: sheetName } }),
 

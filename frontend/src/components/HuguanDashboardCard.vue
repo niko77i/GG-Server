@@ -30,8 +30,8 @@
         </div>
       </div>
 
-      <!-- gg / fb：单表（原样保留） -->
-      <div v-if="HD_PLATFORM !== 'tt'" style="margin-bottom:16px;">
+      <!-- gg：单表（原样保留） -->
+      <div v-if="HD_PLATFORM === 'gg'" style="margin-bottom:16px;">
         <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">工作表名</div>
         <el-select v-model="hdForm.sheet_name" filterable allow-create default-first-option
                    placeholder="选择或输入工作表名" style="width:100%;" :disabled="hdBusy">
@@ -44,24 +44,36 @@
         </el-select>
       </div>
 
-      <!-- tt：多张账户表，每条 = 户类型名（自定义，也是账户页按钮的名字）+ 工作表 -->
+      <!-- tt / fb：共用这一支（tt = 户类型→工作表多表；fb = 单表，隐藏户类型名/删除/按表按钮/新增）。
+           说明文案分平台：tt 讲「户类型」，fb 讲「这就是 FB 的账户管理表」。 -->
       <div v-else style="margin-bottom:16px;">
-        <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">
-          账户表（户类型 → 工作表）
-        </div>
-        <div style="font-size:12px;color:#6b7280;margin-bottom:8px;line-height:1.6;">
-          每一行是一张账户表。左边的名字就是「户类型」，会出现在账户页的筛选按钮上，
-          也是系统里区分账户的依据；右边选这张表在 Google 表格里对应的工作表。
-        </div>
+        <template v-if="HD_PLATFORM === 'tt'">
+          <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">
+            账户表（户类型 → 工作表）
+          </div>
+          <div style="font-size:12px;color:#6b7280;margin-bottom:8px;line-height:1.6;">
+            每一行是一张账户表。左边的名字就是「户类型」，会出现在账户页的筛选按钮上，
+            也是系统里区分账户的依据；右边选这张表在 Google 表格里对应的工作表。
+          </div>
+        </template>
+        <template v-else>
+          <div style="font-weight:500;font-size:13px;color:#374151;margin-bottom:6px;">
+            账户表
+          </div>
+          <div style="font-size:12px;color:#6b7280;margin-bottom:8px;line-height:1.6;">
+            这张表就是 FB 的账户管理表。右边选它在 Google 表格里对应的工作表，
+            下面的「列映射」可以把每一列指派到系统字段。
+          </div>
+        </template>
         <div v-for="(t, i) in hdForm.tables" :key="i" style="margin-bottom:8px;">
           <div style="display:flex;gap:8px;align-items:center;">
-            <el-input v-model="t.name" placeholder="户类型名，如 加白户" style="width:180px;"
-                      :disabled="hdBusy" />
+            <el-input v-if="HD_PLATFORM === 'tt'" v-model="t.name" placeholder="户类型名，如 加白户"
+                      style="width:180px;" :disabled="hdBusy" />
             <el-select v-model="t.sheet_name" filterable allow-create default-first-option
                        placeholder="选择或输入工作表名" style="flex:1;" :disabled="hdBusy">
               <el-option v-for="name in hdSheets" :key="name" :label="name" :value="name" />
             </el-select>
-            <el-button :disabled="hdBusy" @click="removeHdTable(i)">删除</el-button>
+            <el-button v-if="HD_PLATFORM === 'tt'" :disabled="hdBusy" @click="removeHdTable(i)">删除</el-button>
           </div>
 
           <!-- 列映射（第二批 §3.4）：每张表各自的「读表头 → 逐列指派」面板。
@@ -169,7 +181,7 @@
                  图标沿用既有语言（⬇️ 表→系统 / ⬆️ 系统→表），与平台级按钮同款。
                  没填工作表名时禁用并给提示：空名发出去会被后端当成「全部表」（静默跑全量），
                  而不是报错 —— 这里必须拦住。 -->
-            <el-tooltip content="先在左边填这张表的工作表名" placement="top" :disabled="!!hdSheetKey(t)">
+            <el-tooltip v-if="HD_PLATFORM === 'tt'" content="先在左边填这张表的工作表名" placement="top" :disabled="!!hdSheetKey(t)">
               <span class="hd-sheet-actions">
                 <el-button size="small" plain
                            :loading="!!hdSheetBusy && hdSheetBusy.sheet === hdSheetKey(t) && hdSheetBusy.dir === 'sync'"
@@ -188,8 +200,8 @@
             正在处理「{{ hdSheetBusy.sheet }}」，请稍候…
           </div>
         </div>
-        <el-button size="small" :disabled="hdBusy" @click="addHdTable">＋ 新增户类型</el-button>
-        <div v-if="!hdForm.tables.length" style="font-size:12px;color:#e6a23c;margin-top:6px;">
+        <el-button v-if="HD_PLATFORM === 'tt'" size="small" :disabled="hdBusy" @click="addHdTable">＋ 新增户类型</el-button>
+        <div v-if="HD_PLATFORM === 'tt' && !hdForm.tables.length" style="font-size:12px;color:#e6a23c;margin-top:6px;">
           还没配任何账户表。至少要有「加白户」一条，否则同步会读不到数据。
         </div>
       </div>
@@ -629,8 +641,8 @@
         <!-- 未采集列（第二批 §3.4）。第一批只把 unmatched_columns 放进了 diff 载荷，前端一直
              没渲染它 —— 这里把它变成「报告 → 去指派」的入口：点「去指派」关弹窗、展开那张表的
              列映射区、自动读一次表头并滚到可见。红色左竖条沿用「未采集」的语义色。
-             只在 tt 出现：gg/fb 没有表头映射，后端也恒返回空数组。 -->
-        <div v-if="HD_PLATFORM === 'tt' && hdUnmatchedColumns.length"
+             只在 tt/fb 出现：gg 没有表头映射，后端恒返回空数组。 -->
+        <div v-if="(HD_PLATFORM === 'tt' || HD_PLATFORM === 'fb') && hdUnmatchedColumns.length"
              style="border-left:3px solid #f56c6c;padding-left:10px;margin:16px 0;">
           <div style="font-weight:600;font-size:14px;color:#374151;margin-bottom:6px;">未采集列</div>
           <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">
@@ -1618,7 +1630,10 @@ const hdColumnOptions = computed(() => (hdFieldCatalog.value || [])
   .map(c => ({
     value: c.key,
     label: c.label || c.key,
-    mark: c.key_col ? '定位键' : (c.direction === 'r' ? '只读回' : ''),
+    // 三档标记与后端 direction 一一对应：定位键 > 只读回 > 只写。
+    // 「只写」是 fb 的「操作人」这类系统写、绝不读回的列（设计 §4.1）。
+    mark: c.key_col ? '定位键'
+      : (c.direction === 'r' ? '只读回' : (c.direction === 'w' ? '只写' : '')),
     keyCol: !!c.key_col,
   })))
 
