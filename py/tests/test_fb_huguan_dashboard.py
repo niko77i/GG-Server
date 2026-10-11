@@ -57,7 +57,7 @@ class TestFbColumnSpec:
     def test_key_and_owner_cols(self):
         assert hd.KEY_COL["fb"] == "D"
         assert hd.OWNER_COL["fb"] == "J"
-        assert hd.READ_RANGE["fb"] == "A:Q"
+        assert hd.READ_RANGE["fb"] == "A:ZZ"   # 表头映射后列数不定（2026-10-11 设计 §4.4）
         assert hd.ACCOUNT_KEY_FIELD["fb"] == "account_id"
 
     def test_owner_channel_col_has_no_fb_key(self):

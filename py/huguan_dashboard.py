@@ -87,9 +87,12 @@ COLUMN_SPEC = {
 KEY_COL = {"gg": "C", "tt": "C", "fb": "D"}
 OWNER_COL = {"gg": "G", "tt": "G", "fb": "J"}
 OWNER_CHANNEL_COL = {"gg": "H", "tt": "L"}      # 刻意不含 fb，见 spec §6.5
-# tt 读 A:ZZ：表头映射后列数不定（户管每加一张表表头都不同，且「认识但刻意不采集」
-# 的列也占位），固定 A:M 会读漏右侧列。gg/fb 仍走各自固定范围（逐字节不变）。
-READ_RANGE = {"gg": "A:N", "tt": "A:ZZ", "fb": "A:Q"}
+# tt / fb 读 A:ZZ：表头映射后列数不定（户管每加一张表表头都不同，且「认识但刻意不采集」
+# 的列也占位），固定范围会读漏右侧列。gg 仍走固定 A:N（逐字节不变）。
+READ_RANGE = {"gg": "A:N", "tt": "A:ZZ", "fb": "A:ZZ"}
+# 「账户ID」列在各平台表里的**表头名** —— 只用于错误文案。户管是拿这句话去自己的表里
+# 找那一列的，说错名字他就找不到（FB 那张表的表头是「资产UID」，不是「账户ID」）。
+KEY_COL_LABEL = {"gg": "账户ID", "tt": "账户ID", "fb": "资产UID"}
 
 # 系统里「账户ID」列在两张表下的实际字段名
 ACCOUNT_KEY_FIELD = {"gg": "account_id", "tt": "advertiser_id", "fb": "account_id"}
@@ -446,7 +449,8 @@ def resolve_table_col_map(service, spreadsheet_id: str, sheet_name: str,
     headers = grid[0] if grid else []
     col_map, _unmatched = resolve_column_map(headers, overrides or {}, platform)
     if not (col_map.get("advertiser_id") or col_map.get(TT_KEY_FIELD)):
-        raise ValueError(f"工作表「{sheet_name}」里找不到「账户ID」列，无法写表")
+        raise ValueError(
+            f"工作表「{sheet_name}」里找不到「{KEY_COL_LABEL[platform]}」列，无法写表")
     return col_map
 
 

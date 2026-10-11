@@ -2657,7 +2657,11 @@ class TestSyncWritebackKeyColumn:
         row = [""] * 17
         row[col_index("D")] = "KC-FB-1"
         row[col_index("J")] = "甲丁"        # 在用运营 → 触发归属变更（fb 无通道列）
-        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [["表头"], row])
+        # 表头行必须是**真的 FB 表头**：FB 读路径已改按表头名解析（2026-10-11 设计 §4.4），
+        # 占位表头「表头」让定位键认不出 ⇒ 整批 400。标准顺序 ⇒ col_map 与固定列规格
+        # 逐位等价，本用例的判别力（route 传 key_col=D）不变。断言一字未动。
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [[c[1] for c in hd.COLUMN_SPEC["fb"]], row])
         captured = []
         _stub_sheets(monkeypatch, captured)
 
@@ -7045,4 +7049,46 @@ class TestFbHeaderMappingAnchor:
         assert unmatched == []
         assert col_map["advertiser_id"] == "C"
         assert col_map["remark"] == "M"
+
+
+class TestFbSyncReadPath:
+    """FB 读路径（设计 §4.4）。"""
+
+    def test_fb_read_range_is_wide(self):
+        assert hd.READ_RANGE["fb"] == "A:ZZ", "表头映射后列数不定，固定 A:Q 会读漏右侧列"
+        assert hd.READ_RANGE["gg"] == "A:N", "gg 逐字节不变"
+
+    def test_key_col_label_speaks_the_users_language(self):
+        """错误文案里的列名必须与户管表里的表头一致 —— 他拿这句去找列。"""
+        assert hd.KEY_COL_LABEL["fb"] == "资产UID"
+        assert hd.KEY_COL_LABEL["tt"] == "账户ID"
+        assert hd.KEY_COL_LABEL["gg"] == "账户ID"
+
+    def test_missing_key_column_message_names_asset_uid(self, client, monkeypatch):
+        """FB 表里没有「资产UID」⇒ 拒绝同步，且文案说「资产UID」不是「账户ID」。
+
+        **走真入口**（`/api/huguan/dashboard/sync` 的 400 分支）：FB 在本任务里正是被
+        放行到「按表头解析 + 定位键校验」这一段，这就是文案按平台取词要生效的地方。
+
+        （brief 原稿此用例打桩 `resolve_table_col_map` 走**写表侧**，但那条分支此时
+        **仍只服务 tt**（放行 fb 是下一个任务的事）⇒ 原稿永远 `DID NOT RAISE`。
+        故改测同步侧的同一条文案 —— 判据一样：「FB 显示的是资产UID」。）"""
+        hg, _ = _create_user(client, "_fb_read", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_fb_read')}", json.dumps({"fb": {
+                       "spreadsheet_id": "SS", "sheet_name": "账户管理分配"}})))
+        db.commit(); db.close()
+        import google_sheets_service as gs
+        # 表头里**没有**「资产UID」⇒ 定位键认不出 ⇒ 整批拒同步
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda *a, **k: [["日期", "资产类型"], ["2026-10-01", "x"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "fb", "dry_run": True})
+        assert resp.status_code == 400, resp.get_json()
+        msg = resp.get_json()["error"]
+        assert "资产UID" in msg
+        assert "账户ID" not in msg
+        assert "账户管理分配" in msg
 

@@ -231,17 +231,18 @@ def dashboard_sync():
         for t in tables:
             grid = gs.read_sheet_values(service, spreadsheet_id,
                                         t["sheet_name"], hd.READ_RANGE[platform])
-            # tt 改按**表头名**解析列（户管每加一张表表头都不同，固定列字母会静默串列）；
-            # gg/fb 仍走合成 map（`col_map=None` ⇒ `COLUMN_SPEC` 固定列，逐字节不变）。
+            # tt / fb 改按**表头名**解析列（户管每加一张表表头都不同，固定列字母会静默串列）；
+            # gg 仍走合成 map（`col_map=None` ⇒ `COLUMN_SPEC` 固定列，逐字节不变）。
             col_map = None
-            if platform == "tt":
+            if platform in ("tt", "fb"):
                 headers = grid[0] if grid else []
                 col_map, unmatched = hd.resolve_column_map(
                     headers, t.get("columns") or {}, platform)
-                # 定位键认不出 ⇒ 整批拒同步（设计 §4.3 第 2 条）：没有账户ID 列，
+                # 定位键认不出 ⇒ 整批拒同步（设计 §4.3 第 2 条）：没有定位键列，
                 # 读出来的每一行都无法与系统里的账户对应，继续跑只会产出垃圾差异。
                 if not (col_map.get("advertiser_id") or col_map.get("account_id")):
-                    return err(f"工作表「{t['sheet_name']}」里找不到「账户ID」列，无法同步")
+                    return err(f"工作表「{t['sheet_name']}」里找不到"
+                               f"「{hd.KEY_COL_LABEL[platform]}」列，无法同步")
                 if unmatched:
                     unmatched_columns.append({"sheet": t["sheet_name"],
                                               "headers": unmatched})
