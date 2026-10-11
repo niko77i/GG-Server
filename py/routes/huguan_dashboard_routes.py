@@ -53,11 +53,13 @@ def _log_sync_summary(scope, t0, parsed_rows, diff, *, dry_run=False) -> None:
 @jwt_required()
 @huguan_required
 def dashboard_config_get():
-    """返回当前户管的看板配置（GG 与 TT 两份）。
+    """返回当前户管的看板配置（按平台：gg / tt / fb 各一份）。
 
-    两份都经 `get_platform_config` 归一化后再返回：`config` 表是全仓共用的，
+    各平台都经 `get_platform_config` 归一化后再返回：`config` 表是全仓共用的，
     平台条目可能是「真值非 dict」，直接透传会让 `config.gg` 变成字符串/数字，
     破坏 `{"spreadsheet_id","sheet_name"}` 这个响应契约。
+    平台专属的额外键（tt 的 `tables`、fb 的 `columns`、tt/fb 的 `*_field_catalog`）
+    在本层 enrich，`get_platform_config` 自身的契约不动。
     """
     db = database.get_db()
     try:
@@ -73,6 +75,12 @@ def dashboard_config_get():
                 entry["tables"] = tables
                 if tables and tables[0]["sheet_name"]:
                     entry["sheet_name"] = tables[0]["sheet_name"]
+            elif p == "fb":
+                # fb 的列映射覆盖也要回给前端（与 tt 回 `tables` 同一手法：路由层 enrich，
+                # 不动 `get_platform_config` 的契约）。若不回：刷新后前端读不到映射 ⇒ 显示为空
+                # ⇒ 用户再点一次保存，前端上送空 ⇒ `save_config` 重写整条 fb 配置、覆盖不落盘
+                # ⇒ 已存的映射被**静默清掉**。缺省 `{}`（与 `get_platform_tables` 同口径）。
+                entry["columns"] = hd.get_platform_tables(db, uid, "fb")[0]["columns"]
             if p in ("tt", "fb"):
                 # 列映射 UI 的下拉数据源（设计 §3.2）：**按平台**给，键名 `{platform}_field_catalog`。
                 # tt 的键名逐字不变（老前端零破坏）；gg 不给这个键（载荷形状不变）。

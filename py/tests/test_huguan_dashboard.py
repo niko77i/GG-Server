@@ -6434,6 +6434,8 @@ class TestSheetHeadersEndpoint:
         assert "tt_field_catalog" not in conf["fb"]
         assert "fb_field_catalog" not in conf["gg"]
         assert "gg_field_catalog" not in conf["gg"]
+        # tt 的目录键也不许漏到 gg（gg 载荷形状逐字节不变）。
+        assert "tt_field_catalog" not in conf["gg"]
 
 
 # ---------- Task 1（per-sheet-sync）：按表同步 ----------
@@ -7324,3 +7326,19 @@ class TestFbColumnsPostValidation:
 
     def test_fb_columns_must_be_an_object(self, client):
         assert self._save(client, "_fbcols6", ["consumption"]).status_code == 400
+
+    def test_saved_fb_columns_come_back_from_config_get(self, client):
+        """存了 fb 的列映射之后，配置 GET 必须**原样回给**前端。
+
+        否则刷新后前端读不到映射 ⇒ 显示为空 ⇒ 用户再点一次保存，前端上送空 ⇒ 后端把整条
+        fb 配置重写、`columns` 不落盘 ⇒ 已存的覆盖被**静默清掉**。gg 绝不出这个键。
+        （把 GET 里给 fb enrich `columns` 的那行去掉，本用例即变红。）
+        """
+        hg, _uid = _create_user(client, "_fbcols7", role="huguan")
+        resp = client.post("/api/huguan/dashboard", json={
+            "platform": "fb", "spreadsheet_id": "SS", "sheet_name": "账户管理分配",
+            "columns": {"备注二": "consumption"}}, headers=hg)
+        assert resp.status_code == 200, resp.get_json()
+        conf = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert conf["fb"]["columns"] == {"备注二": "consumption"}
+        assert "columns" not in conf["gg"]
