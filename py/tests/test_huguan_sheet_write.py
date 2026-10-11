@@ -624,7 +624,7 @@ def test_tt_write_background_routes_mapped_owner_column_to_single_cell(client, m
                "VALUES ('hg_mapbk_1','hg_mapbk_1',?,?)", (uid, _TT_TYPE))
     db.commit()
 
-    cm, _ = hd.resolve_column_map(_TT_REORDERED_HEADER, {})
+    cm, _ = hd.resolve_column_map(_TT_REORDERED_HEADER, {}, "tt")
     assert cm["owner_name"] == "I" and cm["advertiser_id"] == "A", cm
     hr._write_background_tables(
         db, uid, "tt",

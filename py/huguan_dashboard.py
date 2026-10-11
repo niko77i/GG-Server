@@ -165,18 +165,25 @@ def _derive_catalog(platform: str) -> list:
 # 字段目录：按平台一份。tt 手写、fb 从 COLUMN_SPEC 推导（设计 §4.1）。
 FIELD_CATALOG = {"tt": TT_FIELD_CATALOG, "fb": _derive_catalog("fb")}
 
-# 别名 → 字段key（同名字段只取最先出现的那个别名条目）
-_TT_ALIAS_TO_FIELD = {}
-for _f, _label, _aliases, _dir, _key, _skip in TT_FIELD_CATALOG:
-    for _a in _aliases:
-        _TT_ALIAS_TO_FIELD.setdefault(_a, _f)
+# 别名 → 字段key，按平台一份（同名字段只取最先出现的那个别名条目）。
+# 放在这里而不是目录定义旁边，是因为它按 FIELD_CATALOG 逐平台展开。
+_ALIAS_TO_FIELD = {}
+for _p, _catalog in FIELD_CATALOG.items():
+    _alias = {}
+    for _f, _label, _aliases, _dir, _key, _skip in _catalog:
+        for _a in _aliases:
+            _alias.setdefault(_a, _f)
+    _ALIAS_TO_FIELD[_p] = _alias
 
 
-def resolve_column_map(headers: list, overrides: dict) -> tuple:
+def resolve_column_map(headers: list, overrides: dict, platform: str) -> tuple:
     """表头行 + 手工覆盖 → ({字段key: 列字母}, [未采集的表头名])。
 
     优先级：**手工覆盖 > 别名自动匹配 > 不采集**（设计 §4.2）。
+    字段目录与别名表按 `platform` 取（tt 手写 / fb 由 COLUMN_SPEC 推导，见 FIELD_CATALOG）。
+    **`platform` 刻意没有默认值** —— 漏传要当场 TypeError，绝不静默按 tt 处理。
 
+    其余口径见下（与 TT 单平台时逐字相同）：
     - 表头文本 strip() 后匹配；空表头跳过。
     - 多列命中同一字段 ⇒ 取**最左**那列。其余列**只有输给了别的名字**（真冲突，用户改指派
       就能解）才记入未采集；**同名表头的后一个不报** —— `columns` 按表头名存键，用户按名字
@@ -187,10 +194,12 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
       也不上报 —— 与目录里的空串哨兵同档，只是由覆盖手工指定。
     返回的未采集列表保留表头原文（strip 后），供前端逐条显示与指派。
     """
+    catalog = FIELD_CATALOG[platform]
+    alias_map = _ALIAS_TO_FIELD[platform]
     # 只把**真正的字段**当合法覆盖目标：空串字段key 是「认识但刻意不采集」的哨兵
     # （见 TT_FIELD_CATALOG），不是字段，故不能作为覆盖**指向的字段**。
     # （覆盖**值**取空串是另一回事：那合法，见下方第一轮。）
-    catalog_fields = {f for f, _l, _a, _d, _k, _s in TT_FIELD_CATALOG if f}
+    catalog_fields = {f for f, _l, _a, _d, _k, _s in catalog if f}
     out, unmatched, taken = {}, [], set()
     # 已被**成功认领**的表头名（跨两轮累计）：同名表头的后一个落选时不再报未采集。
     claimed_names = set()
@@ -235,7 +244,7 @@ def resolve_column_map(headers: list, overrides: dict) -> tuple:
         name = ("" if raw is None else str(raw)).strip()
         if not name or _col_letter(i) in taken:
             continue
-        field = _TT_ALIAS_TO_FIELD.get(name)
+        field = alias_map.get(name)
         if field is None:
             # 完全不认识 ⇒ 报出来（设计 §4.3）；同一个未知表头只报一次
             if name not in (overrides or {}):
@@ -262,8 +271,11 @@ def _col_letter(i: int) -> str:
 
 
 def describe_header_columns(headers: list, overrides: dict,
-                            col_map: dict, unmatched: list) -> list:
+                            col_map: dict, unmatched: list, platform: str) -> list:
     """把一次表头解析的结果摊成「逐列一行」，供前端列映射 UI 显示（设计 §3.1）。
+
+    `platform` 只是**转交给** `resolve_column_map`（下面那次「无覆盖」解析），本函数
+    自己不按平台分支 —— 逐列判据只依赖那一次的产出。
 
     每项：{"header": strip 后的表头原文, "field": 字段key | "" | None, "via": 四档,
            "alias_field": 字段key | "" | None}
@@ -288,7 +300,7 @@ def describe_header_columns(headers: list, overrides: dict,
     ov = overrides or {}
     unknown = set(unmatched)
     # 别名单独（无覆盖）的解析：只回答「这列去掉覆盖会是什么」，不是第二套认列逻辑。
-    alias_map, alias_unmatched = resolve_column_map(headers, {})
+    alias_map, alias_unmatched = resolve_column_map(headers, {}, platform)
     alias_by_letter = {col: field for field, col in alias_map.items()}
     alias_unknown = set(alias_unmatched)
 
@@ -432,7 +444,7 @@ def resolve_table_col_map(service, spreadsheet_id: str, sheet_name: str,
         return spec_column_map(platform)
     grid = read_sheet_values(service, spreadsheet_id, sheet_name, "A1:ZZ1")
     headers = grid[0] if grid else []
-    col_map, _unmatched = resolve_column_map(headers, overrides or {})
+    col_map, _unmatched = resolve_column_map(headers, overrides or {}, platform)
     if not (col_map.get("advertiser_id") or col_map.get(TT_KEY_FIELD)):
         raise ValueError(f"工作表「{sheet_name}」里找不到「账户ID」列，无法写表")
     return col_map

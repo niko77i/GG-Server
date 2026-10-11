@@ -237,7 +237,7 @@ def dashboard_sync():
             if platform == "tt":
                 headers = grid[0] if grid else []
                 col_map, unmatched = hd.resolve_column_map(
-                    headers, t.get("columns") or {})
+                    headers, t.get("columns") or {}, platform)
                 # 定位键认不出 ⇒ 整批拒同步（设计 §4.3 第 2 条）：没有账户ID 列，
                 # 读出来的每一行都无法与系统里的账户对应，继续跑只会产出垃圾差异。
                 if not (col_map.get("advertiser_id") or col_map.get("account_id")):
@@ -774,8 +774,8 @@ def dashboard_sheet_headers():
         grid = gs.read_sheet_values(service, spreadsheet_id, sheet_name, "A1:ZZ1")
         headers = grid[0] if grid else []
         overrides = table.get("columns") or {}
-        col_map, unmatched = hd.resolve_column_map(headers, overrides)
-        return ok({"columns": hd.describe_header_columns(headers, overrides, col_map, unmatched),
+        col_map, unmatched = hd.resolve_column_map(headers, overrides, platform)
+        return ok({"columns": hd.describe_header_columns(headers, overrides, col_map, unmatched, platform),
                    "unmatched": unmatched})
     finally:
         db.close()

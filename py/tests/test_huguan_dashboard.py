@@ -5320,7 +5320,7 @@ class TestResolveColumnMap:
 
     def test_enterprise_header_resolves_fully_by_alias(self):
         """企业户表零配置可认全：别名「日期」→ 入库时间，含两个新字段。"""
-        m, unmatched = hd.resolve_column_map(self.ENTERPRISE, {})
+        m, unmatched = hd.resolve_column_map(self.ENTERPRISE, {}, "tt")
         assert unmatched == [], f"应零未采集，实际={unmatched}"
         assert m["advertiser_id"] == "C"
         assert m["acquired_date"] == "A"          # ← 靠别名
@@ -5331,7 +5331,7 @@ class TestResolveColumnMap:
 
     def test_jiabai_header_resolves_identically_to_legacy_spec(self):
         """加白户表：解析结果必须与既有 COLUMN_SPEC 逐字段相同（回归锚）。"""
-        m, unmatched = hd.resolve_column_map(self.JIABAI, {})
+        m, unmatched = hd.resolve_column_map(self.JIABAI, {}, "tt")
         assert unmatched == []
         legacy = {f: c for c, _h, f, _w, _r in hd.COLUMN_SPEC["tt"] if f}
         # 定位键两套命名并存（设计 §4.1/§4.4）：m 用目录名 advertiser_id，legacy 用
@@ -5341,17 +5341,17 @@ class TestResolveColumnMap:
                {k: v for k, v in legacy.items() if k != "account_id"}
 
     def test_unknown_header_is_reported_not_silently_dropped(self):
-        m, unmatched = hd.resolve_column_map(["账户ID", "备注二"], {})
+        m, unmatched = hd.resolve_column_map(["账户ID", "备注二"], {}, "tt")
         assert unmatched == ["备注二"]
         assert "remark" not in m          # 没认出来就不许映射到任何字段
 
     def test_override_beats_alias(self):
         """手工覆盖优先：把别名表里没有的叫法指到任意字段。"""
-        m, unmatched = hd.resolve_column_map(["账户ID", "负责人"], {"负责人": "owner_name"})
+        m, unmatched = hd.resolve_column_map(["账户ID", "负责人"], {"负责人": "owner_name"}, "tt")
         assert m["owner_name"] == "B" and unmatched == []
 
     def test_override_wins_over_alias(self):
-        m, _u = hd.resolve_column_map(["账户ID", "日期"], {"日期": "remark"})
+        m, _u = hd.resolve_column_map(["账户ID", "日期"], {"日期": "remark"}, "tt")
         assert m["remark"] == "B" and "acquired_date" not in m
 
     def test_duplicate_field_takes_leftmost_without_reporting(self):
@@ -5361,14 +5361,14 @@ class TestResolveColumnMap:
         指派也只能认领最左那列 ⇒ 报它＝每条同步报告都挂一行永远解不掉的未采集（永久噪音，
         与「位置」哨兵同款的陷阱，会把「未采集」这个信号训练成被忽略）。
         """
-        m, unmatched = hd.resolve_column_map(["账户ID", "日期", "日期"], {})
+        m, unmatched = hd.resolve_column_map(["账户ID", "日期", "日期"], {}, "tt")
         assert m["acquired_date"] == "B"
         assert unmatched == [], f"同名后一个不该报未采集，实际={unmatched}"
 
     def test_assigned_duplicate_name_is_still_not_reported(self):
         """同名表头两列都**已指派**（= 同一份映射，指派按名字生效）⇒ 仍不报未采集。"""
         m, unmatched = hd.resolve_column_map(["账户ID", "备注二", "备注二"],
-                                             {"备注二": "remark"})
+                                             {"备注二": "remark"}, "tt")
         assert m["remark"] == "B"
         assert unmatched == [], f"已指派的同名列不该报未采集，实际={unmatched}"
 
@@ -5378,12 +5378,12 @@ class TestResolveColumnMap:
         这条形状 POST 层会拒（同一字段出现两遍），但纯函数仍必须如实报 —— 它就是
         「输给了**别的名字**」那一档，与同名落选本质不同（后者用户永远解不掉）。
         """
-        m, unmatched = hd.resolve_column_map(["甲", "乙"], {"甲": "remark", "乙": "remark"})
+        m, unmatched = hd.resolve_column_map(["甲", "乙"], {"甲": "remark", "乙": "remark"}, "tt")
         assert m["remark"] == "A"
         assert unmatched == ["乙"], f"真冲突必须报，实际={unmatched}"
 
     def test_blank_header_ignored(self):
-        m, unmatched = hd.resolve_column_map(["账户ID", "", "  "], {})
+        m, unmatched = hd.resolve_column_map(["账户ID", "", "  "], {}, "tt")
         assert unmatched == [] and "B" not in m.values()
 
     def test_key_field_flag(self):
@@ -5399,26 +5399,26 @@ class TestResolveColumnMap:
 
     def test_recognized_but_ignored_header_is_not_reported(self):
         """「位置」是**认识但刻意不采集**的列：既不映射、也不进未采集列表。"""
-        m, unmatched = hd.resolve_column_map(["账户ID", "位置"], {})
+        m, unmatched = hd.resolve_column_map(["账户ID", "位置"], {}, "tt")
         assert unmatched == []
         assert "B" not in m.values(), "「位置」不该被映射到任何字段"
 
     def test_repeated_unknown_header_reported_once(self):
         """同一个未知表头出现两次 ⇒ 未采集列表里只报一次（否则前端的逐列清单会出现重复项）。"""
-        m, unmatched = hd.resolve_column_map(["账户ID", "备注二", "备注二"], {})
+        m, unmatched = hd.resolve_column_map(["账户ID", "备注二", "备注二"], {}, "tt")
         assert unmatched == ["备注二"], f"应只报一次，实际={unmatched}"
         assert "remark" not in m
 
     def test_override_empty_string_means_deliberately_ignored(self):
         """覆盖值空串 = 刻意不采集：既不映射，也不进未采集（用户显式关掉的列不该再报噪音）。"""
-        m, unmatched = hd.resolve_column_map(["账户ID", "备注二"], {"备注二": ""})
+        m, unmatched = hd.resolve_column_map(["账户ID", "备注二"], {"备注二": ""}, "tt")
         assert unmatched == [], f"刻意不采集不该再报未采集，实际={unmatched}"
         assert "B" not in m.values()
         assert m.get("advertiser_id") == "A"
 
     def test_override_empty_string_beats_alias(self):
         """空串也是一种覆盖 ⇒ 优先级最高，压过别名自动匹配。"""
-        m, unmatched = hd.resolve_column_map(["账户ID", "日期"], {"日期": ""})
+        m, unmatched = hd.resolve_column_map(["账户ID", "日期"], {"日期": ""}, "tt")
         assert unmatched == []
         assert "acquired_date" not in m, "覆盖空串应压过别名"
         assert "B" not in m.values()
@@ -5431,8 +5431,8 @@ class TestDescribeHeaderColumns:
                   "国家", "所属渠道", "接户运营", "时区", "下户链接"]
 
     def _describe(self, headers, overrides):
-        m, unmatched = hd.resolve_column_map(headers, overrides)
-        return hd.describe_header_columns(headers, overrides, m, unmatched), unmatched
+        m, unmatched = hd.resolve_column_map(headers, overrides, "tt")
+        return hd.describe_header_columns(headers, overrides, m, unmatched, "tt"), unmatched
 
     def test_alias_and_ignored_and_none_are_distinguished(self):
         rows, _u = self._describe(["账户ID", "位置", "备注二"], {})
@@ -5556,7 +5556,7 @@ class TestColMapReadWrite:
                 "BC-1", "US", "渠道X", "张三", "UTC+8", "https://x/y"]
 
     def test_parse_row_uses_col_map(self):
-        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {}, "tt")
         p = hd.parse_row(self._row(), "tt", cm)
         assert p["account_id"] == "7001234567890123456"
         assert p["acquired_date"] == "2026-10-01"
@@ -5569,14 +5569,14 @@ class TestColMapReadWrite:
         assert p["_dead_flag"] == "否"
 
     def test_parse_row_omits_unmapped_columns(self):
-        cm, _u = hd.resolve_column_map(["账户ID", "备注二"], {})
+        cm, _u = hd.resolve_column_map(["账户ID", "备注二"], {}, "tt")
         p = hd.parse_row(["7001", "x"], "tt", cm)
         # 未采集列不得出现在任何字段里 —— 「位置」「消耗」等也应缺席
         assert "consumption" not in p and "status_name" not in p
         assert p["account_id"] == "7001"
 
     def test_cells_for_row_uses_col_map_letters(self):
-        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {}, "tt")
         cells = hd.cells_for_row({"account_id": "7001", "bc_name": "BC-9", "name": "甲"},
                                  "tt", cm)
         assert cells["F"] == "BC-9"            # BC 在 F 列（企业户表）
@@ -5588,7 +5588,7 @@ class TestColMapReadWrite:
 
     def test_cells_for_row_skips_unmapped_columns_entirely(self):
         """未采集的列**一个字不碰** —— 产出里不得含它的列字母。"""
-        cm, _u = hd.resolve_column_map(["账户ID", "备注二"], {"备注二": "remark"})
+        cm, _u = hd.resolve_column_map(["账户ID", "备注二"], {"备注二": "remark"}, "tt")
         # 只有 account_id + remark 被采集；其余字段（bc_name 等）不在 map 里
         cells = hd.cells_for_row({"account_id": "7001", "bc_name": "BC-9", "remark": "R"},
                                  "tt", cm)
@@ -5597,7 +5597,7 @@ class TestColMapReadWrite:
 
     def test_cells_for_row_skips_empty_landing_url(self):
         """设计 §4.7：landing_url 库里为空 ⇒ 跳过该格，不清表。"""
-        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {}, "tt")
         cells = hd.cells_for_row({"account_id": "7001", "landing_url": ""}, "tt", cm)
         assert cm["landing_url"] not in cells
         cells2 = hd.cells_for_row({"account_id": "7001", "landing_url": "https://a"},
@@ -5632,7 +5632,7 @@ class TestColMapReadWrite:
     def test_cells_for_row_real_tt_col_map_writes_id_cell(self):
         """真实 tt col_map（key=advertiser_id）下，账户ID 格必须按 spec.key 判定：
         数字 ID 加 ' 前缀、非数字原样；修前该格被写成空串（写回会清掉表里的 ID）。"""
-        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {}, "tt")
         cells = hd.cells_for_row({"account_id": "7001"}, "tt", cm)
         assert cells[cm["advertiser_id"]] == "'7001"
         cells2 = hd.cells_for_row({"account_id": "ACCT-1"}, "tt", cm)
@@ -5640,7 +5640,7 @@ class TestColMapReadWrite:
 
     def test_parse_row_real_tt_col_map_key_does_not_leak(self):
         """真实 tt col_map 下定位键列（key=advertiser_id）不得泄漏成独立字段。"""
-        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {}, "tt")
         p = hd.parse_row(self._row(), "tt", cm)
         assert "advertiser_id" not in p
         assert p["account_id"] == "7001234567890123456"
@@ -5648,7 +5648,7 @@ class TestColMapReadWrite:
     def test_cells_for_row_keeps_falsy_numeric_id(self):
         """写侧取键值用 `is None` 判定而非 `or` 链：假值但**有效**的 ID "0" 必须存活，
         不能被吞成空串（那等于把表里的账户ID 清掉）。"""
-        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {})
+        cm, _u = hd.resolve_column_map(self.ENTERPRISE, {}, "tt")
         cells = hd.cells_for_row({"account_id": "0"}, "tt", cm)
         assert cells[cm["advertiser_id"]] == "'0"
 
@@ -5658,13 +5658,13 @@ class TestColMapReadWrite:
 class TestColMapOwnerColumns:
     def test_owner_sheet_from_uses_col_map(self):
         """撤回快照的表侧原值，列字母必须来自这张表的映射。"""
-        cm, _u = hd.resolve_column_map(["账户ID", "接户运营"], {})
+        cm, _u = hd.resolve_column_map(["账户ID", "接户运营"], {}, "tt")
         parsed = {"account_id": "7001", "owner_name": "张三", "_owner_channel": ""}
         got = hd._owner_sheet_from(parsed, "tt", cm)
         assert got == {"B": "张三"}          # 接户运营在 B 列（这张表里）
 
     def test_owner_channel_cells_uses_col_map(self):
-        cm, _u = hd.resolve_column_map(["账户ID", "换绑情况"], {})
+        cm, _u = hd.resolve_column_map(["账户ID", "换绑情况"], {}, "tt")
         got = hd.owner_channel_cells([{"account_id": "7001"}], "tt", "张三", cm)
         assert got == [{"account_id": "7001", "cells": {"B": "张三"}}]
 
@@ -5674,7 +5674,7 @@ class TestColMapOwnerColumns:
         钉住 `if target is None: continue` 守卫：去掉它，缺失字段会被塞进
         `out[None]`（`{None: "张三"}`），撤回时就会往一个不存在的列写字。
         """
-        cm, _u = hd.resolve_column_map(["账户ID"], {})
+        cm, _u = hd.resolve_column_map(["账户ID"], {}, "tt")
         got = hd._owner_sheet_from(
             {"account_id": "7001", "owner_name": "张三"}, "tt", cm)
         assert got == {}
@@ -6950,4 +6950,72 @@ class TestFieldCatalogPerPlatform:
         assert s["owner_change_note"] == {"writable": False, "readable": True,
                                          "key": False, "skip_empty_write": False}
         assert s["advertiser_id"]["key"] is True
+
+
+class TestFbHeaderMappingAnchor:
+    """FB 表头映射的等价性锚（设计 §六 锚 1）。
+
+    FB 表头正常时，按表头名解析的结果必须与老的「按列字母」合成结果**逐字节相同**。
+    这条锚是「改造没有改变正常表的行为」的唯一证据。
+    """
+
+    FB_STD_HEADER = [c[1] for c in hd.COLUMN_SPEC["fb"]]   # 17 个中文表头，顺序即 A..Q
+
+    def test_fb_standard_header_reproduces_legacy_column_map(self):
+        col_map, unmatched = hd.resolve_column_map(self.FB_STD_HEADER, {}, "fb")
+        assert col_map == hd.spec_column_map("fb")
+        assert unmatched == []
+
+    def test_fb_standard_header_maps_every_column_in_order(self):
+        """逐列钉字面值：列字母必须与原固定规格一模一样。"""
+        col_map, _u = hd.resolve_column_map(self.FB_STD_HEADER, {}, "fb")
+        assert [col_map.get(f) for f in
+                ("acquired_date", "operator", "name", "account_id", "channel_name",
+                 "asset_type_name", "unit_price", "inbound_qty", "acceptor",
+                 "owner_name", "outbound_date", "outbound_qty", "timezone",
+                 "consumption", "status_name", "primary_bm_name", "remark")] \
+            == list("ABCDEFGHIJKLMNOPQ")
+
+    def test_fb_reordered_header_follows_names(self):
+        """换序：映射跟着表头走（老实现按列字母读会静默串列）。"""
+        headers = list(reversed(self.FB_STD_HEADER))
+        col_map, unmatched = hd.resolve_column_map(headers, {}, "fb")
+        assert unmatched == []
+        assert col_map["acquired_date"] == "Q"
+        assert col_map["remark"] == "A"
+        assert col_map["account_id"] == "N"
+
+    def test_fb_unknown_header_is_reported_not_mapped(self):
+        """插一列不认识的：它进未采集，其余列不受影响。"""
+        headers = self.FB_STD_HEADER[:5] + ["临时备注"] + self.FB_STD_HEADER[5:]
+        col_map, unmatched = hd.resolve_column_map(headers, {}, "fb")
+        assert unmatched == ["临时备注"]
+        assert col_map["asset_type_name"] == "G"     # 原 F 列被挤到 G
+        assert set(col_map) == {f for f in hd.spec_column_map("fb")}
+
+    def test_fb_override_wins_over_alias(self):
+        col_map, unmatched = hd.resolve_column_map(
+            self.FB_STD_HEADER, {"时区": "consumption"}, "fb")
+        assert col_map["consumption"] == "M"          # 时区列（M）被改指派给消耗
+        assert "timezone" not in col_map              # 消耗列（N）落选
+        assert unmatched == ["消耗"]
+
+    def test_fb_override_empty_string_means_deliberately_skipped(self):
+        col_map, unmatched = hd.resolve_column_map(self.FB_STD_HEADER, {"时区": ""}, "fb")
+        assert "timezone" not in col_map
+        assert unmatched == []
+
+    def test_resolve_column_map_requires_platform(self):
+        """platform 无默认值：漏传必须当场 TypeError，不许静默按 TT 处理。"""
+        import pytest
+        with pytest.raises(TypeError):
+            hd.resolve_column_map(self.FB_STD_HEADER, {})
+
+    def test_tt_standard_header_unchanged(self):
+        """TT 的表头行仍解析成同一份 col_map（走同一函数、不同目录）。"""
+        tt_header = [c[1] for c in hd.COLUMN_SPEC["tt"]]
+        col_map, unmatched = hd.resolve_column_map(tt_header, {}, "tt")
+        assert unmatched == []
+        assert col_map["advertiser_id"] == "C"
+        assert col_map["remark"] == "M"
 
