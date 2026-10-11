@@ -6348,12 +6348,19 @@ class TestColumnsConfig:
 class TestSheetHeadersEndpoint:
     """列映射 UI 的「读取表头」：把某张表第 1 行摊成逐列来源。"""
 
-    def _conf(self, client, username, tables):
+    def _conf(self, client, username, tables=None, platform="tt", entry=None):
+        """建一个户管用户并把某个平台的看板配置塞进 config 表。
+
+        `entry` 给了就用它当该平台的配置整体（fb 是扁平形）；否则按 `tables` 包成 tt 多表形。
+        默认参数保证既有三个用例（tt 多表形）逐字不变。
+        """
         hg, _ = _create_user(client, username, role="huguan")
+        if entry is None:
+            entry = {"spreadsheet_id": "SS", "tables": tables}
         db = database.get_db()
         db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
-                   (f"huguan_dashboard_{_uid_of(username)}", json.dumps(
-                       {"tt": {"spreadsheet_id": "SS", "tables": tables}})))
+                   (f"huguan_dashboard_{_uid_of(username)}",
+                    json.dumps({platform: entry})))
         db.commit(); db.close()
         return hg
 
@@ -6397,6 +6404,36 @@ class TestSheetHeadersEndpoint:
         r2 = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
                         query_string={"platform": "tt"})
         assert r2.status_code == 400
+
+    def test_accepts_fb_and_maps_by_header_name(self, client, monkeypatch):
+        """fb 放行：扁平配置 + 按表头解析；门禁仍是「这张表必须在用户自己的配置里」。"""
+        import google_sheets_service as gs
+        hg = self._conf(client, "_sh4", platform="fb", entry={
+            "spreadsheet_id": "SS", "sheet_name": "账户管理分配"})
+        headers = [c[1] for c in hd.COLUMN_SPEC["fb"]]
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [headers])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        res = client.get("/api/huguan/dashboard/sheet-headers", headers=hg,
+                         query_string={"platform": "fb",
+                                       "sheet_name": "账户管理分配"}).get_json()
+        assert res["unmatched"] == []
+        by_header = {c["header"]: c for c in res["columns"]}
+        assert by_header["资产UID"] == {"header": "资产UID", "field": "account_id",
+                                        "via": "alias", "alias_field": "account_id"}
+        assert by_header["操作人"] == {"header": "操作人", "field": "operator",
+                                       "via": "alias", "alias_field": "operator"}
+        assert by_header["接户运营"] == {"header": "接户运营", "field": "acceptor",
+                                         "via": "alias", "alias_field": "acceptor"}
+
+    def test_config_payload_carries_field_catalog_per_platform(self, client):
+        """tt 键名不变；fb 多出 fb_field_catalog；gg 两个键都没有。"""
+        hg, _ = _create_user(client, "_sh5", role="huguan")
+        conf = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
+        assert isinstance(conf["tt"]["tt_field_catalog"], list)
+        assert isinstance(conf["fb"]["fb_field_catalog"], list)
+        assert "tt_field_catalog" not in conf["fb"]
+        assert "fb_field_catalog" not in conf["gg"]
+        assert "gg_field_catalog" not in conf["gg"]
 
 
 # ---------- Task 1（per-sheet-sync）：按表同步 ----------

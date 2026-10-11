@@ -71,10 +71,12 @@ def dashboard_config_get():
                 # get_platform_config 自身的签名/返回值不动（gg/fb 与既有测试依赖它）。
                 tables = hd.get_platform_tables(db, uid, "tt")
                 entry["tables"] = tables
-                # 列映射 UI 的下拉数据源（设计 §3.2）。只加在 tt 分支：gg/fb 载荷形状不变。
-                entry["tt_field_catalog"] = hd.field_catalog(p)
                 if tables and tables[0]["sheet_name"]:
                     entry["sheet_name"] = tables[0]["sheet_name"]
+            if p in ("tt", "fb"):
+                # 列映射 UI 的下拉数据源（设计 §3.2）：**按平台**给，键名 `{platform}_field_catalog`。
+                # tt 的键名逐字不变（老前端零破坏）；gg 不给这个键（载荷形状不变）。
+                entry[f"{p}_field_catalog"] = hd.field_catalog(p)
             conf[p] = entry
     finally:
         db.close()
@@ -771,15 +773,15 @@ def dashboard_owner_options():
 @jwt_required()
 @huguan_required
 def dashboard_sheet_headers():
-    """读某张 tt 表的第 1 行，摊成「逐列：表头 → 字段 + 来源」（设计 §3.1）。
+    """读某张规格表（tt / fb）的第 1 行，摊成「逐列：表头 → 字段 + 来源」（设计 §3.1）。
 
     只服务列映射 UI 的显示。**归属门禁与 sync 同款**：表地址一律取自该户管自己的配置，
     请求体不接受表地址；`sheet_name` 必须是**他自己配置里的某张表**（配置保证工作表名互不重复）
     —— 否则就等于「对着任意 sheet 读表头」。
     """
     platform = str(request.args.get("platform") or "").strip()
-    if platform != "tt":
-        return err("只有 TT 支持表头映射", 400)
+    if platform not in ("tt", "fb"):
+        return err("只有 TT / FB 支持表头映射", 400)
     sheet_name = str(request.args.get("sheet_name") or "").strip()
     if not sheet_name:
         return err("缺少 sheet_name", 400)
