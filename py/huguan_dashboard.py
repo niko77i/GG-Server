@@ -477,7 +477,7 @@ def owner_role_col(platform: str, role: str, col_map: dict | None = None):
 
     `col_map` 给了（这张表的 {字段key: 列字母}）就按其定位该角色应写的列；
     该表没有这一列（未采集）时返回 None，由调用方「一个字不碰」。没给（None）
-    就走既有固定字母 —— 与改动前逐字节等价（gg/fb 与既有调用点零改动）。
+    就走既有固定字母 —— 与改动前逐字节等价（只有 gg 与既有调用点零改动）。
     """
     table = _OWNER_ROLE_COL.get(role)
     if table is None:
@@ -508,7 +508,7 @@ def cells_for_row(row: dict, platform: str, col_map: dict | None = None) -> dict
     """系统 → 表：把一行账户数据转成 {列字母: 待写值}。
 
     `col_map` 是**这张表**的 {字段key: 列字母}；`None` ⇒ 用既有固定规格合成的
-    （gg/fb 与既有调用点零改动，逐字节等价）。
+    （只有 gg 与既有调用点零改动，逐字节等价）。
 
     只产出「col_map 里映射到可写字段」的列，且**绝不产出归属变更通道列**
     （规格 §7.2 规则 2）—— 自动回写若顺手把户管刚填的重新分配清掉，那个变更就被静默吞了。
@@ -1117,7 +1117,7 @@ def _owner_sheet_from(parsed: dict, platform: str, col_map: dict | None = None) 
     FB 的 J/I = owner_name/acceptor），解析结果里必然有对应字段，无需回读原始 values。
 
     `col_map` 是**这张表**的 {字段key: 列字母}；`None` ⇒ 用既有固定规格合成的
-    （gg/fb 与既有调用点零改动，逐字节等价）。给了 col_map 时方向翻转：字段集合
+    （只有 gg 与既有调用点零改动，逐字节等价）。给了 col_map 时方向翻转：字段集合
     仍由既有来源（`_OWNER_SHEET_COLS` × `COLUMN_SPEC`）推导，但列字母改为到这张
     表的映射里查该字段的落点；**这张表没有该列（未采集）⇒ 跳过，一个字不碰**。
     """
@@ -1383,7 +1383,8 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
         # `f in p` ⇔ 该表的 col_map 映射了这列。未采集的列（如加白户表没有
         # 主体名称/下户链接）不产出字段 ⇒ 不参与比对、不进 clears、不被清库
         #（全局约束「未采集的列一个字不碰」）。与下面的值判空**正交**：被采集但空着的
-        # 列仍产出空串并照常清库。gg/fb 的合成 map 覆盖全部文本列 ⇒ 恒 `f in p` ⇒ 无操作。
+        # 列仍产出空串并照常清库。只有 gg 的合成 map 覆盖全部文本列 ⇒ 恒 `f in p` ⇒ 无操作；
+        # tt / fb 走表头解析，未采集的文本列会 `f not in p`，就此跳过。
         if f not in p:
             continue
         # `_conf_text` 兜底是因为 p 未必全是 str（同 `_conf_text` 的既有理由）
@@ -1436,8 +1437,9 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     # 无条件产出会让「缺这两列的 tt 表」同步一个库里已死账户时判成「变了」→ 确认后
     # `apply_diff` 清空 `death_date`（**静默复活**），违反「未采集的列一个字不碰」——
     # 与 Task 7 文本列门控**同族**（这里载体是合成键而非文本列）。
-    # gg/fb 的合成 map 恒含这两列（gg：B `_dead_flag` + K `status_name`；fb：O
-    # `status_name`）⇒ 门控恒真、逐字节不变（见 `spec_column_map`）。
+    # gg 的合成 map 恒含这两列（B `_dead_flag` + K `status_name`）⇒ 门控恒真、逐字节不变
+    # （见 `spec_column_map`）；tt / fb 走表头解析，其表若没采集这两列，门控即变假 ——
+    # 那正是本段要保护的情形。
     # 缺键时的消费端已保证「什么都不做」：create 分支 `pop(..., False)` 默认存活、
     # update 分支 `pop(..., None)` 直接跳过死亡处理。
     if "_dead_flag" in p or "status_name" in p:
@@ -2086,13 +2088,16 @@ def _fb_owner_transition(old_name: str, new_name: str) -> str:
     return f"{old_name}转{new_name}"
 
 
-def _fb_acceptor_cells(rows: list, value: str) -> list:
-    """构造只写 I 列（接户运营）的 rows。
+def _fb_acceptor_cells(rows: list, value: str, col: str) -> list:
+    """构造只写「接户运营」列的 rows（列字母由调用方按该表 col_map 传入）。
+
+    **`col` 必填、无默认值** —— 表头映射后这一列不在固定位置，给个默认 "I" 就是
+    留一个「表头一挪就写错列」的入口。
 
     刻意只含这一列 —— 与 `owner_channel_cells` 同一理由：收尾写入若顺手带上别的列，
     就会把户管在表里的其他手工改动一起冲掉。
     """
-    return [{"account_id": r["account_id"], "cells": {"I": value}} for r in rows]
+    return [{"account_id": r["account_id"], "cells": {col: value}} for r in rows]
 
 
 def _set_primary_bm(db, acc_pk: int, bm_id: int) -> None:
@@ -2231,8 +2236,8 @@ def collect_rows_for_push(db, platform: str, account_ids=None,
     主动从看板撤下的意图，刷新不该把它复活。
 
     `col_maps_by_type`（可选）是 `{户类型名: 该表的 col_map}`。给了就逐行按该行
-    `account_type` 取到本表的 col_map 再产出 cells（tt 表头顺序不同 ⇒ 固定列字母会
-    串列）；没给（None）⇒ 既有合成 map，gg/fb 与既有调用点零改动、逐字节不变。
+    `account_type` 取到本表的 col_map 再产出 cells（tt / fb 表头顺序不同 ⇒ 固定列字母会
+    串列）；没给（None）⇒ 既有合成 map，只有 gg 与既有调用点零改动、逐字节不变。
     调用方负责把 col_map 解析好（读表头需要 service，本函数只有 db）。
     """
     sql = _ROW_SQL[platform]
@@ -2390,8 +2395,8 @@ def snapshot_push_targets(service, conf: dict, platform: str, groups: list,
       该表 col_map 里 writable 的那几列，`cells` 已由 col_map 版 `cells_for_row` 产出）
 
     `col_maps`（可选）是 `{sheet_name: 该表的 col_map}`：给了就用该表 col_map 的
-    定位键列找行，**与写表器用同一列**（tt 表头顺序不同时尤其关键）；没给（None）
-    ⇒ 回落到既有 `KEY_COL[platform]`，gg/fb 与既有调用点零改动、零额外读。
+    定位键列找行，**与写表器用同一列**（tt / fb 表头顺序不同时尤其关键）；没给（None）
+    ⇒ 回落到既有 `KEY_COL[platform]`，只有 gg 与既有调用点零改动、零额外读。
 
     ⚠️ 必须在**写表之前**调用 —— 写完之后原值就没了。
     ⚠️ 返回值从「单表快照」改成**每张表一份**（2026-10-08 多表规格 §4.4）：
@@ -2685,7 +2690,7 @@ def undo_sync(user_id: int, platform: str) -> dict:
     # **必须显式传 key_col**：写入器默认 "C"（GG/TT 的账户ID列），
     # 而 **FB 的账户ID在 D 列**，不传就按错误的列定位、整批静默写空（不抛异常）。
     # tt 表头顺序不同时账户ID 也不在 C 列 ⇒ 逐表按**该表表头**解析 col_map 再取定位键
-    # （gg/fb 走合成 map、零额外读）。这是本仓库已修五处的同一缺陷族。
+    # （只有 gg 走合成 map、零额外读；tt 与 fb 都要读一次表头行）。这是本仓库已修五处的同一缺陷族。
     back = [{"account_id": item["account_id"], "cells": dict(item["cells"])}
             for item in payload.get("sheet_back", []) if item.get("cells")]
     table_result = {"updated": 0, "not_found": []}
@@ -2720,7 +2725,8 @@ def undo_sync(user_id: int, platform: str) -> dict:
             for name, rows in by_sheet.items():
                 # 定位列必须与**快照/写表器用的同一列**：优先用快照逐表记的 `sheet_key_cols`；
                 # 旧快照没有该键 ⇒ 回落按该表表头解析 col_map（并带上该表 `columns` 覆盖 ——
-                # 账户ID 经覆盖映射时不带覆盖会抛「找不到账户ID列」）。gg/fb 合成 map、零额外读。
+                # 账户ID 经覆盖映射时不带覆盖会抛「找不到账户ID列」）。只有 gg 进合成 map、零额外读；
+                # tt 与 fb 都读一次表头行。
                 key_col = sheet_key_cols.get(name)
                 if not key_col:
                     cm = resolve_table_col_map(service, conf["spreadsheet_id"], name, platform,

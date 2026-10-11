@@ -77,7 +77,7 @@ def huguan_dashboard_sync(user_id, platform, account_ids):
         spreadsheet_id = hd.get_platform_config(db, user_id, platform)["spreadsheet_id"]
         if not spreadsheet_id:
             raise RuntimeError("该看板未配置表格 ID")
-        # 写表前逐表解析 col_map（tt 读一次表头行；gg/fb 零额外读）。用该表配置里的
+        # 写表前逐表解析 col_map（tt 与 fb 都读一次表头行；只有 gg 零额外读）。用该表配置里的
         # 手工覆盖 `columns` —— 与读路径（`dashboard_sync` 的 `t.get("columns")`）**同源**，
         # 否则读写对「哪一列是定位键」认识不一致，写就会落到错行。
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
@@ -174,13 +174,13 @@ def huguan_owner_channel_sync(user_id, platform, account_id, value, role="channe
         db.close()
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-    # 写表前按**该表**表头解析 col_map（tt 读一次表头行；gg/fb 零额外读）。定位键列
-    # 与角色列都可能不在固定字母上（tt 表头顺序不同）—— 只改 key_col 而列仍写死，
+    # 写表前按**该表**表头解析 col_map（tt 与 fb 都读一次表头行；只有 gg 零额外读）。定位键列
+    # 与角色列都可能不在固定字母上（tt / fb 表头顺序不同）—— 只改 key_col 而列仍写死，
     # 等于把归属名写进别的列，冲掉户管在表里的手工内容。
     cm = hd.resolve_table_col_map(service, spreadsheet_id, sheet_name, platform, columns)
-    # gg/fb 的 col_map 就是固定规格，用 None 走既有固定字母路径（含它们的既有抛错口径，
-    # 逐字节不变）；只有 tt 需要按表头定位角色列。
-    col = hd.owner_role_col(platform, role, cm if platform == "tt" else None)
+    # 角色列必须与写表器用**同一份** col_map 定位（tt / fb 的表头顺序都可能与固定规格不同）。
+    # gg 仍传 None 走既有固定字母路径（含它的既有抛错口径，逐字节不变）。
+    col = hd.owner_role_col(platform, role, cm if platform in ("tt", "fb") else None)
     if col is None:
         # 该表没有这一列（未采集）⇒ 一个字不碰（与 owner_channel_cells 同口径）
         return
@@ -296,11 +296,12 @@ def _operator_dashboard_remark_rebuild(user_id, business_key, payload):
 # ---------- target: huguan_fb_acceptor（点位 #4） ----------
 
 def huguan_fb_acceptor_sync(user_id, platform, account_id, note):
-    """写 FB 接户运营列（I 列）。
+    """写 FB「接户运营」列（列字母按**该表** col_map 定位，通常是 I 列）。
 
     本 target 只用于 fb（`_huguan_fb_acceptor_rebuild` 里平台是硬编码的 "fb"），
-    而 fb 恒为单表 ⇒ 走 `_resolve_sheet_name` 会命中那个唯一的空名条目，
-    行为与改动前等价；用同一个 helper 只是为了让「选表」只有一处实现。
+    fb 恒为单表、走 `_resolve_account_table` 命中那个唯一的空名条目。用同一个 helper
+    选表，同时取出该表的 `columns`（手工覆盖）—— 写表前与读路径**同源**地解析 col_map：
+    表头映射后「接户运营」列不在固定位置，写死 I 就会把换绑记录写进错列。
     """
     import database
     import google_sheets_service as gs
@@ -312,18 +313,25 @@ def huguan_fb_acceptor_sync(user_id, platform, account_id, note):
         spreadsheet_id = hd.get_platform_config(db, user_id, platform)["spreadsheet_id"]
         if not spreadsheet_id:
             raise RuntimeError("该看板未配置表格 ID")
-        sheet_name = _resolve_sheet_name(db, user_id, platform, account_id)
-        if not sheet_name:
+        table = _resolve_account_table(db, user_id, platform, account_id)
+        if not table or not table["sheet_name"]:
             raise RuntimeError("查不到该看板的工作表")
-        rows = hd._fb_acceptor_cells([{"account_id": account_id}], note)
+        sheet_name = table["sheet_name"]
+        columns = table.get("columns") or {}
     finally:
         db.close()
-    if not rows:
-        raise RuntimeError("无法构造 FB 接户运营待写行")
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
+    # 写表前按**该表**表头解析 col_map（与 `huguan_owner_channel_sync` 同法）。表头映射后
+    # 「接户运营」列不在固定位置，定位键列同理 —— 写死 I / D 就是把换绑记录和整行写错位。
+    cm = hd.resolve_table_col_map(service, spreadsheet_id, sheet_name, platform, columns)
+    col = cm.get("acceptor")
+    if col is None:
+        # 该表没有「接户运营」列（未采集）⇒ 一个字不碰（与 owner_role_col 同口径）
+        return
+    rows = hd._fb_acceptor_cells([{"account_id": account_id}], note, col)
     gs.update_rows_by_account_id(service, spreadsheet_id, sheet_name, rows,
-                                 key_col=hd.KEY_COL[platform])
+                                 key_col=hd.key_col_of_col_map(cm, platform))
 
 
 def _huguan_fb_acceptor_rebuild(user_id, business_key, payload):

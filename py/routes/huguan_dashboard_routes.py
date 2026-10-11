@@ -269,7 +269,7 @@ def dashboard_sync():
         t0 = _tick("解析完成", t0)
         diff = hd.build_diff(db, parsed_rows, platform)
         # 未采集列逐表上报（设计 §4.3）：**空列表也要带** —— 前端据它的存在与否渲染
-        # 「N 列未采集」提示。gg/fb 无表头映射 ⇒ 恒为空（行为与改动前一致）。
+        # 「N 列未采集」提示。只有 gg 无表头映射 ⇒ 恒为空；tt / fb 按表头解析，未采集列在此上报。
         diff["unmatched_columns"] = unmatched_columns
         t0 = _tick("build_diff 完成", t0)
 
@@ -325,21 +325,21 @@ def dashboard_sync():
             aid = p.get("account_id")
             if aid:
                 # 表侧原值必须按**该行那张表**的表头映射取列 —— 与上面的读路径同源。
-                # 若这里还用合成 map（固定列），tt 表列序不同时快照会记错列字母，
-                # 撤回便把运营名写进别的列（本批次新引入的串列）。gg/fb 的
-                # `sheet_col_maps` 为空 ⇒ 查到 None ⇒ 仍走合成 map，行为不变。
+                # 若这里还用合成 map（固定列），tt / fb 表列序不同时快照会记错列字母，
+                # 撤回便把运营名写进别的列。只有 gg 的 `sheet_col_maps` 为空 ⇒
+                # 查到 None ⇒ 仍走合成 map，行为不变（tt / fb 已按表头映射取列）。
                 cm = sheet_col_maps.get(p.get("_sheet"))
                 sheet_from.setdefault(aid, hd._owner_sheet_from(p, platform, cm))
                 sheet_back_sheets.setdefault(aid, hd._conf_text(p.get("_sheet")))
-        # 账户 → 该账户所在表的 col_map（tt）。下面的归属/备注回写要按它取**列身份**
-        # （目标列 + 分桶），与读路径/写表器**同源**。gg/fb 的 sheet_col_maps 为空 ⇒ 恒空
+        # 账户 → 该账户所在表的 col_map（tt / fb）。下面的归属/备注回写要按它取**列身份**
+        # （目标列 + 分桶），与读路径/写表器**同源**。只有 gg 的 sheet_col_maps 为空 ⇒ 恒空
         # ⇒ `.get(...)` 得 None ⇒ 分桶与取列仍走固定字母（逐字节不变）。
         col_map_by_account = {aid: sheet_col_maps[sheet]
                               for aid, sheet in sheet_back_sheets.items()
                               if sheet in sheet_col_maps}
         # 逐表记下**定位键列**（新增键 `sheet_key_cols`）：撤回的表侧回退据此按
         # 「当初同步用的同一列」找行，且不受此后表头漂移影响；账户ID 经手工覆盖映射时，
-        # 撤回若按别名重解析会认不出（本批终审 Important #1）。gg/fb 的 sheet_col_maps
+        # 撤回若按别名重解析会认不出（本批终审 Important #1）。只有 gg 的 sheet_col_maps
         # 为空 ⇒ 该键也空 ⇒ `undo_sync` 回落既有解析（逐字节不变）。
         sheet_key_cols = {sheet: hd.key_col_of_col_map(cm, platform)
                           for sheet, cm in sheet_col_maps.items()}
@@ -400,13 +400,20 @@ def dashboard_sync():
                 _write_background_tables(db, uid, platform,
                                          hd.owner_channel_cells(applied, platform, ""))
             if platform == "fb":
-                # FB 没有通道列可清；改为把换绑记录定向写进 I 列。
-                # 注意 _fb_acceptor_cells 的签名是 (rows, value)，value 是**同一个串**
-                # 写给所有行 —— 而这里每行的串不同，所以不能用它，直接构造 rows。
-                _write_background_tables(db, uid, platform, [
-                    {"account_id": r["account_id"],
-                     "cells": {"I": hd._fb_owner_transition(r.get("from", ""), r["to"])}}
-                    for r in applied])
+                # FB 没有通道列可清；改为把换绑记录定向写进「接户运营」列。
+                # 列字母按**该账户那张表**的 col_map 取（表头映射后不在固定 I 列）；
+                # 每行的串不同，所以不能用 _fb_acceptor_cells（它写同一个串）。
+                rows = []
+                for r in applied:
+                    cm = col_map_by_account.get(r["account_id"])
+                    col = (cm or {}).get("acceptor")
+                    if col is None:
+                        continue                   # 未采集 ⇒ 一个字不碰
+                    rows.append({"account_id": r["account_id"],
+                                 "cells": {col: hd._fb_owner_transition(
+                                     r.get("from", ""), r["to"])}})
+                if rows:
+                    _write_background_tables(db, uid, platform, rows, col_map_by_account)
 
         # TT 备注首次对齐的两个写回（2026-10-06 规格）。与 applied_owner_rows 同法：
         # 先从 result 摘掉，再发起后台写回。三期起，备注列经 `huguan_dashboard` target
@@ -486,7 +493,7 @@ def dashboard_push():
                          else [t for t in tables if t["name"] == target_type])
         # collect / 快照 / 写表三者必须用**同一份**每表 col_map：tt 表头顺序不同时，
         # 固定列字母会把 cells 产出到错列、定位也会落错列 ⇒ 快照记的行集合与真正被写的
-        # 行集合对不上（静默串列 + 整批落空）。gg/fb 走合成 map、零额外读，行为逐字节不变。
+        # 行集合对不上（静默串列 + 整批落空）。只有 gg 走合成 map、零额外读；tt 与 fb 都读一次表头行。
         col_maps_by_sheet = {
             t["sheet_name"]: hd.resolve_table_col_map(
                 service, c["spreadsheet_id"], t["sheet_name"], platform,
@@ -533,7 +540,7 @@ def dashboard_push():
         # 写表按它找行，快照也按它找行，两边不一致时快照记的行集合与真正被写的行就对不上。
         # 写入器的默认值是 "C"（GG/TT 的账户ID列），但 **FB 的账户ID在 D 列**
         # （C 是「账户名称」）⇒ 不显式传就按错误的列定位、写空。tt 表头顺序不同时账户ID
-        # 也不在 C 列 ⇒ 逐表取该表 col_map 的定位键（gg/fb 合成 map ⇒ 仍是 C / D）。
+        # 也不在 C 列 ⇒ 逐表取该表 col_map 的定位键（只有 gg 走合成 map ⇒ 仍是 C；tt 与 fb 按表头解析）。
         for sheet_name, sheet_rows in groups:
             res = gs.update_rows_by_account_id(
                 service, c["spreadsheet_id"], sheet_name, sheet_rows,
@@ -811,9 +818,9 @@ def _write_background_tables(db, uid: int, platform: str, rows,
       - 其余（TT 备注列 …）→ `huguan_dashboard`（整行重建）
 
     `col_map_by_account`（可选）是 `{account_id: 该账户所在表的 col_map}`：给了就按该表
-    col_map 取**映射后**的通道/归属列来分桶（tt 表头顺序不同时角色列不在固定字母上 ——
+    col_map 取**映射后**的通道/归属列来分桶（tt / fb 表头顺序不同时角色列不在固定字母上 ——
     固定字母会把映射列归属行当「其余」→ 整行重建）；没给（None）⇒ 既有固定字母路径，
-    逐字节不变（gg/fb 与直接调本函数的既有用例都走这条）。
+    逐字节不变（只有 gg 与直接调本函数的既有用例走这条）。
 
     划分**按身份**逐行归桶，不得用 `r not in channel_rows` 这类写法 ——
     dict 的 `in` / `==` 是**按值比较**，两行内容相同会被一起划进/划出。
@@ -838,7 +845,7 @@ def _write_background_tables(db, uid: int, platform: str, rows,
             channel_col = hd.owner_role_col(platform, "channel", cm)
             owner_col = hd.owner_role_col(platform, "owner", cm)
         else:
-            # gg/fb（或调用方未提供映射）：既有固定字母路径，逐字节不变。
+            # gg（或调用方未提供映射）：既有固定字母路径，逐字节不变。
             channel_col = hd.OWNER_CHANNEL_COL.get(platform)
             owner_col = hd.OWNER_COL.get(platform)
         if channel_col and channel_col in cells:

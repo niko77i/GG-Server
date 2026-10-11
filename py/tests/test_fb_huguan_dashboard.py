@@ -571,7 +571,7 @@ class TestFbAcceptor:
 
     def test_acceptor_cells_only_contains_column_i(self):
         rows = [{"account_id": "A1"}, {"account_id": "A2"}]
-        cells = hd._fb_acceptor_cells(rows, "张三转李四")
+        cells = hd._fb_acceptor_cells(rows, "张三转李四", "I")
         assert cells == [{"account_id": "A1", "cells": {"I": "张三转李四"}},
                          {"account_id": "A2", "cells": {"I": "张三转李四"}}]
 
@@ -588,6 +588,18 @@ class TestFbAcceptor:
         parsed = hd.parse_row(values, "fb")
         assert parsed["acceptor"] == "张三转李四"
         assert "_owner_channel" not in parsed
+
+
+class TestFbAcceptorColumnFollowsHeader:
+    """「接户运营」列挪位后，写表器必须写到**挪过去的那一列**（设计 §4.5）。"""
+
+    def test_fb_acceptor_cells_takes_explicit_column(self):
+        rows = hd._fb_acceptor_cells([{"account_id": "7"}], "张三转李四", "X")
+        assert rows == [{"account_id": "7", "cells": {"X": "张三转李四"}}]
+
+    def test_fb_acceptor_cells_requires_column(self):
+        with pytest.raises(TypeError):
+            hd._fb_acceptor_cells([{"account_id": "7"}], "张三转李四")
 
 
 class TestFbAcceptorReadback:
@@ -705,9 +717,9 @@ class TestFbAcceptorWritebackKeyCol:
     """
 
     def test_fb_acceptor_writeback_passes_key_col_D(self, client, monkeypatch):
-        """走到真实 `writeback_fb_acceptor`（不桩它），只桩 Sheets I/O 与后台线程。
+        """走到真实 `writeback_fb_acceptor`（不桩它），只桩 Sheets I/O、表头读与后台线程。
 
-        判别力：去掉函数里的 `key_col=KEY_COL[platform]`，本用例立刻变红（实得 "C"）。
+        判别力：把写表器传的 `key_col` 换成默认 "C"，本用例立刻变红（实得 "C"）。
         """
         from huguan_dashboard import KEY_COL
         assert KEY_COL["fb"] == "D", "前提：FB 的资产UID在 D 列；列规格变了本用例要重写"
@@ -732,6 +744,11 @@ class TestFbAcceptorWritebackKeyCol:
         monkeypatch.setattr(gs, "build_service", lambda path: object())
         # 回写经 main._sync_sheets_background 起后台线程；换成同步执行，断言不抢时间。
         monkeypatch.setattr(m, "_sync_sheets_background", lambda fn, on_fail: fn())
+        # fb 写表前要读表头解析 col_map（Task 6）：回标准 FB 表头 ⇒ 资产UID 在 D、
+        # 「接户运营」在 I，与下面两条断言（key_col="D" / 写 I 列）一致。
+        monkeypatch.setattr(hd, "read_sheet_values",
+                            lambda svc, sid, name, rng: [[c[1] for c in hd.COLUMN_SPEC["fb"]]]
+                            if rng == "A1:ZZ1" else [])
 
         hd.writeback_fb_acceptor(uid, "fb", "A1", "张三转李四")
 

@@ -20,17 +20,20 @@ import sheet_write
 # —— 不带就整批被跳过，什么也写不进去（且失败会表现为「户类型查不到工作表」）。
 _TT_TYPE = hd.TT_DEFAULT_ACCOUNT_TYPE
 
-# 标准「加白户」表头（由 COLUMN_SPEC["tt"] 的列头推出，与固定列逐列等价）。
+# 标准表头（由 COLUMN_SPEC 的列头推出，与固定列逐列等价）。写表前解析 col_map 时按平台
+# 回对应的那张 —— Task 5 起 fb 也读表头，回 tt 表头会认不出「资产UID」。
 _TT_STD_HEADER = [c[1] for c in hd.COLUMN_SPEC["tt"]]
+_FB_STD_HEADER = [c[1] for c in hd.COLUMN_SPEC["fb"]]
 
 
-def _stub_header_read(monkeypatch):
+def _stub_header_read(monkeypatch, platform="tt"):
     """桩掉写表前的「表头行读取」（`A1:ZZ1`，Task 6 写表前解析 col_map 用）。
 
-    回标准加白户表头 ⇒ 解析出的 col_map 与固定列规格等价，各用例按列字母的断言不变。
+    `platform` 决定回哪张标准表头（tt / fb），默认 tt ⇒ 既有调用点行为不变。
     """
+    header = _FB_STD_HEADER if platform == "fb" else _TT_STD_HEADER
     monkeypatch.setattr(hd, "read_sheet_values",
-                        lambda svc, sid, name, rng: [list(_TT_STD_HEADER)]
+                        lambda svc, sid, name, rng: [list(header)]
                         if rng == "A1:ZZ1" else [])
 
 
@@ -259,6 +262,7 @@ def test_write_background_routes_fb_acceptor_column_to_its_target(client, monkey
     import routes.huguan_dashboard_routes as hr
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
+    _stub_header_read(monkeypatch, "fb")     # fb 写表前要读表头解析 col_map（Task 6）
 
     h, uid = _tt_huguan(client, "_hg_p5fb")
     db = database.get_db()
@@ -357,6 +361,7 @@ def test_writeback_fb_acceptor_registers(client, monkeypatch):
     import huguan_dashboard as hd
     monkeypatch.setattr(gs, "build_service", lambda _p: object())
     monkeypatch.setattr(gs, "update_rows_by_account_id", lambda *a, **k: None)
+    _stub_header_read(monkeypatch, "fb")     # fb 写表前要读表头解析 col_map（Task 6）
 
     h, uid = _tt_huguan(client, "_hg_p4")
     db = database.get_db()
@@ -470,6 +475,20 @@ def test_fb_resolve_table_col_map_reads_header(monkeypatch):
     cm = hd.resolve_table_col_map(object(), "SS", "账户管理分配", "fb")
     assert cm["account_id"] == "A", f"应按表头定为 A 列，实际={cm}"
     assert reads == [("SS", "账户管理分配", "A1:ZZ1")], f"表头读取必须恰为 A1:ZZ1 一次：{reads}"
+
+
+class TestFbOwnerColumnFollowsHeader:
+    """「在用运营」列挪位后，归属回写仍落到正确的列。"""
+
+    def test_owner_role_col_resolves_from_col_map_for_fb(self):
+        cm = {f: c for f, c in hd.spec_column_map("fb").items()}
+        cm["owner_name"] = "Z"                     # 模拟表头变了 ⇒ 运营列在 Z
+        assert hd.owner_role_col("fb", "owner", cm) == "Z"
+
+    def test_owner_role_col_returns_none_when_column_not_collected(self):
+        cm = {f: c for f, c in hd.spec_column_map("fb").items()}
+        del cm["owner_name"]
+        assert hd.owner_role_col("fb", "owner", cm) is None   # 一个字不碰
 
 
 def test_resolve_table_col_map_raises_when_key_column_missing(monkeypatch):

@@ -2672,7 +2672,10 @@ class TestSyncWritebackKeyColumn:
         monkeypatch.setattr(gs, "read_sheet_values",
                             lambda *a, **k: [[c[1] for c in hd.COLUMN_SPEC["fb"]], row])
         captured = []
-        _stub_sheets(monkeypatch, captured)
+        # 写路径的表头读（`hd.read_sheet_values`）也必须回 **FB 表头**：Task 6 起
+        # `huguan_fb_acceptor_sync` 也按表头解析 col_map，默认的 tt 表头认不出「资产UID」
+        # ⇒ 归属/接户运营两次写入都 ValueError、captured 恒空。断言一字未动。
+        _stub_sheets(monkeypatch, captured, header=_FB_STD_HEADER)
 
         resp = client.post("/api/huguan/dashboard/sync", headers=hg,
                            json={"platform": "fb", "dry_run": False,
