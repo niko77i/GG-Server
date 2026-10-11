@@ -44,12 +44,6 @@ def _resolve_account_table(db, user_id, platform, account_id):
     return None
 
 
-def _resolve_sheet_name(db, user_id, platform, account_id):
-    """按账户的**户类型**解析它该写哪张 worksheet 的名字（见 `_resolve_account_table`）。"""
-    t = _resolve_account_table(db, user_id, platform, account_id)
-    return t["sheet_name"] if t else None
-
-
 # ---------- target: huguan_dashboard（整行刷新；覆盖点位 #1 与 #5 的 :159/:171/:180） ----------
 
 def huguan_dashboard_sync(user_id, platform, account_ids):

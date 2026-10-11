@@ -895,7 +895,8 @@ const props = defineProps({
 const HD_PLATFORM = props.platform
 
 
-// tt 用 tables（多张账户表，每条 = 户类型名 + worksheet）；gg/fb 仍用 sheet_name 单表。
+// tt 用 tables（多张账户表，每条 = 户类型名 + worksheet）；fb 也用 tables（后端把扁平配置
+// 摊成一条、无户类型名，界面从 tables[0] 渲染）；只有 gg 仍用顶层 sheet_name 单表。
 // 两个字段同时保留：切平台时不会因为残留值串味，保存时按平台只发对应的那个。
 const hdForm = ref({ spreadsheet_id: '', sheet_name: '', tables: [] })
 const hdSheets = ref([])
@@ -1387,7 +1388,12 @@ const syncTitle = computed(() => {
     return syncDlg.mode === 'B' ? `${syncDlg.sheet} · 同步结果` : `${syncDlg.sheet} · 差异报告`
   }
   if (syncDlg.mode === 'B') return '从表同步到系统 · 同步结果'
-  const name = hdForm.value.sheet_name || ''
+  // 工作表名的来源按平台取：gg 是顶层 sheet_name（单表）；tt / fb 的表名编辑的是
+  // `tables[0].sheet_name`，顶层那个只在加载配置时写入一次 ⇒ 读顶层会把「改了名、
+  // 没保存」的旧名显示出来（后端加载时给 tt 回填的顶层值 = tables[0]，故 tt 不变）。
+  const name = HD_PLATFORM === 'gg'
+    ? (hdForm.value.sheet_name || '')
+    : (((hdForm.value.tables || [])[0] || {}).sheet_name || '')
   // 工作表名太长会撑爆标题：省略，完整名交给 el-dialog 的原生 title tooltip
   return name.length > 20 ? '从表同步到系统' : `从表同步到系统 · 工作表「${name}」`
 })

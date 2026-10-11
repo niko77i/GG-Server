@@ -295,7 +295,7 @@ def describe_header_columns(headers: list, overrides: dict,
 
     **不重新解析**：主结果全部从 resolve_column_map 的三个产出（col_map / unmatched / overrides）
     反推，避免第二套「认列」逻辑（那是本批最容易漂的地方）；alias_field 另调一次同一个
-    `resolve_column_map(headers, {})`（＝「无覆盖」的解析），判据与主解析逐行同款
+    `resolve_column_map(headers, {}, platform)`（＝「无覆盖」的解析），判据与主解析逐行同款
     （缺席 ⟺ 未识别 → None；在场且非空 ⟺ 别名档；在场且空 ⟺ 哨兵档）。
     空表头列不列出 —— 与 resolve_column_map 的跳过口径一致。
     """
@@ -1186,7 +1186,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
             continue
         if aid in seen_rows:
             warnings.append({"row": p.get("row"), "sheet": _sheet_of(p),
-                             "message": f"账户ID「{aid}」已在第 {seen_rows[aid]} 行出现，本行跳过"})
+                             "message": f"{KEY_COL_LABEL[platform]}「{aid}」已在第 {seen_rows[aid]} 行出现，本行跳过"})
             continue
         seen_rows[aid] = p.get("row")
         deduped.append(p)
@@ -1213,7 +1213,7 @@ def build_diff(db, parsed_rows: list, platform: str) -> dict:
         aid = p.get("account_id", "")
         if not aid:
             warnings.append({"row": row_no, "sheet": _sheet_of(p),
-                             "message": "账户ID为空，跳过"})
+                             "message": f"{KEY_COL_LABEL[platform]}为空，跳过"})
             continue
 
         want_owner_name = effective_owner_name(p, platform)
