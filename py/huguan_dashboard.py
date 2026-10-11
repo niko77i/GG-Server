@@ -382,13 +382,13 @@ def field_spec(platform: str) -> dict:
 
 # 合法的**可手工覆盖字段**集合，供 POST 层校验 `tables[].columns`（设计 §4.2）。
 # 必须与 `resolve_column_map` 认定的可覆盖目标**同一口径** —— 后者用
-# `{f for f, ... in TT_FIELD_CATALOG if f}`（剔掉空串哨兵）。若这里直接
-# `{f for f, *_ in TT_FIELD_CATALOG}`，就会把「认识但刻意不采集」的空串哨兵
-# （中文名「位置」）**当成一个字段**混进来：用户把某列覆盖成这个字段会被放行，
-# 而 `resolve_column_map` 里根本没有这个字段可认 —— 两边对「什么是字段」打架。
-# 故取 `field_spec("tt")` 这个**终裁字段集**（哨兵已在函数内部排除）。
+# `{f for f, ... in FIELD_CATALOG[platform] if f}`（剔掉空串哨兵）。若直接取整个目录，
+# 就会把「认识但刻意不采集」的空串哨兵（tt 的中文名「位置」）**当成一个字段**混进来：
+# 用户把某列覆盖成这个字段会被放行，而 `resolve_column_map` 里根本没有这个字段可认
+# —— 两边对「什么是字段」打架。故取 `field_spec(platform)` 这个**终裁字段集**。
 # 至于覆盖**值**取空串（= 刻意不采集），那是另一回事，合法且两层一致，不经本集合。
-_TT_CATALOG_FIELDS = set(field_spec("tt"))
+def _catalog_fields(platform: str) -> set:
+    return set(field_spec(platform))
 
 
 def spec_column_map(platform: str) -> dict:
@@ -397,18 +397,18 @@ def spec_column_map(platform: str) -> dict:
     return {field: col for col, _h, field, _w, _r in COLUMN_SPEC[platform] if field}
 
 
-def tt_field_catalog() -> list:
-    """TT 字段目录（供前端「列映射」下拉）：只含**真正的字段**，排除空串哨兵。
+def field_catalog(platform: str) -> list:
+    """字段目录（供前端「列映射」下拉）：只含**真正的字段**，排除空串哨兵。
 
-    与 POST 校验**同源**（都出自 TT_FIELD_CATALOG / field_spec("tt")）—— 否则会出现
+    与 POST 校验**同源**（都出自 `FIELD_CATALOG` / `field_spec(platform)`）—— 否则会出现
     「下拉里能选、保存时被 400 拒」这种漂移。`key_col` 给前端把定位键标成必选；
-    `direction == "r"` 的标「只读回」。
+    `direction == "r"` 的标「只读回」、`"w"` 的标「只写」（fb 的「操作人」）。
     """
-    spec = field_spec("tt")
+    spec = field_spec(platform)
     return [{"key": f, "label": label, "direction": d,
              "writable": spec[f]["writable"], "readable": spec[f]["readable"],
              "key_col": spec[f]["key"]}
-            for f, label, _aliases, d, _key, _skip in TT_FIELD_CATALOG if f]
+            for f, label, _aliases, d, _key, _skip in FIELD_CATALOG[platform] if f]
 
 
 def key_col_of_col_map(col_map: dict, platform: str) -> str:

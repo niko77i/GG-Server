@@ -910,7 +910,7 @@ const ownerTblRef = ref(null)
 // （routes/huguan_dashboard_routes.py 的 seen_sheets），所以它比下标稳：
 // 删掉中间一行不会让状态整体错位。
 // ---------------------------------------------------------------------------
-const hdFieldCatalog = ref([])      // GET 配置的 config.tt.tt_field_catalog（下拉数据源）
+const hdFieldCatalog = ref([])      // GET 配置的 config.tt.tt_field_catalog / config.fb.fb_field_catalog（下拉数据源）
 const hdHeaderRows = ref({})        // { [sheet]: [{header, via, auto, selected, touched}] }
 const hdHeaderLoading = ref({})     // { [sheet]: true }
 const hdHeaderError = ref({})       // { [sheet]: 就地错误文案 }

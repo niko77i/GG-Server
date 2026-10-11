@@ -758,7 +758,7 @@ class TestDashboardConfig:
         # 落在路由层合并（spec §4.7）。归属归一化本身的意图不变，只是形状多一项。
         # 又于 2026-10-10（列映射第二批）恒带字段目录（列映射 UI 下拉数据源），同属形状多一项。
         assert got["tt"] == {"spreadsheet_id": "", "sheet_name": "", "tables": [],
-                             "tt_field_catalog": hd.tt_field_catalog()}
+                             "tt_field_catalog": hd.field_catalog("tt")}
 
 
 # ---------- Task 6: 差异比对 ----------
@@ -5523,14 +5523,14 @@ class TestDescribeHeaderColumns:
 class TestFieldCatalogExposure:
     def test_catalog_excludes_the_ignore_sentinel(self):
         """目录是前端下拉的数据源：只含真字段，绝不含空串哨兵（否则前端能选、后端必拒）。"""
-        cat = hd.tt_field_catalog()
+        cat = hd.field_catalog("tt")
         keys = [c["key"] for c in cat]
         assert "" not in keys, "空串哨兵不该出现在目录里"
         assert "advertiser_id" in keys and "subject_name" in keys and "landing_url" in keys
         assert set(keys) == set(hd.field_spec("tt")), "必须与 POST 校验同源"
 
     def test_catalog_marks_the_key_column_and_directions(self):
-        by_key = {c["key"]: c for c in hd.tt_field_catalog()}
+        by_key = {c["key"]: c for c in hd.field_catalog("tt")}
         assert by_key["advertiser_id"]["key_col"] is True
         assert by_key["owner_change_note"]["direction"] == "r"      # 只读回
         assert by_key["landing_url"]["writable"] is True
@@ -5543,6 +5543,33 @@ class TestFieldCatalogExposure:
         assert conf["tt"]["tt_field_catalog"], "tt 目录不该为空"
         for p in ("gg", "fb"):
             assert "tt_field_catalog" not in conf[p], f"{p} 的载荷形状不该变"
+
+    # ---- 2026-10-11 FB 表头映射 Task 3：目录暴露按平台（设计 §4.7）----
+
+    def test_fb_catalog_has_17_real_fields(self):
+        cat = hd.field_catalog("fb")
+        assert len(cat) == 17
+        by_key = {c["key"]: c for c in cat}
+        assert by_key["operator"]["direction"] == "w"
+        assert by_key["operator"]["writable"] is True
+        assert by_key["operator"]["readable"] is False
+        assert by_key["acceptor"]["direction"] == "r"
+        assert by_key["account_id"]["key_col"] is True
+        assert by_key["remark"]["label"] == "产品信息"
+        assert by_key["channel_name"]["label"] == "所属渠道"
+
+    def test_tt_catalog_unchanged(self):
+        """TT 的目录（含哨兵剔除）逐项不变。"""
+        cat = hd.field_catalog("tt")
+        keys = [c["key"] for c in cat]
+        assert "位置" not in keys and "" not in keys
+        assert {c["key"]: c["label"] for c in cat}["advertiser_id"] == "账户ID"
+
+    def test_catalog_fields_are_the_post_whitelist(self):
+        """白名单与目录同源：能选的必能存。"""
+        for p in ("tt", "fb"):
+            assert hd._catalog_fields(p) == {c["key"] for c in hd.field_catalog(p)}
+        assert "" not in hd._catalog_fields("tt")
 
 
 # ---------- Task 3: 表级 col_map 的读写 ----------

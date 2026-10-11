@@ -72,7 +72,7 @@ def dashboard_config_get():
                 tables = hd.get_platform_tables(db, uid, "tt")
                 entry["tables"] = tables
                 # 列映射 UI 的下拉数据源（设计 §3.2）。只加在 tt 分支：gg/fb 载荷形状不变。
-                entry["tt_field_catalog"] = hd.tt_field_catalog()
+                entry["tt_field_catalog"] = hd.field_catalog(p)
                 if tables and tables[0]["sheet_name"]:
                     entry["sheet_name"] = tables[0]["sheet_name"]
             conf[p] = entry
@@ -139,7 +139,7 @@ def dashboard_config_save():
                         continue
                     # 非字符串字段key 一律按未知处理（否则下面 `not in set` 对 list/dict
                     # 等不可哈希值会抛 TypeError → 500；本层契约是畸形输入 400 而非 500）。
-                    if not isinstance(field, str) or field not in hd._TT_CATALOG_FIELDS:
+                    if not isinstance(field, str) or field not in hd._catalog_fields(platform):
                         return err(f"列「{header}」指向了未知字段「{field}」", 400)
                     if field in seen_fields:
                         return err(f"字段「{field}」被两列同时指定", 400)
