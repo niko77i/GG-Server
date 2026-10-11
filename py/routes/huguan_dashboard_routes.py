@@ -807,7 +807,7 @@ def _write_background_tables(db, uid: int, platform: str, rows,
     四向分派（按 cells 的键身份，勿并成一组）：
       - 归属变更通道列（`OWNER_CHANNEL_COL`，GG=H / TT=L）→ `huguan_owner_channel`
         （该列被 `cells_for_row` 刻意排除，整行重建碰不到它）
-      - FB 的接户运营列（I）→ `huguan_fb_acceptor`
+      - FB 的接户运营列（该表 col_map 的 `acceptor` 列，通常是 I）→ `huguan_fb_acceptor`
         （fb 规格里该列 `writable=False`，同样被整行重建排除 —— 计划书曾误称
          该分支由整行重建覆盖，实为静默丢弃，T3 审查时回归修复）
       - 归属/运营列（`OWNER_COL`，gg/tt=G、fb=J）→ **也走 `huguan_owner_channel`**
@@ -818,8 +818,8 @@ def _write_background_tables(db, uid: int, platform: str, rows,
       - 其余（TT 备注列 …）→ `huguan_dashboard`（整行重建）
 
     `col_map_by_account`（可选）是 `{account_id: 该账户所在表的 col_map}`：给了就按该表
-    col_map 取**映射后**的通道/归属列来分桶（tt / fb 表头顺序不同时角色列不在固定字母上 ——
-    固定字母会把映射列归属行当「其余」→ 整行重建）；没给（None）⇒ 既有固定字母路径，
+    col_map 取**映射后**的通道/归属/接户运营列来分桶（tt / fb 表头顺序不同时角色列不在固定
+    字母上 —— 固定字母会把映射列归属行当「其余」→ 整行重建）；没给（None）⇒ 既有固定字母路径，
     逐字节不变（只有 gg 与直接调本函数的既有用例走这条）。
 
     划分**按身份**逐行归桶，不得用 `r not in channel_rows` 这类写法 ——
@@ -844,13 +844,18 @@ def _write_background_tables(db, uid: int, platform: str, rows,
             # 该表没有这一列（未采集）⇒ 返回 None ⇒ 这一行不落进该桶。
             channel_col = hd.owner_role_col(platform, "channel", cm)
             owner_col = hd.owner_role_col(platform, "owner", cm)
+            # 「接户运营」列同样按**角色**认（仅 fb 有此列）：表头映射后它不在固定 I 列，
+            # 认字面 "I" 会让换绑记录落进「其余」→ 整行重建（不含该列）⇒ 静默丢记录。
+            acceptor_col = cm.get("acceptor") if platform == "fb" else None
         else:
             # gg（或调用方未提供映射）：既有固定字母路径，逐字节不变。
             channel_col = hd.OWNER_CHANNEL_COL.get(platform)
             owner_col = hd.OWNER_COL.get(platform)
+            # fb 无映射表时沿用既有固定列；gg/tt 根本没有这条支路（恒 None）。
+            acceptor_col = "I" if platform == "fb" else None
         if channel_col and channel_col in cells:
             channel_rows.append((r, channel_col))
-        elif platform == "fb" and "I" in cells:
+        elif acceptor_col and acceptor_col in cells:
             acceptor_rows.append(r)
         elif owner_col and owner_col in cells:
             owner_rows.append((r, owner_col))

@@ -2715,6 +2715,83 @@ class TestSyncWritebackKeyColumn:
         assert all(c["key_col"] == "C" for c in captured), [c["key_col"] for c in captured]
 
 
+class TestFbAcceptorColumnRouting:
+    """FB 换绑记录的分桶按**角色**认「接户运营」列，不认字面 "I"（Task 6）。
+
+    表头映射后该列可能不在 I。若分桶判据仍写死 `"I" in cells`，换绑记录会被当成
+    「其余」→ 走 `huguan_dashboard` 整行重建（`cells_for_row` 不含该列）⇒ **静默丢记录**。
+    本族走真实入口 `/sync` 的归属变更回写路径。
+    """
+
+    def _fb_moved_header(self):
+        """FB 标准表头，但把「接户运营」(I) 与最后那列「产品信息」(Q) 对调。
+
+        「在用运营」(J) 不动 ⇒ 归属回写那一路与往常一致，只有接户运营列被挪。
+        """
+        header = [c[1] for c in hd.COLUMN_SPEC["fb"]]
+        i, j = 8, 16
+        assert header[i] == "接户运营" and header[j] == "产品信息", header
+        header[i], header[j] = header[j], header[i]
+        return header
+
+    def _fb_sync(self, client, monkeypatch, header, account_id, owner_name):
+        """配好一个 FB 看板 + 一条账户 + 表头/行，触发一次归属变更同步。"""
+        hg, uid = _create_user(client, f"_fb_acc_{account_id}", role="huguan", platform="fb")
+        db = database.get_db()
+        _seed(db, f"_fb_acc_t_{account_id}", owner_name, platform="fb")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}",
+                    json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        # acceptor 留空：归属变更落库时 apply_diff 会把它写成「旧转新」串（重建走它取写表值）。
+        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', ?, ?)",
+                   (account_id, uid))
+        db.commit()
+        db.close()
+
+        import google_sheets_service as gs
+        row = [""] * len(header)
+        row[header.index("资产UID")] = account_id
+        row[header.index("在用运营")] = owner_name     # 触发归属变更
+        monkeypatch.setattr(gs, "read_sheet_values", lambda *a, **k: [header, row])
+        captured = []
+        _stub_sheets(monkeypatch, captured, header=header)   # 写路径的表头读也回这张
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "fb", "dry_run": False,
+                                 "confirmed": {"owner": [account_id]}})
+        assert resp.status_code == 200, resp.get_json()
+        return captured
+
+    def test_moved_acceptor_column_still_gets_transition(self, client, monkeypatch):
+        """「接户运营」被挪到 Q ⇒ 换绑记录必须写进 Q，不得被丢。"""
+        header = self._fb_moved_header()
+        acc_col = chr(ord("A") + header.index("接户运营"))     # "Q"
+        assert acc_col != "I"
+
+        captured = self._fb_sync(client, monkeypatch, header, "MV-1", "甲丁")
+
+        assert captured, "对照：写入器必须被调用过，否则下面断言无判别力"
+        hit = [x for c in captured for x in c["rows"] if acc_col in (x.get("cells") or {})]
+        assert hit, f"换绑记录必须写进挪过去的「接户运营」列 {acc_col}（写死 I 会让它被丢）：{captured}"
+        # 值是 apply_diff 落库的「旧转新」整串（旧主名 = 该户管用户名）
+        assert "转" in hit[0]["cells"][acc_col] and "甲丁" in hit[0]["cells"][acc_col], hit[0]
+        # 反向钉死：绝不能还往原来的 I 列写（那一列已被「产品信息」占用）
+        assert not any("I" in (x.get("cells") or {})
+                       for c in captured for x in c["rows"]), f"不得再写 I 列：{captured}"
+
+    def test_missing_acceptor_column_writes_nothing(self, client, monkeypatch):
+        """反例：该表没有「接户运营」列（未采集）⇒ 换绑记录一个字不碰。"""
+        header = [c[1] for c in hd.COLUMN_SPEC["fb"]]
+        header.remove("接户运营")
+
+        captured = self._fb_sync(client, monkeypatch, header, "NO-1", "甲丁")
+
+        # 归属列（在用运营）照常回写；但没有任何一格是「转」的换绑记录
+        values = [v for c in captured for x in c["rows"]
+                  for v in (x.get("cells") or {}).values()]
+        assert not any("转" in str(v) for v in values), f"无接户运营列时不得写换绑记录：{captured}"
+
+
 class TestWritebackRowsKeyColumn:
     """修复轮 4 · 同族最后一处：`push_rows` 的回写也要按平台的定位列。
 
