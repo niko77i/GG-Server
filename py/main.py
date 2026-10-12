@@ -6263,6 +6263,59 @@ def mcc_options():
     return jsonify({"success": True, "options": [dict(r) for r in rows]})
 
 
+# MCC 等级留空时落到这个 id（用户 2026-10-12 裁定：空就默认为 1，id=1 不存在就补建）
+_DEFAULT_MCC_LEVEL_ID = 1
+# 补建 id=1 时依次尝试的名字（本人可能已有一个同名等级，撞 UNIQUE(name, owner_id) 就换下一个）
+_DEFAULT_MCC_LEVEL_NAMES = ("一级", "默认等级")
+
+
+def _resolve_mcc_level_id(db, raw, owner_id):
+    """把前端传来的 level_id 归一成一个**必定存在**的等级 id（否则返回 None）。
+
+    起因（2026-10-12）：`MccModal.vue` 的 `form.level_id` 初值是**空字符串**（不是 null），
+    未选等级就原样提交；而 `mcc.level_id` 是 `INTEGER REFERENCES mcc_levels(id)`
+    （`database.py:348` 迁移列），连接又开着 `PRAGMA foreign_keys=ON`，空串插进去直接
+    `FOREIGN KEY constraint failed`。该异常被 `mcc_create` 的
+    `except _sqlite3.IntegrityError` 统一误报成「MCC ID 'xxx' 已存在」409，
+    把排查方向彻底带偏（用户实测时以为是权限被拒）。
+
+    且这与角色无关：全新库 `mcc_levels` 一行都没有，等级下拉对 admin / developer / user
+    全是空的 —— 谁点「新增 MCC」谁 409。补建 id=1 正是为了让这个下拉第一次就有内容。
+
+    口径：空 / 非数字 / 悬空 id 一律落 id=1。**指向真实存在的等级时原样保留**，
+    不许无脑改成 1（`py/tests/test_mcc_level_default.py::test_valid_level_id_is_kept` 钉住）。
+    """
+    # 1) 传了值且指向真实存在的等级 —— 原样用（含 "43" 这种字符串形式的数字）
+    if raw not in (None, ""):
+        try:
+            candidate = int(raw)
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate is not None:
+            if db.execute("SELECT 1 FROM mcc_levels WHERE id=?", (candidate,)).fetchone():
+                return candidate
+    # 2) 空缺 / 非法 / 悬空 —— 落 id=1（已存在就直接用，天然幂等）
+    if db.execute("SELECT 1 FROM mcc_levels WHERE id=?", (_DEFAULT_MCC_LEVEL_ID,)).fetchone():
+        return _DEFAULT_MCC_LEVEL_ID
+    # 3) 补建 id=1。名字被本人占了就换后备名：
+    #    `INSERT OR IGNORE` 在这里**不管用** —— 它只吞 UNIQUE 冲突、且是「忽略插入」，
+    #    而我们要的是「换个名字插成功」。且 ON CONFLICT 算法不适用于 FOREIGN KEY。
+    for candidate_name in _DEFAULT_MCC_LEVEL_NAMES + (f"默认等级-{owner_id}",):
+        try:
+            db.execute("INSERT INTO mcc_levels(id, name, owner_id) VALUES(?,?,?)",
+                       (_DEFAULT_MCC_LEVEL_ID, candidate_name, owner_id))
+            db.commit()
+            return _DEFAULT_MCC_LEVEL_ID
+        except _sqlite3.IntegrityError:
+            continue
+    # 4) 连后备名都被占（极端）—— 退回本人已有的任一等级，好歹别把 FK 错误抛出去。
+    #    真的一个都没有就返回 None，让调用方写 NULL（level_id 可空），仍不是 409。
+    row = db.execute(
+        "SELECT id FROM mcc_levels WHERE owner_id=? ORDER BY id LIMIT 1", (owner_id,)
+    ).fetchone()
+    return row["id"] if row else None
+
+
 @app.route("/api/mcc/create", methods=["POST"])
 @jwt_required()
 def mcc_create():
@@ -6325,10 +6378,10 @@ def mcc_create():
             return jsonify({"success": False, "error": "无权限关联到该上级 MCC"}), 403
 
 
-    # --- level_id 兼容处理 ---
+    # --- level_id 归一 ---
+    # 老接口可能只传文本 `level`（无 level_id）：按其名字找/建等级；其余一律走归一。
     level = (data.get("level") or "").strip()
-    level_id = data.get("level_id")
-    if level_id is None and level:
+    if not data.get("level_id") and level:
         existing_lvl = db.execute(
             "SELECT id FROM mcc_levels WHERE name=? AND owner_id=?", (level, user_id)
         ).fetchone()
@@ -6337,6 +6390,8 @@ def mcc_create():
         else:
             db.execute("INSERT INTO mcc_levels(name, owner_id) VALUES(?,?)", (level, user_id))
             level_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    else:
+        level_id = _resolve_mcc_level_id(db, data.get("level_id"), user_id)
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
@@ -6352,9 +6407,13 @@ def mcc_create():
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.close()
         return jsonify({"success": True, "id": new_id})
-    except _sqlite3.IntegrityError:
+    except _sqlite3.IntegrityError as e:
         db.close()
-        return jsonify({"success": False, "error": f"MCC ID '{mcc_id}' 已存在"}), 409
+        # ⚠️ 别把所有完整性错误都说成「ID 已存在」（2026-10-12）：外键失败（等级悬空）
+        # 曾被这条文案盖住，用户看到 409 以为是权限/重名问题，实际是 level_id 的 FK。
+        if "mcc.mcc_id" in str(e):
+            return jsonify({"success": False, "error": f"MCC ID '{mcc_id}' 已存在"}), 409
+        return jsonify({"success": False, "error": f"保存失败：{e}"}), 400
 
 
 @app.route("/api/mcc/<int:mid>", methods=["PUT"])
@@ -6391,6 +6450,13 @@ def mcc_update(mid):
         if not _cross_user_actor(user_id) and not _mcc_visible(db, new_parent, user_id):
             db.close()
             return jsonify({"success": False, "error": "无权限关联到该上级 MCC"}), 403
+    if "level_id" in data:
+        # 编辑时清空等级 ⇒ 同样落 id=1。原实现把空串直接 UPDATE 进去，
+        # 抛的是 IntegrityError 而这里**没有 except** ⇒ 500（比 409 更难查）。
+        # 用 mcc_row["owner_id"]（而非当前用户）：developer/admin 可跨用户改 MCC，
+        # 补建出来的默认等级要挂在 MCC 归属人名下，不要污染操作者名下。
+        data = dict(data)
+        data["level_id"] = _resolve_mcc_level_id(db, data["level_id"], mcc_row["owner_id"])
     _mcc_fields = {"name": "name", "level_id": "level_id", "parent_mcc_id": "parent_mcc_id"}
     for key, col in _mcc_fields.items():
         if key in data:

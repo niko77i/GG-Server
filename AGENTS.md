@@ -706,6 +706,21 @@ platform='gg'` + `INSERT OR IGNORE ... VALUES(?,?,'gg')` 再重查，**去掉 ow
 `owner_id` 悬挂（跨库拷 app.db / 旧备份），此时补建 gg 行抛 FOREIGN KEY ——
 **`INSERT OR IGNORE` 不吞外键错**（ON CONFLICT 算法不适用于 FOREIGN KEY）。
 回归钉：`test_does_not_kill_get_db_when_owner_fk_dangles`（去掉 except 恰好 1 红）。
+
+⚠️ **`mcc.level_id` 也是这个坑的第三个落点（2026-10-12）。** `MccModal.vue` 的
+`form.level_id` 初值是**空字符串**（不是 null），未选等级就原样提交；该列是
+`INTEGER REFERENCES mcc_levels(id)`，连接又开着 `PRAGMA foreign_keys=ON` ⇒ 空串插进去
+`FOREIGN KEY constraint failed`，而 `mcc_create` 的 `except _sqlite3.IntegrityError`
+**把所有完整性错误统一报成「MCC ID 'xxx' 已存在」409** —— 用户看了以为是自己没权限。
+现口径：`main.py::_resolve_mcc_level_id()` 把空/非数字/悬空一律归一成 **id=1**，
+id=1 不存在就**补建**（用户 2026-10-12 裁定；名字撞 `UNIQUE(name, owner_id)` 时依次退
+`一级`→`默认等级`→`默认等级-{uid}`）；**指向真实存在的等级时原样保留**。
+`mcc_update` 同样接上（原实现无 except，空等级是 **500** 不是 409）。
+⚠️ **别把 except 再收窄成"一律 409"**，也**别把归一写成"一律改成 1"** ——
+`py/tests/test_mcc_level_default.py` 9 条里那两条对照腿就是钉这两件事的
+（变异实测：旧代码 7 红 2 绿，两条对照腿保持绿）。
+**同类前科**：GG 状态字典那处 409 也是 `INSERT` 撞 UNIQUE 被通用分支误报
+（见上文 `account_statuses` 一段）—— 本项目已两次栽在「IntegrityError 一律当成重名」上。
 ⚠️ **空状态（`status_id IS NULL`）的口径 = 「未知」**（2026-10-06 用户裁定）。
 GG 侧三处必须同一口径：表格渲染（前端 `row.status || '未知'`）、`accounts_list`
 的 `status_counts`（NULL 桶命名为「未知」，**不再 `COALESCE(...,'存活')`**）、
@@ -976,6 +991,8 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [上万户规模下的看板同步延迟与数据安全治理](docs/superpowers/specs/2026-10-07-sheet-sync-scale-design.md)（设计分三部分，**目前只落地第 ③ 部分「分页与列表」**：17 处列表端点加 `size` 服务端上限（越界钳制 500、非数字回落不报错）+ `page` 上界、GG/TT「已删除账户」列表补分页与服务端搜索（含稳定排序 tiebreaker）、FB 列表 BM 改批量查消除 N+1、既有 `IN (...)` 接入 `chunk(900)`。实现计划见 `docs/superpowers/plans/2026-10-07-sheet-sync-scale-pagination.md`；连带记有 3 处清单勘误与 4 条后续工单）
 - [FB 账户面板批量能力对齐](docs/superpowers/specs/2026-10-08-fb-account-panel-batch-actions-design.md)（批量查户 / 批量新增导入 / 批量删除 / 回收站四项；**不含**同步与批量充值）
 - [TT 户类型与多账户表](docs/superpowers/specs/2026-10-08-tt-account-types-design.md)
+- [普通用户放开账户区（广告账户 / MCC / 设置）](docs/superpowers/specs/2026-10-12-open-account-area-to-normal-users-design.md)（前端 `meta.admin` 摘除；判据从 1 条拆成 3 条 —— 能进页面 / 能改全局字典 / 能管别人的数据；后端本来就只做 owner 隔离；§3.4 记了一次同族自我纠错：五张字典里**只有 `regions`** 有硬闸，其余四张是 owner 隔离，不该一起藏）
+- [MCC 等级留空落到 id=1（修「建不了 MCC」）](docs/superpowers/specs/2026-10-12-mcc-level-default-design.md)（上条真机验收时用户报的 409：**与权限无关** —— 前端空串 `level_id` 撞 `PRAGMA foreign_keys=ON`，又被 `except IntegrityError` 误报成「MCC ID 已存在」；用户裁定空即补建 id=1）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
