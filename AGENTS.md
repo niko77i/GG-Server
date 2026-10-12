@@ -1086,6 +1086,58 @@ npm run dev
 # Vite dev server :5173，自动代理 /api 到 Flask :5001
 ```
 
+## 换机器 / 新服务机部署（2026-10-11 实测）
+
+> **`git clone` 之后起来的不是「能用的服务」，是一个空壳。** 代码之外有 4 样东西
+> **刻意不入库**（`.gitignore` 明确排除），必须从旧机器拷过来 —— 缺哪样坏哪块见下表。
+> 新会话接手时**先读这一节**。
+
+```bash
+# 1. 代码
+git clone <repo> && cd GG-Server
+
+# 2. 后端依赖（含 flask-jwt-extended；见 requirements.txt）
+pip install -r requirements.txt
+
+# 3. 前端：frontend/dist/ 不入库 ⇒ 必须自己构建，否则页面是旧的/空的
+cd frontend && npm install && npm run build && cd ..
+
+# 4. 【关键】从旧机器拷这 4 样（都不在 git 里）
+#      config/config.local.json                          ← 真实密钥层
+#      config/fit-boulevard-503111-u4-812bc02c2000.json  ← Google 服务账号
+#      temp/data/app.db                                  ← 整个数据库（约 6.6MB）
+#      ffmpeg.exe                                        ← 或系统里装一个（见下）
+
+# 5. 启动（必须在 py/ 目录内跑，sys.path 依赖目录结构）
+cd py && python main.py     # http://localhost:5001
+```
+
+| 不在 git 里 | 缺了会怎样 |
+|---|---|
+| `temp/data/app.db` | **整个数据库**空 ⇒ 没有用户 / 账户 / 看板配置 / 字典。服务能起，但是空壳：要自己注册账号并重建全部配置 |
+| `config/fit-boulevard-503111-u4-812bc02c2000.json` | **Google 服务账号**缺 ⇒ **户管看板的「读表头 / 导入 / 刷新回表」全部失败**（其余功能正常） |
+| `config/config.local.json` | 真实密钥层缺 ⇒ **登录会坏**。入库的 `config.json` 里 `secret_key` 实测是**空串**，而 `main.py` 那句 `.get("secret_key", 默认值)` **只在键不存在时**才给默认值（键存在且为空串 ⇒ 默认值不生效），JWT 就用空密钥签 |
+| `ffmpeg.exe`（约 232MB） | 视频 / 音频相关功能失败。**不是「必须拷这个文件」**：`main.py:_get_ffmpeg_path` 是先找**仓库根**的 `ffmpeg.exe`、找不到再退到系统 `PATH` 与 `C:\ffmpeg\bin\ffmpeg.exe` ⇒ 系统里装了 ffmpeg 也行 |
+
+**在 git 里、新机器装一遍就有的**：`requirements.txt`、`frontend/package.json`、
+`config/config.json`（只有结构与非敏感默认值）、`temp/data/music/`（BGM 库，**是入库的**）。
+
+**启动前自检**（一条命令看四样缺没缺）：
+
+```bash
+for f in config/config.local.json config/fit-boulevard-503111-u4-812bc02c2000.json temp/data/app.db ffmpeg.exe; do
+  [ -e "$f" ] && echo "OK   $f" || echo "缺!  $f"; done
+```
+
+> **敏感信息核查（2026-10-11 实测，只核值的形状、未打印值）**：入库的 `config/config.json` 里
+> `secret_key` / `developer.password` / `smtp.user` / `smtp.password` / `telegram.*` / `tt_telegram.*`
+> **全部是空串**；`developer.username` 与 `smtp.host` / `from_name` 是普通非敏感值
+> ⇒ **没有真实凭据进过 git 历史**。真凭据只在 `config.local.json` 这层覆盖里。
+> （连带影响：开发者账号的**密码也是空串**，新机器上要么自建账号、要么把 `config.local.json` 拷过来。）
+
+**多机访问**：Tailscale 部署下其他电脑**只能访问 5001**，Vite 的 5173 访问不到
+⇒ 前端改动后**必须 `npm run build`**，别人才能看到（同「开发注意」一节）。
+
 ## 配置说明（config/config.json + config/config.local.json）
 
 ```json
