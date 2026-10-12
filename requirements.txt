@@ -1,6 +1,8 @@
 flask>=3.0
 flask-cors>=4.0
 flask-compress>=1.15
+# WSGI 生产服务器：main.py 顶层 `from waitress import serve`，缺了服务直接起不来
+waitress>=3.0
 requests>=2.31
 beautifulsoup4>=4.12
 Pillow>=10.0
