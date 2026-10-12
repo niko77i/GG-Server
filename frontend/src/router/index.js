@@ -37,9 +37,13 @@ const routes = [
     meta: { platform: 'gg' },
     children: [
       { path: 'products', component: () => import('../views/ProductPanel.vue'), meta: { title: '产品管理' } },
-      { path: 'ads', component: () => import('../views/AdsAccountPanel.vue'), meta: { admin: true, title: '广告账户' } },
-      { path: 'mcc', component: () => import('../views/MccPanel.vue'), meta: { admin: true, title: 'MCC 管理' } },
-      { path: 'settings', component: () => import('../views/SettingsPanel.vue'), meta: { admin: true, title: '设置' } },
+      // 广告账户 / MCC / 设置：2026-10-12 起对普通用户（role='user'）放开，故**去掉 meta.admin**。
+      // 后端这三块本来就只做 owner_id 隔离、无角色闸门（mcc_update/mcc_delete 另有归属校验），
+      // 挡住普通用户的只是这里的 meta.admin，去掉即通。
+      // viewer 不受影响：下面 viewer 守卫把它硬拦回 /accounts/products。
+      { path: 'ads', component: () => import('../views/AdsAccountPanel.vue'), meta: { title: '广告账户' } },
+      { path: 'mcc', component: () => import('../views/MccPanel.vue'), meta: { title: 'MCC 管理' } },
+      { path: 'settings', component: () => import('../views/SettingsPanel.vue'), meta: { title: '设置' } },
 
     ]
   },
@@ -190,7 +194,10 @@ router.beforeEach((to, from, next) => {
   // 当前身份与平台的默认落地页
   const platformHome = auth.homePath
 
-  // 户管可进入的带 meta.admin 的账户区/用户管理路由
+  // 户管可进入的带 meta.admin 的路由。⚠️ 2026-10-12 起 GG 账户区三页与 FB/TT 账户页
+  // **都不再带 meta.admin**（GG 三页对普通用户放开；FB/TT 本来就没带），故本表目前
+  // 实际只对 `/admin/users` 生效，其余条目是防御性冗余（若哪天给那些路由补回 meta.admin，
+  // 户管的通行权还在）。`/admin/scheduler` 刻意不在表内 —— 定时任务不对户管开放。
   const HUGUAN_ROUTES = [
     '/accounts/ads', '/accounts/mcc', '/accounts/settings',
     '/fb/accounts', '/fb/bms', '/fb/pixels', '/fb/settings',

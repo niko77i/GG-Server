@@ -4,9 +4,11 @@
     <div class="sticky-tabs" style="flex-shrink:0;">
       <el-tabs :model-value="activeTab" @update:model-value="switchTab">
         <el-tab-pane v-if="!auth.isHuguan" label="产品管理" name="products" />
-        <el-tab-pane v-if="auth.canManageAccounts" label="广告账户" name="ads" />
-        <el-tab-pane v-if="auth.canManageAccounts" label="MCC 管理" name="mcc" />
-        <el-tab-pane v-if="auth.canManageAccounts" label="设置" name="settings" />
+        <!-- 用 canAccessAccounts（含普通用户）而非 canManageAccounts —— 后者是
+             「跨用户管账户」开关，拿它控 Tab 会把普通用户一并挡在 Tab 外。 -->
+        <el-tab-pane v-if="auth.canAccessAccounts" label="广告账户" name="ads" />
+        <el-tab-pane v-if="auth.canAccessAccounts" label="MCC 管理" name="mcc" />
+        <el-tab-pane v-if="auth.canAccessAccounts" label="设置" name="settings" />
 
       </el-tabs>
     </div>

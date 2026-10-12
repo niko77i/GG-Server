@@ -69,7 +69,10 @@ function switchPlatform(platform) {
 
 const detailOpen = ref(true); const activeSection = ref('accounts')
 const ggNavItems = [
-  { key: 'accounts', icon: '🏢', label: '账户管理', requireProducts: true, admin: true, sections: [{ title: '账户', items: [{ icon:'📦',label:'产品管理',path:'/accounts/products'},{ icon:'👤',label:'广告账户',path:'/accounts/ads'},{ icon:'🏢',label:'MCC管理',path:'/accounts/mcc'}]},{ title:'系统', items:[{ icon:'⚙',label:'设置',path:'/accounts/settings'}]}]},
+  // ⚠️ 本项原带 `admin: true` —— 是**死标记**：visibleNavItems 里 `requireProducts` 先短路，
+  // 那个 admin 从来没起过作用（TT 的同类项就没有它）。2026-10-12 随手摘掉，免得读代码的人
+  // 以为账户区是管理员专属（账户区三页已对普通用户放开，见 utils/accessLogic.mjs）。
+  { key: 'accounts', icon: '🏢', label: '账户管理', requireProducts: true, sections: [{ title: '账户', items: [{ icon:'📦',label:'产品管理',path:'/accounts/products'},{ icon:'👤',label:'广告账户',path:'/accounts/ads'},{ icon:'🏢',label:'MCC管理',path:'/accounts/mcc'}]},{ title:'系统', items:[{ icon:'⚙',label:'设置',path:'/accounts/settings'}]}]},
   { key: 'youtube', icon: '📺', label: '视频管理', sections: [{ title: '视频', items: [{ icon:'▶',label:'视频展示',path:'/youtube/view'},{ icon:'📝',label:'文案展示',path:'/youtube/copywriting'},{ icon:'➕',label:'导入视频或文案',path:'/youtube/import'},{ icon:'🏷',label:'标签配置',path:'/youtube/config'}]}]},
   { key: 'media', icon: '🎬', label: '媒体工具', sections: [{ title: '媒体', items: [{ icon:'🖼',label:'爬取&视频',path:'/media'}]}]},
   { key: 'toolkit', icon: '🧰', label: '工具集', sections: [{ title: '工具', items: [{ icon:'📊',label:'做表数据',path:'/toolkit/zuobiao'},{ icon:'🎵',label:'音频替换',path:'/toolkit/audio'},{ icon:'🌐',label:'翻译工具',path:'/toolkit/translate'}]}]},

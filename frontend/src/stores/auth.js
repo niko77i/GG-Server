@@ -1,6 +1,9 @@
 ﻿import { defineStore } from 'pinia'
 import { authApi } from '../api/auth'
 import { PLATFORM_KEY, sanitizePlatform, platformFamily, resolvePlatform } from '../utils/platformPrefs.mjs'
+import {
+  canAccessAccountPages, canEditGlobalOptions, canManageOthersAccounts,
+} from '../utils/accessLogic.mjs'
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -20,7 +23,15 @@ export const useAuthStore = defineStore('auth', {
     isViewer: (state) => state.user?.role === 'viewer',
     isHuguan: (state) => state.user?.role === 'huguan',
     canSwitchPlatform: (state) => ['developer', 'huguan'].includes(state.user?.role),
-    canManageAccounts: (state) => ['developer', 'admin', 'huguan'].includes(state.user?.role),
+    // 账户区的三条独立判据（口径与常量见 utils/accessLogic.mjs，有回归测试）。
+    // ⚠️ 别把这三条合并回一条 —— 它们在普通用户身上刻意不同值：
+    //   能进「广告账户 / MCC / 设置」三页 ✓，但不能改全局字典、不能管别人的数据。
+    canManageAccounts: (state) => canManageOthersAccounts(state.user?.role),
+    // 2026-10-12 起普通用户可进账户区三页（router 对应去掉 meta.admin）
+    canAccessAccounts: (state) => canAccessAccountPages(state.user?.role),
+    // 全局字典（代理/状态/MCC等级/商务/地区）的**写**权限：镜像后端 GLOBAL_OPTION_ROLES。
+    // 仅供前端隐藏写入口用，拦截权威在后端。
+    canEditGlobalOptions: (state) => canEditGlobalOptions(state.user?.role),
     // 报表数据（数据管理页）的权限。与后端 helpers.report_editable_fields 同口径：
     // developer → 全权；户管 → 仅可改「消耗」；其余（含 admin）→ 只读。
     canEditReportCost: (state) => state.user?.role === 'huguan',

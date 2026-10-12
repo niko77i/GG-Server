@@ -90,6 +90,23 @@ CREATE TABLE users (
 | viewer | 只读 | 不可 | 不可 | 由 admin 创建 |
 | hidden | - | - | - | 被停用，无法登录 |
 
+**账户区（广告账户 / MCC 管理 / 设置）的可见性 —— 三条独立判据（2026-10-12 起）**：
+
+| 判据 | 常量 | 值 | 含义 |
+|------|------|-----|------|
+| `canAccessAccounts` | `ACCOUNT_PAGE_ROLES` | developer / admin / 户管 / **user** | 能进上述三页 |
+| `canEditGlobalOptions` | `GLOBAL_OPTION_ROLES` | developer / admin / 户管 | 能改全局字典（镜像后端） |
+| `canManageAccounts` | `CROSS_USER_ACCOUNT_ROLES` | developer / admin / 户管 | 能管**别人**的账户 / MCC |
+
+阶梯关系：`跨用户管账户 ⊆ 改全局字典 ⊆ 能进账户区`；**只有 user 落在「进得去、改不了」那一档**，
+`viewer` 三档全否（止步 `/accounts/products`）。判据在 `frontend/src/utils/accessLogic.mjs`
+（纯函数，有回归测试 `frontend/tests/accessLogic.test.mjs`），**镜像后端** `py/routes/helpers.py`。
+
+⚠️ **别把三条合并回一条**。`canManageAccounts` 看着像「能不能用账户功能」，实为「跨用户管账户」开关，
+全站 20 处在用（归属人下拉、批量导入逐行编辑、`AccountModal` 认领分支、`MccPanel` 行内编辑按钮、
+FB 三张全局字典写入口）—— 放宽它等于把编辑别人数据的权限给了普通用户。
+设计见 `docs/superpowers/specs/2026-10-12-open-account-area-to-normal-users-design.md`。
+
 ### 数据隔离设计
 
 #### 共享数据（所有人可见）
@@ -129,7 +146,13 @@ CREATE TABLE users (
 - admin 路由额外检查 `role in ('developer', 'admin')`
 - developer 专属路由检查 `role == 'developer'`
 - viewer 角色对所有写操作返回 403
-- 前端全局路由守卫：未登录 → /login，非 admin → /accounts
+- **前端全局路由守卫**：未登录 → /login；带 `meta.admin` 的路由仅 admin（户管另有白名单）；
+  viewer 锁在 `/accounts/products`。⚠️ 2026-10-12 起**「非 admin → /accounts」这条已不成立** ——
+  账户区（广告账户 / MCC / 设置）对普通用户放开了，`meta.admin` 只剩
+  `/admin/users` 与 `/admin/scheduler` 两处（见上文「账户区可见性」三条判据）。
+- ⚠️ **GG 账户/MCC/充值路由没有角色装饰器**，只有 `@jwt_required()` + `owner_id` 隔离
+  （MCC 的增删改另有归属校验）。别误以为它们受 `admin_required` 保护 ——
+  放不放给普通用户是由**前端路由**决定的，改守则要连着 `accessLogic.mjs` 一起看。
 
 ## 项目结构
 

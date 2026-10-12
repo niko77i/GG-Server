@@ -132,7 +132,7 @@
             >
               <span style="flex:0 0 100px;font-size:14px;font-weight:500;color:#374151;">{{ row.name }}</span>
               <el-select
-                v-if="authStore.canManageAccounts"
+                v-if="authStore.canEditGlobalOptions"
                 v-model="row._editTz"
                 placeholder="选择时区"
                 size="small"
@@ -144,7 +144,7 @@
               </el-select>
               <span v-else style="flex:1;font-size:13px;color:#6b7280;">{{ row.timezone || '—' }}</span>
               <el-button
-                v-if="authStore.canManageAccounts"
+                v-if="authStore.canEditGlobalOptions"
                 size="small"
                 type="danger"
                 :icon="Delete"
@@ -161,7 +161,11 @@
           </div>
 
           <!-- 新增行 -->
-          <div v-if="authStore.canManageAccounts" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:#f9fafb;border-radius:6px;margin-top:8px;">
+          <!-- ⚠️ 这里是 canEditGlobalOptions（= 后端 GLOBAL_OPTION_ROLES），不是 canManageAccounts：
+               地区是五张字典里**唯一**对写操作硬闸门 403 的表（全平台共享、一改对所有人生效）；
+               代理 / 状态 / MCC 等级 / 商务四张则是 owner 隔离、普通用户本就能增删改自己的，
+               故那四张的设置卡片**不设**前端闸门（藏了反而挡住普通用户建自己的 MCC 等级）。 -->
+          <div v-if="authStore.canEditGlobalOptions" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:#f9fafb;border-radius:6px;margin-top:8px;">
             <el-input v-model="newRegionName" placeholder="新地区名" size="small" style="flex:0 0 100px;" @keyup.enter="addRegion" />
             <el-select v-model="newRegionTz" placeholder="时区" size="small" style="flex:1;" filterable>
               <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
