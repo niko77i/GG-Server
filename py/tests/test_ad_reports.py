@@ -736,3 +736,55 @@ class TestAdReportsListSearch:
         resp = client.get("/api/ad-reports/list?search=SrcCampaign", headers=auth_headers)
         data = resp.get_json()
         assert data["total"] >= 1
+
+
+class TestProductsUpdateNameStrip:
+    """PUT /api/products/<id> —— 改名时产品名必须去首尾空格（2026-10-17 回归）。"""
+
+    def _create(self, client, headers, name):
+        resp = client.post("/api/products/create", json={
+            "product_name": name, "kpi": "test", "region": "巴西"}, headers=headers)
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+        import database
+        db = database.get_db()
+        pid = db.execute("SELECT id FROM products WHERE product_name=?", (name,)).fetchone()["id"]
+        uid = db.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()["id"]
+        db.close()
+        return pid, uid
+
+    def test_rename_strips_trailing_space_and_cascades_trimmed(self, client, auth_headers):
+        """改名 `xxx2  `（尾部空格）⇒ 库里存 `xxx2`，级联到 ad_reports 的也是无空格版。
+
+        不 strip 的后果：入库/写表/产品校验都拿 `.strip()` 后的名字**精确匹配**
+        `products.product_name` ⇒ 匹配不到 ⇒ 商务(H) / 代投比例(L) 静默写空。
+        2026-10-17 实例：products id=302「YN3059—GG谷歌包代投 7+1 +8户 」。
+        """
+        import database
+        pid, uid = self._create(client, auth_headers, "test_trim_prod")
+        db = database.get_db()
+        db.execute(
+            "INSERT INTO ad_reports (user_id, product_name, region, report_date, account, "
+            "customer_id, campaign, cost) VALUES (?,?,?,?,?,?,?,?)",
+            (uid, "test_trim_prod", "US", "2026-10-01", "a", "c", "x", 1))
+        db.commit()
+        db.close()
+
+        resp = client.put(f"/api/products/{pid}",
+                          json={"product_name": "test_trim_prod2  "}, headers=auth_headers)
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+
+        db = database.get_db()
+        got = db.execute("SELECT product_name FROM products WHERE id=?",
+                         (pid,)).fetchone()["product_name"]
+        n_cascaded = db.execute(
+            "SELECT COUNT(*) FROM ad_reports WHERE product_name='test_trim_prod2'").fetchone()[0]
+        db.close()
+        assert got == "test_trim_prod2", f"未去空格，库里是 {got!r}"
+        assert n_cascaded == 1, "级联改名也必须用去空格后的名字"
+
+    def test_rename_to_blank_after_strip_is_rejected(self, client, auth_headers):
+        """全是空格的名字 strip 后为空 ⇒ 400（与新增端点的「产品名不能为空」对齐）。"""
+        pid, _ = self._create(client, auth_headers, "test_trim_blank")
+        resp = client.put(f"/api/products/{pid}", json={"product_name": "   "},
+                          headers=auth_headers)
+        assert resp.status_code == 400, resp.get_data(as_text=True)[:200]

@@ -3137,6 +3137,15 @@ def products_update(pid):
 
     # 产品改名时同步更新所有关联表（冗余存储的 product_name 字段）
     if "product_name" in data:
+        # ⚠️ **必须去首尾空格**：入库/写表路径都拿 `.strip()` 后的名字去**精确匹配**
+        # `products.product_name`（见 `google_sheets_update_zuobiao` 的产品校验与
+        # `gg_zuobiao_kwargs`）。名称带空格 ⇒ 匹配不到 ⇒ 商务(H)/代投比例(L) 静默写空。
+        # 新增端点 `products_create` 本来就 strip，这里补齐，避免改名时再埋一次。
+        # 2026-10-17 实例：products id=302「YN3059—…8户 」（尾部空格）。
+        data["product_name"] = (data["product_name"] or "").strip()
+        if not data["product_name"]:
+            db.close()
+            return jsonify({"success": False, "error": "产品名不能为空"}), 400
         old_name = current["product_name"]
         if data["product_name"] != old_name:
             new_name = data["product_name"]
@@ -7651,7 +7660,8 @@ def google_sheets_update_zuobiao():
     pkgs = db.execute(
         "SELECT pkg.series_name FROM packages pkg "
         "JOIN products prod ON pkg.product_id = prod.id "
-        "WHERE prod.product_name=? AND (pkg.status IS NULL OR pkg.status='' OR pkg.status='0')",
+        # TRIM：见写表 target 里同一处注释 —— 产品名带首尾空格会让这里的校验静默跳过
+        "WHERE TRIM(prod.product_name)=? AND (pkg.status IS NULL OR pkg.status='' OR pkg.status='0')",
         (product_name,)
     ).fetchall()
     # 注意：不调 db.close()，因为 _yt_db() 使用 Flask g 共享连接

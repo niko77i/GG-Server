@@ -833,3 +833,38 @@ def test_upsert_zuobiao_key_includes_product():
         region="US", report_date="2026-10-01", sales_person="商务",
         agency_ratio=10, operator_name="op")
     assert result == {"updated": 1, "inserted": 1}, result
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-17：产品名带首尾空格导致商务(H)/代投比例(L) 静默写空
+# ---------------------------------------------------------------------------
+
+def test_gg_zuobiao_kwargs_finds_product_with_padded_name(client):
+    """产品名在库里带首尾空格时，写表实参仍必须取到商务与代投比例。
+
+    回归：products id=302「YN3059—GG谷歌包代投 7+1 +8户 」（尾部空格）。
+    写表路径传进 `gg_zuobiao_kwargs` 的是 `.strip()` 后的名字，精确匹配
+    `p.product_name=?` 匹配不到 ⇒ `sales_person` / `agency_ratio` 静默为空
+    ⇒ 表上 H 列（商务）与 L 列（代投比例/服务费）空白。
+
+    修法：查询用 `TRIM(p.product_name)=?`。本用例钉住该行为。
+    """
+    from routes.gg_zuobiao_target import gg_zuobiao_kwargs
+
+    hdr, uid = _gg_user(client, "_zb_padded")
+    _setup_zuobiao_config(client, hdr)
+
+    db = database.get_db()
+    sp_id = db.execute("INSERT INTO sales_persons (name) VALUES (?)", ("蓝桉",)).lastrowid
+    db.execute(
+        "INSERT INTO products (product_name, region, agency_ratio, sales_person_id) "
+        "VALUES (?,?,?,?)", ("产品乙 ", "US", 8.0, sp_id))
+    _seed_zuobiao(db, uid, product="产品乙", date="2026-10-01")
+    db.commit()
+
+    kwargs, why = gg_zuobiao_kwargs(db, uid, "产品乙", report_date="2026-10-01")
+    db.close()
+
+    assert kwargs is not None, why
+    assert kwargs["sales_person"] == "蓝桉", f"H 列商务取空：{kwargs}"
+    assert kwargs["agency_ratio"] == 8.0, f"L 列代投比例取空：{kwargs}"

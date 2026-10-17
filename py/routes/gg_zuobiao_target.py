@@ -119,11 +119,18 @@ def gg_zuobiao_kwargs(db, user_id, product_name, yanghu_rows=None,
     if not spreadsheet_id:
         return None, "表格 ID 为空"
 
+    # ⚠️ 用 `TRIM` 比对：写表路径传进来的是 `.strip()` 后的产品名，而库里可能因历史
+    # 录入留了首尾空格 ⇒ 精确匹配失败 ⇒ `sales_person`(H 列商务) 与 `agency_ratio`
+    # (L 列代投比例) 静默写空。2026-10-17 实例：products id=302「YN3059—…8户 」。
     prod = db.execute(
         "SELECT COALESCE(sp.name, '') AS sales_person, agency_ratio FROM products p "
         "LEFT JOIN sales_persons sp ON p.sales_person_id = sp.id "
-        "WHERE p.product_name=? AND (p.is_archived IS NULL OR p.is_archived=0) LIMIT 1",
+        "WHERE TRIM(p.product_name)=? AND (p.is_archived IS NULL OR p.is_archived=0) LIMIT 1",
         (product_name,)).fetchone()
+    if prod is None:
+        # 查不到产品 ⇒ 商务/服务费必定写空。这是**静默失败**，必须留痕。
+        log.warning("做表写表：产品未找到（H 列商务 / L 列代投比例将写空）"
+                    "user_id=%s product=%r", user_id, product_name)
     user = db.execute("SELECT display_name, username FROM users WHERE id=?",
                       (user_id,)).fetchone()
 
