@@ -2137,3 +2137,42 @@ class TestUndoUsesSnapshotKeyColumn:
         assert out["not_found"] == []
 
 
+def test_undo_push_works_for_fb_multi_table(monkeypatch):
+    """fb 多表配置下 conf['sheet_name'] 恒空 —— undo_push 不许因此静默返回全零。
+
+    ⚠️ 偏离 brief（两处，必要）：
+      ① 快照带上 `key_col`: 真实 push 快照由 `snapshot_push_targets` 产出、自上一批起
+         必带该键；brief 的样例没有它 ⇒ undo_push 会回落读表头（`read_sheet_values`），
+         在此上下文必然炸真实 Google 调用，测不到「配置门」这个目标。
+      ② 写回桩返回结果字典：undo_push 对返回值取 `["updated"]`，返回 None 会 TypeError。
+    断言与用例目标不变。
+    """
+    import huguan_dashboard as hd
+    db = database.get_db()
+    db.execute("INSERT OR IGNORE INTO users(id, username, password, role, platform) "
+               "VALUES(1, 'fb_undo_u', 'x', 'user', 'fb')")
+    db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_1', ?)",
+               (json.dumps({"fb": {"spreadsheet_id": "SS", "tables": [
+                   {"name": "加白户", "sheet_name": "加白户表"}]}}),))
+    # 造一份 push 快照：覆盖一张表里的一个账户
+    hd.save_undo(db, 1, "fb", "push",
+                 {"spreadsheet_id": "SS",
+                  "sheets": [{"sheet_name": "加白户表", "key_col": "D",
+                              "cells": [{"account_id": "U-1", "cells": {"D": "旧值"}}]}]})
+    db.commit()
+    db.close()
+
+    # 写回打桩：确认 undo_push 真的走了写表（而不是被配置门拦下返回全零）
+    import google_sheets_service as gs
+    calls = []
+    monkeypatch.setattr(gs, "build_service", lambda p: object())
+    monkeypatch.setattr(gs, "update_rows_by_account_id",
+                        lambda svc, sid, name, rows, key_col:
+                            calls.append((name, rows))
+                            or {"updated": len(rows), "not_found": []})
+    out = hd.undo_push(1, "fb")
+    assert calls, "fb 多表下 undo_push 必须真的写表，不能静默返回全零"
+    assert calls[0][0] == "加白户表"
+    # 按表快照只含这一张：撤回只写这一次，不碰其它表
+    assert len(calls) == 1
+    assert out == {"updated": 1, "not_found": []}

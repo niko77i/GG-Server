@@ -2662,12 +2662,17 @@ def undo_push(user_id: int, platform: str) -> dict:
     try:
         conf = get_platform_config(db, user_id, platform)
         tables = get_platform_tables(db, user_id, platform)
-        # gg/fb：只有一张表，工作表名仍在 conf 里 —— 判据与改动前逐字等价（表名为空
-        # 时同样返回全零，不碰写入器）。
-        # tt：工作表名在 tables 里。多表配置的 `conf["sheet_name"]` **恒为空串**
-        # （表名存在 `tables` 里），沿用旧判据会让 TT 撤回**静默变成空操作**：
-        # 一个字都不写、快照也不作废，撤回按钮永久亮着。
-        if not conf["spreadsheet_id"] or not tables or (platform != "tt" and not conf["sheet_name"]):
+        # gg：只有一张表，工作表名仍在 conf 里 —— 判据与改动前逐字等价（表名为空时同样返回全零）。
+        # tt / fb：工作表名在 tables 里，多表配置的 conf["sheet_name"] **恒为空串**，沿用旧判据
+        # 会让撤回**静默变成空操作**。故只对 gg 保留 conf["sheet_name"] 判据。
+        # fb 例外收窄：`get_platform_tables` 在「有 spreadsheet_id、却没配任何表名」时会返回
+        # 一条空名空表名的哨兵（见其 docstring）—— 这种**半截配置**必须继续返回全零，
+        # 否则会拿空工作表名去调写入器（改动前是直接不碰写入器）。只有 tables 里真有
+        # 表名时，才认定是合法的 fb 多表配置。
+        if (not conf["spreadsheet_id"] or not tables
+                or (platform == "gg" and not conf["sheet_name"])
+                or (platform == "fb" and not conf["sheet_name"]
+                    and not any(t.get("sheet_name") for t in tables))):
             return {"updated": 0, "not_found": []}
         payload = load_undo(db, user_id, platform, "push")
         # 各表的手工覆盖（`{sheet_name: columns}`）：只在**旧快照**（没有 `key_col`）
