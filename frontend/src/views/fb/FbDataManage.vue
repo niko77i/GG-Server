@@ -77,8 +77,8 @@
       <el-table-column
         v-for="col in visibleColumnDefs" :key="col.prop"
         :prop="col.prop" :label="col.label"
-        :width="col.cost ? (auth.canEditReportCost ? 150 : 100) : col.width"
-        :min-width="col.minWidth"
+        :width="colWidth(col)"
+        :min-width="colMinWidth(col)"
       >
         <template #default="{ row }">
           <!-- 「消耗」列：户管可内联改（仅此角色）；其余角色与改动前逐字一致。
@@ -215,8 +215,23 @@ function loadColumnPrefs() {
   return [...DEFAULT_VISIBLE_COLUMNS]
 }
 const visibleColumns = ref(loadColumnPrefs())
-const visibleColumnDefs = computed(() =>
-  allColumns.filter(c => visibleColumns.value.includes(c.prop)))
+const visibleColumnDefs = computed(() => {
+  const cols = allColumns.filter(c => visibleColumns.value.includes(c.prop))
+  // 最后一列改为**可伸缩**：否则当可见列总宽 < 容器宽时，`fixed="right"` 的操作列
+  // 会被钉在容器最右边，和数据列之间留出一大块空白（只勾「账号+消耗」时必现）。
+  return cols.map((c, i) => (i === cols.length - 1 ? { ...c, flex: true } : c))
+})
+// 「消耗」列宽：普通 user 100（几何不变）；户管多一个 ✏️ 按钮 ⇒ 150。
+function costColWidth() { return auth.canEditReportCost ? 150 : 100 }
+// 可伸缩列（最后一列）用 min-width 撑开，其余列沿用各自的固定/最小宽。
+function colWidth(col) {
+  if (col.flex) return undefined
+  return col.cost ? costColWidth() : col.width
+}
+function colMinWidth(col) {
+  if (!col.flex) return col.minWidth
+  return col.cost ? costColWidth() : (col.minWidth || col.width || 120)
+}
 function saveColumnPrefs() {
   hasExplicitColumnPrefs = true
   localStorage.setItem(COL_STORAGE_KEY, JSON.stringify(visibleColumns.value))
