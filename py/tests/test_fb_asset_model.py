@@ -108,13 +108,60 @@ class TestFbAccountColumns:
             os.unlink(db_path)
 
     def test_migration_idempotent_includes_new_columns(self, client):
-        """_ensure_columns 连跑两次不报错，且两列都存在。"""
+        """连开两次不报错（幂等）。
+
+        注意：这里的库由夹具**新建**，两列来自建表语句，所以本用例**不能**证明
+        「存量库升级」路径 —— 那条路由 test_migration_adds_both_columns_to_existing_db
+        用旧结构的裸 sqlite3 库守住。
+        """
         db1 = database.get_db()
         db1.close()
         db2 = database.get_db()
         cols = _cols(db2, "fb_accounts")
         db2.close()
         assert "account_type" in cols and "source_sheet" in cols
+
+    def test_migration_adds_both_columns_to_existing_db(self):
+        """存量库升级路径：旧结构没有两列，`_ensure_columns` 必须补上，且幂等。
+
+        不能用 `client` 夹具 —— 它会建全新库（建表语句已含两列），测不到迁移。
+        删掉 `database.py` 迁移区那两行，本用例必须变红。
+        """
+        import os, tempfile, sqlite3
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(db_path)
+        try:
+            # 旧结构 = 当前建表语句删掉 account_type / source_sheet 两列。
+            conn.execute("""
+                CREATE TABLE fb_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    account_id TEXT NOT NULL UNIQUE,
+                    timezone TEXT DEFAULT '',
+                    status_id INTEGER REFERENCES account_statuses(id),
+                    acquired_date TEXT DEFAULT (date('now','localtime')),
+                    status_changed_date TEXT DEFAULT '',
+                    owner_id INTEGER REFERENCES users(id),
+                    deleted_at TEXT DEFAULT NULL,
+                    created_at TEXT DEFAULT (datetime('now','localtime')),
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
+                )
+            """)
+            conn.commit()
+            before = {r[1] for r in conn.execute("PRAGMA table_info(fb_accounts)").fetchall()}
+            assert "account_type" not in before and "source_sheet" not in before
+
+            database._ensure_columns(conn)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(fb_accounts)").fetchall()}
+            assert "account_type" in cols, "存量库迁移未补 account_type"
+            assert "source_sheet" in cols, "存量库迁移未补 source_sheet"
+
+            # 幂等：再跑一次不得报错
+            database._ensure_columns(conn)
+        finally:
+            conn.close()
+            os.unlink(db_path)
 
 
 class TestSharedOptionTables:
