@@ -750,3 +750,64 @@ class TestFbResolveAccountTableBySourceSheet:
         db.commit()
         assert hst._resolve_account_table(db, 1, "fb", "RAT-1") is None
         db.close()
+
+
+def test_fb_multi_table_sync_uses_each_tables_col_map(client, monkeypatch):
+    """FB 多表 push：每个账户必须按 `source_sheet` 取**自己那张表**的 col_map。
+
+    这是 T6 的全部意义所在。夹具刻意让 `name` 与 `sheet_name` 不同（加白户→表A、
+    企业户→表B）—— legacy 单表配置里两者相等，区分不出键取错。两张表头把「资产UID」
+    放在不同的列（表A=D、表B=E）：若 `col_maps_by_type` 的键仍是 `t["name"]`，
+    `collect_rows_for_push` 按行的 `source_sheet`（"表A"/"表B"）查不到 ⇒ col_map 退化为
+    固定规格，表B 的账户ID 会被写进 D 列（表A 恰好也是 D，故只有表B 能判别）。
+    """
+    import google_sheets_service as gs
+    import routes.huguan_sheet_targets as tgt
+
+    headers = {
+        "表A": ["日期", "操作人", "账户名称", "资产UID", "产品信息"],
+        "表B": ["日期", "操作人", "账户名称", "所属渠道", "资产UID", "产品信息"],
+    }
+
+    def _fake_read(svc, sid, name, rng):
+        assert rng == "A1:ZZ1", rng
+        return [list(headers[name])]
+
+    monkeypatch.setattr(hd, "read_sheet_values", _fake_read)
+    monkeypatch.setattr(gs, "build_service", lambda _p: object())
+    captured = []
+
+    def _upd(svc, sid, name, rows, key_col=None):
+        captured.append({"sheet_name": name, "key_col": key_col, "rows": rows})
+        return {"updated": len(rows), "not_found": []}
+
+    monkeypatch.setattr(gs, "update_rows_by_account_id", _upd)
+
+    h, uid = _tt_huguan(client, "_hg_fb_multi")
+    db = database.get_db()
+    db.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+               (f"huguan_dashboard_{uid}", json.dumps({"fb": {
+                   "spreadsheet_id": "SS",
+                   "tables": [{"name": "加白户", "sheet_name": "表A"},
+                              {"name": "企业户", "sheet_name": "表B"}]}})))
+    db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, owner_id) "
+               "VALUES('户A','FB-A','加白户','表A',?)", (uid,))
+    db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, owner_id) "
+               "VALUES('户B','FB-B','企业户','表B',?)", (uid,))
+    db.commit()
+    db.close()
+
+    tgt.huguan_dashboard_sync(uid, "fb", ["FB-A", "FB-B"])
+
+    by_sheet = {c["sheet_name"]: c for c in captured}
+    assert set(by_sheet) == {"表A", "表B"}, f"两张表必须各写各的，不得写成同一张：{captured}"
+    a, b = by_sheet["表A"], by_sheet["表B"]
+    assert a["key_col"] == "D" and b["key_col"] == "E", \
+        f"定位键必须按各自表头取（表A=D / 表B=E）：{captured}"
+    assert [r["account_id"] for r in a["rows"]] == ["FB-A"], a
+    assert [r["account_id"] for r in b["rows"]] == ["FB-B"], b
+    # 关键判据：cells 必须用**该行自己那张表**的 col_map 产出。
+    assert a["rows"][0]["cells"].get("D") == "FB-A", \
+        f"表A的账户ID 必须落在表A col_map 的 D 列：{a}"
+    assert b["rows"][0]["cells"].get("E") == "FB-B", \
+        f"表B的账户ID 必须落在表B col_map 的 E 列（取错表会退回固定 D）：{b}"
