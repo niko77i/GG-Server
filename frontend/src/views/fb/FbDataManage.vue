@@ -23,7 +23,20 @@
            谓词是 canWriteReportRows（developer + 普通 user + viewer），**不是** canManageReports
            （= developer）—— 后者会把普通 user 的按钮藏掉，破坏回归判据 -->
       <el-button v-if="auth.canWriteReportRows" type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">🗑 批量删除({{ selectedIds.length }})</el-button>
-      <el-checkbox v-model="showDetailCols" style="margin-left:8px">显示详情列</el-checkbox>
+      <!-- 列选择器：与 GG 数据管理页同构（逐列勾选，localStorage 持久化） -->
+      <el-popover placement="bottom-start" :width="220" trigger="click">
+        <template #reference>
+          <el-button>📊 列显示</el-button>
+        </template>
+        <div class="column-selector">
+          <el-checkbox
+            v-for="col in allColumns" :key="col.prop"
+            :model-value="visibleColumns.includes(col.prop)"
+            :label="col.prop"
+            @change="(checked) => toggleColumn(col.prop, checked)"
+          >{{ col.label }}</el-checkbox>
+        </div>
+      </el-popover>
       <el-button type="primary" @click="loadStats" style="margin-left:auto">📈 查看统计</el-button>
       <el-button type="success" @click="handleExport">📥 导出CSV</el-button>
       <!-- 原「🔄 重试写表」按钮已移除：其入口并入下方失败汇总区的「重试全部失败的」。
@@ -59,37 +72,35 @@
     <el-table :data="items" stripe border v-loading="loading" @selection-change="onSelect">
       <!-- 勾选框：只读角色（管理员/户管）没有批量删除动作，留着勾选框是误导 -->
       <el-table-column v-if="auth.canWriteReportRows" type="selection" width="45" />
-      <el-table-column prop="product_name" label="产品名" min-width="100" />
-      <el-table-column prop="line_name" label="线名" min-width="100" />
-      <el-table-column prop="report_date" label="日期" width="110" />
-      <el-table-column prop="account_name" label="账户名称" min-width="120" />
-      <el-table-column prop="account_id" label="账户ID" width="160" />
-      <!-- 列宽：普通 user 维持 100（几何必须与改动前一致）；**户管**的单元格里多一个 ✏️
-           按钮（`.inline-edit-btn` 是 flex-shrink:0，不收缩），固定 100px 会把金额挤成
-           省略号 ⇒ 仅对户管加宽到 150。普通 user 不走这个分支，几何不变。 -->
-      <el-table-column label="消耗" :width="auth.canEditReportCost ? 150 : 100">
-        <template #default="{row}">
-          <!-- 户管：内联改消耗（仅此角色）。其余角色走 else 分支，与改动前逐字一致 -->
-          <template v-if="auth.canEditReportCost">
-            <div class="inline-edit-cell" v-if="editingCostId === row.id">
-              <el-input v-model="editCostValue" size="small" class="inline-name-input"
-                :ref="el => { if (el) costInputRef = el }"
-                @blur="saveCost(row)" @keyup.enter="saveCost(row)" @keyup.escape="cancelCostEdit" />
-            </div>
-            <div class="inline-edit-cell" v-else>
-              <span class="inline-cell-text">${{ row.cost?.toFixed(2) }}</span>
-              <el-button link size="small" class="inline-edit-btn" @click.stop="startEditCost(row)">✏️</el-button>
-            </div>
+      <!-- 数据列：可见性由「📊 列显示」控制（localStorage 持久化）。
+           勾选框列与操作列不在此处 —— 它们由角色决定，不是展示偏好。 -->
+      <el-table-column
+        v-for="col in visibleColumnDefs" :key="col.prop"
+        :prop="col.prop" :label="col.label"
+        :width="col.cost ? (auth.canEditReportCost ? 150 : 100) : col.width"
+        :min-width="col.minWidth"
+      >
+        <template #default="{ row }">
+          <!-- 「消耗」列：户管可内联改（仅此角色）；其余角色与改动前逐字一致。
+               宽度：普通 user 100（几何不变）；户管多一个 ✏️ 按钮（flex-shrink:0，
+               占位不收缩），100px 会把金额挤成省略号 ⇒ 仅对户管加宽到 150。 -->
+          <template v-if="col.cost">
+            <template v-if="auth.canEditReportCost">
+              <div class="inline-edit-cell" v-if="editingCostId === row.id">
+                <el-input v-model="editCostValue" size="small" class="inline-name-input"
+                  :ref="el => { if (el) costInputRef = el }"
+                  @blur="saveCost(row)" @keyup.enter="saveCost(row)" @keyup.escape="cancelCostEdit" />
+              </div>
+              <div class="inline-edit-cell" v-else>
+                <span class="inline-cell-text">${{ row.cost?.toFixed(2) }}</span>
+                <el-button link size="small" class="inline-edit-btn" @click.stop="startEditCost(row)">✏️</el-button>
+              </div>
+            </template>
+            <template v-else>${{ row.cost?.toFixed(2) }}</template>
           </template>
-          <template v-else>${{ row.cost?.toFixed(2) }}</template>
+          <template v-else-if="col.prop === 'cost_per_purchase'">${{ row.cost_per_purchase?.toFixed(2) }}</template>
+          <template v-else>{{ row[col.prop] }}</template>
         </template>
-      </el-table-column>
-      <el-table-column v-if="showDetailCols" prop="impressions" label="展示" width="90" />
-      <el-table-column v-if="showDetailCols" prop="clicks" label="点击" width="80" />
-      <el-table-column v-if="showDetailCols" prop="registrations" label="注册" width="80" />
-      <el-table-column v-if="showDetailCols" prop="purchases" label="购物" width="80" />
-      <el-table-column v-if="showDetailCols" prop="cost_per_purchase" label="单词购物费用" width="120">
-        <template #default="{row}">${{ row.cost_per_purchase?.toFixed(2) }}</template>
       </el-table-column>
       <!-- 每行编辑/删除：只有能改自己整行的角色才渲染（管理员只读、户管仅可改消耗 →
            他们的改整行/删除走 API 会被后端 403，故整列不渲染） -->
@@ -170,7 +181,59 @@ async function loadOwnerUsers() {
 }
 function onOwnerFilter() { page.value = 1; loadData() }
 const selectedIds = ref([]); const productOptions = ref([]); const lineOptions = ref([])
-const showDetailCols = ref(false)
+// ---------- 列选择（对齐 GG 数据管理页）----------
+// 默认可见 = 改动前的默认形态：前 6 列可见、5 个详情列隐藏 ⇒ 普通 user 的表格几何不变。
+// 偏好存 localStorage（key 与 GG 的分开），不落后端。
+const COL_STORAGE_KEY = 'fb_data_manage_columns'
+const allColumns = [
+  { prop: 'product_name',      label: '产品名',       minWidth: 100 },
+  { prop: 'line_name',         label: '线名',         minWidth: 100 },
+  { prop: 'report_date',       label: '日期',         width: 110 },
+  { prop: 'account_name',      label: '账户名称',     minWidth: 120 },
+  { prop: 'account_id',        label: '账户ID',       width: 160 },
+  { prop: 'cost',              label: '消耗',         cost: true },
+  { prop: 'impressions',       label: '展示',         width: 90 },
+  { prop: 'clicks',            label: '点击',         width: 80 },
+  { prop: 'registrations',     label: '注册',         width: 80 },
+  { prop: 'purchases',         label: '购物',         width: 80 },
+  { prop: 'cost_per_purchase', label: '单词购物费用', width: 120 },
+]
+const DEFAULT_VISIBLE_COLUMNS = ['product_name', 'line_name', 'report_date',
+                                 'account_name', 'account_id', 'cost']
+// 用户是否**显式**保存过列偏好。保存过 ⇒ 一切以用户选择为准，不再自动开详情列。
+let hasExplicitColumnPrefs = false
+function loadColumnPrefs() {
+  try {
+    const saved = localStorage.getItem(COL_STORAGE_KEY)
+    if (saved) {
+      const arr = JSON.parse(saved)
+      // 过滤掉已不存在的列名（旧偏好指向已删列时不至于整表空掉）
+      const known = arr.filter(p => allColumns.some(c => c.prop === p))
+      if (known.length) { hasExplicitColumnPrefs = true; return known }
+    }
+  } catch (e) { /* 坏数据 ⇒ 回落默认 */ }
+  return [...DEFAULT_VISIBLE_COLUMNS]
+}
+const visibleColumns = ref(loadColumnPrefs())
+const visibleColumnDefs = computed(() =>
+  allColumns.filter(c => visibleColumns.value.includes(c.prop)))
+function saveColumnPrefs() {
+  hasExplicitColumnPrefs = true
+  localStorage.setItem(COL_STORAGE_KEY, JSON.stringify(visibleColumns.value))
+}
+function toggleColumn(prop, checked) {
+  if (checked) {
+    // 按 allColumns 的顺序插回，避免勾选次序打乱表格列序
+    const idx = allColumns.findIndex(c => c.prop === prop)
+    const cur = [...visibleColumns.value]
+    const at = cur.findIndex(p => allColumns.findIndex(c => c.prop === p) > idx)
+    if (at === -1) cur.push(prop); else cur.splice(at, 0, prop)
+    visibleColumns.value = cur
+  } else {
+    visibleColumns.value = visibleColumns.value.filter(p => p !== prop)
+  }
+  saveColumnPrefs()
+}
 const statsVisible = ref(false); const statsData = ref([])
 // 前端分页（③ 浏览类）：见模板注释。权威数据是 `statsData`，这里只切当前页渲染。
 const PAGE_SIZE = 50
@@ -284,8 +347,12 @@ async function loadData() {
     if (filterOwner.value) p.user_id = filterOwner.value      // 保存人筛选（仅跨用户角色会有值）
     const res = await fbApi.listReports(p)
     items.value = res.items; total.value = res.total
-    // 自动检测是否有详情数据
-    if (items.value.some(r => r.impressions > 0 || r.clicks > 0)) showDetailCols.value = true
+    // 与改动前一致：数据里有展示/点击时**自动打开详情列**。
+    // 但一旦用户在「📊 列显示」里显式选择过，就以用户的选择为准，不再自动覆盖。
+    if (!hasExplicitColumnPrefs &&
+        items.value.some(r => r.impressions > 0 || r.clicks > 0)) {
+      visibleColumns.value = allColumns.map(c => c.prop)
+    }
   } finally { loading.value = false }
 }
 async function loadStats() {
@@ -404,4 +471,6 @@ onMounted(() => { loadFilterOptions(); loadData(); loadFbSwFailures(); if (auth.
 .inline-edit-btn{opacity:0;transition:opacity .15s;font-size:13px;flex-shrink:0}
 .inline-edit-cell:hover .inline-edit-btn{opacity:1}
 .inline-name-input{width:100%}
+/* 列选择器（与 GG 数据管理页同款） */
+.column-selector{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto}
 </style>
