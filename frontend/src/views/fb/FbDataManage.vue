@@ -190,8 +190,8 @@ const COL_STORAGE_KEY = 'fb_data_manage_columns'
 // 可见列多时各自收缩到最小值、出现横向滚动。
 // ⚠️ 不要改回 `width` —— 固定宽度 + 列少 ⇒ 剩余宽度无处可去，列分配会很难看。
 const allColumns = [
-  { prop: 'product_name',      label: '产品名',       minWidth: 100 },
   { prop: 'report_date',       label: '日期',         minWidth: 110 },
+  { prop: 'product_name',      label: '产品名',       minWidth: 100 },
   { prop: 'line_name',         label: '线名',         minWidth: 100 },
   { prop: 'account_name',      label: '账户名称',     minWidth: 120 },
   { prop: 'account_id',        label: '账户ID',       minWidth: 160 },
@@ -202,7 +202,7 @@ const allColumns = [
   { prop: 'purchases',         label: '购物',         minWidth: 80 },
   { prop: 'cost_per_purchase', label: '单词购物费用', minWidth: 120 },
 ]
-const DEFAULT_VISIBLE_COLUMNS = ['product_name', 'report_date', 'line_name',
+const DEFAULT_VISIBLE_COLUMNS = ['report_date', 'product_name', 'line_name',
                                  'account_name', 'account_id', 'cost']
 // 用户是否**显式**保存过列偏好。保存过 ⇒ 一切以用户选择为准，不再自动开详情列。
 let hasExplicitColumnPrefs = false

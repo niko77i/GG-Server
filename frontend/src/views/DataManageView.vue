@@ -184,8 +184,8 @@ if (!auth.user) auth.initFromStorage()
 const COL_STORAGE_KEY = 'gg_data_manage_columns'
 
 const allColumns = [
-  { prop: 'display_product', label: '产品', minWidth: 100 },
   { prop: 'report_date', label: '日期', minWidth: 100 },
+  { prop: 'display_product', label: '产品', minWidth: 100 },
   { prop: 'region', label: '地区', minWidth: 70 },
   { prop: 'account', label: '账户', minWidth: 110 },
   { prop: 'customer_id', label: '客户ID', minWidth: 120 },
