@@ -58,8 +58,8 @@ def dashboard_config_get():
     各平台都经 `get_platform_config` 归一化后再返回：`config` 表是全仓共用的，
     平台条目可能是「真值非 dict」，直接透传会让 `config.gg` 变成字符串/数字，
     破坏 `{"spreadsheet_id","sheet_name"}` 这个响应契约。
-    平台专属的额外键（tt 的 `tables`、fb 的 `columns`、tt/fb 的 `*_field_catalog`）
-    在本层 enrich，`get_platform_config` 自身的契约不动。
+    平台专属的额外键（tt/fb 的 `tables`、tt/fb 的 `*_field_catalog`）在本层
+    enrich，`get_platform_config` 自身的契约不动。
     """
     db = database.get_db()
     try:
@@ -76,11 +76,12 @@ def dashboard_config_get():
                 if tables and tables[0]["sheet_name"]:
                     entry["sheet_name"] = tables[0]["sheet_name"]
             elif p == "fb":
-                # fb 的列映射覆盖也要回给前端（与 tt 回 `tables` 同一手法：路由层 enrich，
-                # 不动 `get_platform_config` 的契约）。若不回：刷新后前端读不到映射 ⇒ 显示为空
-                # ⇒ 用户再点一次保存，前端上送空 ⇒ `save_config` 重写整条 fb 配置、覆盖不落盘
-                # ⇒ 已存的映射被**静默清掉**。缺省 `{}`（与 `get_platform_tables` 同口径）。
-                entry["columns"] = hd.get_platform_tables(db, uid, "fb")[0]["columns"]
+                # fb 与 tt 同形多表：回 `tables`（每项带 columns）。**不再回顶层 columns**
+                # —— B 之后 fb 的列映射覆盖挂在 tables[].columns 上。`fb_field_catalog` 仍由
+                # 下方 `if p in ("tt","fb")` 那段按平台回，列映射下拉的数据源不动。
+                entry["tables"] = hd.get_platform_tables(db, uid, "fb")
+                if entry["tables"] and entry["tables"][0]["sheet_name"]:
+                    entry["sheet_name"] = entry["tables"][0]["sheet_name"]
             if p in ("tt", "fb"):
                 # 列映射 UI 的下拉数据源（设计 §3.2）：**按平台**给，键名 `{platform}_field_catalog`。
                 # tt 的键名逐字不变（老前端零破坏）；gg 不给这个键（载荷形状不变）。
@@ -108,12 +109,12 @@ def dashboard_config_save():
     ss_id = _parse_sheet_id(str(data.get("spreadsheet_id") or "").strip())
     sheet_name = str(data.get("sheet_name") or "").strip()
 
-    # tables 可选：给了就走多表（仅 tt），没给走旧单表路径（gg/fb 与老前端）。
+    # tables 可选：给了就走多表（tt / fb），没给走旧单表路径（gg 与老前端）。
     raw_tables = data.get("tables")
     tables = None
     if raw_tables is not None:
-        if platform != "tt":
-            return err("多账户表只支持 tt", 400)
+        if platform not in ("tt", "fb"):
+            return err("多账户表只支持 tt / fb", 400)
         if not isinstance(raw_tables, list) or not raw_tables:
             return err("tables 必须是非空数组", 400)
         tables = []
@@ -159,29 +160,12 @@ def dashboard_config_save():
                 item["columns"] = cols
             tables.append(item)
 
-    # fb 的列映射覆盖在**顶层** `columns`（fb 仍是单表，没有 tables[]）。规则与 tt 的
-    # `tables[].columns` 逐字同款：空串合法（刻意不采集，允许多列同指）、非字符串一律 400、
-    # 同一字段被两列指定 ⇒ 400、白名单按**该平台**的目录取（fb 目录里没有 tt 的
-    # advertiser_id，反之亦然 —— 用错平台的字段名必须当场拒）。
-    fb_cols = data.get("columns")
-    if platform == "fb" and fb_cols is not None:
-        if not isinstance(fb_cols, dict):
-            return err("columns 必须是对象", 400)
-        allowed = hd._catalog_fields(platform)
-        seen_fields = set()
-        for header, field in fb_cols.items():
-            if isinstance(field, str) and field == "":
-                continue
-            if not isinstance(field, str) or field not in allowed:
-                return err(f"列「{header}」指向了未知字段「{field}」", 400)
-            if field in seen_fields:
-                return err(f"字段「{field}」被两列同时指定", 400)
-            seen_fields.add(field)
-
+    # fb 的列映射覆盖现在只随 `tables[].columns` 走（与 tt 逐字同款、同一段校验）；
+    # 顶层 `columns` 契约已作废 —— 不再读取，避免前端同时看到两套形状。
     db = database.get_db()
     try:
         hd.save_config(db, get_uid(), platform, ss_id, sheet_name, tables=tables,
-                       columns=fb_cols if isinstance(fb_cols, dict) else None)
+                       columns=None)
     finally:
         db.close()
     return ok({"message": "配置已保存"})

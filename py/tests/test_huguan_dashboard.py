@@ -7404,13 +7404,17 @@ class TestFbWritePathColMap:
 
 
 class TestFbColumnsPostValidation:
-    """POST 层放行 fb 的顶层 columns，白名单按平台取（设计 §4.7）。"""
+    """POST 层放行 fb 的 `tables[].columns`，白名单按平台取（设计 §4.7 / §4.3）。
+
+    B 之后 fb 与 tt 同形（多表）：顶层 `columns` 契约已作废，覆盖只随 `tables[]` 走。
+    """
 
     def _save(self, client, username, cols):
         hg, _uid = _create_user(client, username, role="huguan")
-        body = {"platform": "fb", "spreadsheet_id": "SS", "sheet_name": "账户管理分配"}
+        table = {"name": "账户管理分配", "sheet_name": "账户管理分配"}
         if cols is not None:
-            body["columns"] = cols
+            table["columns"] = cols
+        body = {"platform": "fb", "spreadsheet_id": "SS", "tables": [table]}
         return client.post("/api/huguan/dashboard", json=body, headers=hg)
 
     def test_fb_accepts_a_known_field(self, client):
@@ -7435,20 +7439,22 @@ class TestFbColumnsPostValidation:
         assert self._save(client, "_fbcols6", ["consumption"]).status_code == 400
 
     def test_saved_fb_columns_come_back_from_config_get(self, client):
-        """存了 fb 的列映射之后，配置 GET 必须**原样回给**前端。
+        """存了 fb 的列映射之后，配置 GET 必须从 `tables[].columns` **原样回给**前端。
 
         否则刷新后前端读不到映射 ⇒ 显示为空 ⇒ 用户再点一次保存，前端上送空 ⇒ 后端把整条
-        fb 配置重写、`columns` 不落盘 ⇒ 已存的覆盖被**静默清掉**。gg 绝不出这个键。
-        （把 GET 里给 fb enrich `columns` 的那行去掉，本用例即变红。）
+        fb 配置重写、`columns` 不落盘 ⇒ 已存的覆盖被**静默清掉**。gg 绝不出这两个键。
         """
         hg, _uid = _create_user(client, "_fbcols7", role="huguan")
         resp = client.post("/api/huguan/dashboard", json={
-            "platform": "fb", "spreadsheet_id": "SS", "sheet_name": "账户管理分配",
-            "columns": {"备注二": "consumption"}}, headers=hg)
+            "platform": "fb", "spreadsheet_id": "SS",
+            "tables": [{"name": "账户管理分配", "sheet_name": "账户管理分配",
+                        "columns": {"备注二": "consumption"}}]}, headers=hg)
         assert resp.status_code == 200, resp.get_json()
         conf = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
-        assert conf["fb"]["columns"] == {"备注二": "consumption"}
+        assert conf["fb"]["tables"][0]["columns"] == {"备注二": "consumption"}
+        assert "columns" not in conf["fb"], "顶层 columns 契约已作废"
         assert "columns" not in conf["gg"]
+        assert "tables" not in conf["gg"]
 
 
 # ---------- Task 4: fb 读路径（多表 + 户类型） ----------
@@ -7736,3 +7742,43 @@ class TestFbMultiSheetPushRoute:
         assert [r["account_id"] for r in b["rows"]] == ["FB-B"], \
             f"必须按 source_sheet 过滤；按 account_type/name 会漏行或错配：{b}"
         assert b["rows"][0]["cells"].get("E") == "FB-B", b
+
+
+# ---------- Task 9（子项目 B）：配置 GET/POST 的 fb 形状改 tables[].columns ----------
+
+class TestFbConfigTablesShape:
+    def _hg(self, client, username):
+        hg, _ = _create_user(client, username, role="huguan")
+        return hg
+
+    def test_get_fb_returns_tables_and_catalog_not_top_level_columns(self, client):
+        hg = self._hg(client, "_fbc1")
+        client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "fb", "spreadsheet_id": "SS",
+            "tables": [{"name": "加白户", "sheet_name": "加白户表", "columns": {"时区": "consumption"}},
+                       {"name": "企业户", "sheet_name": "企业户表"}]})
+        fb = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["fb"]
+        assert [t["name"] for t in fb["tables"]] == ["加白户", "企业户"]
+        assert fb["tables"][0]["columns"] == {"时区": "consumption"}
+        assert "columns" not in fb, "fb 不再有顶层 columns（迁移到 tables[].columns）"
+        assert isinstance(fb["fb_field_catalog"], list), "fb_field_catalog 保留（列映射下拉还用它）"
+
+    def test_post_fb_tables_columns_whitelist(self, client):
+        """fb 的 tables[].columns 白名单按 fb 目录取，与 tt 同口径。"""
+        hg = self._hg(client, "_fbc2")
+        ok_resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "fb", "spreadsheet_id": "SS",
+            "tables": [{"name": "加白户", "sheet_name": "加白户表", "columns": {"时区": "consumption"}}]})
+        assert ok_resp.status_code == 200
+        bad_resp = client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "fb", "spreadsheet_id": "SS",
+            "tables": [{"name": "加白户", "sheet_name": "加白户表",
+                        "columns": {"某列": "不存在的字段"}}]})
+        assert bad_resp.status_code == 400
+
+    def test_gg_shape_unchanged(self, client):
+        hg = self._hg(client, "_fbc3")
+        client.post("/api/huguan/dashboard", headers=hg, json={
+            "platform": "gg", "spreadsheet_id": "G1", "sheet_name": "看板"})
+        gg = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["gg"]
+        assert gg == {"spreadsheet_id": "G1", "sheet_name": "看板"}
