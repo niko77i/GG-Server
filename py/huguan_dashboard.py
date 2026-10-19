@@ -1426,7 +1426,8 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
     产出里可能带五个**下划线开头的合成键**（不是数据库列，调用方必须先摘掉）：
     `_is_dead` 死亡标记、`_pending_status` 系统里还没有的状态名、
     `_primary_bm_name`（FB 专有，表里填的主 BM 名）、
-    `_account_type`（TT 专有，由调用方按「这一行读自哪张表」注入的户类型）、
+    `_account_type`（tt/fb，调用方注入的户类型，fb 是「资产类型」原串）、
+    `_source_sheet`（fb 专有，读自哪张表）、
     `_sheet_name`（TT 专有，表里「账户名称」列的值，供新建账户决定 `name`）、
     `_pending_master`（系统字典里缺的 BC/渠道/国家时区，dry_run 只产不写，落库才补建）。
 
@@ -1515,6 +1516,13 @@ def _collect_updates(db, platform, p, owner_id, row_no, warnings, *, create_miss
         # 与 `_account_type` 同理无条件产出（未映射时 `p.get("name")` 为 None →
         # 空串），由 apply_diff 的 create 分支回落账户ID。
         out["_sheet_name"] = _conf_text(p.get("name"))
+    if platform == "fb":
+        # 户类型 + 来源表（spec §4.4）：两个键都**无条件产出**（值缺失时空串），理由同 tt 的
+        # _account_type —— 缺键会让已存账户被判成「变了」⇒ 整行虚报「将更新」。
+        # account_type 是「资产类型」单元格原串（不是表名、不是配置里的 name）；
+        # source_sheet 是「读自哪张工作表」。
+        out["_account_type"] = _conf_text(p.get("_account_type"))
+        out["_source_sheet"] = _conf_text(p.get("_source_sheet"))
     # 国家 → 时区：表里两列都有、而 regions 里没有这个国家 ⇒ 记 pending（**只查库、不写**）。
     # 国家或时区缺一不建：建出「有国家没时区」的残项会被当成已有、再也补不上。
     # 只在 tt 产（gg/fb 的国家列本轮不映射、也不补建字典）。
@@ -1560,11 +1568,19 @@ def _same_as_existing(db, platform, existing: dict, key: str, value) -> bool:
     if key == "_is_dead":
         cur_dead = bool((existing.get("death_date") or "").strip())
         return cur_dead == bool(value)
-    if key == "_account_type":
-        # 合成键：库里对应的是真实列 account_type。不加这一支会落到下面的通用比较，
-        # 拿 existing["_account_type"]（不存在 → None）去比 → 恒判「变了」，
+    if key in ("_account_type", "_source_sheet"):
+        # 合成键：库里对应的是真实列 account_type / source_sheet。不加这一支会落到下面的
+        # 通用比较，拿 existing["_account_type"]（不存在 → None）去比 → 恒判「变了」，
         # 于是每次同步都把每一行报成「将更新」。
-        return _conf_text(existing.get("account_type")) == _conf_text(value)
+        # **空值视为无变化**（spec §4.9）：fb 的 account_type 来自表里「资产类型」单元格、
+        # source_sheet 来自「读自哪张表」，两者在 §4.4 都**无条件产出**（缺失时空串），
+        # 而 apply_diff 的更新口径是「只在非空时写」。若拿空串去比库里非空值，库里是
+        # 「企业户」+ 本次表里那格空着 ⇒ 恒判「变了」⇒ 整份报告虚报「将更新」。
+        # tt 的 _account_type 恒非空（表名即类型名），加「空 ⇒ 无变化」不影响 tt（逐字节不变）。
+        col = "account_type" if key == "_account_type" else "source_sheet"
+        if _conf_text(value) == "":
+            return True
+        return _conf_text(existing.get(col)) == _conf_text(value)
     if key == "_primary_bm_name":
         # 合成键：当前主 BM 名不在业务表行上（挂在中间表 fb_account_bm），
         # existing 里取不到，必须现查 —— 否则「表里清空位置」会被误判成「没变」
@@ -1818,9 +1834,12 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # fb_accounts 的列。**必须在下面 `cols = ", ".join(src)` 之前摘掉**，
             # 否则会拼出 `INSERT INTO fb_accounts(..., _primary_bm_name)` 直接报错。
             fb_bm_name = src.pop("_primary_bm_name", None) if platform == "fb" else None
-            # 户类型（规格 §4.3 第 ④ 环）：合成键必须在拼 SQL 之前摘掉，
-            # 否则会拼出 `INSERT INTO tt_accounts(..., _account_type)` 直接报错。
-            account_type = src.pop("_account_type", None) if platform == "tt" else None
+            # 户类型（spec §4.3 第 ④ 环）：合成键必须在拼 SQL 之前摘掉，否则会拼出
+            # `INSERT INTO tt_accounts(..., _account_type)` 直接报错。
+            # tt：account_type 存户类型名，空值回落默认「加白户」；fb：存「资产类型」原串
+            #     （可空 —— 空 = 该行没填资产类型），另加 source_sheet（读自哪张表）。
+            account_type = src.pop("_account_type", None) if platform in ("tt", "fb") else None
+            source_sheet = src.pop("_source_sheet", None) if platform == "fb" else None
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读）
             pending = item.get("pending_status")
             if pending:
@@ -1839,7 +1858,12 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             src["name"] = (src.pop("_sheet_name", None) or "").strip() or item["account_id"]
             src["owner_id"] = item.get("owner_id")
             if account_type is not None:
-                src["account_type"] = account_type or TT_DEFAULT_ACCOUNT_TYPE
+                # tt：空类型回落默认「加白户」；fb：account_type 是资产类型原串，空就是空，
+                #     绝不回落 TT 的默认类型。
+                src["account_type"] = account_type if platform == "fb" \
+                    else (account_type or TT_DEFAULT_ACCOUNT_TYPE)
+            if source_sheet is not None:
+                src["source_sheet"] = source_sheet
             # FB 无 death_date 列（子项目 ① 已确认，设计 §6.1）：生死只由状态列承载，
             # 「apply_diff 不据此写 death_date」。无条件写会让 FB 的 INSERT 直接
             # `no column named death_date` —— 整条 to_create 失败，主 BM（位置列）也就挂不上。
@@ -1903,10 +1927,15 @@ def apply_diff(db, diff: dict, platform: str, confirmed: dict, user_id: int,
             # 要落到下面的 else 分支「只清主 BM 标记、不删关联行」（设计 §6.3）。
             new_bm_name = fields.pop("_primary_bm_name", None) if platform == "fb" else None
             # 同 create：`sets = [f"{k}=?" for k in fields]` 会无条件把每个键拼进 SET，
-            # 漏 pop 就是 `UPDATE tt_accounts SET _account_type=?` 直接报错。
-            account_type = fields.pop("_account_type", None) if platform == "tt" else None
+            # 漏 pop 就是 `UPDATE fb_accounts SET _account_type=?` 直接报错。
+            account_type = fields.pop("_account_type", None) if platform in ("tt", "fb") else None
+            source_sheet = fields.pop("_source_sheet", None) if platform == "fb" else None
+            # 只在非空时写（照 TT 对 account_type 的既有口径）：空值不覆盖，避免「表里那格
+            # 空着」把已有分类擦掉（spec §4.5）。
             if account_type:
                 fields["account_type"] = account_type
+            if source_sheet:
+                fields["source_sheet"] = source_sheet
             # 系统里还没有的状态名，到这一步才建行（build_diff 全程只读，规格 §8.3
             # 步骤 7/8）。owner 取该行作用域归属，只记「谁先建的」——不参与查重。
             pending = item.get("pending_status")

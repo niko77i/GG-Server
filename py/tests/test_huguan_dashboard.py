@@ -7449,3 +7449,118 @@ class TestFbColumnsPostValidation:
         conf = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]
         assert conf["fb"]["columns"] == {"备注二": "consumption"}
         assert "columns" not in conf["gg"]
+
+
+# ---------- Task 4: fb 读路径（多表 + 户类型） ----------
+
+class TestFbMultiSheetReadPath:
+    """fb 读路径：逐行注入两个合成键 + 空产出不算变（spec §4.4 / §4.9）。"""
+
+    def _seed_user(self):
+        db = database.get_db()
+        db.execute("INSERT OR IGNORE INTO users(id, username, password, role, platform) "
+                   "VALUES(1, 'fb_ms_u', 'x', 'user', 'fb')")
+        db.commit()
+        return db
+
+    def test_collect_updates_produces_both_keys_for_fb(self):
+        db = self._seed_user()
+        # p 模拟 parse_row 产出：asset_type_name 是「资产类型」单元格原串
+        p = {"account_id": "MS-1", "asset_type_name": "企业户",
+             "_account_type": "企业户", "_source_sheet": "企业户表"}
+        out = hd._collect_updates(db, "fb", p, None, 2, [])
+        assert out["_account_type"] == "企业户"
+        assert out["_source_sheet"] == "企业户表"
+        db.close()
+
+    def test_same_as_existing_empty_value_means_no_change(self):
+        """§4.9 的坑：库里 account_type 非空 + 本次产出空串 ⇒ 视为无变化（不进 to_update）。"""
+        db = self._seed_user()
+        existing = {"account_type": "企业户", "source_sheet": "企业户表"}
+        assert hd._same_as_existing(db, "fb", existing, "_account_type", "") is True
+        assert hd._same_as_existing(db, "fb", existing, "_source_sheet", "") is True
+        # 相同值也必须比对**真实列**（若整条分支被删，通用比较拿 None 去比 ⇒ 恒 False）
+        assert hd._same_as_existing(db, "fb", existing, "_account_type", "企业户") is True
+        assert hd._same_as_existing(db, "fb", existing, "_source_sheet", "企业户表") is True
+        # 非空但不同 ⇒ 才是真的「变了」
+        assert hd._same_as_existing(db, "fb", existing, "_account_type", "加白户") is False
+        db.close()
+
+    def test_build_diff_empty_account_type_does_not_report_update(self):
+        """库里分类非空 + 表里那格空着 ⇒ 该行**不进 to_update**（整份报告不虚报）。"""
+        db = self._seed_user()
+        # 临时库的 account_statuses 是空的：不先建「存活」，`_pending_status` 单独就能把
+        # 整行推进 to_update（同 TestAccountTypeFlow.test_same_type_produces_no_update 的坑），
+        # 那样就测不到「空产出不算变」这一条了。
+        db.execute("INSERT INTO account_statuses(name, platform) VALUES('存活','fb')")
+        sid = db.execute("SELECT id FROM account_statuses "
+                         "WHERE name='存活' AND platform='fb'").fetchone()[0]
+        # 库里状态与表里的「存活」一致，否则 status_id 这一项会单独把行推进 to_update。
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, "
+                   "status_id, owner_id) VALUES('户甲', 'MS-9', '企业户', '企业户表', ?, 1)", (sid,))
+        db.commit()
+        # 表里那格空着：_account_type 无条件产出空串（_source_sheet 恒为表名，非空）
+        rows = [{"row": 2, "account_id": "MS-9", "asset_type_name": "",
+                 "_account_type": "", "_source_sheet": "企业户表",
+                 "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "fb")
+        assert not any(u["account_id"] == "MS-9" for u in diff["to_update"]), \
+            "空产出必须视为无变化，否则整份报告虚报「将更新」"
+        db.close()
+
+
+# ---------- Task 5: fb 两键落库 ----------
+
+class TestFbAccountTypeFlow:
+    """fb 的 account_type / source_sheet 落库（spec §4.5）。"""
+
+    def _seed_user(self):
+        db = database.get_db()
+        db.execute("INSERT OR IGNORE INTO users(id, username, password, role, platform) "
+                   "VALUES(1, 'fb_atf_u', 'x', 'user', 'fb')")
+        db.commit()
+        return db
+
+    def test_create_writes_both_keys(self):
+        db = self._seed_user()
+        rows = [{"row": 2, "_account_type": "企业户", "_source_sheet": "企业户表",
+                 "account_id": "ATF-1", "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "fb")
+        assert diff["to_create"][0]["db_values"]["_account_type"] == "企业户"
+        assert diff["to_create"][0]["db_values"]["_source_sheet"] == "企业户表"
+        result = hd.apply_diff(db, diff, "fb", {"create": ["ATF-1"]}, user_id=1)
+        assert result["created"] == 1
+        r = db.execute("SELECT account_type, source_sheet FROM fb_accounts WHERE account_id='ATF-1'").fetchone()
+        assert (r["account_type"], r["source_sheet"]) == ("企业户", "企业户表")
+        db.close()
+
+    def test_create_allows_empty_account_type(self):
+        """fb 的 account_type 可空（表里那格空着）—— 不能回落成任何默认类型。"""
+        db = self._seed_user()
+        rows = [{"row": 2, "_account_type": "", "_source_sheet": "加白户表",
+                 "account_id": "ATF-2", "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "fb")
+        hd.apply_diff(db, diff, "fb", {"create": ["ATF-2"]}, user_id=1)
+        r = db.execute("SELECT account_type FROM fb_accounts WHERE account_id='ATF-2'").fetchone()
+        assert r["account_type"] == "", "fb 空资产类型不能回落成 TT 的默认「加白户」"
+        db.close()
+
+    def test_update_only_writes_non_empty_keys(self):
+        """表里那格空着 ⇒ 不擦掉已有分类（spec §4.5 空值不覆盖）。"""
+        db = self._seed_user()
+        # 夹具前提（与 T4 第三条用例同）：临时库无状态，`_pending_status` 会单独把行推进
+        # to_update；建了状态后库里账户的 status_id 也要指向它，否则 status_id 这一项同样
+        # 会制造「有更新」，就测不到「空 account_type 不算变」了。
+        db.execute("INSERT INTO account_statuses(name, platform) VALUES('存活','fb')")
+        sid = db.execute("SELECT id FROM account_statuses "
+                         "WHERE name='存活' AND platform='fb'").fetchone()[0]
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, "
+                   "status_id, owner_id) VALUES('户甲', 'ATF-3', '企业户', '企业户表', ?, 1)",
+                   (sid,))
+        db.commit()
+        rows = [{"row": 2, "_account_type": "", "_source_sheet": "企业户表",
+                 "account_id": "ATF-3", "owner_name": "", "status_name": "存活"}]
+        diff = hd.build_diff(db, rows, "fb")
+        # §4.9：空 account_type 视为无变化 ⇒ 这一行根本不该进 to_update
+        assert not any(u["account_id"] == "ATF-3" for u in diff["to_update"])
+        db.close()

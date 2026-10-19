@@ -294,6 +294,12 @@ def dashboard_sync():
                     # `_account_type`，缺键（→ 空串）会让「加白户」的既有账户被判成
                     # 「变了」⇒ 整行虚报「将更新」（见 `_same_as_existing`）。
                     parsed["_account_type"] = t["name"]
+                if platform == "fb":
+                    # 户类型 = 该行「资产类型」单元格原串（不是表名、不是配置里的 name，spec §4.4）。
+                    # 资产类型列在 COLUMN_SPEC 里的字段key 是 asset_type_name，parse_row 已产出原串。
+                    parsed["_account_type"] = hd._conf_text(parsed.get("asset_type_name"))
+                    # 回写路由 = 读自哪张工作表（source_sheet），与户类型解耦（spec §4.2）。
+                    parsed["_source_sheet"] = t["sheet_name"]
                 parsed_rows.append(parsed)
 
         t0 = _tick("解析完成", t0)
