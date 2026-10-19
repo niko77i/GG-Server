@@ -67,13 +67,13 @@
         </template>
         <div v-for="(t, i) in hdForm.tables" :key="i" style="margin-bottom:8px;">
           <div style="display:flex;gap:8px;align-items:center;">
-            <el-input v-if="HD_PLATFORM === 'tt'" v-model="t.name" placeholder="户类型名，如 加白户"
+            <el-input v-if="HD_PLATFORM !== 'gg'" v-model="t.name" placeholder="户类型名，如 加白户"
                       style="width:180px;" :disabled="hdBusy" />
             <el-select v-model="t.sheet_name" filterable allow-create default-first-option
                        placeholder="选择或输入工作表名" style="flex:1;" :disabled="hdBusy">
               <el-option v-for="name in hdSheets" :key="name" :label="name" :value="name" />
             </el-select>
-            <el-button v-if="HD_PLATFORM === 'tt'" :disabled="hdBusy" @click="removeHdTable(i)">删除</el-button>
+            <el-button v-if="HD_PLATFORM !== 'gg'" :disabled="hdBusy" @click="removeHdTable(i)">删除</el-button>
           </div>
 
           <!-- 列映射（第二批 §3.4）：每张表各自的「读表头 → 逐列指派」面板。
@@ -181,7 +181,7 @@
                  图标沿用既有语言（⬇️ 表→系统 / ⬆️ 系统→表），与平台级按钮同款。
                  没填工作表名时禁用并给提示：空名发出去会被后端当成「全部表」（静默跑全量），
                  而不是报错 —— 这里必须拦住。 -->
-            <el-tooltip v-if="HD_PLATFORM === 'tt'" content="先在左边填这张表的工作表名" placement="top" :disabled="!!hdSheetKey(t)">
+            <el-tooltip v-if="HD_PLATFORM !== 'gg'" content="先在左边填这张表的工作表名" placement="top" :disabled="!!hdSheetKey(t)">
               <span class="hd-sheet-actions">
                 <el-button size="small" plain
                            :loading="!!hdSheetBusy && hdSheetBusy.sheet === hdSheetKey(t) && hdSheetBusy.dir === 'sync'"
@@ -200,9 +200,9 @@
             正在处理「{{ hdSheetBusy.sheet }}」，请稍候…
           </div>
         </div>
-        <el-button v-if="HD_PLATFORM === 'tt'" size="small" :disabled="hdBusy" @click="addHdTable">＋ 新增户类型</el-button>
-        <div v-if="HD_PLATFORM === 'tt' && !hdForm.tables.length" style="font-size:12px;color:#e6a23c;margin-top:6px;">
-          还没配任何账户表。至少要有「加白户」一条，否则同步会读不到数据。
+        <el-button v-if="HD_PLATFORM !== 'gg'" size="small" :disabled="hdBusy" @click="addHdTable">＋ 新增户类型</el-button>
+        <div v-if="HD_PLATFORM !== 'gg' && !hdForm.tables.length" style="font-size:12px;color:#e6a23c;margin-top:6px;">
+          还没配任何账户表。至少要有「{{ HD_PLATFORM === 'fb' ? '账户管理分配' : '加白户' }}」一条，否则同步会读不到数据。
         </div>
       </div>
 
@@ -221,8 +221,8 @@
                     :disabled="hdConfigured">
           <span style="display:inline-flex;gap:24px;align-items:center;flex-wrap:wrap;">
             <span style="display:inline-flex;gap:8px;align-items:center;">
-              <!-- tt 下文案改「⬆️ 全部刷新」并挂列出所有表的 tooltip（视觉规格 §平台级按钮）；
-                   这两个是「全部表」，按表入口在每张表那一行。gg/fb 文案逐字节不变。 -->
+              <!-- tt / fb 下文案改「⬆️ 全部刷新」并挂列出所有表的 tooltip（视觉规格 §平台级按钮）；
+                   这两个是「全部表」，按表入口在每张表那一行。gg 文案逐字节不变。 -->
               <el-tooltip :content="hdTablesTip" placement="top" :disabled="!hdTablesTip">
                 <el-button @click="openPushDlg(null)" :loading="hdPushing"
                            :disabled="!hdConfigured || hdBusy">{{ hdPushBtnLabel }}</el-button>
@@ -870,7 +870,7 @@ import { sheetWriteApi } from '@/api/sheetWrite'
 import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 // 列映射的纯换算（表头响应 ↔ 下拉行状态）。**不要在组件里重推一遍映射** —— 三值约定
 // （字段key / "" 刻意不采集 / null 未指派）只有这一份实现，node --test 覆盖的就是它。
-import { rowsFromColumns, columnsFromRows, pickColumn, seedTables, flattenColumns } from '@/utils/columnMapping.mjs'
+import { rowsFromColumns, columnsFromRows, pickColumn, seedTables } from '@/utils/columnMapping.mjs'
 // 大批量结果的「预览」纯逻辑（T1 已交付，node --test 覆盖）。slicePreview 限行、selectedIds
 // 把「默认全选」用「全量 − 排除集」表示 —— 这样只渲染前 100 行也不会丢掉另外几千行的勾选。
 import { DEFAULT_PREVIEW_LIMIT, slicePreview, selectedIds, groupWarnings } from '@/utils/previewRows.mjs'
@@ -971,27 +971,26 @@ const hdBusy = computed(() =>
   || !!hdUndoing.value || syncDlg.applying || !!hdSheetBusy.value)
 const hdConfigured = computed(() => {
   if (!hdForm.value.spreadsheet_id) return false
-  if (HD_PLATFORM === 'tt') {
+  if (HD_PLATFORM === 'tt' || HD_PLATFORM === 'fb') {
+    // tt / fb 都是多表：必须同时有户类型名与工作表名才算配置好（与保存校验同口径）。
     return hdForm.value.tables.some(t => (t.name || '').trim() && (t.sheet_name || '').trim())
-  }
-  if (HD_PLATFORM === 'fb') {
-    // fb 没有户类型名，只看工作表名
-    return hdForm.value.tables.some(t => (t.sheet_name || '').trim())
   }
   return !!hdForm.value.sheet_name
 })
 
-// 平台级两个按钮的文案（视觉规格 §平台级按钮）：tt 下改「全部导入 / 全部刷新」，与每张表
-// 那一行的按表入口构成两层且无歧义；gg/fb 只有一张表、按表无意义 ⇒ 逐字节不变。
-const hdPushBtnLabel = HD_PLATFORM === 'tt' ? '⬆️ 全部刷新' : '🔄 刷新到看板'
-const hdSyncBtnLabel = HD_PLATFORM === 'tt' ? '⬇️ 全部导入' : '⬇️ 从表同步到系统'
-// tt 的按表配置里所有填了工作表名的表名（按配置顺序）—— 给平台级按钮当 tooltip 用。
+// 平台级两个按钮的文案（视觉规格 §平台级按钮）：tt / fb 下改「全部导入 / 全部刷新」，
+// 与每张表那一行的按表入口构成两层且无歧义；gg 只有一张表、按表无意义 ⇒ 逐字节不变。
+const hdPushBtnLabel = (HD_PLATFORM === 'tt' || HD_PLATFORM === 'fb')
+  ? '⬆️ 全部刷新' : '🔄 刷新到看板'
+const hdSyncBtnLabel = (HD_PLATFORM === 'tt' || HD_PLATFORM === 'fb')
+  ? '⬇️ 全部导入' : '⬇️ 从表同步到系统'
+// tt / fb 的按表配置里所有填了工作表名的表名（按配置顺序）—— 给平台级按钮当 tooltip 用。
 const hdPlatformTables = computed(() => (hdForm.value.tables || [])
   .map(t => ((t && t.sheet_name) || '').trim()).filter(Boolean))
-// 空串 = 不挂 tooltip（gg/fb、未配置、或一张表都没填）。挂上时两条 tooltip 不叠加：
+// 空串 = 不挂 tooltip（gg、未配置、或一张表都没填）。挂上时两条 tooltip 不叠加：
 // 未配置时这条为空，让位给外层那条「请先填写表格地址…」。
-const hdTablesTip = computed(() => (HD_PLATFORM === 'tt' && hdConfigured.value
-  && hdPlatformTables.value.length)
+const hdTablesTip = computed(() => ((HD_PLATFORM === 'tt' || HD_PLATFORM === 'fb')
+  && hdConfigured.value && hdPlatformTables.value.length)
   ? `所有表：${hdPlatformTables.value.join('、')}` : '')
 // 刷新确认弹窗里那行「范围」（视觉规格修正 2026-10-10）：说清这次写的是哪张表。
 const hdPushScopeText = computed(() => (pushDlg.sheet
@@ -1417,7 +1416,8 @@ async function loadHdConfig() {
     hdForm.value = {
       spreadsheet_id: conf.spreadsheet_id || '',
       sheet_name: conf.sheet_name || '',
-      // tt 的多表 / fb 的单表（扁平配置摊成一条）都在 seedTables 里；gg 得到 []（没有表格列表）。
+      // tt / fb 的多表（fb 的存量扁平配置摊成一条）都在 seedTables 里；
+      // gg 得到 []（没有表格列表）。
       tables: seedTables(conf, HD_PLATFORM),
     }
     // 基线 = 刚从服务器读回的样子 ⇒ 此刻什么都是「已保存」。
@@ -1665,8 +1665,8 @@ async function saveHdConfig() {
       platform: HD_PLATFORM,
       spreadsheet_id: hdForm.value.spreadsheet_id,
     }
-    if (HD_PLATFORM === 'tt') {
-      // tt 走多表。空行（用户点了「+ 新增」还没填完）在这里被过滤掉 ——
+    if (HD_PLATFORM === 'tt' || HD_PLATFORM === 'fb') {
+      // tt / fb 都走多表。空行（用户点了「+ 新增」还没填完）在这里被过滤掉 ——
       // 后端会 400，但用户在填的过程中不该被拦，所以只要有一条完整就发。
       const tables = hdForm.value.tables
         .map((t) => {
@@ -1680,13 +1680,10 @@ async function saveHdConfig() {
         })
         .filter(t => t.name && t.sheet_name)
       body.tables = tables
-    } else if (HD_PLATFORM === 'fb') {
-      // fb 仍是单表：摊平的 sheet_name + columns 在顶层（设计 §4.6）
-      Object.assign(body, flattenColumns('fb', hdForm.value.tables))
     } else {
       body.sheet_name = hdForm.value.sheet_name
     }
-    if (HD_PLATFORM === 'tt' && (!body.tables || !body.tables.length)) {
+    if ((HD_PLATFORM === 'tt' || HD_PLATFORM === 'fb') && (!body.tables || !body.tables.length)) {
       ElMessage.warning('至少要配一张账户表（类型名 + 工作表名）')
       return
     }

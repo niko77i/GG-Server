@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { seedTables, flattenColumns } from '../src/utils/columnMapping.mjs'
 
-test('fb：扁平配置摊成一条 table', () => {
+test('fb：存量扁平配置（legacy 过渡态）摊成一条 table', () => {
   const rows = seedTables(
     { spreadsheet_id: 'SS', sheet_name: '账户管理分配', columns: { 时区: 'consumption' } }, 'fb')
   assert.deepEqual(rows, [{ name: '', sheet_name: '账户管理分配',
@@ -36,11 +36,15 @@ test('gg：既没有 tables 也不摊平（该分支不渲染表格列表）', (
   assert.deepEqual(seedTables({ sheet_name: 'X' }, 'gg'), [])
 })
 
-test('fb：折回时只带 sheet_name 与非空 columns', () => {
+test('fb：折回时产出 tables 数组（空行过滤、空 columns 不上送）', () => {
   assert.deepEqual(
-    flattenColumns('fb', [{ name: '', sheet_name: ' 账户管理分配 ', columns: { 时区: 'consumption' } }]),
-    { sheet_name: '账户管理分配', columns: { 时区: 'consumption' } })
+    flattenColumns('fb', [{ name: '加白户', sheet_name: ' 账户管理分配 ',
+                            columns: { 时区: 'consumption' } }]),
+    [{ name: '加白户', sheet_name: '账户管理分配', columns: { 时区: 'consumption' } }])
+  assert.deepEqual(
+    flattenColumns('fb', [{ name: '加白户', sheet_name: 'S', columns: {} }]),
+    [{ name: '加白户', sheet_name: 'S' }])            // 空 columns 不上送（配置文本逐字节不变）
   assert.deepEqual(
     flattenColumns('fb', [{ name: '', sheet_name: 'S', columns: {} }]),
-    { sheet_name: 'S' })                              // 空 columns 不上送（配置文本逐字节不变）
+    [])                                               // 没填户类型名的空行被过滤
 })
