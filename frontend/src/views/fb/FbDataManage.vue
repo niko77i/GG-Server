@@ -77,8 +77,7 @@
       <el-table-column
         v-for="col in visibleColumnDefs" :key="col.prop"
         :prop="col.prop" :label="col.label"
-        :width="colWidth(col)"
-        :min-width="colMinWidth(col)"
+        :min-width="col.cost ? costColWidth() : col.minWidth"
       >
         <template #default="{ row }">
           <!-- 「消耗」列：户管可内联改（仅此角色）；其余角色与改动前逐字一致。
@@ -187,18 +186,21 @@ const selectedIds = ref([]); const productOptions = ref([]); const lineOptions =
 // 默认可见 = 改动前的默认形态：前 6 列可见、5 个详情列隐藏 ⇒ 普通 user 的表格几何不变。
 // 偏好存 localStorage（key 与 GG 的分开），不落后端。
 const COL_STORAGE_KEY = 'fb_data_manage_columns'
+// 全部用 min-width（与 GG 页一致）：可见列少时，剩余宽度按比例分给**所有**列；
+// 可见列多时各自收缩到最小值、出现横向滚动。
+// ⚠️ 不要改回 `width` —— 固定宽度 + 列少 ⇒ 剩余宽度无处可去，列分配会很难看。
 const allColumns = [
   { prop: 'product_name',      label: '产品名',       minWidth: 100 },
   { prop: 'line_name',         label: '线名',         minWidth: 100 },
-  { prop: 'report_date',       label: '日期',         width: 110 },
+  { prop: 'report_date',       label: '日期',         minWidth: 110 },
   { prop: 'account_name',      label: '账户名称',     minWidth: 120 },
-  { prop: 'account_id',        label: '账户ID',       width: 160 },
+  { prop: 'account_id',        label: '账户ID',       minWidth: 160 },
   { prop: 'cost',              label: '消耗',         cost: true },
-  { prop: 'impressions',       label: '展示',         width: 90 },
-  { prop: 'clicks',            label: '点击',         width: 80 },
-  { prop: 'registrations',     label: '注册',         width: 80 },
-  { prop: 'purchases',         label: '购物',         width: 80 },
-  { prop: 'cost_per_purchase', label: '单词购物费用', width: 120 },
+  { prop: 'impressions',       label: '展示',         minWidth: 90 },
+  { prop: 'clicks',            label: '点击',         minWidth: 80 },
+  { prop: 'registrations',     label: '注册',         minWidth: 80 },
+  { prop: 'purchases',         label: '购物',         minWidth: 80 },
+  { prop: 'cost_per_purchase', label: '单词购物费用', minWidth: 120 },
 ]
 const DEFAULT_VISIBLE_COLUMNS = ['product_name', 'line_name', 'report_date',
                                  'account_name', 'account_id', 'cost']
@@ -217,23 +219,10 @@ function loadColumnPrefs() {
   return [...DEFAULT_VISIBLE_COLUMNS]
 }
 const visibleColumns = ref(loadColumnPrefs())
-const visibleColumnDefs = computed(() => {
-  const cols = allColumns.filter(c => visibleColumns.value.includes(c.prop))
-  // 最后一列改为**可伸缩**：否则当可见列总宽 < 容器宽时，`fixed="right"` 的操作列
-  // 会被钉在容器最右边，和数据列之间留出一大块空白（只勾「账号+消耗」时必现）。
-  return cols.map((c, i) => (i === cols.length - 1 ? { ...c, flex: true } : c))
-})
-// 「消耗」列宽：普通 user 100（几何不变）；户管多一个 ✏️ 按钮 ⇒ 150。
+const visibleColumnDefs = computed(() =>
+  allColumns.filter(c => visibleColumns.value.includes(c.prop)))
+// 「消耗」列的最小宽：普通 user 100；户管多一个 ✏️ 按钮（不收缩） ⇒ 150。
 function costColWidth() { return auth.canEditReportCost ? 150 : 100 }
-// 可伸缩列（最后一列）用 min-width 撑开，其余列沿用各自的固定/最小宽。
-function colWidth(col) {
-  if (col.flex) return undefined
-  return col.cost ? costColWidth() : col.width
-}
-function colMinWidth(col) {
-  if (!col.flex) return col.minWidth
-  return col.cost ? costColWidth() : (col.minWidth || col.width || 120)
-}
 function saveColumnPrefs() {
   hasExplicitColumnPrefs = true
   localStorage.setItem(COL_STORAGE_KEY, JSON.stringify(visibleColumns.value))
