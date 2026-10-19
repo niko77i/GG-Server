@@ -7782,3 +7782,108 @@ class TestFbConfigTablesShape:
             "platform": "gg", "spreadsheet_id": "G1", "sheet_name": "看板"})
         gg = client.get("/api/huguan/dashboard", headers=hg).get_json()["config"]["gg"]
         assert gg == {"spreadsheet_id": "G1", "sheet_name": "看板"}
+
+
+# ---------- Task 12（子项目 B）：端到端「两张表互不串」 ----------
+
+class TestFbTwoTableEndToEnd:
+    """两张 FB 表、各一行，刷新时互不串（spec §七 的核心锚 / §八-I）。
+
+    走**真实写路径** `routes.huguan_sheet_targets.huguan_dashboard_sync`：它就是
+    `push_rows` 后台 target 重建最终调到的那个同步函数（`push_rows` →
+    `run_write_many` → `huguan_dashboard_many_sync` → `huguan_dashboard_sync`）。
+    只打桩两条外部依赖（表头解析、Sheets 写入），分组 / 选表 / 按 `source_sheet`
+    过滤全部走真实实现。
+
+    ⚠️ 不直接调 `hd.push_rows`：它走 `run_write_many` 的后台线程，函数返回时
+    `writes` 往往还是空的（时序不稳）；直调 sync 的判据与后台线程内执行的**同一函数**
+    一致，只是去掉了与路由无关的日志登记。
+    """
+
+    TABLES = [{"name": "加白户", "sheet_name": "加白户表"},
+              {"name": "企业户", "sheet_name": "企业户表"}]
+
+    def _seed(self, client, accounts):
+        """建一个户管 + 两张表配置 + 给定账户；返回 user_id。"""
+        _hg, uid = _create_user(client, "_fb_e2e", role="huguan", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"fb": {
+                       "spreadsheet_id": "SS", "tables": self.TABLES}})))
+        for name, account_id, account_type, source_sheet in accounts:
+            db.execute("INSERT INTO fb_accounts"
+                       "(name, account_id, account_type, source_sheet, owner_id) "
+                       "VALUES(?,?,?,?,?)",
+                       (name, account_id, account_type, source_sheet, uid))
+        db.commit()
+        db.close()
+        return uid
+
+    def _stub(self, monkeypatch):
+        """打桩两条外部依赖，返回捕获到的写入列表。
+
+        `resolve_table_col_map` 固定成「资产UID=D」（两张表同映射）——本用例只验
+        选表，不验逐表表头；`update_rows_by_account_id` 记录每次调用的
+        `{sheet_name, key_col, rows}`。
+        """
+        import google_sheets_service as gs
+        writes = []
+
+        def _upd(svc, sid, name, rows, key_col=None):
+            writes.append({"sheet_name": name, "key_col": key_col,
+                           "rows": [dict(r) for r in rows]})
+            return {"updated": len(rows), "not_found": []}
+
+        monkeypatch.setattr(hd, "resolve_table_col_map", lambda *a, **k: {"account_id": "D"})
+        monkeypatch.setattr(gs, "build_service", lambda _p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _upd)
+        return writes
+
+    def test_two_tables_write_back_to_own_sheet(self, client, monkeypatch):
+        """两张表各一行 ⇒ 各自写回各自的工作表（spec §七「两表各一行、互不串」）。"""
+        import routes.huguan_sheet_targets as hst
+        uid = self._seed(client, [
+            ("户甲", "E2E-1", "企业户", "企业户表"),
+            ("户乙", "E2E-2", "加白户", "加白户表"),
+        ])
+        writes = self._stub(monkeypatch)
+        hst.huguan_dashboard_sync(uid, "fb", ["E2E-1", "E2E-2"])
+        by_sheet = {w["sheet_name"]: [r["account_id"] for r in w["rows"]] for w in writes}
+        assert set(by_sheet) == {"企业户表", "加白户表"}, writes
+        assert by_sheet["企业户表"] == ["E2E-1"], "企业户表只能写 E2E-1"
+        assert by_sheet["加白户表"] == ["E2E-2"], "加白户表只能写 E2E-2"
+
+    def test_same_uid_in_both_sheets_writes_only_to_source_sheet(self, client, monkeypatch):
+        """同一资产UID 同时出现在两张 Google 表里（验收清单 I 的关键形态）。
+
+        `fb_accounts.account_id` 是 UNIQUE ⇒ 库里同一 UID 只有一行、只有一个
+        `source_sheet`。这个场景的关键在于：**写错的表里也能按 UID 找到行**，
+        因此选表一旦退回「第一张表」/按资产类型路由，写入会静默成功（不会报
+        `not_found`）。所以判据必须是「实际被写的表名」，不是写入器的报错。
+        两次分别把 `source_sheet` 指向两张表 ⇒ 写回随之切换，不粘在配置的第一张表。
+        """
+        import routes.huguan_sheet_targets as hst
+        uid = self._seed(client, [("户甲", "DUP-1", "企业户", "企业户表")])
+        writes = self._stub(monkeypatch)
+
+        hst.huguan_dashboard_sync(uid, "fb", ["DUP-1"])
+        assert [w["sheet_name"] for w in writes] == ["企业户表"], writes
+        assert [r["account_id"] for r in writes[0]["rows"]] == ["DUP-1"]
+
+        # 模拟「这次是从另一张表导入的」：source_sheet 换成配置里的第二张表。
+        db = database.get_db()
+        db.execute("UPDATE fb_accounts SET source_sheet='加白户表' WHERE account_id='DUP-1'")
+        db.commit()
+        db.close()
+        writes.clear()
+        hst.huguan_dashboard_sync(uid, "fb", ["DUP-1"])
+        assert [w["sheet_name"] for w in writes] == ["加白户表"], writes
+
+    def test_unknown_source_sheet_skips_not_first_table(self, client, monkeypatch):
+        """`source_sheet` 指向配置里没有的表 ⇒ 整批跳过报错，**一个字都不写**。"""
+        import routes.huguan_sheet_targets as hst
+        uid = self._seed(client, [("户甲", "GONE-1", "企业户", "已删除的表")])
+        writes = self._stub(monkeypatch)
+        with pytest.raises(RuntimeError, match="查不到对应工作表"):
+            hst.huguan_dashboard_sync(uid, "fb", ["GONE-1"])
+        assert writes == [], f"绝不能退回写第一张表：{writes}"
