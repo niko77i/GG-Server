@@ -10257,16 +10257,63 @@ def ad_reports_list():
         like_val = f"%{search}%"
         params.extend([like_val, like_val, like_val])
 
-    total = db.execute(
-        f"SELECT COUNT(*) FROM ad_reports WHERE {' AND '.join(where)}", params
-    ).fetchone()[0]
+    # ---------- 自动聚合（2026-10-19 设计）：group_by 走白名单，绝不拼原始参数 ----------
+    _GROUPABLE = {
+        "report_date": "report_date",
+        # 明细里的「产品」是 resolved_product_name || product_name（推断值，不是列）；
+        # 聚合必须落在真实列上 ⇒ 按库里的 product_name 分组/显示。
+        "display_product": "product_name",
+        "region": "region",
+        "account": "account",
+        "customer_id": "customer_id",
+        "campaign": "campaign",
+    }
+    _grouped = request.args.get("grouped") in ("1", "true")
+    _group_by = [g.strip() for g in (request.args.get("group_by") or "").split(",") if g.strip()]
+    _aggregated = _grouped or bool(_group_by)
+    _select = _lead = _group_clause = _order_clause = ""
+    if _aggregated:
+        _unknown = [g for g in _group_by if g not in _GROUPABLE]
+        if _unknown:
+            return err(f"不支持的分组列：{','.join(_unknown)}", 400)
+        _cols = [_GROUPABLE[g] for g in dict.fromkeys(_group_by)]   # 去重保序
+        _select = ", ".join(_cols)
+        _lead = f"{_select}, " if _cols else ""
+        # 维度列全部隐藏时 = 只出一行总计（无 GROUP BY）
+        _group_clause = f"GROUP BY {_select} " if _cols else ""
+        if _cols:
+            total = db.execute(
+                f"SELECT COUNT(*) FROM (SELECT 1 FROM ad_reports WHERE {' AND '.join(where)} "
+                f"{_group_clause})", params).fetchone()[0]
+            _order = "report_date" if "report_date" in _cols else _cols[0]
+            _order_clause = "ORDER BY " + ", ".join(
+                [f"{_order} DESC"] + [f"{c}" for c in _cols if c != _order]) + " "
+        else:
+            total = 1 if db.execute(
+                f"SELECT 1 FROM ad_reports WHERE {' AND '.join(where)} LIMIT 1",
+                params).fetchone() else 0
+            _order_clause = ""
+    else:
+        total = db.execute(
+            f"SELECT COUNT(*) FROM ad_reports WHERE {' AND '.join(where)}", params
+        ).fetchone()[0]
 
     offset = (page - 1) * size
-    rows = db.execute(
-        f"SELECT * FROM ad_reports WHERE {' AND '.join(where)} "
-        f"ORDER BY saved_at DESC LIMIT ? OFFSET ?",
-        params + [size, offset]
-    ).fetchall()
+    if _aggregated:
+        rows = db.execute(
+            f"SELECT {_lead}SUM(cost) AS cost, SUM(impressions) AS impressions, "
+            f"SUM(clicks) AS clicks, SUM(installs) AS installs, "
+            f"SUM(in_app_actions) AS in_app_actions "
+            f"FROM ad_reports WHERE {' AND '.join(where)} {_group_clause}{_order_clause}"
+            f"LIMIT ? OFFSET ?",
+            params + [size, offset]
+        ).fetchall()
+    else:
+        rows = db.execute(
+            f"SELECT * FROM ad_reports WHERE {' AND '.join(where)} "
+            f"ORDER BY saved_at DESC LIMIT ? OFFSET ?",
+            params + [size, offset]
+        ).fetchall()
 
     # 聚合的产品和地区列表
     # 选地区 → 展示有做表数据的产品；选产品 → 展示产品的配置地区
@@ -10315,7 +10362,9 @@ def ad_reports_list():
     enriched = []
     for r in rows:
         d = dict(r)
-        d["resolved_product_name"] = _resolve_product_name(d.get("campaign", ""), campaign_map) or ""
+        # 聚合行按库里的 product_name 分组，**不做**推断（推断值不是数据库列，无法 GROUP BY）
+        d["resolved_product_name"] = "" if _aggregated else (
+            _resolve_product_name(d.get("campaign", ""), campaign_map) or "")
         enriched.append(d)
 
     db.close()

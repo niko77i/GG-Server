@@ -48,10 +48,15 @@
               v-for="col in allColumns" :key="col.prop"
               :model-value="visibleColumns.includes(col.prop)"
               :label="col.prop"
-              @change="(checked) => toggleColumn(col.prop, checked)"
+              :disabled="childDisabled(col.prop, visibleColumns, AGG_CFG)"
+              @change="(checked) => onColumnChecked(col.prop, checked)"
             >{{ col.label }}</el-checkbox>
           </div>
         </el-popover>
+        <!-- 聚合开关：只在「有维度列被隐藏」时出现；聚合态只读，点击后切回明细可编辑 -->
+        <el-button v-if="aggregationAvailable" @click="toggleAggregation">
+          {{ aggregating ? '放弃聚合' : '恢复聚合' }}
+        </el-button>
       </div>
       <div class="filter-right">
         <el-button @click="loadData">🔄 刷新</el-button>
@@ -59,8 +64,8 @@
         <!-- 新增 / 批量删除：只对「能增删自己行的角色」渲染（管理员只读、户管仅可改消耗）
              ⚠️ 谓词是 canWriteReportRows（developer + 普通 user + viewer），**不是**
              canManageReports（= developer）—— 后者会把普通 user 的按钮一并藏掉，破坏回归判据 -->
-        <el-button v-if="auth.canWriteReportRows" type="success" @click="openAddDialog">➕ 新增数据</el-button>
-        <el-button v-if="auth.canWriteReportRows" type="danger" :disabled="selectedIds.length === 0" @click="handleBatchDelete">
+        <el-button v-if="auth.canWriteReportRows && !aggregating" type="success" @click="openAddDialog">➕ 新增数据</el-button>
+        <el-button v-if="auth.canWriteReportRows && !aggregating" type="danger" :disabled="selectedIds.length === 0" @click="handleBatchDelete">
           🗑 批量删除 ({{ selectedIds.length }})
         </el-button>
       </div>
@@ -72,7 +77,7 @@
       @selection-change="onSelectionChange" @sort-change="onSortChange"
     >
       <!-- 勾选框：只读角色（管理员/户管）没有批量删除动作，留着勾选框是误导 -->
-      <el-table-column v-if="auth.canWriteReportRows" type="selection" width="45" />
+      <el-table-column v-if="auth.canWriteReportRows && !aggregating" type="selection" width="45" />
       <el-table-column
         v-for="col in visibleColumnDefs" :key="col.prop"
         :prop="col.prop" :label="col.label" :min-width="col.minWidth"
@@ -80,7 +85,8 @@
       >
         <template v-if="col.format" #default="{ row }">
           <!-- 「花费」列：户管可内联改（仅此角色）。其余角色走下面两个分支，与改动前逐字一致 -->
-          <template v-if="col.format === 'cost' && auth.canEditReportCost">
+          <!-- 聚合行对应多条库记录，无法定位到单条 ⇒ 聚合态不可内联编辑 -->
+          <template v-if="col.format === 'cost' && auth.canEditReportCost && !aggregating">
             <div class="inline-edit-cell" v-if="editingCostId === row.id">
               <el-input v-model="editCostValue" size="small" class="inline-name-input"
                 :ref="el => { if (el) costInputRef = el }"
@@ -97,7 +103,7 @@
       </el-table-column>
       <!-- 每行编辑/删除：只有能改自己整行的角色才渲染（管理员只读、户管仅可改消耗 →
            他们的改整行走 API 会被后端 403，故整列不渲染） -->
-      <el-table-column v-if="auth.canWriteReportRows" label="操作" width="140" fixed="right">
+      <el-table-column v-if="auth.canWriteReportRows && !aggregating" label="操作" width="140" fixed="right">
         <template #default="{ row }">
           <el-button size="small" type="primary" link @click="openEditDialog(row)">编辑</el-button>
           <el-popconfirm title="确定删除这条数据？" @confirm="handleDelete(row.id)">
@@ -173,6 +179,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { reportsApi } from '../api/reports'
 import api from '../api/client'
 import { useAuthStore } from '../stores/auth'
+import { isAggregating, visibleDimensions, childDisabled, applyLinkage, normalizePrefs }
+  from '../utils/reportAggregation.mjs'
 
 const auth = useAuthStore()
 // 身份由 App.vue 根组件的 onMounted 水合，而子组件 setup 恒早于父组件 onMounted：
@@ -184,29 +192,31 @@ if (!auth.user) auth.initFromStorage()
 const COL_STORAGE_KEY = 'gg_data_manage_columns'
 
 const allColumns = [
-  { prop: 'report_date', label: '日期', minWidth: 100 },
-  { prop: 'display_product', label: '产品', minWidth: 100 },
-  { prop: 'region', label: '地区', minWidth: 70 },
-  { prop: 'account', label: '账户', minWidth: 110 },
-  { prop: 'customer_id', label: '客户ID', minWidth: 120 },
-  { prop: 'campaign', label: '广告系列', minWidth: 130 },
-  { prop: 'cost', label: '花费', minWidth: 90, align: 'right', format: 'cost' },
-  { prop: 'impressions', label: '展示', minWidth: 80, align: 'right', format: 'number' },
-  { prop: 'clicks', label: '点击', minWidth: 70, align: 'right', format: 'number' },
-  { prop: 'installs', label: '安装', minWidth: 70, align: 'right', format: 'number' },
-  { prop: 'in_app_actions', label: '应用内操作', minWidth: 100, align: 'right', format: 'number' },
+  { prop: 'report_date', label: '日期', minWidth: 100, role: 'dimension' },
+  { prop: 'display_product', label: '产品', minWidth: 100, role: 'dimension' },
+  { prop: 'region', label: '地区', minWidth: 70, role: 'dimension' },
+  { prop: 'account', label: '账户', minWidth: 110, role: 'dimension' },
+  { prop: 'customer_id', label: '客户ID', minWidth: 120, role: 'dimension' },
+  { prop: 'campaign', label: '广告系列', minWidth: 130, role: 'dimension' },
+  { prop: 'cost', label: '花费', minWidth: 90, align: 'right', format: 'cost', role: 'metric' },
+  { prop: 'impressions', label: '展示', minWidth: 80, align: 'right', format: 'number', role: 'metric' },
+  { prop: 'clicks', label: '点击', minWidth: 70, align: 'right', format: 'number', role: 'metric' },
+  { prop: 'installs', label: '安装', minWidth: 70, align: 'right', format: 'number', role: 'metric' },
+  { prop: 'in_app_actions', label: '应用内操作', minWidth: 100, align: 'right', format: 'number', role: 'metric' },
 ]
+// 聚合与联动配置（纯逻辑在 utils/reportAggregation.mjs，有单测）
+const AGG_CFG = {
+  columns: allColumns.map(c => ({ prop: c.prop, role: c.role })),
+  defaultVisible: allColumns.map(c => c.prop),
+  links: [{ parent: 'display_product', child: 'campaign' }],
+}
 
-// 从 localStorage 恢复列可见性
+// 从 localStorage 恢复列可见性（含父子列归一化；空/坏数据回落默认全部可见）
 function loadColumnPrefs() {
   try {
     const saved = localStorage.getItem(COL_STORAGE_KEY)
-    if (saved) {
-      const arr = JSON.parse(saved)
-      if (Array.isArray(arr) && arr.length > 0) return arr
-    }
+    if (saved) return normalizePrefs(JSON.parse(saved), AGG_CFG)
   } catch (e) { /* ignore */ }
-  // 默认全部可见
   return allColumns.map(c => c.prop)
 }
 
@@ -222,25 +232,29 @@ const visibleColumnDefs = computed(() =>
   allColumns.filter(c => visibleColumns.value.includes(c.prop))
 )
 
-function toggleColumn(prop, checked) {
-  if (checked) {
-    // 按 allColumns 顺序插入
-    const idx = allColumns.findIndex(c => c.prop === prop)
-    const current = [...visibleColumns.value]
-    const insertAt = current.findIndex(p => {
-      const ci = allColumns.findIndex(c => c.prop === p)
-      return ci > idx
-    })
-    if (insertAt === -1) {
-      current.push(prop)
-    } else {
-      current.splice(insertAt, 0, prop)
-    }
-    visibleColumns.value = current
-  } else {
-    visibleColumns.value = visibleColumns.value.filter(p => p !== prop)
-  }
+// ---------- 自动聚合（2026-10-19 设计）----------
+// 可见维度列少于维度总数 ⇒ 自动按可见维度分组（服务端 GROUP BY）；聚合态只读。
+const aggregationOff = ref(false)
+const aggregationAvailable = computed(() =>
+  isAggregating(visibleColumns.value, AGG_CFG, false))
+const aggregating = computed(() =>
+  isAggregating(visibleColumns.value, AGG_CFG, aggregationOff.value))
+function toggleAggregation() {
+  aggregationOff.value = !aggregationOff.value
+  page.value = 1
+  loadData()
+}
+function onColumnChecked(prop, checked) {
+  const wasAggregating = aggregating.value
+  const isDim = allColumns.find(c => c.prop === prop)?.role === 'dimension'
+  visibleColumns.value = applyLinkage(visibleColumns.value, prop, checked, AGG_CFG)
+  aggregationOff.value = false            // 列变了 ⇒ 重新按可见列自动判定
   saveColumnPrefs()
+  // 维度变化会改变分组键；聚合状态翻转也要重取。只切数值列不影响服务端结果。
+  if (isDim || aggregating.value !== wasAggregating) {
+    page.value = 1
+    loadData()
+  }
 }
 
 // 筛选状态
@@ -299,6 +313,12 @@ async function loadData() {
     }
     if (searchKeyword.value) params.search = searchKeyword.value
     if (filterOwner.value) params.user_id = filterOwner.value   // 保存人筛选（仅跨用户角色会有值）
+    // 聚合态：服务端按可见维度 GROUP BY；全部维度隐藏时只出总计（grouped=1，不带 group_by）
+    if (aggregating.value) {
+      params.grouped = 1
+      const dims = visibleDimensions(visibleColumns.value, AGG_CFG)
+      if (dims.length) params.group_by = dims.join(',')
+    }
 
     const data = await reportsApi.list(params)
     reports.value = (data.reports || []).map(r => ({

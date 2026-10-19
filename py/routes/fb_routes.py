@@ -2294,6 +2294,53 @@ def list_reports():
         params.append(date_to)
 
     where_clause = " AND ".join(where)
+
+    # ---------- 自动聚合（2026-10-19 设计）：group_by 走白名单，绝不拼原始参数 ----------
+    # 维度 prop → 真实列。传了不认识的 prop 一律 400，**不要**把它拼进 SQL。
+    _GROUPABLE = {
+        'report_date': 'report_date',
+        'product_name': 'product_name',
+        'line_name': 'line_name',
+        'account_name': 'account_name',
+        'account_id': 'account_id',
+    }
+    _grouped = request.args.get('grouped') in ('1', 'true')
+    _group_by = [g.strip() for g in (request.args.get('group_by') or '').split(',') if g.strip()]
+    if _grouped or _group_by:
+        _unknown = [g for g in _group_by if g not in _GROUPABLE]
+        if _unknown:
+            return err(f"不支持的分组列：{','.join(_unknown)}", 400)
+        _cols = [_GROUPABLE[g] for g in dict.fromkeys(_group_by)]   # 去重保序
+        _select = ", ".join(_cols)
+        _lead = f"{_select}, " if _cols else ""
+        # 维度列全部隐藏时 = 只出一行总计（无 GROUP BY）
+        _group_clause = f"GROUP BY {_select} " if _cols else ""
+        if _cols:
+            total = db.execute(
+                f"SELECT COUNT(*) FROM (SELECT 1 FROM fb_ad_reports WHERE {where_clause} "
+                f"{_group_clause})", params).fetchone()[0]
+            _order = "report_date" if "report_date" in _cols else _cols[0]
+            _order_clause = "ORDER BY " + ", ".join(
+                [f"{_order} DESC"] + [f"{c}" for c in _cols if c != _order]) + " "
+        else:
+            total = 1 if db.execute(
+                f"SELECT 1 FROM fb_ad_reports WHERE {where_clause} LIMIT 1",
+                params).fetchone() else 0
+            _order_clause = ""
+        rows = db.execute(
+            f"SELECT {_lead}SUM(cost) AS cost, SUM(impressions) AS impressions, "
+            f"SUM(clicks) AS clicks, SUM(registrations) AS registrations, "
+            f"SUM(purchases) AS purchases, "
+            # 比率列**重算**（总消耗/总购物），不能把比率相加；分母 0 取 0
+            f"CASE WHEN SUM(purchases) > 0 THEN SUM(cost) / SUM(purchases) ELSE 0 END "
+            f"  AS cost_per_purchase "
+            f"FROM fb_ad_reports WHERE {where_clause} {_group_clause}{_order_clause}"
+            f"LIMIT ? OFFSET ?",
+            params + [size, offset]
+        ).fetchall()
+        return ok({'items': [dict(r) for r in rows], 'total': total,
+                   'page': page, 'size': size, 'grouped': True})
+
     total = db.execute(f"SELECT COUNT(*) FROM fb_ad_reports WHERE {where_clause}", params).fetchone()[0]
     rows = db.execute(
         f"SELECT * FROM fb_ad_reports WHERE {where_clause} ORDER BY report_date DESC, saved_at DESC LIMIT ? OFFSET ?",

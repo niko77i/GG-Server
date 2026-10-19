@@ -399,3 +399,92 @@ def test_gg_report_owners_lists_only_users_with_data(client, three):
 def test_gg_report_owners_forbidden_for_plain_user(client, three):
     h, _, _ = three["user"]
     assert client.get("/api/ad-reports/owners", headers=h).status_code == 403
+
+
+# ---------- 自动聚合（2026-10-19 设计） ----------
+
+def test_fb_list_aggregates_by_visible_dimensions(client, fb_three):
+    """按可见维度分组：同日期+同账户的两行（不同线名）合并，消耗求和。"""
+    _, u_uid, _ = fb_three["user"]
+    db = database.get_db()
+    db.execute(
+        "INSERT INTO fb_ad_reports (user_id, product_name, line_name, report_date, "
+        "account_name, account_id, cost) VALUES (?,?,?,?,?,?,?)",
+        (u_uid, "P1", "L2", "2026-10-01", "n-u1", "u1", 5.0))
+    db.commit(); db.close()
+
+    h, _, _ = fb_three["huguan"]
+    r = client.get("/api/fb/reports/list", headers=h,
+                   query_string={"group_by": "report_date,account_id"})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    body = r.get_json()
+    assert body["total"] == 3, f"应按分组计数，实际 {body['total']}"
+    mine = [i for i in body["items"] if i["account_id"] == "u1"]
+    assert len(mine) == 1, f"同日期+同账户应合并为一行，实际 {mine}"
+    assert mine[0]["cost"] == 16.0, f"消耗应求和 11+5，实际 {mine[0]['cost']}"
+
+
+def test_fb_list_group_by_rejects_unknown_column(client, fb_three):
+    """白名单外的列（含数值列）必须 400，绝不拼进 SQL。"""
+    h, _, _ = fb_three["huguan"]
+    for bad in ("cost", "id", "user_id", "nope"):
+        r = client.get("/api/fb/reports/list", headers=h, query_string={"group_by": bad})
+        assert r.status_code == 400, f"{bad} 应被拒，实际 {r.status_code}"
+
+
+def test_fb_aggregation_respects_plain_user_scope(client, fb_three):
+    """聚合不得绕过普通 user 的归属收窄。"""
+    h, _, _ = fb_three["user"]
+    body = client.get("/api/fb/reports/list", headers=h,
+                      query_string={"group_by": "report_date"}).get_json()
+    assert body["total"] == 1
+    assert len(body["items"]) == 1
+    assert body["items"][0]["cost"] == 11.0
+
+
+def test_gg_list_aggregates_by_visible_dimensions(client, three):
+    """GG：按日期分组时，三个账号同日的数据应合并求和。"""
+    _, uid, _ = three["user"]
+    _mk_report(uid, date="2026-10-02", cost=5.0, campaign="C2")
+
+    h, _, _ = three["huguan"]
+    r = client.get("/api/ad-reports/list", headers=h, query_string={"group_by": "report_date"})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    body = r.get_json()
+    by_date = {x["report_date"]: x for x in body["reports"]}
+    assert set(by_date) == {"2026-10-01", "2026-10-02"}, f"分组不对：{set(by_date)}"
+    assert by_date["2026-10-01"]["cost"] == 66.0, f"应求和 11+22+33，实际 {by_date['2026-10-01']['cost']}"
+    assert body["total"] == 2
+
+
+def test_gg_list_group_by_rejects_unknown_column(client, three):
+    h, _, _ = three["huguan"]
+    r = client.get("/api/ad-reports/list", headers=h, query_string={"group_by": "cost"})
+    assert r.status_code == 400
+
+
+def test_gg_aggregation_respects_plain_user_scope(client, three):
+    h, _, _ = three["user"]
+    body = client.get("/api/ad-reports/list", headers=h,
+                      query_string={"group_by": "report_date"}).get_json()
+    assert body["total"] == 1
+    assert body["reports"][0]["cost"] == 11.0
+
+
+def test_fb_grouped_without_columns_returns_single_total(client, fb_three):
+    """所有维度列都隐藏：grouped=1 且不带 group_by ⇒ 只返回一行总计。"""
+    h, _, _ = fb_three["huguan"]
+    body = client.get("/api/fb/reports/list", headers=h,
+                      query_string={"grouped": "1"}).get_json()
+    assert body["total"] == 1
+    assert len(body["items"]) == 1
+    assert body["items"][0]["cost"] == 66.0, body["items"]
+
+
+def test_gg_grouped_without_columns_returns_single_total(client, three):
+    h, _, _ = three["huguan"]
+    body = client.get("/api/ad-reports/list", headers=h,
+                      query_string={"grouped": "1"}).get_json()
+    assert body["total"] == 1
+    assert len(body["reports"]) == 1
+    assert body["reports"][0]["cost"] == 66.0, body["reports"]

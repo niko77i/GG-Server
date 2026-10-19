@@ -22,7 +22,7 @@
       <!-- 批量删除：只对「能删自己行的角色」渲染（管理员只读、户管仅可改消耗）。
            谓词是 canWriteReportRows（developer + 普通 user + viewer），**不是** canManageReports
            （= developer）—— 后者会把普通 user 的按钮藏掉，破坏回归判据 -->
-      <el-button v-if="auth.canWriteReportRows" type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">🗑 批量删除({{ selectedIds.length }})</el-button>
+      <el-button v-if="auth.canWriteReportRows && !aggregating" type="danger" :disabled="selectedIds.length===0" @click="handleBatchDelete">🗑 批量删除({{ selectedIds.length }})</el-button>
       <!-- 列选择器：与 GG 数据管理页同构（逐列勾选，localStorage 持久化） -->
       <el-popover placement="bottom-start" :width="220" trigger="click">
         <template #reference>
@@ -33,10 +33,15 @@
             v-for="col in allColumns" :key="col.prop"
             :model-value="visibleColumns.includes(col.prop)"
             :label="col.prop"
-            @change="(checked) => toggleColumn(col.prop, checked)"
+            :disabled="childDisabled(col.prop, visibleColumns, AGG_CFG)"
+            @change="(checked) => onColumnChecked(col.prop, checked)"
           >{{ col.label }}</el-checkbox>
         </div>
       </el-popover>
+      <!-- 聚合开关：只在「有维度列被隐藏」时出现；聚合态只读，点击后切回明细可编辑 -->
+      <el-button v-if="aggregationAvailable" @click="toggleAggregation">
+        {{ aggregating ? '放弃聚合' : '恢复聚合' }}
+      </el-button>
       <el-button type="primary" @click="loadStats" style="margin-left:auto">📈 查看统计</el-button>
       <el-button type="success" @click="handleExport">📥 导出CSV</el-button>
       <!-- 原「🔄 重试写表」按钮已移除：其入口并入下方失败汇总区的「重试全部失败的」。
@@ -71,7 +76,7 @@
 
     <el-table :data="items" stripe border v-loading="loading" @selection-change="onSelect">
       <!-- 勾选框：只读角色（管理员/户管）没有批量删除动作，留着勾选框是误导 -->
-      <el-table-column v-if="auth.canWriteReportRows" type="selection" width="45" />
+      <el-table-column v-if="auth.canWriteReportRows && !aggregating" type="selection" width="45" />
       <!-- 数据列：可见性由「📊 列显示」控制（localStorage 持久化）。
            勾选框列与操作列不在此处 —— 它们由角色决定，不是展示偏好。 -->
       <el-table-column
@@ -84,7 +89,8 @@
                宽度：普通 user 100（几何不变）；户管多一个 ✏️ 按钮（flex-shrink:0，
                占位不收缩），100px 会把金额挤成省略号 ⇒ 仅对户管加宽到 150。 -->
           <template v-if="col.cost">
-            <template v-if="auth.canEditReportCost">
+            <!-- 聚合行对应多条库记录，无法定位到单条 ⇒ 聚合态不可内联编辑 -->
+            <template v-if="auth.canEditReportCost && !aggregating">
               <div class="inline-edit-cell" v-if="editingCostId === row.id">
                 <el-input v-model="editCostValue" size="small" class="inline-name-input"
                   :ref="el => { if (el) costInputRef = el }"
@@ -103,7 +109,7 @@
       </el-table-column>
       <!-- 每行编辑/删除：只有能改自己整行的角色才渲染（管理员只读、户管仅可改消耗 →
            他们的改整行/删除走 API 会被后端 403，故整列不渲染） -->
-      <el-table-column v-if="auth.canWriteReportRows" label="操作" width="140" fixed="right">
+      <el-table-column v-if="auth.canWriteReportRows && !aggregating" label="操作" width="140" fixed="right">
         <template #default="{row}">
           <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
           <el-popconfirm title="确定删除？" @confirm="handleDelete(row.id)">
@@ -158,6 +164,8 @@ import { sheetWriteApi } from '../../api/sheetWrite'
 import { sheetWriteTone, sheetWriteHint } from '@/utils/sheetWriteUi'
 import api from '../../api/client'
 import { useAuthStore } from '../../stores/auth'
+import { isAggregating, visibleDimensions, childDisabled, applyLinkage, normalizePrefs }
+  from '../../utils/reportAggregation.mjs'
 
 const auth = useAuthStore()
 // 身份由 App.vue 根组件的 onMounted 水合，而子组件 setup 恒早于父组件 onMounted：
@@ -190,30 +198,34 @@ const COL_STORAGE_KEY = 'fb_data_manage_columns'
 // 可见列多时各自收缩到最小值、出现横向滚动。
 // ⚠️ 不要改回 `width` —— 固定宽度 + 列少 ⇒ 剩余宽度无处可去，列分配会很难看。
 const allColumns = [
-  { prop: 'report_date',       label: '日期',         minWidth: 110 },
-  { prop: 'product_name',      label: '产品名',       minWidth: 100 },
-  { prop: 'line_name',         label: '线名',         minWidth: 100 },
-  { prop: 'account_name',      label: '账户名称',     minWidth: 120 },
-  { prop: 'account_id',        label: '账户ID',       minWidth: 160 },
-  { prop: 'cost',              label: '消耗',         cost: true },
-  { prop: 'impressions',       label: '展示',         minWidth: 90 },
-  { prop: 'clicks',            label: '点击',         minWidth: 80 },
-  { prop: 'registrations',     label: '注册',         minWidth: 80 },
-  { prop: 'purchases',         label: '购物',         minWidth: 80 },
-  { prop: 'cost_per_purchase', label: '单词购物费用', minWidth: 120 },
+  { prop: 'report_date',       label: '日期',         minWidth: 110, role: 'dimension' },
+  { prop: 'product_name',      label: '产品名',       minWidth: 100, role: 'dimension' },
+  { prop: 'line_name',         label: '线名',         minWidth: 100, role: 'dimension' },
+  { prop: 'account_name',      label: '账户名称',     minWidth: 120, role: 'dimension' },
+  { prop: 'account_id',        label: '账户ID',       minWidth: 160, role: 'dimension' },
+  { prop: 'cost',              label: '消耗',         cost: true,   role: 'metric' },
+  { prop: 'impressions',       label: '展示',         minWidth: 90, role: 'metric' },
+  { prop: 'clicks',            label: '点击',         minWidth: 80, role: 'metric' },
+  { prop: 'registrations',     label: '注册',         minWidth: 80, role: 'metric' },
+  { prop: 'purchases',         label: '购物',         minWidth: 80, role: 'metric' },
+  { prop: 'cost_per_purchase', label: '单词购物费用', minWidth: 120, role: 'metric' },
 ]
 const DEFAULT_VISIBLE_COLUMNS = ['report_date', 'product_name', 'line_name',
                                  'account_name', 'account_id', 'cost']
+// 聚合与联动配置（纯逻辑在 utils/reportAggregation.mjs，有单测）
+const AGG_CFG = {
+  columns: allColumns.map(c => ({ prop: c.prop, role: c.role })),
+  defaultVisible: DEFAULT_VISIBLE_COLUMNS,
+  links: [{ parent: 'product_name', child: 'line_name' }],
+}
 // 用户是否**显式**保存过列偏好。保存过 ⇒ 一切以用户选择为准，不再自动开详情列。
 let hasExplicitColumnPrefs = false
 function loadColumnPrefs() {
   try {
     const saved = localStorage.getItem(COL_STORAGE_KEY)
     if (saved) {
-      const arr = JSON.parse(saved)
-      // 过滤掉已不存在的列名（旧偏好指向已删列时不至于整表空掉）
-      const known = arr.filter(p => allColumns.some(c => c.prop === p))
-      if (known.length) { hasExplicitColumnPrefs = true; return known }
+      hasExplicitColumnPrefs = true
+      return normalizePrefs(JSON.parse(saved), AGG_CFG)
     }
   } catch (e) { /* 坏数据 ⇒ 回落默认 */ }
   return [...DEFAULT_VISIBLE_COLUMNS]
@@ -223,22 +235,34 @@ const visibleColumnDefs = computed(() =>
   allColumns.filter(c => visibleColumns.value.includes(c.prop)))
 // 「消耗」列的最小宽：普通 user 100；户管多一个 ✏️ 按钮（不收缩） ⇒ 150。
 function costColWidth() { return auth.canEditReportCost ? 150 : 100 }
+
+// ---------- 自动聚合（2026-10-19 设计）----------
+// 可见维度列少于维度总数 ⇒ 自动按可见维度分组（服务端 GROUP BY）；聚合态只读。
+const aggregationOff = ref(false)
+const aggregationAvailable = computed(() =>
+  isAggregating(visibleColumns.value, AGG_CFG, false))
+const aggregating = computed(() =>
+  isAggregating(visibleColumns.value, AGG_CFG, aggregationOff.value))
+function toggleAggregation() {
+  aggregationOff.value = !aggregationOff.value
+  page.value = 1
+  loadData()
+}
+function onColumnChecked(prop, checked) {
+  const wasAggregating = aggregating.value
+  const isDim = allColumns.find(c => c.prop === prop)?.role === 'dimension'
+  visibleColumns.value = applyLinkage(visibleColumns.value, prop, checked, AGG_CFG)
+  aggregationOff.value = false            // 列变了 ⇒ 重新按可见列自动判定
+  saveColumnPrefs()
+  // 维度变化会改变分组键；聚合状态翻转也要重取。只切数值列不影响服务端结果。
+  if (isDim || aggregating.value !== wasAggregating) {
+    page.value = 1
+    loadData()
+  }
+}
 function saveColumnPrefs() {
   hasExplicitColumnPrefs = true
   localStorage.setItem(COL_STORAGE_KEY, JSON.stringify(visibleColumns.value))
-}
-function toggleColumn(prop, checked) {
-  if (checked) {
-    // 按 allColumns 的顺序插回，避免勾选次序打乱表格列序
-    const idx = allColumns.findIndex(c => c.prop === prop)
-    const cur = [...visibleColumns.value]
-    const at = cur.findIndex(p => allColumns.findIndex(c => c.prop === p) > idx)
-    if (at === -1) cur.push(prop); else cur.splice(at, 0, prop)
-    visibleColumns.value = cur
-  } else {
-    visibleColumns.value = visibleColumns.value.filter(p => p !== prop)
-  }
-  saveColumnPrefs()
 }
 const statsVisible = ref(false); const statsData = ref([])
 // 前端分页（③ 浏览类）：见模板注释。权威数据是 `statsData`，这里只切当前页渲染。
@@ -351,6 +375,12 @@ async function loadData() {
     if (filterLine.value) p.line_name = filterLine.value
     if (dateRange.value) { p.date_from = dateRange.value[0]; p.date_to = dateRange.value[1] }
     if (filterOwner.value) p.user_id = filterOwner.value      // 保存人筛选（仅跨用户角色会有值）
+    // 聚合态：服务端按可见维度 GROUP BY；全部维度隐藏时只出总计（grouped=1，不带 group_by）
+    if (aggregating.value) {
+      p.grouped = 1
+      const dims = visibleDimensions(visibleColumns.value, AGG_CFG)
+      if (dims.length) p.group_by = dims.join(',')
+    }
     const res = await fbApi.listReports(p)
     items.value = res.items; total.value = res.total
     // 与改动前一致：数据里有展示/点击时**自动打开详情列**。
