@@ -7508,6 +7508,54 @@ class TestFbMultiSheetReadPath:
             "空产出必须视为无变化，否则整份报告虚报「将更新」"
         db.close()
 
+    def test_route_injects_cell_value_and_sheet_name_per_table(self, client, monkeypatch):
+        """走真实 `/sync` 入口：两张表**各自**注入自己那行的资产类型单元格值与工作表名。
+
+        本类的其余用例都直接往行里塞已注入好的 `_account_type` / `_source_sheet`，
+        绕过了 `dashboard_sync` 的注入循环 ⇒ 「注入来源写错」它们全绿。本用例补上这段：
+        判别力（均实测）：
+          · 注入改成 `t["name"]` ⇒ 类型断言红（来源必须是单元格，不是表名/配置 name）；
+          · `_source_sheet` 写成固定表名 ⇒ R-2 的来源断言红（两表不串）。
+        """
+        hg, _ = _create_user(client, "_fb_ms_route", role="huguan")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_fb_ms_route')}", json.dumps({"fb": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "企业户", "sheet_name": "企业户表"},
+                           {"name": "加白户", "sheet_name": "加白户表"}]}})))
+        db.commit(); db.close()
+
+        import google_sheets_service as gs
+        spreads = {
+            "企业户表": [["资产UID", "资产类型"], ["R-1", "类型甲"]],
+            "加白户表": [["资产UID", "资产类型"], ["R-2", "类型乙"]],
+        }
+        reads = []
+
+        def _read(svc, sid, sheet, rng):
+            reads.append(sheet)
+            return spreads[sheet]
+
+        monkeypatch.setattr(gs, "read_sheet_values", _read)
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "fb", "dry_run": True})
+        assert resp.status_code == 200, resp.get_json()
+        assert reads == ["企业户表", "加白户表"], "必须按配置顺序逐张表读"
+        created = {c["account_id"]: c for c in resp.get_json()["diff"]["to_create"]}
+        assert created["R-1"]["db_values"]["_account_type"] == "类型甲"
+        assert created["R-1"]["db_values"]["_source_sheet"] == "企业户表"
+        assert created["R-2"]["db_values"]["_account_type"] == "类型乙"
+        assert created["R-2"]["db_values"]["_source_sheet"] == "加白户表"
+        # 钉死「来源是单元格」：类型值不等于任何一张表的 name / sheet_name
+        assert created["R-1"]["db_values"]["_account_type"] not in ("企业户", "企业户表")
+        assert created["R-2"]["db_values"]["_account_type"] not in ("加白户", "加白户表")
+        # 两表不串
+        assert created["R-1"]["db_values"]["_account_type"] \
+            != created["R-2"]["db_values"]["_account_type"]
+
 
 # ---------- Task 5: fb 两键落库 ----------
 
