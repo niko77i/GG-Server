@@ -213,11 +213,11 @@ def dashboard_sync():
         return err("platform 必须是 gg、tt 或 fb", 400)
 
     # 按表操作（设计 §3.1）：`sheet_name` 可选。给了就只处理那一张表；缺省＝全部表
-    # （与改动前逐字节一致）。gg/fb 只有一张表，按表无意义 ⇒ 直接拒，避免「静默等同全量」
-    # 让前端 bug 变成哑巴。
+    # （与改动前逐字节一致）。gg 只有一张表，按表无意义 ⇒ 直接拒，避免「静默等同全量」
+    # 让前端 bug 变成哑巴；tt / fb 多表，按表生效。
     only_sheet = str(data.get("sheet_name") or "").strip()
-    if only_sheet and platform != "tt":
-        return err("只有 TT 支持按表操作", 400)
+    if only_sheet and platform not in ("tt", "fb"):
+        return err("只有 TT / FB 支持按表操作", 400)
 
     uid = get_uid()
     db = database.get_db()
@@ -498,35 +498,39 @@ def dashboard_push():
         conf = {p: hd.get_platform_config(db, uid, p) for p in (platform,)}
         c = conf[platform]
         tables = hd.get_platform_tables(db, uid, platform)
-        # gg/fb：判据里必须留着 `c["sheet_name"]` —— 「有表格ID 但工作表名为空」的半截
+        # gg：判据里必须留着 `c["sheet_name"]` —— 「有表格ID 但工作表名为空」的半截
         # 配置是 POST 端点允许存下的（它不校验非空），改动前会在这里 400。
         # tt：工作表名在 `tables` 里（多表配置的 `conf["sheet_name"]` 恒为空串），
         # 沿用旧判据会把已配好的多表看板当成「未配置」。
+        # fb：表名同样在 `tables` 里（多表）或走 legacy 扁平配置。`get_platform_tables`
+        # 在「有 spreadsheet_id、却没配任何表名」时会返回一条空名空表名的哨兵（见其
+        # docstring）—— 这种**半截配置**必须继续 400，否则会拿空工作表名去读/写表；
+        # 只有 tables 里真有表名时，才认定是合法的 fb 多表配置（与 T7 `undo_push` 同口径）。
         if (not c["spreadsheet_id"] or not tables
-                or (platform != "tt" and not c["sheet_name"])):
+                or (platform == "gg" and not c["sheet_name"])
+                or (platform == "fb" and not c["sheet_name"]
+                    and not any(t.get("sheet_name") for t in tables))):
             return err("请先在设置页配置户管看板的表格 ID 与工作表名", 400)
 
         # 按表刷新（设计 §3.1/§3.2）：`sheet_name` 可选。缺省＝全部表（与改动前逐字节
-        # 一致）；gg/fb 只有一张表，按表无意义 ⇒ 直接拒（同 sync，不静默等同全量）。
+        # 一致）；gg 只有一张表，按表无意义 ⇒ 直接拒（同 sync，不静默等同全量）。
         only_sheet = str(data.get("sheet_name") or "").strip()
-        if only_sheet and platform != "tt":
-            return err("只有 TT 支持按表操作", 400)
-        target_type = None
+        if only_sheet and platform not in ("tt", "fb"):
+            return err("只有 TT / FB 支持按表操作", 400)
+        target = None
         if only_sheet:
+            # 定位键是**工作表名**（同一份配置里互不重复）：tt 是用户请求的那张表，
+            # fb 的 `name` 只是标签、可能重名，绝不能拿它定位。
             target = next((t for t in tables if t["sheet_name"] == only_sheet), None)
             if target is None:
                 return err(f"工作表「{only_sheet}」不在你的看板配置里", 400)
-            # ⚠️ 只过滤 tables 不够：group_rows_by_sheet 会**重新读配置取全部表**
-            # ⇒ 必须记住目标户类型，稍后把「行」过滤到它，否则照样写每一张表。
-            target_type = target["name"]
 
         import google_sheets_service as gs
         from main import _GOOGLE_SHEETS_CONFIG
         service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
         t0 = _tick("建服务完成", op_t0)
         # 按表时只解析**目标表**的表头（省掉其它表的表头读 = 提速）；缺省＝全部表。
-        target_tables = (tables if target_type is None
-                         else [t for t in tables if t["name"] == target_type])
+        target_tables = tables if target is None else [target]
         # collect / 快照 / 写表三者必须用**同一份**每表 col_map：tt 表头顺序不同时，
         # 固定列字母会把 cells 产出到错列、定位也会落错列 ⇒ 快照记的行集合与真正被写的
         # 行集合对不上（静默串列 + 整批落空）。只有 gg 走合成 map、零额外读；tt 与 fb 都读一次表头行。
@@ -542,14 +546,17 @@ def dashboard_push():
         col_maps_by_type = {hd._table_key_of(platform, t): col_maps_by_sheet[t["sheet_name"]]
                             for t in target_tables}
         rows = hd.collect_rows_for_push(db, platform, col_maps_by_type=col_maps_by_type)
-        if target_type is not None:
-            # 只留目标户类型的账户：写回的是**这张表**，别的表一个格都不碰。
-            rows = [r for r in rows if (r.get("account_type") or "") == target_type]
+        if target is not None:
+            # 只留「分表键 == 目标表」的账户：写回的是**这张表**，别的表一个格都不碰。
+            # tt：account_type == target["name"]；fb：source_sheet == target["sheet_name"]。
+            # 判据必须与 collect / group 同口径（`_sheet_key_of` / `_table_key_of`），
+            # 否则 fb 会按资产类型过滤 ⇒ 漏行或把不该刷的账户刷进某张表。
+            rows = [r for r in rows
+                    if hd._sheet_key_of(platform, r) == hd._table_key_of(platform, target)]
         # 跨表归属提示（设计 §3.3）**只接在 sync 侧，push 侧刻意不接**：push 的 rows 已被
-        # 过滤到 `account_type == 目标户类型`，而提示拿**工作表名**去比 `account_type` ——
-        # 正常配置里「户类型名 == 工作表名」⇒ 按构造永不命中（死代码）；若二者被人为改成
-        # 不同，则每一行都命中 ⇒ 变成一条恒错的告警。有意义的那一侧只有 sync
-        # （行来自表、库里的 account_type 才可能真的不同）。详见 task-3-report.md。
+        # 过滤到「分表键 == 目标表」（`_sheet_key_of`），与提示的比对口径一致 ⇒ 按构造
+        # 永不命中（死代码）。有意义的那一侧只有 sync（行来自表、库里的分表键才可能
+        # 真的不同）。详见 task-3-report.md。
         groups, skipped = hd.group_rows_by_sheet(db, uid, platform, rows)
         t0 = _tick("收集完成", t0)
     finally:

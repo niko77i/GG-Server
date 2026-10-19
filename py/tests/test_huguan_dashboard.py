@@ -7612,3 +7612,127 @@ class TestFbAccountTypeFlow:
         # §4.9：空 account_type 视为无变化 ⇒ 这一行根本不该进 to_update
         assert not any(u["account_id"] == "ATF-3" for u in diff["to_update"])
         db.close()
+
+
+class TestFbPerSheetEntry:
+    """fb 按表导入/刷新入口放开 + cross_sheet_notes 不报错（spec §4.7 / §三.3 的哑弹）。"""
+
+    def test_fb_sync_per_sheet_no_longer_400(self, client, monkeypatch):
+        import google_sheets_service as gs
+        hg, _ = _create_user(client, "_fps1", role="huguan", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{_uid_of('_fps1')}", json.dumps({"fb": {
+                       "spreadsheet_id": "SS", "tables": [
+                           {"name": "加白户", "sheet_name": "加白户表"},
+                           {"name": "企业户", "sheet_name": "企业户表"}]}})))
+        db.commit(); db.close()
+        monkeypatch.setattr(gs, "read_sheet_values",
+                            lambda svc, sid, name, rng: [["资产UID", "资产类型"],
+                                                         ["9001", "企业户"]])
+        monkeypatch.setattr(gs, "build_service", lambda p: object())
+        resp = client.post("/api/huguan/dashboard/sync", headers=hg,
+                           json={"platform": "fb", "sheet_name": "企业户表", "dry_run": True})
+        assert resp.status_code == 200, resp.get_json()
+        assert "cross_sheet_notes" in resp.get_json()["diff"]
+
+    def test_cross_sheet_notes_uses_source_sheet_for_fb(self, client):
+        """哑弹回归钉：放开按表后调 cross_sheet_notes 不报错，且按 source_sheet 比对。"""
+        db = database.get_db()
+        db.execute("INSERT OR IGNORE INTO users(id, username, password, role, platform) "
+                   "VALUES(1, 'fb_csn_u', 'x', 'user', 'fb')")
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, owner_id) "
+                   "VALUES('户甲', 'CSN-1', '企业户', '企业户表', 1)")
+        db.commit()
+        notes = hd.cross_sheet_notes(db, "fb", ["CSN-1"], "加白户表")
+        db.close()
+        assert notes["count"] == 1, "fb 应按 source_sheet 与本次表名比对（不是 account_type）"
+        assert notes["notes"][0]["current_type"] == "企业户表"
+
+
+class TestFbMultiSheetPushRoute:
+    """路由级：fb 多表 `/push` 必须按 `source_sheet` 取各自那张表的 col_map。
+
+    今天之前这段代码**不可达**（fb 多表配置被 `/push` 的配置门 400），T8 打开门后
+    才暴露：若 `col_maps_by_type` 的键写回 `t["name"]`，两张表都会退化为固定规格，
+    表B 的资产UID 会被写进 D 列（表A 恰好也在 D）⇒ 静默串列。
+    """
+
+    headers = {
+        "表A": ["日期", "操作人", "账户名称", "资产UID", "产品信息"],
+        "表B": ["日期", "操作人", "账户名称", "所属渠道", "资产UID", "产品信息"],
+    }
+
+    def _seed(self, client, username, labels=("加白户", "企业户")):
+        hg, uid = _create_user(client, username, role="huguan", platform="fb")
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
+                   (f"huguan_dashboard_{uid}", json.dumps({"fb": {
+                       "spreadsheet_id": "SS",
+                       "tables": [{"name": labels[0], "sheet_name": "表A"},
+                                  {"name": labels[1], "sheet_name": "表B"}]}})))
+        # account_type（资产类型）刻意与表名/配置 name 都不同：按表过滤若用错键，
+        # 这里就一行都匹配不上（判别力的来源）。
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, owner_id) "
+                   "VALUES('户A','FB-A','资产A','表A',?)", (uid,))
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, owner_id) "
+                   "VALUES('户B','FB-B','资产B','表B',?)", (uid,))
+        db.commit()
+        db.close()
+        return hg
+
+    def _stub(self, monkeypatch):
+        import google_sheets_service as gs
+        reads, captured = [], []
+
+        def _fake_read(svc, sid, name, rng):
+            if rng != "A1:ZZ1":
+                return []
+            reads.append(name)
+            return [list(self.headers[name])]
+
+        def _upd(svc, sid, name, rows, key_col=None):
+            captured.append({"sheet_name": name, "key_col": key_col, "rows": rows})
+            return {"updated": len(rows), "not_found": []}
+
+        monkeypatch.setattr(hd, "read_sheet_values", _fake_read)
+        monkeypatch.setattr(gs, "build_service", lambda _p: object())
+        monkeypatch.setattr(gs, "update_rows_by_account_id", _upd)
+        return reads, captured
+
+    def test_full_push_uses_each_tables_col_map(self, client, monkeypatch):
+        """全部刷新：两张表各按自己的表头写（表A 账户ID在 D、表B 在 E）。"""
+        hg = self._seed(client, "_fb_push_all")
+        reads, captured = self._stub(monkeypatch)
+        resp = client.post("/api/huguan/dashboard/push", headers=hg, json={"platform": "fb"})
+        assert resp.status_code == 200, resp.get_json()
+        by_sheet = {c["sheet_name"]: c for c in captured}
+        assert set(by_sheet) == {"表A", "表B"}, captured
+        a, b = by_sheet["表A"], by_sheet["表B"]
+        assert a["key_col"] == "D" and b["key_col"] == "E", captured
+        assert [r["account_id"] for r in a["rows"]] == ["FB-A"], a
+        assert [r["account_id"] for r in b["rows"]] == ["FB-B"], b
+        assert a["rows"][0]["cells"].get("D") == "FB-A", \
+            f"表A的账户ID 必须落在表A col_map 的 D 列：{a}"
+        assert b["rows"][0]["cells"].get("E") == "FB-B", \
+            f"表B的账户ID 必须落在表B col_map 的 E 列（键写回 t['name'] 会退回固定 D）：{b}"
+
+    def test_per_sheet_push_filters_by_source_sheet_and_targets_one_table(self, client, monkeypatch):
+        """按表刷新：按 `source_sheet` 过滤，且只解析/只写**目标那张表**。
+
+        夹具让两张表的配置 `name` **同名**（fb 的 name 只是标签，不承载路由）：
+        若目标表解析退回 `t["name"]`，就会连表A 的表头也读、把表A 纳入目标集合。
+        """
+        hg = self._seed(client, "_fb_push_one", labels=("同名标签", "同名标签"))
+        reads, captured = self._stub(monkeypatch)
+        resp = client.post("/api/huguan/dashboard/push", headers=hg,
+                           json={"platform": "fb", "sheet_name": "表B"})
+        assert resp.status_code == 200, resp.get_json()
+        assert reads == ["表B"], f"按表刷新只该读目标表的表头：{reads}"
+        assert len(captured) == 1, f"只该写目标表：{captured}"
+        b = captured[0]
+        assert b["sheet_name"] == "表B"
+        assert b["key_col"] == "E", b
+        assert [r["account_id"] for r in b["rows"]] == ["FB-B"], \
+            f"必须按 source_sheet 过滤；按 account_type/name 会漏行或错配：{b}"
+        assert b["rows"][0]["cells"].get("E") == "FB-B", b

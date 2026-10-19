@@ -2369,9 +2369,10 @@ def cross_sheet_notes(db, platform: str, account_ids: list, sheet_name: str,
     """按表操作时的「跨表重复」提示（设计 §3.3）：这些账户**当前归属另一张表**。
 
     为什么只查库：读其它表会抵消按表操作带来的提速（与「只在该表内去重」的初衷冲突）。
-    库里的 `account_type` 就是「上一次同步时它来自哪张表」的记账，够用。
+    库里的**分表键**（tt 是 `account_type`、fb 是 `source_sheet`）就是「上一次同步时它
+    来自哪张表」的记账，够用。
 
-    判据：本次同步里出现的账户，其库里 `account_type` 非空且与本次表名不同。
+    判据：本次同步里出现的账户，其库里分表键非空且与本次表名不同。
     `count` 给总数（前端能说「共 N 个」），`notes` 最多 `cap` 条（防空表刷爆报告）。
     软删账户不计（`deleted_at IS NULL`，与 `collect_rows_for_push` 同口径）。
     """
@@ -2379,14 +2380,18 @@ def cross_sheet_notes(db, platform: str, account_ids: list, sheet_name: str,
     if not ids:
         return {"count": 0, "notes": []}
     table = _TABLE_FOR_PLATFORM[platform]
+    # 比对列**按平台取分表键**：tt 仍是 account_type（与改动前逐字节相同）；fb 必须是
+    # source_sheet —— 拿 account_type（资产类型）去比工作表名永远不会相等 ⇒ 每个账户
+    # 都被误报「跨表重复」。gg 不走按表入口，回落 account_type 仅为兼容。
+    key_field = _SHEET_KEY_FIELD.get(platform) or "account_type"
     hits = []
     for part in chunk(ids):
         marks = ",".join("?" for _ in part)
         for r in db.execute(
-                f"SELECT {ACCOUNT_KEY_FIELD[platform]} AS aid, account_type "
+                f"SELECT {ACCOUNT_KEY_FIELD[platform]} AS aid, {key_field} AS sheet_key "
                 f"FROM {table} WHERE {ACCOUNT_KEY_FIELD[platform]} IN ({marks}) "
                 "AND deleted_at IS NULL", tuple(part)).fetchall():
-            cur = _conf_text(r["account_type"])
+            cur = _conf_text(r["sheet_key"])
             if cur and cur != sheet_name:
                 hits.append({"account_id": _conf_text(r["aid"]),
                              "current_type": cur, "this_sheet": sheet_name})
