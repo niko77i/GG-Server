@@ -86,7 +86,11 @@ def huguan_dashboard_sync(user_id, platform, account_ids):
             for t in tables
         }
         # cells 也要按本表的 col_map 产出：tt 表头顺序不一定等于固定列规格。
-        col_maps_by_type = {t["name"]: col_map_by_sheet[t["sheet_name"]] for t in tables}
+        # 键必须与 `collect_rows_for_push` 里的 `_sheet_key_of(platform, row)` 同口径
+        # （按平台取）：tt=t["name"]（逐字节不变）；fb=t["sheet_name"] —— 与
+        # `_resolve_account_table` 的分表键一致，否则 fb 多表下 col_map 取空/取错。
+        col_maps_by_type = {hd._table_key_of(platform, t): col_map_by_sheet[t["sheet_name"]]
+                            for t in tables}
         rows = hd.collect_rows_for_push(db, platform, list(account_ids), col_maps_by_type)
         groups, skipped = hd.group_rows_by_sheet(db, user_id, platform, rows)
         for name in skipped:

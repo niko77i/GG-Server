@@ -536,7 +536,10 @@ def dashboard_push():
                 t.get("columns") or {})
             for t in target_tables
         }
-        col_maps_by_type = {t["name"]: col_maps_by_sheet[t["sheet_name"]]
+        # 键必须与 `collect_rows_for_push` 的 `_sheet_key_of(platform, row)` 同口径
+        # （按平台取）：tt=t["name"]（逐字节不变）；fb=t["sheet_name"] —— fb 多表下
+        # 按 name 取会让每一行都取不到 col_map（静默退回固定列/串列）。
+        col_maps_by_type = {hd._table_key_of(platform, t): col_maps_by_sheet[t["sheet_name"]]
                             for t in target_tables}
         rows = hd.collect_rows_for_push(db, platform, col_maps_by_type=col_maps_by_type)
         if target_type is not None:

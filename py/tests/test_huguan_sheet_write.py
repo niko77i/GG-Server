@@ -716,3 +716,37 @@ def test_update_rows_tolerates_row_with_empty_cells(monkeypatch):
     res = gs.update_rows_by_account_id(object(), "SS", "S",
                                        [{"account_id": "7001", "cells": {}}], key_col="C")
     assert res == {"updated": 1, "not_found": []}, res
+
+
+# ========== Task 6（子项目 B）: 写路径按 source_sheet 选表 ==========
+
+
+class TestFbResolveAccountTableBySourceSheet:
+    def _seed(self):
+        db = database.get_db()
+        db.execute("INSERT OR IGNORE INTO users(id, username, password, role, platform) "
+                   "VALUES(1, 'fb_rat_u', 'x', 'user', 'fb')")
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, owner_id) "
+                   "VALUES('户甲', 'RAT-1', '企业户', '企业户表', 1)")
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_1', ?)",
+                   (json.dumps({"fb": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "加白户表"},
+                       {"name": "企业户", "sheet_name": "企业户表"}]}}),))
+        db.commit()
+        return db
+
+    def test_resolve_account_table_uses_source_sheet_for_fb(self):
+        import routes.huguan_sheet_targets as hst
+        db = self._seed()
+        t = hst._resolve_account_table(db, 1, "fb", "RAT-1")
+        assert t["sheet_name"] == "企业户表", "fb 必须按 source_sheet 命中，不是按 t['name']"
+        db.close()
+
+    def test_resolve_account_table_returns_none_when_sheet_missing(self):
+        """source_sheet 指向配置里没有的表 ⇒ None，调用方跳过 + warning，绝不写第一张表。"""
+        import routes.huguan_sheet_targets as hst
+        db = self._seed()
+        db.execute("UPDATE fb_accounts SET source_sheet='已删除的表' WHERE account_id='RAT-1'")
+        db.commit()
+        assert hst._resolve_account_table(db, 1, "fb", "RAT-1") is None
+        db.close()
