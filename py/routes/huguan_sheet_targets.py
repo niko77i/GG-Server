@@ -19,11 +19,12 @@ log = logging.getLogger("gg-server")
 
 
 def _resolve_account_table(db, user_id, platform, account_id):
-    """按账户的**户类型**解析它该写哪张 worksheet 的配置项（`{name, sheet_name, columns}`）。
+    """按账户的**分表键**解析它该写哪张 worksheet 的配置项（`{name, sheet_name, columns}`）。
 
     解析不到 → 返回 None，由调用方决定「跳过」还是「报失败」。
-    gg / fb 的类型恒为空串、配置里恰有一个空名条目 ⇒ 恒命中那唯一一张表，
-    行为与改动前（单表）等价；只有 tt 会真正分表。
+    分表键按平台取（spec §4.2）：tt 读 tt_accounts.account_type（对 t["name"]）；
+    fb 读 fb_accounts.source_sheet（对 t["sheet_name"]）；gg 恒空串、命中唯一空名条目，
+    行为与改动前（单表）等价。
 
     返回**整项**而不只是工作表名：写表前要按该表的 `columns`（手工覆盖）解析 col_map，
     读路径用的是同一份配置（`get_platform_tables` 的同一项），读写必须同源。
@@ -33,13 +34,17 @@ def _resolve_account_table(db, user_id, platform, account_id):
     tables = hd.get_platform_tables(db, user_id, platform)
     if not tables:
         return None
-    atype = ""
+    key = ""
     if platform == "tt":
         r = db.execute("SELECT account_type FROM tt_accounts WHERE advertiser_id=?",
                        (account_id,)).fetchone()
-        atype = (r["account_type"] if r else "") or ""
+        key = (r["account_type"] if r else "") or ""
+    elif platform == "fb":
+        r = db.execute("SELECT source_sheet FROM fb_accounts WHERE account_id=?",
+                       (account_id,)).fetchone()
+        key = (r["source_sheet"] if r else "") or ""
     for t in tables:
-        if t["name"] == atype:
+        if hd._table_key_of(platform, t) == key:
             return t
     return None
 

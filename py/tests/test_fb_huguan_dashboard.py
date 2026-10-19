@@ -729,6 +729,11 @@ class TestFbAcceptorWritebackKeyCol:
         db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                    (f"huguan_dashboard_{uid}",
                     json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
+        # 新契约：fb 按 source_sheet 选表（`_resolve_account_table`），空值/无账户会被
+        # 跳过（T6 Step 3 提前后的必然连带）。本用例只测定位列，补一条指向配置表名的
+        # 账户即可；断言不动。
+        db.execute("INSERT INTO fb_accounts(name, account_id, source_sheet, owner_id) "
+                   "VALUES('户', 'A1', 'S', ?)", (uid,))
         db.commit()
         db.close()
 

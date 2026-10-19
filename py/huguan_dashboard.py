@@ -667,8 +667,9 @@ def get_platform_tables(db, user_id: int, platform: str) -> list:
       取它，前端也据此渲染，缺省 `{}` 让前端无需判 None。
     - tt 只有旧的 `sheet_name`（2026-10-08 之前的存量配置）→ 当成单条「加白户」。
       **只读不改写磁盘**：写回发生在用户下次点保存时，这样出问题能一眼看出是读的还是写的。
-    - gg → 单元素列表、`name` 为空串、**不带 `columns`**；fb → 单元素列表、**带 `columns`**
-      （fb 已有表头映射，与 tt 同口径；gg 没有，载荷形状必须逐字节不变）。
+    - gg → 单元素列表、`name` 为空串、**不带 `columns`**；fb → 与 tt 同形多表
+      （legacy 扁平配置兜成一条，`name` 取该表名）。gg 没有 `columns`，载荷形状必须
+      逐字节不变。
     """
     entry = load_config(db, user_id).get(platform)
     if not isinstance(entry, dict):
@@ -693,11 +694,33 @@ def get_platform_tables(db, user_id: int, platform: str) -> list:
         legacy = _conf_text(entry.get("sheet_name"))
         return [{"name": TT_DEFAULT_ACCOUNT_TYPE, "sheet_name": legacy}] if legacy else []
     if platform == "fb":
-        # fb 有了表头映射 ⇒ 与 tt 一样带 `columns`（手工覆盖）。**gg 不带** ——
-        # gg 没有表头映射，载荷形状必须逐字节不变（前端也据此分流）。
-        cols = entry.get("columns")
-        return [{"name": "", "sheet_name": _conf_text(entry.get("sheet_name")),
-                 "columns": cols if isinstance(cols, dict) else {}}]
+        # fb 与 tt 同形多表：每项 {name, sheet_name, columns}。name 只是表的人名标签，
+        # 不参与路由（路由按 source_sheet 走，spec §4.2）；columns 是手工覆盖（表头映射）。
+        tables = entry.get("tables")
+        if isinstance(tables, list):
+            out = []
+            for t in tables:
+                if not isinstance(t, dict):
+                    continue
+                name = _conf_text(t.get("name"))
+                sheet_name = _conf_text(t.get("sheet_name"))
+                if name and sheet_name:
+                    cols = t.get("columns")
+                    out.append({"name": name, "sheet_name": sheet_name,
+                                "columns": cols if isinstance(cols, dict) else {}})
+            if out:
+                return out
+        # 存量扁平配置 {spreadsheet_id, sheet_name, columns} ⇒ 当成一条 tables，
+        # name 取该工作表名（spec §4.3）。**只读不改写磁盘**：写回发生在用户下次保存时。
+        legacy = _conf_text(entry.get("sheet_name"))
+        if legacy:
+            cols = entry.get("columns")
+            return [{"name": legacy, "sheet_name": legacy,
+                     "columns": cols if isinstance(cols, dict) else {}}]
+        # 未配置：返回**一条空名空表名**（与改动前逐字节一致）。不能返回 [] ——
+        # GET 配置路由按 `get_platform_tables(...)[0]["columns"]` 取覆盖、undo_push 用
+        # `not tables` 当「未配置」门，空列表会让两者分别 IndexError / 静默空操作。
+        return [{"name": "", "sheet_name": "", "columns": {}}]
     return [{"name": "", "sheet_name": _conf_text(entry.get("sheet_name"))}]
 
 
@@ -717,14 +740,15 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
     """写入某平台的看板配置，另一个平台的配置保持不变。
 
     `tables=None`（默认）→ 写旧格式 `{spreadsheet_id, sheet_name}`，行为与改动前**逐字节一致**
-    （gg / fb 走这条路）。`tables` 非 None → 只允许 tt，写新格式
-    `{spreadsheet_id, tables:[{name, sheet_name}]}`，并按类型名改名**级联**回填账户表。
+    （gg / fb 走这条路）。`tables` 非 None → 只允许 tt / fb，写新格式
+    `{spreadsheet_id, tables:[{name, sheet_name}]}`；tt 按类型名改名**级联**回填账户表，
+    fb 的 `tables` 不级联改名（fb 的户类型是数据驱动的）。
     `columns` 只对 fb 生效（tt 的覆盖挂在 `tables[]` 每一项上）。
     """
     if platform not in PLATFORMS:
         raise ValueError(f"不支持的平台: {platform}")
-    if tables is not None and platform != "tt":
-        raise ValueError(f"多账户表只支持 tt，收到: {platform}")
+    if tables is not None and platform not in ("tt", "fb"):
+        raise ValueError(f"多账户表只支持 tt / fb，收到: {platform}")
     conf = load_config(db, user_id)
     if tables is None:
         conf[platform] = {
@@ -758,13 +782,17 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
         # （见 routes/huguan_dashboard_routes.py 的 POST 校验）。
         # 已知边界：用户同时改「类型名」和「worksheet」时会被当成删+增、不级联，
         # 该类型账户保留旧名（孤儿）。这是刻意接受的取舍 —— 宁可留孤儿，不可错并户。
-        old_by_sheet = {t["sheet_name"]: t["name"] for t in get_platform_tables(db, user_id, "tt")}
-        for new_t in clean:
-            old_name = old_by_sheet.get(new_t["sheet_name"])
-            if old_name and old_name != new_t["name"]:
-                # 类型名字符串即标识（规格 §5）：不级联的话，存量账户会从按钮里凭空消失。
-                db.execute("UPDATE tt_accounts SET account_type=? WHERE account_type=?",
-                           (new_t["name"], old_name))
+        # 改名级联**只对 tt**（spec §五）：fb 的户类型是数据驱动的（来自单元格），
+        # 改名应该改表、不是改配置，也不改账户的 account_type。
+        if platform == "tt":
+            old_by_sheet = {t["sheet_name"]: t["name"]
+                            for t in get_platform_tables(db, user_id, "tt")}
+            for new_t in clean:
+                old_name = old_by_sheet.get(new_t["sheet_name"])
+                if old_name and old_name != new_t["name"]:
+                    # 类型名字符串即标识（规格 §5）：不级联的话，存量账户会从按钮里凭空消失。
+                    db.execute("UPDATE tt_accounts SET account_type=? WHERE account_type=?",
+                               (new_t["name"], old_name))
         conf[platform] = {
             "spreadsheet_id": _conf_text(spreadsheet_id),
             "tables": clean,
@@ -774,38 +802,57 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
     db.commit()
 
 
+# 分表键（2026-10-11 设计 §4.2 方案 1 的核心）：一行账户「该写回哪张表」的判据字段。
+#   tt → account_type（户类型名，与配置项 t["name"] 对）
+#   fb → source_sheet（读自哪张工作表，与配置项 t["sheet_name"] 对）
+#   gg → 无（恒单表，恒空串）
+_SHEET_KEY_FIELD = {"tt": "account_type", "fb": "source_sheet", "gg": None}
+
+
+def _sheet_key_of(platform: str, row: dict) -> str:
+    """取某行账户的分表键值（空则返回空串）。gg 恒空串。"""
+    field = _SHEET_KEY_FIELD.get(platform)
+    return _conf_text((row or {}).get(field)) if field else ""
+
+
+def _table_key_of(platform: str, table: dict) -> str:
+    """取某配置表项上与之匹配的键：tt 是 t["name"]，fb 是 t["sheet_name"]，gg 恒空串。"""
+    if platform == "fb":
+        return _conf_text((table or {}).get("sheet_name"))
+    return _conf_text((table or {}).get("name"))
+
+
 def group_rows_by_sheet(db, user_id: int, platform: str, rows: list):
-    """把待写行按「户类型 → worksheet」分组。
+    """把待写行按「分表键 → worksheet」分组（spec §4.2）。
 
     返回 `(groups, skipped)`：`groups` 是 `[(sheet_name, rows)]`（按配置顺序），
-    `skipped` 是「在配置里查不到工作表的类型名」列表。
+    `skipped` 是「在配置里查不到工作表的分表键」列表。
 
-    查不到就**跳过**，绝不退回写第一张表 —— 那正是多表之后要消除的「填错表」。
-    gg/fb 的类型恒为空串且配置里恰好有一个空名条目 ⇒ 只有一组，与改动前等价。
-    tt 的空类型（账户行没类型 / 查不到）**跳过**，不退回第一张表：宁可漏写
-    （日志里看得见）也不能写错 —— 写错表会把甲类账户的内容覆盖进乙类的 worksheet。
+    分桶键与匹配键**按平台取**：tt 用 account_type（对 t["name"]）、fb 用 source_sheet
+    （对 t["sheet_name"]）、gg 恒空串（配置里恰有一个空名条目 ⇒ 只有一组）。tt / fb 查不到
+    对应工作表的分表键**跳过**，绝不退回写第一张表 —— 那正是多表之后要消除的「填错表」。
+    只有 gg 保留「空键落进唯一一张表」的历史态兜底（它恒单表）。
     """
     tables = get_platform_tables(db, user_id, platform)
     buckets = {}
     for r in rows:
-        buckets.setdefault(r.get("account_type") or "", []).append(r)
+        buckets.setdefault(_sheet_key_of(platform, r) or "", []).append(r)
     groups, skipped = [], []
     for t in tables:
-        name = t["name"]
-        if name in buckets:
-            groups.append((t["sheet_name"], buckets.pop(name)))
+        key = _table_key_of(platform, t)
+        if key in buckets:
+            groups.append((t["sheet_name"], buckets.pop(key)))
     for leftover, leftover_rows in buckets.items():
         if leftover:
             skipped.append(leftover)
-        elif platform != "tt" and tables:
-            # gg/fb 的类型恒为空串，其配置条目也恰好是空名 ⇒ 正常已被上面的循环取走。
-            # 保留这一支只为兼容「配置条目缺失」这种历史态，行为与改动前等价。
+        elif platform == "gg" and tables:
+            # gg 恒单表：空键配置里恰好一个空名条目 ⇒ 正常已被上面的循环取走。
+            # 保留这一支只为兼容「配置条目缺失」的历史态，行为与改动前等价。
             groups.append((tables[0]["sheet_name"], leftover_rows))
         else:
-            # tt：类型为空 ⇒ 查不到对应工作表。**绝不退回写第一张表** —— 那正是本设计
-            # 要消除的「填错表」。宁可漏写（日志里看得见）也不能写错：写错表会把甲类
-            # 账户的内容覆盖进乙类的 worksheet，而漏写只是少刷新几行。
-            skipped.append(leftover or "（未设置户类型）")
+            # tt / fb：空键（空类型 / 空 source_sheet）⇒ 查不到对应工作表。绝不退回写第一张表。
+            label = "（未设置户类型）" if platform == "tt" else "（未设置来源表）"
+            skipped.append(leftover or label)
     return groups, skipped
 
 
@@ -2211,8 +2258,9 @@ LEFT JOIN account_statuses s ON a.status_id = s.id
 """
 
 _FB_ROW_SQL = """
-SELECT a.account_id, a.acquired_date, a.name, a.timezone, a.operator, a.acceptor,
-       a.unit_price, a.inbound_qty, a.outbound_date, a.outbound_qty, a.consumption, a.remark,
+SELECT a.account_id, a.account_type, a.source_sheet, a.acquired_date, a.name, a.timezone,
+       a.operator, a.acceptor, a.unit_price, a.inbound_qty, a.outbound_date, a.outbound_qty,
+       a.consumption, a.remark,
        ch.name AS channel_name, at.name AS asset_type_name,
        bm.name AS primary_bm_name,
        COALESCE(NULLIF(u.display_name, ''), u.username, '') AS owner_name,
@@ -2246,10 +2294,11 @@ def collect_rows_for_push(db, platform: str, account_ids=None,
     to_skip 的口径对称，也符合规格 §6.2「软删不触发回写」的意图 —— 软删是用户
     主动从看板撤下的意图，刷新不该把它复活。
 
-    `col_maps_by_type`（可选）是 `{户类型名: 该表的 col_map}`。给了就逐行按该行
-    `account_type` 取到本表的 col_map 再产出 cells（tt / fb 表头顺序不同 ⇒ 固定列字母会
-    串列）；没给（None）⇒ 既有合成 map，只有 gg 与既有调用点零改动、逐字节不变。
-    调用方负责把 col_map 解析好（读表头需要 service，本函数只有 db）。
+    `col_maps_by_type`（可选）是 `{分表键: 该表的 col_map}`。**键按平台取**：tt 的键是
+    `t["name"]`（户类型名）、fb 的键是 `t["sheet_name"]`（工作表名）—— 与 `_table_key_of`
+    同口径。给了就逐行按该行的 `_sheet_key_of` 取到本表的 col_map 再产出 cells（tt / fb
+    表头顺序不同 ⇒ 固定列字母会串列）；没给（None）⇒ 既有合成 map，只有 gg 与既有调用点
+    零改动、逐字节不变。调用方负责把 col_map 解析好（读表头需要 service，本函数只有 db）。
     """
     sql = _ROW_SQL[platform]
     # 两个基语句都没有 WHERE 子句，故条件先累积成 list 再统一拼 —— 避免
@@ -2272,14 +2321,16 @@ def collect_rows_for_push(db, platform: str, account_ids=None,
     for q_sql, q_params in queries:
         for r in db.execute(q_sql, q_params).fetchall():
             row = dict(r)
-            atype = row.get("account_type") or ""
-            cm = col_maps_by_type.get(atype) if col_maps_by_type else None
+            key = _sheet_key_of(platform, row)
+            cm = col_maps_by_type.get(key) if col_maps_by_type else None
             item = {"account_id": str(row.get("account_id") or "").strip(),
                     "cells": cells_for_row(row, platform, cm)}
-            # 户类型只用于**路由**（决定写哪张 worksheet），不进 cells ——
-            # cells 是「表列字母 → 单元格值」，没有类型这一列。
-            # gg/fb 的 _ROW_SQL 没有这一列 ⇒ 取到空串，分组时只有一组，行为不变。
-            item["account_type"] = atype
+            # 分表键：tt 是 account_type、fb 是 source_sheet。两者都从 SQL 带出（fb 的
+            # _ROW_SQL 新增两列；gg/tt 的 _ROW_SQL 没有 source_sheet 列 ⇒ 空串）。
+            # group_rows_by_sheet 按 _sheet_key_of 取用，这里原样带上，方便下游（按表过滤、
+            # 日志）直接读，无需再回查库。
+            item["account_type"] = row.get("account_type") or ""
+            item["source_sheet"] = row.get("source_sheet") or ""
             out.append(item)
     return [o for o in out if o["account_id"]]
 

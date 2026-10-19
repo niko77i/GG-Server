@@ -267,8 +267,11 @@ def test_write_background_routes_fb_acceptor_column_to_its_target(client, monkey
     h, uid = _tt_huguan(client, "_hg_p5fb")
     db = database.get_db()
     _mk_huguan_conf(db, uid, platform="fb")
-    db.execute("INSERT INTO fb_accounts (name, account_id, acceptor, owner_id) "
-               "VALUES ('fb_p5','hg_p5fb_a','张三转李四',?)", (uid,))
+    # 新契约：fb 按 source_sheet 选表（`_resolve_account_table`），空值会被跳过
+    # （T6 Step 3 提前后的必然连带）。本用例只测后台分派，补上与配置工作表名一致的值
+    # 即可；断言不动。
+    db.execute("INSERT INTO fb_accounts (name, account_id, acceptor, source_sheet, owner_id) "
+               "VALUES ('fb_p5','hg_p5fb_a','张三转李四','看板',?)", (uid,))
     db.commit()
     rows = [{"account_id": "hg_p5fb_a", "cells": {"I": "张三转李四"}}]
     hr._write_background_tables(db, uid, "fb", rows)

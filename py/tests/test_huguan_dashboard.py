@@ -2620,8 +2620,10 @@ class TestPushKeyColumn:
         db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                    (f"huguan_dashboard_{uid}",
                     json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
-        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户','KC-FB',?)",
-                   (uid,))
+        # 新契约：fb 按 source_sheet 选表，空值会被跳过（见 T2/T3 合并 brief）。
+        # 本用例只测定位列，补上与配置 sheet_name 一致的值即可；断言不动。
+        db.execute("INSERT INTO fb_accounts(name, account_id, source_sheet, owner_id) "
+                   "VALUES('户','KC-FB','S',?)", (uid,))
         db.commit()
         db.close()
 
@@ -2657,8 +2659,10 @@ class TestSyncWritebackKeyColumn:
         db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                    (f"huguan_dashboard_{uid}",
                     json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
-        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', ?, ?)",
-                   ("KC-FB-1", uid))
+        # 新契约：fb 按 source_sheet 选表，空值会被跳过（T6 Step 3 提前后的必然连带）。
+        # 本用例只测定位列，补上与配置 sheet_name 一致的值即可；断言不动。
+        db.execute("INSERT INTO fb_accounts(name, account_id, source_sheet, owner_id) "
+                   "VALUES('户', ?, 'S', ?)", ("KC-FB-1", uid))
         db.commit()
         db.close()
 
@@ -2743,8 +2747,10 @@ class TestFbAcceptorColumnRouting:
                    (f"huguan_dashboard_{uid}",
                     json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
         # acceptor 留空：归属变更落库时 apply_diff 会把它写成「旧转新」串（重建走它取写表值）。
-        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', ?, ?)",
-                   (account_id, uid))
+        # 新契约：fb 按 source_sheet 选表，空值会被跳过（T6 Step 3 提前后的必然连带）。
+        # 本用例只测列路由，补上与配置 sheet_name 一致的值即可；断言不动。
+        db.execute("INSERT INTO fb_accounts(name, account_id, source_sheet, owner_id) "
+                   "VALUES('户', ?, 'S', ?)", (account_id, uid))
         db.commit()
         db.close()
 
@@ -2820,8 +2826,10 @@ class TestWritebackRowsKeyColumn:
         db.execute("INSERT OR REPLACE INTO config(key,value) VALUES(?,?)",
                    (f"huguan_dashboard_{uid}",
                     json.dumps({"fb": {"spreadsheet_id": "SS", "sheet_name": "S"}})))
-        db.execute("INSERT INTO fb_accounts(name, account_id, owner_id) VALUES('户', ?, ?)",
-                   ("WB-KC-FB-1", uid))
+        # 新契约：fb 按 source_sheet 选表，空值会被跳过（见 T2/T3 合并 brief）。
+        # 本用例只测定位列，补上与配置 sheet_name 一致的值即可；断言不动。
+        db.execute("INSERT INTO fb_accounts(name, account_id, source_sheet, owner_id) "
+                   "VALUES('户', ?, 'S', ?)", ("WB-KC-FB-1", uid))
         db.commit()
         db.close()
 
@@ -4954,13 +4962,14 @@ class TestPlatformTables:
     # ---- 2026-10-11（子项目 A）：FB 的列映射覆盖随配置存取 ----
 
     def test_fb_carries_columns_and_gg_does_not(self, client):
-        """fb 带 columns（缺省 {}，与 tt 同口径）；**gg 不带** —— 载荷形状逐字节不变。"""
+        """fb 走 tables（多表，每项带 columns）；**gg 不带** —— 载荷形状逐字节不变。"""
         db = self._db()
-        hd.save_config(db, 9, "fb", "SS1", "账户管理分配",
-                       columns={"时区": "consumption"})
+        hd.save_config(db, 9, "fb", "SS1", "", tables=[
+            {"name": "账户管理分配", "sheet_name": "账户管理分配",
+             "columns": {"时区": "consumption"}}])
         hd.save_config(db, 9, "gg", "SS2", "看板G")
         assert hd.get_platform_tables(db, 9, "fb") == [
-            {"name": "", "sheet_name": "账户管理分配",
+            {"name": "账户管理分配", "sheet_name": "账户管理分配",
              "columns": {"时区": "consumption"}}]
         assert hd.get_platform_tables(db, 9, "gg") == [
             {"name": "", "sheet_name": "看板G"}]
@@ -4968,25 +4977,48 @@ class TestPlatformTables:
 
     def test_fb_columns_default_to_empty_dict(self, client):
         db = self._db()
-        hd.save_config(db, 9, "fb", "SS1", "账户管理分配")
+        hd.save_config(db, 9, "fb", "SS1", "", tables=[
+            {"name": "账户管理分配", "sheet_name": "账户管理分配"}])
         assert hd.get_platform_tables(db, 9, "fb")[0]["columns"] == {}
-        db.close()
-
-    def test_fb_empty_columns_do_not_touch_the_stored_text(self, client):
-        """传空 dict ⇒ 落盘的配置文本与改动前一致（多一个键都不行）。"""
-        db = self._db()
-        hd.save_config(db, 9, "fb", "SS1", "账户管理分配", columns={})
-        raw = db.execute("SELECT value FROM config WHERE key='huguan_dashboard_9'").fetchone()[0]
-        assert json.loads(raw)["fb"] == {"spreadsheet_id": "SS1", "sheet_name": "账户管理分配"}
         db.close()
 
     def test_fb_columns_survive_a_round_trip(self, client):
         """存了再读回来一模一样 —— 否则改一次配置就把已有覆盖**静默清掉**。"""
         db = self._db()
-        hd.save_config(db, 9, "fb", "SS1", "账户管理分配", columns={"时区": "consumption"})
+        hd.save_config(db, 9, "fb", "SS1", "", tables=[
+            {"name": "账户管理分配", "sheet_name": "账户管理分配",
+             "columns": {"时区": "consumption"}}])
         got = hd.get_platform_tables(db, 9, "fb")[0]["columns"]
-        hd.save_config(db, 9, "fb", "SS1", "账户管理分配", columns=got)
+        hd.save_config(db, 9, "fb", "SS1", "", tables=[
+            {"name": "账户管理分配", "sheet_name": "账户管理分配",
+             "columns": got}])
         assert hd.get_platform_tables(db, 9, "fb")[0]["columns"] == {"时区": "consumption"}
+        db.close()
+
+    def test_fb_legacy_flat_config_reads_as_one_table(self, client):
+        """存量扁平 {spreadsheet_id, sheet_name, columns} ⇒ 一条 tables，name 取该表名。"""
+        db = self._db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_9', ?)",
+                   (json.dumps({"fb": {"spreadsheet_id": "SS1",
+                                       "sheet_name": "账户管理分配",
+                                       "columns": {"时区": "consumption"}}}),))
+        db.commit()
+        assert hd.get_platform_tables(db, 9, "fb") == [
+            {"name": "账户管理分配", "sheet_name": "账户管理分配",
+             "columns": {"时区": "consumption"}}]
+        raw = db.execute("SELECT value FROM config WHERE key='huguan_dashboard_9'").fetchone()[0]
+        assert json.loads(raw)["fb"] == {"spreadsheet_id": "SS1",
+                                          "sheet_name": "账户管理分配",
+                                          "columns": {"时区": "consumption"}}, \
+            "读路径兜底不许改写磁盘（spec §4.3）"
+        db.close()
+
+    def test_fb_multi_table_read(self, client):
+        db = self._db()
+        hd.save_config(db, 9, "fb", "SS1", "", tables=[
+            {"name": "加白户", "sheet_name": "加白户表"},
+            {"name": "企业户", "sheet_name": "企业户表"}])
+        assert [t["name"] for t in hd.get_platform_tables(db, 9, "fb")] == ["加白户", "企业户"]
         db.close()
 
 
@@ -5030,6 +5062,81 @@ class TestGroupRowsBySheet:
         groups, skipped = hd.group_rows_by_sheet(db, 7, "gg", rows)
         assert groups == [("看板", rows)] and skipped == []
         db.close()
+
+    # 以下 3 个方法追加进 TestGroupRowsBySheet 类
+
+    def test_fb_splits_by_source_sheet(self, client):
+        """fb 按 source_sheet 分桶、匹配 t["sheet_name"]（不是 t["name"]）。"""
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_7', ?)",
+                   (json.dumps({"fb": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "加白户表"},
+                       {"name": "企业户", "sheet_name": "企业户表"}]}}),))
+        db.commit()
+        rows = [{"account_id": "1", "source_sheet": "加白户表", "cells": {"A": "x"}},
+                {"account_id": "2", "source_sheet": "企业户表", "cells": {"A": "y"}}]
+        groups, skipped = hd.group_rows_by_sheet(db, 7, "fb", rows)
+        assert [(s, [r["account_id"] for r in rs]) for s, rs in groups] == [
+            ("加白户表", ["1"]), ("企业户表", ["2"])]
+        assert skipped == []
+        db.close()
+
+    def test_fb_unknown_source_sheet_is_skipped_not_first_table(self, client):
+        """source_sheet 指向配置里没有的表 ⇒ 跳过，绝不写第一张表（spec §4.5）。"""
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_7', ?)",
+                   (json.dumps({"fb": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "加白户表"}]}}),))
+        db.commit()
+        rows = [{"account_id": "1", "source_sheet": "已删除的表", "cells": {"A": "x"}}]
+        groups, skipped = hd.group_rows_by_sheet(db, 7, "fb", rows)
+        assert groups == []
+        assert skipped == ["已删除的表"]
+        db.close()
+
+    def test_fb_empty_source_sheet_is_skipped(self, client):
+        """空 source_sheet ⇒ 跳过（与 tt 空类型同口径），**不得**落进第一张表。"""
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO config(key,value) VALUES('huguan_dashboard_7', ?)",
+                   (json.dumps({"fb": {"spreadsheet_id": "SS", "tables": [
+                       {"name": "加白户", "sheet_name": "加白户表"}]}}),))
+        db.commit()
+        rows = [{"account_id": "1", "source_sheet": "", "cells": {"A": "x"}}]
+        groups, skipped = hd.group_rows_by_sheet(db, 7, "fb", rows)
+        assert groups == []
+        assert skipped == ["（未设置来源表）"]
+        db.close()
+
+
+class TestSheetKeyAbstraction:
+    """分表键抽象：tt/fb/gg 三个平台各取各的键（spec §4.2）。"""
+
+    def test_sheet_key_of_per_platform(self):
+        assert hd._sheet_key_of("tt", {"account_type": "加白户"}) == "加白户"
+        assert hd._sheet_key_of("fb", {"source_sheet": "企业户表"}) == "企业户表"
+        assert hd._sheet_key_of("gg", {"anything": "x"}) == ""
+
+    def test_table_key_of_per_platform(self):
+        assert hd._table_key_of("tt", {"name": "加白户", "sheet_name": "总户-加白"}) == "加白户"
+        assert hd._table_key_of("fb", {"name": "企业户", "sheet_name": "企业户表"}) == "企业户表"
+        assert hd._table_key_of("gg", {"name": "", "sheet_name": "看板G"}) == ""
+
+    def test_fb_row_sql_selects_both_columns(self):
+        """_FB_ROW_SQL 必须 SELECT account_type 与 source_sheet —— 这是整条链路的最小一刀。"""
+        assert "a.account_type" in hd._FB_ROW_SQL
+        assert "a.source_sheet" in hd._FB_ROW_SQL
+
+    def test_fb_collect_rows_carries_both_keys(self):
+        db = database.get_db()
+        db.execute("INSERT OR REPLACE INTO users(id, username, password, role, platform) "
+                   "VALUES(9901, 'fb_sk_u', 'x', 'user', 'fb')")
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, owner_id) "
+                   "VALUES('户甲', 'SK-FB-1', '企业户', '企业户表', 9901)")
+        db.commit()
+        rows = hd.collect_rows_for_push(db, "fb", ["SK-FB-1"])
+        db.close()
+        assert rows[0]["account_type"] == "企业户"
+        assert rows[0]["source_sheet"] == "企业户表"
 
 
 # ---------- Task 3: 配置 HTTP 多表 ----------
