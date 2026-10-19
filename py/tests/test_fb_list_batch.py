@@ -147,6 +147,33 @@ def test_fb_deleted_list_bms_are_grouped_correctly(app, client, admin_fb_headers
         assert "is_primary" not in item["bms"][0]
 
 
+def test_list_filters_by_account_types(client, admin_fb_headers):
+    """按「户类型」（account_type，资产类型原串）筛选 + type_counts 口径。
+
+    type_counts 必须基于**去掉 account_types 自身**的同一底（含 search/bm/status/
+    owner），否则筛选后按钮上的候选集会被自己筛没 —— 点了「企业户」就只剩企业户，
+    无法再叠加/切换。这里先筛「企业户」仍要求看到两种类型的计数。
+    """
+    import database
+    db = database.get_db()
+    for name, atype in (('户甲', '企业户'), ('户乙', '企业户'), ('户丙', '加白户')):
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, owner_id) "
+                   "SELECT ?, ?, ?, id FROM users WHERE username='adminfb'",
+                   (name, f'{name}-ID', atype))
+    db.commit(); db.close()
+
+    data = client.get("/api/fb/accounts/list?account_types=企业户",
+                      headers=admin_fb_headers).get_json()
+    assert data["total"] == 2
+    assert len(data["items"]) == 2
+    assert data["type_counts"] == {"企业户": 2, "加白户": 1}
+
+    data = client.get("/api/fb/accounts/list?account_types=加白户&account_types=企业户",
+                      headers=admin_fb_headers).get_json()
+    assert data["total"] == 3
+    assert len(data["items"]) == 3
+
+
 def test_fb_deleted_list_makes_one_bm_query_not_per_row(app, client, admin_fb_headers, monkeypatch):
     """**N+1 守卫（已删除端点）**：BM 查询次数必须是 1，不随行数增长。
 

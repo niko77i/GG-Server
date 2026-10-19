@@ -38,6 +38,15 @@
     <el-card class="filter-card" shadow="never">
       <div class="filter-bar">
         <el-input v-model="search" placeholder="搜索ID/名称" clearable style="width:200px" @input="onSearch" />
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center;">
+          <el-button v-for="t in availableTypes" :key="t"
+                     :type="accountTypes.includes(t) ? 'primary' : 'default'"
+                     size="small" @click="toggleType(t)" style="font-weight:600;">
+            {{ t }} {{ typeCounts[t] || 0 }}
+          </el-button>
+          <el-button v-if="accountTypes.length" size="small" type="info" plain
+                     @click="clearTypes">展示全部</el-button>
+        </div>
         <el-select v-model="filterBm" placeholder="全部BM" clearable style="width:180px" @change="loadData">
           <el-option v-for="b in bmOptions" :key="b.id" :label="b.name" :value="b.id" />
         </el-select>
@@ -206,6 +215,7 @@ const visibleOrder = computed(() => columnPrefs.visibleOrder(PANEL_KEYS.FB_ADS, 
 
 const items = ref([]); const loading = ref(false); const page = ref(1); const size = ref(50); const total = ref(0)
 const search = ref(''); const filterBm = ref(''); const ownerId = ref(''); const selected = ref([])
+const accountTypes = ref([]); const typeCounts = ref({})
 const lookupVisible = ref(false); const batchImportVisible = ref(false); const deletedVisible = ref(false)
 const bmOptions = ref([]); const statusOptions = ref([]); const dialogVisible = ref(false)
 const channelOptions = ref([]); const assetTypeOptions = ref([]); const fbUsers = ref([])
@@ -235,6 +245,21 @@ function optName(list, id) {
   return o ? o.name : ''
 }
 
+// 户类型候选集 = 库里实际出现过的 account_type（计数 > 0），不是字典全量（spec §4.8）。
+// 计数由后端在同一筛选底（不含 account_types 自身）上给出，不受当前分页影响。
+const availableTypes = computed(() => {
+  const counted = Object.keys(typeCounts.value).filter(t => (typeCounts.value[t] || 0) > 0)
+  return counted.sort((a, b) => (typeCounts.value[b] || 0) - (typeCounts.value[a] || 0))
+})
+function toggleType(name) {
+  const i = accountTypes.value.indexOf(name)
+  if (i >= 0) accountTypes.value.splice(i, 1)
+  else accountTypes.value.push(name)
+  page.value = 1  // 服务端分页：筛选变化后当前页可能超出新结果集
+  loadData()
+}
+function clearTypes() { accountTypes.value = []; page.value = 1; loadData() }
+
 const form = reactive({
   name:'', account_id:'', bm_ids:[], primary_bm_id:null, timezone:'', acquired_date:'',
   status_id:null, channel_id:null, asset_type_id:null, unit_price:'', inbound_qty:'',
@@ -251,8 +276,10 @@ async function loadData() {
     if (search.value) p.search = search.value
     if (filterBm.value) p.bm_id = filterBm.value
     if (ownerId.value) p.owner_id = ownerId.value
+    if (accountTypes.value.length) p.account_types = accountTypes.value
     const res = await fbApi.listAccounts(p)
     items.value = res.items; total.value = res.total
+    typeCounts.value = res.type_counts || {}
     loadSheetWriteFailures()
   } finally { loading.value = false }
 }

@@ -467,6 +467,7 @@ def list_accounts():
     bm_filter = request.args.get('bm_id', '', type=str)
     status_filter = request.args.get('status_id', '', type=str)
     search = request.args.get('search', '', type=str)
+    account_types = [t.strip() for t in request.args.getlist("account_types") if t.strip()]
     deleted = request.args.get('deleted', '0')
     offset = (page - 1) * size
     uid = get_uid()
@@ -498,6 +499,43 @@ def list_accounts():
     if search:
         where.append("(a.name LIKE ? OR a.account_id LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])
+    if account_types:
+        marks = ",".join("?" for _ in account_types)
+        where.append(f"a.account_type IN ({marks})")
+        params += account_types
+
+    # 各户类型计数：口径与 total/列表同底（含 search/bm/status/owner/deleted），
+    # 但**不含 account_types 自身** —— 否则筛选后按钮上的候选集会被自己筛没。
+    # 显式重列一遍 where（不共享主 where 列表再摘除，避免下标/参数错位）。
+    # fb 无「默认户类型」：空 account_type 的行不进任何桶（按钮上不显示空）。
+    tc_where = []
+    tc_params = []
+    if cross_user:
+        if owner_filter:
+            tc_where.append("a.owner_id = ?"); tc_params.append(owner_filter)
+    else:
+        tc_where.append("a.owner_id = ?"); tc_params.append(uid)
+    if deleted == '1':
+        tc_where.append("a.deleted_at IS NOT NULL")
+    else:
+        tc_where.append("a.deleted_at IS NULL")
+    if bm_filter:
+        tc_where.append("a.id IN (SELECT account_id FROM fb_account_bm WHERE bm_id=?)")
+        tc_params.append(bm_filter)
+    if status_filter:
+        tc_where.append("a.status_id = ?"); tc_params.append(status_filter)
+    if search:
+        tc_where.append("(a.name LIKE ? OR a.account_id LIKE ?)")
+        tc_params.extend([f"%{search}%", f"%{search}%"])
+    type_counts = {}
+    for r in db.execute(
+        "SELECT a.account_type AS atype, COUNT(*) AS cnt FROM fb_accounts a "
+        "WHERE " + (" AND ".join(tc_where) if tc_where else "1=1") + " GROUP BY a.account_type",
+        tc_params
+    ).fetchall():
+        t = r["atype"] or ""
+        if t:
+            type_counts[t] = type_counts.get(t, 0) + r["cnt"]
 
     where_clause = " AND ".join(where) if where else "1=1"
     total = db.execute(f"SELECT COUNT(*) FROM fb_accounts a WHERE {where_clause}", params).fetchone()[0]
@@ -529,7 +567,8 @@ def list_accounts():
         item['primary_bm_name'] = next((b['name'] for b in item['bms'] if b['is_primary']), '')
         result_items.append(item)
 
-    return ok({'items': result_items, 'total': total, 'page': page, 'size': size})
+    return ok({'items': result_items, 'total': total, 'page': page, 'size': size,
+               'type_counts': type_counts})
 
 
 @fb_bp.route('/api/fb/accounts/batch-lookup', methods=['POST'])

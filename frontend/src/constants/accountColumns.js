@@ -49,6 +49,7 @@ export const TT_ADS_COLUMNS = [
 export const FB_ADS_COLUMNS = [
   { key: 'name', prop: 'name', label: '账户名', minWidth: 120 },
   { key: 'account_id', prop: 'account_id', label: '账户ID', width: 160 },
+  { key: 'account_type', prop: 'account_type', label: '户类型', width: 110 },
   { key: 'sheet_write', label: '写表', width: 54, align: 'center' },
   { key: 'bms', label: '所属BM', minWidth: 140 },
   { key: 'location', label: '位置', minWidth: 120 },

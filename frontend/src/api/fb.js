@@ -12,7 +12,9 @@ export const fbApi = {
   listUnifiedBms(params = {}) { return client.get('/fb/bms/unified', { params }) },
 
   // 账户管理
-  listAccounts(params = {}) { return client.get('/fb/accounts/list', { params }) },
+  // account_types 是重复参数（多选筛选），需要 indexes: null 才能序列化成
+  // `account_types=A&account_types=B`，理由同 TT 账户页。
+  listAccounts(params = {}) { return client.get('/fb/accounts/list', { params, paramsSerializer: { indexes: null } }) },
   createAccount(data) { return client.post('/fb/accounts/create', data) },
   updateAccount(id, data) { return client.put(`/fb/accounts/${id}`, data) },
   deleteAccount(id) { return client.delete(`/fb/accounts/${id}`) },
