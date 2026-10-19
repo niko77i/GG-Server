@@ -83,6 +83,39 @@ class TestFbAccountColumns:
         db2.close()
         assert "remark" in cols
 
+    def test_account_type_and_source_sheet_columns_exist(self, client):
+        """B 的两列：account_type（资产类型原串）+ source_sheet（读自哪张表）。"""
+        db = database.get_db()
+        cols = _cols(db, "fb_accounts")
+        db.close()
+        assert cols.get("account_type") == "TEXT", "account_type 缺失或类型不对"
+        assert cols.get("source_sheet") == "TEXT", "source_sheet 缺失或类型不对"
+
+    def test_fresh_schema_has_both_columns(self):
+        """建表语句那一处也要有：只加迁移不加建表，新建库会缺列（spec §4.1）。"""
+        import os, tempfile, sqlite3
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            database._ensure_schema(conn)      # 只跑建表，不跑 _ensure_columns
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(fb_accounts)").fetchall()}
+            assert "account_type" in cols, "建表语句缺 account_type（迁移区加了也不够）"
+            assert "source_sheet" in cols, "建表语句缺 source_sheet（迁移区加了也不够）"
+        finally:
+            conn.close()
+            os.unlink(db_path)
+
+    def test_migration_idempotent_includes_new_columns(self, client):
+        """_ensure_columns 连跑两次不报错，且两列都存在。"""
+        db1 = database.get_db()
+        db1.close()
+        db2 = database.get_db()
+        cols = _cols(db2, "fb_accounts")
+        db2.close()
+        assert "account_type" in cols and "source_sheet" in cols
+
 
 class TestSharedOptionTables:
     def test_tables_exist_with_expected_columns(self, client):
