@@ -61,8 +61,8 @@
             账户表
           </div>
           <div style="font-size:12px;color:#6b7280;margin-bottom:8px;line-height:1.6;">
-            这张表就是 FB 的账户管理表。右边选它在 Google 表格里对应的工作表，
-            下面的「列映射」可以把每一列指派到系统字段。
+            每一行是一张 FB 账户表；名字只是标签（账户分类来自表里的「资产类型」），
+            右边选它在 Google 表格里对应的工作表，下面的「列映射」可把每一列指派到系统字段。
           </div>
         </template>
         <div v-for="(t, i) in hdForm.tables" :key="i" style="margin-bottom:8px;">
@@ -1184,9 +1184,11 @@ const hdPushExtraNote = PUSH_EXTRA_NOTE[HD_PLATFORM]
 
 // ---------- 差异对话框的派生数据 ----------
 const hdSummary = computed(() => (syncDiff.value && syncDiff.value.summary) || {})
-// 「表」列只在 tt 且**非**按表时显示：按表同步时它恒为同一张表，列出来只是噪声
-// （视觉规格：表名改放弹窗标题）。gg/fb 本来就恒不显示。
-const hdShowSheetCol = computed(() => HD_PLATFORM === 'tt' && !syncDlg.sheet)
+// 「表」列在多表平台（tt / fb）且**非**按表时显示：按表同步时它恒为同一张表，
+// 列出来只是噪声（视觉规格：表名改放弹窗标题）。tt 保持既有行为（它有 1 张表时也显示，
+// 本判据不带表数阈值）；fb 与本判据同口径。gg 恒单表，不显示。
+const hdShowSheetCol = computed(() =>
+  (HD_PLATFORM === 'tt' || HD_PLATFORM === 'fb') && !syncDlg.sheet)
 // 跨表归属提示（设计 §3.3，A1 的补偿）：**只有按表同步的后端响应才带这个键**
 // （push 侧刻意不接）；缺省路径没有这个键 ⇒ 恒为空，这一节不出现。
 const hdCrossNotes = computed(() => {

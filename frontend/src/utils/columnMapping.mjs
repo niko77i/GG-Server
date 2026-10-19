@@ -87,22 +87,3 @@ export function seedTables(conf, platform) {
   return []
 }
 
-/** 渲染用的 tables → 后端的配置。fb 现在与 tt 一样回 tables 数组（spec §4.3）。
- *  空行（没填工作表名的）过滤掉；空 columns 不上送（保持配置文本与改动前一致）。 */
-export function flattenColumns(platform, tables) {
-  if (platform === 'fb') {
-    return (tables || [])
-      .map(t => {
-        const item = { name: (t.name || '').trim(), sheet_name: (t.sheet_name || '').trim() }
-        const cols = t.columns
-        if (cols && typeof cols === 'object' && Object.keys(cols).length) item.columns = { ...cols }
-        return item
-      })
-      .filter(t => t.name && t.sheet_name)
-  }
-  const t = (tables || [])[0] || {}
-  const out = { sheet_name: (t.sheet_name || '').trim() }
-  const cols = t.columns
-  if (cols && typeof cols === 'object' && Object.keys(cols).length) out.columns = { ...cols }
-  return out
-}
