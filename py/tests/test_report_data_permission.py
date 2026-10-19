@@ -361,3 +361,41 @@ def test_gg_zuobiao_not_blocked_for_any_role(client, three, monkeypatch, who):
     h, _, _ = three[who]
     r = client.post("/api/google-sheets/update-zuobiao", json=_ZUOBIAO_PAYLOAD, headers=h)
     assert r.status_code != 403, f"{who} 不得被只读守卫拦下：{r.get_data(as_text=True)[:300]}"
+
+
+# ---------- 「保存人」下拉：只列有报表数据的人（2026-10-19） ----------
+
+def test_fb_report_owners_lists_only_users_with_data(client, fb_three):
+    """下拉只列 `fb_ad_reports` 里出现过的保存人；没报表的人不出现。
+
+    回归：此前两页都复用 `/api/platform/users`（口径是「该平台有未删除**账户**的人」）。
+    2026-10-19 实测：`fb_accounts` 为空 ⇒ 下拉只剩户管一人，真有数据的 6 人被漏掉。
+    """
+    _mk_fb_user(client, "fperm_nodata", "user")          # 建号但**不**造报表
+    h, _, _ = fb_three["huguan"]
+    r = client.get("/api/fb/reports/owners", headers=h)
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    ids = {u["id"] for u in r.get_json()["users"]}
+    expected = {fb_three[k][1] for k in ("user", "huguan", "admin")}
+    assert ids == expected, f"应只有有数据的 3 人，实际 {ids}"
+
+
+def test_fb_report_owners_forbidden_for_plain_user(client, fb_three):
+    """普通 user 不需要这个下拉（前端也不渲染），后端一律 403。"""
+    h, _, _ = fb_three["user"]
+    assert client.get("/api/fb/reports/owners", headers=h).status_code == 403
+
+
+def test_gg_report_owners_lists_only_users_with_data(client, three):
+    _mk_user(client, "perm_nodata", "user")              # 建号但**不**造报表
+    h, _, _ = three["huguan"]
+    r = client.get("/api/ad-reports/owners", headers=h)
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    ids = {u["id"] for u in r.get_json()["users"]}
+    expected = {three[k][1] for k in ("user", "huguan", "admin")}
+    assert ids == expected, f"应只有有数据的 3 人，实际 {ids}"
+
+
+def test_gg_report_owners_forbidden_for_plain_user(client, three):
+    h, _, _ = three["user"]
+    assert client.get("/api/ad-reports/owners", headers=h).status_code == 403

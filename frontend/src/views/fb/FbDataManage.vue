@@ -174,8 +174,10 @@ const filterOwner = ref('')
 const ownerUsers = ref([])
 async function loadOwnerUsers() {
   try {
-    // 用现成的 /api/platform/users（与 OwnerFilterSelect.vue:53 同一个端点），不新造接口
-    const res = await api.get('/platform/users')
+    // 只列**有报表数据**的人。不能复用 /api/platform/users：那个口径是
+    // 「该平台有未删除账户的人」（账户面板的筛选语义）。2026-10-19 实测：
+    // fb_accounts 为空时下拉只剩户管一人，真有数据的 6 人全被漏掉。
+    const res = await api.get('/fb/reports/owners')
     ownerUsers.value = res.users || []
   } catch { /* 下拉加载失败不阻塞主流程（同 OwnerFilterSelect.vue:56） */ }
 }

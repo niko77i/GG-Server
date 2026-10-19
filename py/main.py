@@ -10180,6 +10180,28 @@ def ad_reports_save():
     })
 
 
+@app.route("/api/ad-reports/owners", methods=["GET"])
+@jwt_required()
+def ad_reports_owners():
+    """「保存人」筛选下拉：只列**在 `ad_reports` 里真实出现过**的保存人。
+
+    ⚠️ **不要复用 `/api/platform/users`**：其口径是「该平台有未删除**账户**的人」
+    （账户面板的筛选语义），与报表数据无关 —— 会把「有账户但没报表」的人混进来、
+    也会漏掉「有报表但名下没户」的人。筛选类下拉按同仓既有原则只列有数据的人
+    （见 `huguan_dashboard_routes.py` 的 `dashboard_owner_options` 注释）。
+    """
+    db = _yt_db()
+    user_id = int(get_jwt_identity())
+    if user_role(db, user_id) not in REPORT_VIEW_ALL_ROLES:
+        return err("无权限", 403)
+    rows = db.execute(
+        "SELECT u.id, u.username, u.display_name FROM users u "
+        "WHERE u.id IN (SELECT DISTINCT user_id FROM ad_reports) "
+        "ORDER BY COALESCE(NULLIF(u.display_name, ''), u.username)"
+    ).fetchall()
+    return jsonify({"success": True, "users": [dict(r) for r in rows]})
+
+
 @app.route("/api/ad-reports/list", methods=["GET"])
 @jwt_required()
 def ad_reports_list():

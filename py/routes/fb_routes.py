@@ -2235,6 +2235,30 @@ def fb_retry_sheets_sync():
 
 # ==================== 数据管理 ====================
 
+@fb_bp.route('/api/fb/reports/owners', methods=['GET'])
+@jwt_required()
+@fb_required
+def report_owners():
+    """「保存人」筛选下拉：只列**在 `fb_ad_reports` 里真实出现过**的保存人。
+
+    ⚠️ **不要复用 `/api/platform/users`**：那个端点的口径是「该平台有未删除**账户**的人」
+    （账户面板的筛选语义），与报表数据无关。2026-10-19 实测：`fb_accounts` 为空
+    ⇒ 下拉只剩户管一人（豁免规则恒列出），真正存过报表数据的 6 个人全被漏掉。
+    筛选类下拉「只列有数据的人」是同仓既有原则 —— 见
+    `huguan_dashboard_routes.py` 的 `dashboard_owner_options` 注释。
+    """
+    db = get_db()
+    uid = get_uid()
+    if _get_role(db, uid) not in REPORT_VIEW_ALL_ROLES:
+        return err("无权限", 403)
+    rows = db.execute(
+        "SELECT u.id, u.username, u.display_name FROM users u "
+        "WHERE u.id IN (SELECT DISTINCT user_id FROM fb_ad_reports) "
+        "ORDER BY COALESCE(NULLIF(u.display_name, ''), u.username)"
+    ).fetchall()
+    return ok({"users": [dict(r) for r in rows]})
+
+
 @fb_bp.route('/api/fb/reports/list', methods=['GET'])
 @jwt_required()
 @fb_required
