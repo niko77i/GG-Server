@@ -64,8 +64,10 @@
       <el-table-column prop="report_date" label="日期" width="110" />
       <el-table-column prop="account_name" label="账户名称" min-width="120" />
       <el-table-column prop="account_id" label="账户ID" width="160" />
-      <!-- 列宽 100 逐字不动：改宽会让普通 user 的表格几何发生变化（普通 user 界面必须与改动前一致） -->
-      <el-table-column label="消耗" width="100">
+      <!-- 列宽：普通 user 维持 100（几何必须与改动前一致）；**户管**的单元格里多一个 ✏️
+           按钮（`.inline-edit-btn` 是 flex-shrink:0，不收缩），固定 100px 会把金额挤成
+           省略号 ⇒ 仅对户管加宽到 150。普通 user 不走这个分支，几何不变。 -->
+      <el-table-column label="消耗" :width="auth.canEditReportCost ? 150 : 100">
         <template #default="{row}">
           <!-- 户管：内联改消耗（仅此角色）。其余角色走 else 分支，与改动前逐字一致 -->
           <template v-if="auth.canEditReportCost">
