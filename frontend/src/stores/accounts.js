@@ -7,7 +7,7 @@ export const useAccountStore = defineStore('accounts', {
     accounts: [],
     acTotal: 0,
     acPage: 1,
-    acPageSize: 20,
+    acPageSize: 50,   // 广告账户页默认每页 50 条（用户 2026-10-19 要求；下拉里 50 本就可选）
     acFilters: { search: '', status: '', mcc_id: '', agent: '', timezone: '', owner_id: '' },
     mccList: [],
     mccTotal: 0,
