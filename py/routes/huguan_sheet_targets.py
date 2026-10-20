@@ -42,7 +42,9 @@ def _resolve_account_table(db, user_id, platform, account_id):
     elif platform == "fb":
         r = db.execute("SELECT source_sheet FROM fb_accounts WHERE account_id=?",
                        (account_id,)).fetchone()
-        key = (r["source_sheet"] if r else "") or ""
+        # 与匹配侧 `_table_key_of` 同口径归一（strip）；否则库里的值带首尾空白时
+        # 会匹配不上配置项。当前该路径不可达，属纵深防御。
+        key = hd._conf_text(r["source_sheet"] if r else "")
     for t in tables:
         if hd._table_key_of(platform, t) == key:
             return t
@@ -301,10 +303,12 @@ def _operator_dashboard_remark_rebuild(user_id, business_key, payload):
 def huguan_fb_acceptor_sync(user_id, platform, account_id, note):
     """写 FB「接户运营」列（列字母按**该表** col_map 定位，通常是 I 列）。
 
-    本 target 只用于 fb（`_huguan_fb_acceptor_rebuild` 里平台是硬编码的 "fb"），
-    fb 恒为单表、走 `_resolve_account_table` 命中那个唯一的空名条目。用同一个 helper
-    选表，同时取出该表的 `columns`（手工覆盖）—— 写表前与读路径**同源**地解析 col_map：
-    表头映射后「接户运营」列不在固定位置，写死 I 就会把换绑记录写进错列。
+    本 target 只用于 fb（`_huguan_fb_acceptor_rebuild` 里平台是硬编码的 "fb"）。
+    fb 支持多表：`_resolve_account_table` 按账户的 `source_sheet` 匹配配置项的
+    `sheet_name` 选出**该账户所属的那张表**（与读路径、其它写路径同口径）。
+    用同一个 helper 选表，同时取出该表的 `columns`（手工覆盖）—— 写表前与读路径
+    **同源**地解析 col_map：表头映射后「接户运营」列不在固定位置，写死 I 就会把
+    换绑记录写进错列（多表下还可能写进另一张表）。
     """
     import database
     import google_sheets_service as gs

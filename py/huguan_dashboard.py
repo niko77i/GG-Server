@@ -743,7 +743,7 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
     （gg / fb 走这条路）。`tables` 非 None → 只允许 tt / fb，写新格式
     `{spreadsheet_id, tables:[{name, sheet_name}]}`；tt 按类型名改名**级联**回填账户表，
     fb 的 `tables` 不级联改名（fb 的户类型是数据驱动的）。
-    `columns` 只对 fb 生效（tt 的覆盖挂在 `tables[]` 每一项上）。
+    `columns` 形参已作废：fb 的覆盖现在只随 `tables[].columns` 走，POST 路由恒传 None。
     """
     if platform not in PLATFORMS:
         raise ValueError(f"不支持的平台: {platform}")
@@ -755,10 +755,6 @@ def save_config(db, user_id: int, platform: str, spreadsheet_id: str, sheet_name
             "spreadsheet_id": _conf_text(spreadsheet_id),
             "sheet_name": _conf_text(sheet_name),
         }
-        # 列映射覆盖（仅 fb；`{表头名: 字段key}`）。空 dict / None 都**不落盘** ——
-        # 保持「没配 columns」时的配置文本与改动前逐字节一致（gg 永远走这一支）。
-        if platform == "fb" and isinstance(columns, dict) and columns:
-            conf[platform]["columns"] = dict(columns)
     else:
         clean = []
         for t in tables:

@@ -7655,6 +7655,25 @@ class TestFbPerSheetEntry:
         assert notes["count"] == 1, "fb 应按 source_sheet 与本次表名比对（不是 account_type）"
         assert notes["notes"][0]["current_type"] == "企业户表"
 
+    def test_cross_sheet_notes_no_false_positive_for_same_sheet_fb(self, client):
+        """同表不误报：账户的 `source_sheet` == 本次表名 ⇒ count == 0。
+
+        与上一条构成一对：上一条的账户（source_sheet=企业户表，account_type=企业户）
+        查「加白户表」时，两种比对列都会命中，**没有判别力**；这一条的账户
+        account_type（企业户）与本次表名（企业户表）不同，只有按 source_sheet
+        比对才会得到 0 —— 若把比对列改回 account_type，这里会误报 1。
+        """
+        db = database.get_db()
+        db.execute("INSERT OR IGNORE INTO users(id, username, password, role, platform) "
+                   "VALUES(1, 'fb_csn_u', 'x', 'user', 'fb')")
+        db.execute("INSERT INTO fb_accounts(name, account_id, account_type, source_sheet, owner_id) "
+                   "VALUES('户乙', 'CSN-2', '企业户', '企业户表', 1)")
+        db.commit()
+        notes = hd.cross_sheet_notes(db, "fb", ["CSN-2"], "企业户表")
+        db.close()
+        assert notes["count"] == 0
+        assert notes["notes"] == []
+
 
 class TestFbMultiSheetPushRoute:
     """路由级：fb 多表 `/push` 必须按 `source_sheet` 取各自那张表的 col_map。

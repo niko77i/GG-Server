@@ -174,6 +174,64 @@ def test_list_filters_by_account_types(client, admin_fb_headers):
     assert len(data["items"]) == 3
 
 
+def _make_plain_fb_user(client, username):
+    """建一个**普通** fb 用户（非跨用户角色）并返回 (uid, headers)。"""
+    import database
+    client.post("/api/auth/register", json={"username": username, "password": "test123"})
+    db = database.get_db()
+    db.execute("UPDATE users SET role='user', platform='fb' WHERE username=?", (username,))
+    db.commit()
+    uid = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()["id"]
+    db.close()
+    resp = client.post("/api/auth/login", json={"username": username, "password": "test123"})
+    token = resp.get_json().get("access_token", "")
+    return uid, {"Authorization": f"Bearer {token}"}
+
+
+def test_type_counts_scoped_to_owner_for_plain_user(client):
+    """普通 fb 用户（非跨用户角色）的 `type_counts` **只统计自己的**账户。
+
+    上方 `test_list_filters_by_account_types` 用的是 admin（跨用户角色，`tc_where`
+    不加 owner 限制），覆盖不到 `a.owner_id = uid` 这一支。这里让另一个用户也持有
+    同类型账户：若 owner 限制从 `tc_where` 掉队，按钮计数会变成 3（列表仍是 2）。
+    """
+    import database
+    uid_a, headers_a = _make_plain_fb_user(client, "plainfb_a")
+    uid_b, _ = _make_plain_fb_user(client, "plainfb_b")
+    db = database.get_db()
+    db.execute("INSERT INTO fb_accounts(name, account_id, account_type, owner_id) "
+               "VALUES('自己的1', 'PF-A1', '企业户', ?)", (uid_a,))
+    db.execute("INSERT INTO fb_accounts(name, account_id, account_type, owner_id) "
+               "VALUES('自己的2', 'PF-A2', '企业户', ?)", (uid_a,))
+    db.execute("INSERT INTO fb_accounts(name, account_id, account_type, owner_id) "
+               "VALUES('别人的', 'PF-B1', '企业户', ?)", (uid_b,))
+    db.commit(); db.close()
+
+    data = client.get("/api/fb/accounts/list", headers=headers_a).get_json()
+    assert data["total"] == 2
+    assert data["type_counts"] == {"企业户": 2}, (
+        "普通用户只能看到自己名下账户的户类型计数"
+    )
+
+
+def test_type_counts_omits_empty_account_type(client, admin_fb_headers):
+    """空 / NULL 的 `account_type` **不形成按钮**：`type_counts` 里没有空串键。"""
+    import database
+    db = database.get_db()
+    uid = db.execute("SELECT id FROM users WHERE username='adminfb'").fetchone()["id"]
+    db.execute("INSERT INTO fb_accounts(name, account_id, account_type, owner_id) "
+               "VALUES('空串类型', 'fb-at-empty', '', ?)", (uid,))
+    db.execute("INSERT INTO fb_accounts(name, account_id, account_type, owner_id) "
+               "VALUES('NULL类型', 'fb-at-null', NULL, ?)", (uid,))
+    db.execute("INSERT INTO fb_accounts(name, account_id, account_type, owner_id) "
+               "VALUES('有类型', 'fb-at-ent', '企业户', ?)", (uid,))
+    db.commit(); db.close()
+
+    data = client.get("/api/fb/accounts/list", headers=admin_fb_headers).get_json()
+    assert data["type_counts"] == {"企业户": 1}
+    assert "" not in data["type_counts"]
+
+
 def test_fb_deleted_list_makes_one_bm_query_not_per_row(app, client, admin_fb_headers, monkeypatch):
     """**N+1 守卫（已删除端点）**：BM 查询次数必须是 1，不随行数增长。
 
