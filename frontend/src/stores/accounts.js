@@ -12,7 +12,7 @@ export const useAccountStore = defineStore('accounts', {
     mccList: [],
     mccTotal: 0,
     mccPage: 1,
-    mccPageSize: 20,
+    mccPageSize: 50,  // MCC 页默认每页 50 条（下拉上限本就是 50）
     mccFilters: { search: '', level: '', parent_filter: '', owner_id: '' },
     settings: { recharge_sheet_id: '', sheet_mappings: { recharge: '充值表', received_accounts: '已接账户明细', my_dashboard: '我的看板' } },
     options: {
