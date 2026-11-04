@@ -4,6 +4,7 @@
     <div class="sticky-tabs" style="flex-shrink:0;">
       <el-tabs :model-value="activeTab" @update:model-value="switchTab">
         <el-tab-pane label="📊 做表数据" name="zuobiao" />
+        <el-tab-pane label="💰 薪资计算" name="salary" />
         <el-tab-pane label="🎵 音频替换" name="audio" />
         <el-tab-pane label="🌐 翻译工具" name="translate" />
       </el-tabs>
@@ -127,6 +128,12 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- ===== 薪资计算（读用户做表 A–N 列，见 views/toolkit/SalaryPanel.vue） =====
+         v-if 而非 v-show：每次进入现场读一次表，避免页面加载就白跑一次 Sheets API。 -->
+    <div v-if="activeTab === 'salary'" style="flex:1;min-height:0;overflow-y:auto;">
+      <SalaryPanel />
     </div>
 
     <!-- ===== 音频替换 ===== -->
@@ -320,11 +327,13 @@ import { googleSheetsApi } from '@/api/google-sheets'
 import { sheetWriteApi } from '@/api/sheetWrite'
 import { sheetWriteTone, sheetWriteHint, SHEET_WRITE_TOAST } from '@/utils/sheetWriteUi'
 import api from '@/api/client'
+import SalaryPanel from './toolkit/SalaryPanel.vue'
 
 const router = useRouter()
 const route = useRoute()
 
 const activeTab = computed(() => {
+  if (route.path.includes('/salary')) return 'salary'
   if (route.path.includes('/audio')) return 'audio'
   if (route.path.includes('/translate')) return 'translate'
   return 'zuobiao'

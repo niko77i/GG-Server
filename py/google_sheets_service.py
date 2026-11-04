@@ -674,7 +674,8 @@ def merge_ranges(cols: list) -> list:
     return out
 
 
-def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: str) -> list[list]:
+def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: str,
+                      value_render_option: str | None = None) -> list[list]:
     """通用读取 Google Sheet 指定范围的值。
 
     Args:
@@ -682,15 +683,24 @@ def read_sheet_values(service, spreadsheet_id: str, sheet_name: str, range_str: 
         spreadsheet_id: 表格 ID
         sheet_name: sheet 名称
         range_str: 范围字符串，如 'A:G'
+        value_render_option: 取值渲染方式，默认 None 保持既有行为（API 默认
+            FORMATTED_VALUE）。**要拿可计算的数字时必须传 `UNFORMATTED_VALUE`** ——
+            格式化值会带千分位/百分号（`1,234.00`、`6%`），日期也会变成字符串；
+            薪资计算（`salary_service`）依赖未格式化值。
 
     Returns:
-        二维列表，每行为一个 list[str]，不包含空行之后的数据
+        二维列表，每行为一个 list。默认（FORMATTED_VALUE）元素是字符串；
+        传 `UNFORMATTED_VALUE` 时数字/日期会是 float。不包含空行之后的数据。
     """
     range_full = f"{_a1_sheet(sheet_name)}{range_str}"
+    kwargs = {}
+    if value_render_option:
+        kwargs["valueRenderOption"] = value_render_option
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
             range=range_full,
+            **kwargs,
         ).execute()
         return result.get("values", [])
     except Exception as e:

@@ -1,4 +1,4 @@
-﻿import { createRouter, createWebHashHistory } from 'vue-router'
+import { createRouter, createWebHashHistory } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
 const routes = [
@@ -66,6 +66,7 @@ const routes = [
     redirect: '/toolkit/zuobiao',
     children: [
       { path: 'zuobiao', component: () => import('../views/ToolkitView.vue'), meta: { title: '做表数据' } },
+      { path: 'salary', component: () => import('../views/ToolkitView.vue'), meta: { title: '薪资计算', platform: 'gg' } },
       { path: 'audio', component: () => import('../views/ToolkitView.vue'), meta: { title: '音频替换' } },
       { path: 'translate', component: () => import('../views/ToolkitView.vue'), meta: { title: '翻译工具' } },
     ]

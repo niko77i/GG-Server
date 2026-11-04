@@ -32,6 +32,12 @@
 | 代理池 | proxy_pool.py | 掉包检测随机切换代理 IP，避免风控/限流 |
 | 部署 | 常开 Python 服务（`python main.py`） | 暂不打包 EXE |
 
+⚠️ **前端构建入口是 `npm run build`，它已包一层 `frontend/scripts/build.mjs`**：该脚本先把
+`TMP/TEMP/TMPDIR` 指到工程内 `frontend/.tmp/`（已 gitignore）再调 `vite build`。原因是
+Windows 上 esbuild 会在系统临时目录写文件再删，受限 shell / 沙箱 / 安全软件会让删除失败，
+构建最后一步报 `[vite:esbuild-transpile] remove C:\...\Temp\esbuild-xxx: Access is denied`。
+遇到这个报错**不要改代码**，确认走的是 `npm run build` 而不是裸 `vite build`。
+
 ## 核心架构
 
 ```
@@ -797,6 +803,34 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - **配置**：`config.json` 保留空的 `tt_telegram.{bot_token,chat_id}` 结构，真实值放 `config/config.local.json`（已 gitignore）
 - **数据清理**：TT 产品合并、投放对象批量删除时同步清理其掉包检测与通知行
 
+### 薪资计算（工具集）
+
+投手薪资从独立 PowerShell 计算器搬进本站：读用户自己配置的「做表」表格（A–N 列）自动聚合，
+再叠加页面可调的底薪 / 成本 / 汇率。设计见
+[薪资计算](docs/superpowers/specs/2026-11-04-salary-calculator-design.md)。
+
+```
+代投费 = ΣM（M = F×L，L=代投比例）   纯增值 = Σ(F − K)   消耗 = ΣK
+基数   = 代投费 + 纯增值（= ΣN）      利润 = 基数 − 成本
+总薪资 = 底薪 + (消耗提成 + 利润提成) × USDT 汇率
+```
+
+- **只统计 K 列（平台实际）有值的行** —— K 未填时纯增值与消耗都不成立，整行跳过。
+  「最新日期」取**最后一条 K 有值的行**的 A 列，前端据此提示「当前薪资计算到 X 号」。
+- 档位一律**左闭右开**：底薪看基数 `<1万→4000 / <3万→6000 / <4万→8000 / ≥4万→10000`，
+  **下拉框默认选中 6000**（用户 2026-11-04 指定；不随基数自动预选，自动档只作旁注提示）；
+  消耗 `<20万→0.002 / ≥20万→0.003`（**全额按档位**，非超额累进）；
+  利润提成费率看**纯增值** `负→0.01 / <2万→0.10 / <3万→0.12 / <4万→0.15 / ≥4万→0.18`。
+- 利润为负时提成按 0（不倒扣），明细里照实显示负利润。
+- ⚠️ **与 2026-11-03 版的两处差别**（用户 2026-11-04 更正）：底薪 4 万以上 8000 → **10000**；
+  纯增值为负新增 **0.01** 档（旧版会落到 0.10）。
+- ⚠️ `spreadsheet_id` 必须校验**在当前用户自己的表格配置**里 —— 服务账号对这些表有读权限，
+  不校验等于任何登录用户都能读别人的表（越界统一 403）。
+- ⚠️ 读表必须传 `UNFORMATTED_VALUE`：默认的格式化值带千分位 / 百分号，日期还是字符串，
+  数字算不了（`read_sheet_values(..., value_render_option="UNFORMATTED_VALUE")`）。
+- 代码分层：纯计算 `py/salary_calc.py`（无 IO，可单测）、读表聚合 `py/salary_service.py`、
+  路由 `py/routes/salary_routes.py`（`GET /api/salary/overview` 读表、`POST /api/salary/compute` 重算）。
+
 ## 共享功能知识（来自 ImageCrawling）
 
 > 以下核心业务逻辑与 ImageCrawling 共享，详见 ImageCrawling 的 CLAUDE.md。
@@ -993,6 +1027,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [TT 户类型与多账户表](docs/superpowers/specs/2026-10-08-tt-account-types-design.md)
 - [普通用户放开账户区（广告账户 / MCC / 设置）](docs/superpowers/specs/2026-10-12-open-account-area-to-normal-users-design.md)（前端 `meta.admin` 摘除；判据从 1 条拆成 3 条 —— 能进页面 / 能改全局字典 / 能管别人的数据；后端本来就只做 owner 隔离；§3.4 记了一次同族自我纠错：五张字典里**只有 `regions`** 有硬闸，其余四张是 owner 隔离，不该一起藏）
 - [MCC 等级留空落到 id=1（修「建不了 MCC」）](docs/superpowers/specs/2026-10-12-mcc-level-default-design.md)（上条真机验收时用户报的 409：**与权限无关** —— 前端空串 `level_id` 撞 `PRAGMA foreign_keys=ON`，又被 `except IntegrityError` 误报成「MCC ID 已存在」；用户裁定空即补建 id=1）
+- [薪资计算（工具集）](docs/superpowers/specs/2026-11-04-salary-calculator-design.md)（读用户做表 A–N 自动聚合：代投费=ΣM、纯增值=Σ(F−K)、消耗=ΣK；底薪四档下拉、成本手填、汇率可调；**只算 K 有值的行**并按最后一条 K 提示「计算到几号」）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览

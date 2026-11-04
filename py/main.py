@@ -391,6 +391,10 @@ app.register_blueprint(sheet_write_bp)
 # 用户级界面偏好（账户看板自定义列）
 from routes.column_prefs_routes import column_prefs_bp
 app.register_blueprint(column_prefs_bp)
+
+# 薪资计算（工具集 → 薪资计算；读用户做表聚合，见 salary_calc / salary_service）
+from routes.salary_routes import salary_bp
+app.register_blueprint(salary_bp)
 import sheet_write
 import routes.gg_dashboard_sheet  # noqa: F401  —— 注册 gg_my_dashboard target
 import routes.gg_recharge_sheet  # noqa: F401  —— 注册 gg_recharge target

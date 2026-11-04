@@ -11,6 +11,8 @@ py/_patch_*.py
 # 前端
 frontend/node_modules/
 frontend/dist/
+# 构建时 esbuild 的临时目录（见 frontend/scripts/build.mjs：避开系统 temp 的删除权限问题）
+frontend/.tmp/
 
 # 运行时数据（代码经 paths.data_dir() 定位到 temp/data/，2026-10-07 归类）
 # 注意：这里刻意不整目录忽略 temp/ —— temp/data/music/ 是正式内容
