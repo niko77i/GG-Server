@@ -7,7 +7,15 @@
     </div>
 
     <div v-else-if="error" style="text-align:center;padding:20px;">
-      <el-result icon="error" :title="error" />
+      <!-- 详情型错误（如「运营列不匹配」会点名到行号+运营值+账户ID）用副标题左对齐展示：
+           塞进 el-result 的 title（大号居中）会挤成一坨；短错误仍按原样当标题。 -->
+      <el-result icon="error" :title="error.length > 30 ? '同步被拒绝' : error">
+        <template v-if="error.length > 30" #sub-title>
+          <div style="max-width:620px;margin:0 auto;text-align:left;line-height:1.8;color:#606266;">
+            {{ error }}
+          </div>
+        </template>
+      </el-result>
     </div>
 
     <div v-else-if="done">

@@ -568,6 +568,52 @@ def test_sync_from_sheet_short_row_no_index_error(mock_read, mock_build, client,
     assert data["created"][0]["consumption"] == ""
 
 
+@mock.patch("google_sheets_service.build_service")
+@mock.patch("google_sheets_service.read_sheet_values")
+def test_sync_from_sheet_mismatch_names_the_offending_rows(mock_read, mock_build, client, tt_headers):
+    """运营列不匹配时，报错要指到具体行号、该行运营值与账户ID（旧文案只有一句泛泛的话）。"""
+    mock_build.return_value = object()
+    mock_read.return_value = [
+        ["运营", "入库时间", "是否回收", "账户ID", "BC", "国家", "渠道", "时区", "消耗", "备注"],
+        ["黎明", "2026-09-20", "否", "1234567890123", "BC-A", "US", "X", "+8", "高", ""],
+        ["张三", "2026-09-21", "否", "2234567890123", "BC-A", "US", "X", "+8", "高", ""],
+        ["", "2026-09-22", "否", "3234567890123", "BC-A", "US", "X", "+8", "高", ""],
+    ]
+    db = database.get_db()
+    db.execute("UPDATE users SET display_name='黎明' WHERE username='ttuser'")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_id','sheet-1')")
+    db.execute("INSERT OR REPLACE INTO tags(key,value) VALUES('tt_sheet_mappings', ?)",
+               ('{"my_dashboard": "我的看板"}',))
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/tt/accounts/sync-from-sheet", headers=tt_headers,
+                       json={"dry_run": True})
+    assert resp.status_code == 400
+    msg = resp.get_json()["error"]
+    assert "当前账号：黎明" in msg
+    assert "第 3 行运营是「张三」" in msg and "2234567890123" in msg
+    assert "第 4 行运营为空" in msg
+    # 不该点名第 2 行（那行本来就是本人的）
+    assert "第 2 行" not in msg
+
+
+class TestOperatorMismatchMessage:
+    """`_operator_mismatch_message` 的文案边界（纯函数，直接调）。"""
+
+    def test_folds_rows_beyond_limit(self):
+        from routes.tt_accounts_routes import _operator_mismatch_message
+        rows = [(i, ["张三", "", "否", str(1000 + i)]) for i in range(2, 10)]  # 8 行
+        msg = _operator_mismatch_message("黎明", rows)
+        assert "另有 3 行同类" in msg  # 8 − limit 5
+
+    def test_no_display_name_explains_what_to_do(self):
+        from routes.tt_accounts_routes import _operator_mismatch_message
+        msg = _operator_mismatch_message("", [(2, ["张三", "", "否", "123"])])
+        assert "还没有设置昵称" in msg
+        assert "第 2 行运营是「张三」" in msg
+
+
 @mock.patch("routes.tt_accounts_routes._trigger_recycle_if_dead")
 def test_update_same_status_does_not_rewrite_recycle(mock_trigger, client, tt_headers):
     """对已是「死亡」的账户再次提交同状态，不应重复写回收清单。"""

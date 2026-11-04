@@ -1280,6 +1280,42 @@ def recycle_reason_delete(rid):
 
 # ==================== 同步（我的看板） ====================
 
+def _operator_mismatch_message(operator_name, mismatches, limit=5):
+    """拼「运营列不匹配」的具体原因：指到行号 + 该行运营值 + 账户ID。
+
+    Args:
+        operator_name: 当前账号在表里应出现的名字（display_name，空则 username）
+        mismatches: [(sheet 行号, 行数据)]，只含 A 列与 operator_name 不等的行
+        limit: 最多列几行，其余折叠成「另有 N 行」
+
+    为什么要带到行号：旧文案只写「运营列与当前账号不匹配」，用户得自己翻几千行
+    找那条别人的数据。真机（2026-11-05）就是一行别人的户把整批同步拦掉了。
+    """
+    parts = []
+    for row_no, r in mismatches[:limit]:
+        who = (r[0] or "").strip()
+        acc = (r[3] or "").strip() if len(r) > 3 else ""
+        acc_text = f"、账户 {acc}" if acc else ""
+        if who:
+            parts.append(f"第 {row_no} 行运营是「{who}」{acc_text}")
+        else:
+            parts.append(f"第 {row_no} 行运营为空{acc_text}")
+    more = len(mismatches) - limit
+    detail = "；".join(parts)
+    if more > 0:
+        detail += f"；另有 {more} 行同类"
+
+    if not operator_name:
+        return ("看板「运营」列与当前账号不匹配：当前账号还没有设置昵称（display_name），"
+                f"无法判断哪几行属于你。问题行：{detail}。"
+                "请先到「个人资料」设置昵称，或让看板的运营列使用你的登录名。")
+
+    return (f"看板「运营」列与当前账号不匹配，仅可同步自己名下的账户。"
+            f"当前账号：{operator_name}；问题行：{detail}。"
+            "请把不属于你的行整行删除（只清运营列不行，账户ID 还在仍会拦住），"
+            "或把运营列改成与你昵称完全一致（注意多余空格/全角字符）。")
+
+
 def _region_timezone(db, country):
     """看板时区为空时，用 regions 的时区补（归一化去掉 UTC 前缀，如 UTC+8 → +8）。"""
     row = db.execute("SELECT timezone FROM regions WHERE name=? AND platform='tt'", (country,)).fetchone()
@@ -1327,14 +1363,20 @@ def sync_from_sheet():
         return err("未配置 Google 表格")
 
     service = gs.build_service(_GOOGLE_SHEETS_CONFIG["credentials_path"])
-    rows = gs.read_sheet_values(service, sheet_id, dashboard, "A:J")
-    if rows:
-        rows = rows[1:]  # 跳过表头第一行（列名），避免「运营」表头误触发门禁
-    rows = [r for r in rows if len(r) > 3 and (r[3] or "").strip()]  # D 列账户ID非空
+    raw_rows = gs.read_sheet_values(service, sheet_id, dashboard, "A:J") or []
+    # 行号从 2 起：第 1 行是表头（跳过，避免「运营」两个字误触发门禁）。
+    # 保留原始行号是为了报错能指到具体哪一行（见 _operator_mismatch_message）。
+    numbered_rows = []
+    for row_no, r in enumerate(raw_rows[1:], start=2):
+        if len(r) > 3 and (r[3] or "").strip():  # D 列账户ID非空
+            numbered_rows.append((row_no, r))
+    rows = [r for _, r in numbered_rows]
 
     # 门禁：A 列运营匹配当前用户（display_name 为空时回退 username）
-    if rows and any((r[0] or "").strip() != operator_name for r in rows):
-        return err("看板「运营」列与当前账号不匹配，仅可同步自己的账户")
+    mismatches = [(no, r) for no, r in numbered_rows
+                  if (r[0] or "").strip() != operator_name]
+    if mismatches:
+        return err(_operator_mismatch_message(operator_name, mismatches))
 
     created, updated, conflicts, status_conflicts = [], [], [], []
     for r in rows:
