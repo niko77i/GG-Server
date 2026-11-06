@@ -64,6 +64,8 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/json"):
             self._send(200, json.dumps({"url": "https://www.guangdada.net/api/x"}),
                        ctype="application/json; charset=utf-8")
+        elif self.path.startswith("/big"):
+            self._send(200, "<html><body>" + ("BIGMARKER " + "x" * 2000) + "</body></html>")
         else:
             self._send(404, "not found")
             return
@@ -293,6 +295,20 @@ class TestGateway:
         _enter(client)
         r = client.get("/json", headers={"Host": "gw.test"})
         assert "http://gw.test/api/x" in r.get_data(as_text=True)
+
+    def test_large_text_recompressed(self, gateway):
+        import gzip as _gzip
+        gw, _ = gateway
+        client = Client(gw)
+        _enter(client)
+        r = client.get("/big", headers={"Host": "gw.test", "Accept-Encoding": "gzip"})
+        assert r.headers.get("Content-Encoding") == "gzip"
+        body = _gzip.decompress(r.get_data())
+        assert b"BIGMARKER" in body
+        # 客户端不接受 gzip 时不应压缩
+        r2 = client.get("/big", headers={"Host": "gw.test"})
+        assert r2.headers.get("Content-Encoding") is None
+        assert b"BIGMARKER" in r2.get_data()
 
     def test_post_body_forwarded(self, gateway):
         gw, _ = gateway

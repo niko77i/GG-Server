@@ -424,7 +424,8 @@ class GatewayApp:
                       environ.get("REMOTE_ADDR") or "", (time.time() - t0) * 1000)
 
         try:
-            return self._respond(resp, start_response, gw_origin, method)
+            return self._respond(resp, start_response, gw_origin, method,
+                                 environ.get("HTTP_ACCEPT_ENCODING", ""))
         except Exception as exc:  # 任何意外都别把 waitress 线程炸掉
             try:
                 resp.close()
@@ -463,7 +464,7 @@ class GatewayApp:
             )
         return resp
 
-    def _respond(self, resp, start_response, gw_origin, method):
+    def _respond(self, resp, start_response, gw_origin, method, accept_encoding=""):
         ctype = resp.headers.get("Content-Type", "") or ""
         encoding = (resp.headers.get("Content-Encoding") or "").lower().strip()
         status = f"{resp.status_code} {resp.reason or ''}".strip()
@@ -524,13 +525,24 @@ class GatewayApp:
                     text, "try{localStorage.removeItem('jwt')}catch(e){}")
         out = text.encode("utf-8")
         resp.close()
+        # 上游是 gzip、我们重写后必须发明文；对较大的响应再压回去，
+        # 否则详情页那种大 JSON/JS 在慢网络上会明显变卡。
+        encoded = ""
+        if len(out) > 1024 and "gzip" in (accept_encoding or "").lower():
+            compressed = gzip.compress(out, 6)
+            if len(compressed) < len(out):
+                out = compressed
+                encoded = "gzip"
         headers = self._response_headers(resp, gw_origin, drop_content_encoding=True)
         headers = [
             (k, v) for k, v in headers
             if k.lower() not in ("content-type", "content-length",
-                                 "cache-control", "expires", "pragma")
+                                 "cache-control", "expires", "pragma",
+                                 "content-encoding")
         ]
         headers.append(("Content-Type", _with_utf8(ctype)))
+        if encoded:
+            headers.append(("Content-Encoding", encoded))
         headers.append(("Content-Length", str(len(out))))
         if is_html:
             # 页面必须每次重新取：缓存住旧版 HTML 会出现「别人都好了，他还是白屏」
