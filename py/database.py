@@ -361,6 +361,8 @@ def _ensure_columns(conn: sqlite3.Connection):
     _add_column_if_missing(conn, "account_statuses", "platform", "platform TEXT DEFAULT 'gg'")
     _add_column_if_missing(conn, "regions", "platform", "platform TEXT DEFAULT 'gg'")
     _add_column_if_missing(conn, "agents", "platform", "platform TEXT DEFAULT 'gg'")
+    # 共享账号：会话代次（停用/清空时 +1，使已发出的 __sgw cookie 立即失效）
+    _add_column_if_missing(conn, "share_sessions", "ver", "ver INTEGER DEFAULT 0")
 
 
 def _ensure_schema(conn: sqlite3.Connection):
@@ -1112,6 +1114,41 @@ def _ensure_schema(conn: sqlite3.Connection):
             created_at TEXT DEFAULT (datetime('now','localtime')),
             UNIQUE(name, owner_id)
         );
+
+        -- 共享账号网关（2026-11-06）：外部会员站登录态共享
+        -- 站点配置以 config.json 为准（启动时 upsert），库里保存运行时状态与日志。
+        CREATE TABLE IF NOT EXISTS share_sites (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            upstream    TEXT NOT NULL,
+            port        INTEGER NOT NULL,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT DEFAULT (datetime('now','localtime'))
+        );
+
+        -- 会话罐：cookies_enc 是 AES-256-GCM 密文（base64），密钥由 secret_key 派生
+        CREATE TABLE IF NOT EXISTS share_sessions (
+            site_id     TEXT PRIMARY KEY REFERENCES share_sites(id) ON DELETE CASCADE,
+            cookies_enc TEXT,
+            updated_at  TEXT,
+            status      TEXT DEFAULT 'unknown',
+            last_ok_at  TEXT,
+            last_error  TEXT,
+            fail_streak INTEGER DEFAULT 0,
+            ver         INTEGER DEFAULT 0
+        );
+
+        -- 谁在什么时候进了哪个站点（只记进入动作，不记浏览内容）
+        CREATE TABLE IF NOT EXISTS share_access_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id    TEXT NOT NULL,
+            user_id    INTEGER,
+            username   TEXT,
+            ip         TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_share_access_log_site
+            ON share_access_log(site_id, created_at);
     """)
 
     # 列迁移已移至 _ensure_columns()（每次连接都执行）

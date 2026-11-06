@@ -395,6 +395,12 @@ app.register_blueprint(column_prefs_bp)
 # 薪资计算（工具集 → 薪资计算；读用户做表聚合，见 salary_calc / salary_service）
 from routes.salary_routes import salary_bp
 app.register_blueprint(salary_bp)
+
+# 共享账号网关（外部会员站登录态共享：广大大 / 有米云）
+# 网关本体跑在独立端口（config.share_gateway.sites[].port），这里只注册管理接口。
+from routes.share_routes import share_bp
+app.register_blueprint(share_bp, url_prefix="/api/share")
+app.config["SHARE_GATEWAY_CFG"] = APP_CONFIG.get("share_gateway") or {}
 import sheet_write
 import routes.gg_dashboard_sheet  # noqa: F401  —— 注册 gg_my_dashboard target
 import routes.gg_recharge_sheet  # noqa: F401  —— 注册 gg_recharge target
@@ -11706,6 +11712,12 @@ if __name__ == "__main__":
     print("正在初始化数据库...")
     database.get_db().close()
     print("数据库初始化完成。")
+    # 共享账号网关：独立端口常驻线程；失败不影响主服务
+    try:
+        from share_gateway.runner import start_all as _start_share_gateway
+        _start_share_gateway(APP_CONFIG, app.config.get("JWT_SECRET_KEY") or "")
+    except Exception as e:
+        print(f"[WARN] 共享账号网关启动失败: {e}")
     # 全局 500 处理器已上移到模块级（见文件上部的 internal_error）
     print(f"服务已启动: http://{host}:{port}")
     print("在浏览器中打开上方地址即可使用。")

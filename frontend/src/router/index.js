@@ -96,6 +96,12 @@ const routes = [
     meta: { title: '数据管理', platform: 'gg' }
   },
   {
+    // 共享账号网关（外部会员站登录态）：三平台共用，故不带 meta.platform
+    path: '/share',
+    component: () => import('../views/ShareView.vue'),
+    meta: { title: '共享账号' }
+  },
+  {
     path: '/admin/users',
     component: () => import('../views/UserManageView.vue'),
     meta: { admin: true, title: '用户管理' }

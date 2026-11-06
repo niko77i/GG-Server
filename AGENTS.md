@@ -125,7 +125,9 @@ FB 三张全局字典写入口）—— 放宽它等于把编辑别人数据的�
 
 #### 个人数据（按 user_id 隔离）
 - `accounts` — GG 广告账户管理（owner_id）
-- `mcc` — GG MCC 管理（owner_id）
+- `mcc` — GG MCC 管理（owner_id + **shared_user_ids**；MCC 是**共享**语义，见 2026-06-29 设计，
+  列表口径 owner ∪ shared；⚠️ 所以 MCC 页的「归属人」**不能**默认筛自己 —— owner 过滤是排他的，
+  会把共享 MCC 藏掉，2026-11-06 已回退，见 `2026-09-23-owner-filter-default-scope-design.md` 顶部修订）
 - `video_history` — AI 视频生成历史
 - `videos`（is_public=0）— YouTube 个人视频库
 - `ad_reports` / `fb_ad_reports` — 做表数据（TT 数据提取为纯前端解析，不落库）
@@ -919,6 +921,36 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - **做表数据**：从 Google Ads 原始竖排数据解析账号/客户ID/广告系列/费用/展示/点击，三种视图（原始清洗/按客户ID+广告系列聚合/按广告系列聚合），一键复制 TSV + 导出 XLSX，支持写入 Google Sheets
 - **音频替换**：FFmpeg `-c:v copy -map 0:v:0 -map 1:a:0 -shortest`，支持音频文件和视频文件作为音频源，上传预览 + 历史记录
 
+### 共享账号网关（外部会员站登录态）
+
+把「广大大 / 有米云」这类外部会员站的登录态从「浏览器扩展 + 快照文件」升级为
+「**服务端持有会话 + 反向代理**」：管理员登录一次，同事在 GG-Server 点开即用，不装扩展。
+设计见 [`2026-11-06-shared-account-gateway-design.md`](docs/superpowers/specs/2026-11-06-shared-account-gateway-design.md)。
+
+- **入口**：侧边栏「🔗 共享账号」`/share`（GG/FB/TT 三平台可见，户管不显示）；所有登录用户可打开，管理仅 developer。
+- **端口**：每位站点一个独立端口（广大大 **80**、Insightrackr **8903**、有米云 8902），网关在 `main.py` 的 `__main__` 里由 daemon 线程启动；
+  **端口必须单独放行防火墙**。端口不监听时页面显示「网关未启动」，主服务不受影响。
+  ⚠️ 2026-11-06：广大大从 **8901 改到 80** —— 阿伟那台机器/网络只放行 80 和 5001（8901/8903/8080 的 `Test-NetConnection` 全 False），80 是唯一大家都能到的端口。改端口不影响会话（cookie 不区分端口）。
+- **为什么独立端口**：原站 SPA 的接口是根绝对路径 `/napi/v1/*`、路由读 `location.pathname`，挂在 `/share/xxx/` 前缀下会被打回 GG-Server 自身。独立端口让原站原样跑在根路径。
+- **代理口径**：上游主站取 **apex `guangdada.net`**（`www` 会 301 到 apex）；`www`/apex 的同站跨主机跳转在服务端内部跟随（并同步改 `Host`），同主机跳转改写 `Location` 回网关 origin。
+- **CDN 防盗链（白屏元凶）**：`nbs-bj-global.zingfront.com` / `static-global.zingfront.com` 会拒绝 Referer 为网关地址的请求（403 HTML → Chrome `ERR_BLOCKED_BY_ORB` 丢掉 main.js，页面全白）。所以 HTML 响应必须注入 `<meta name="referrer" content="no-referrer">` + `Referrer-Policy: no-referrer`；实测无 Referer 时 CDN 返回 200。
+- **会话罐**：上游 `Set-Cookie` 先 AES-256-GCM 加密落 `share_sessions.cookies_enc`；`HttpOnly`（`ZFSESSID`）只留服务端，非 `HttpOnly`（`user-token` 等）下发给浏览器（JS 要读）。
+- **`user-token` 必须从浏览器学习**：它是原站 SPA 登录后用 `document.cookie` 写的，**不在上游 `Set-Cookie` 里**；网关从请求 `Cookie` 头里把它收进会话罐（白名单 `user-token` / `x-token`，按 **72 小时**记到期），再在 HTML 响应里下发给所有浏览器。不做这件事的表现是：**管理员明明登录过，点「打开」仍停在登录页**（换端口/主机 = 新 origin，浏览器里没有它，SPA 判定未登录、不发 jwt 请求）。
+  - 实测（2026-11-06）：罐里只有 `user-token`（没有 `ZFSESSID`）时，全新 origin 打开即可进「工作台」，`/napi/v1/creative/list` 返回 200 —— 该站接口鉴权主要靠 `x-nbs-user-token`。
+  - 已知不覆盖：`agent.guangdada.net`（Copilot）是跨域服务，浏览器直连带 Origin 校验，被 CORS 拦。
+- **落地页**：进入后 302 到 `landing_path`（广大大默认 `/modules/creative/display-ads`；Insightrackr 为 `/`）；原站 `/` 是营销首页，登录了也看不出状态。
+- **Insightrackr（8903，localStorage 型）**：它不用 cookie —— token 存 `localStorage.token`、接口带 `Authorization: <token>`。配置 `auth_header` + `local_storage_token_key` 后，网关从请求头学令牌、转发时回注 `Authorization`，并在 HTML 里注入 `localStorage.setItem("token", …)`；`login_path` 的 401 不触发失效标记。测试见 `test_auth_header_site_learns_and_injects`。
+- **鉴权**：GG-Server 发一次性票据（60 秒、nonce 消费）→ 网关入口换 `__sgw_<site>` cookie（12 小时）；**cookie 名按站点区分**，因为浏览器 cookie 不区分端口。
+- **吊销**：cookie 带会话代次 `ver`（`share_sessions.ver`）；`清空会话`/`停用站点` 时代次 +1，旧 cookie 立即 401（停用只吊销 cookie，不清会话罐，重新启用不用再登录）。代理与 `enter` 都检查 `enabled`（代理侧 5 秒缓存）。
+- **token 学习护栏**：罐里有**未过期** `user-token` 时**一律不接受别的值**（不论来源 uid）—— 防止同事顶号、也防止旧浏览器把管理员重登的新 token 回滚。需要更新只能：上游 `/napi/*` 返回 **401** → `mark_auth_invalid()` 把旧令牌标过期（同时状态改「需重新登录」）→ 重新登录的新 token 学进来；或管理员点「清空会话」。
+- **只有管理员能登录原站**：登录页/登录接口（路径含 `login`/`logon`/`signin`）对 `manage_uids`（默认 `[1]`）以外的人一律 403 —— 同事一登录就会把共享会话顶掉（原站会提示「您已在其他设备登录」）。管理员登录前先标失效，新令牌才能学进来。
+- **统一 UA**：转发上游时把 `User-Agent` 换成固定 Chrome UA 并去掉 `sec-ch-ua*`，否则同一 token 从 Chrome/Edge 同时访问会被平台认成多设备、踢下线。
+- **缓冲上限**：文本响应用有界读取（≤ 8MB）后重写，**不能因为「没有 Content-Length」就跳过重写** —— 原站 SPA 壳是 chunked，跳过重写会漏掉 no-referrer，CDN 立刻 403 → 白屏；超过上限才「已读前缀 + 剩余流」回退透传。
+- **链接主机名**：网关 URL 复用浏览器访问 GG-Server 的 Host；Host 为 `127.0.0.1`/`localhost`（在服务器本机打开）时回退 `share_gateway.public_host` 或自动探测本机对外 IP（优先 Tailscale 100.64/10），否则复制给同事的链接会指向**同事自己的机器**（ERR_CONNECTION_REFUSED）。
+- **复制链接 ≠ 邀请链接**：票据一次性且绑定签发人；同事看到「拒绝访问 / 链接已失效」通常是拿到了已用掉的链接。正确用法是各自登录 GG-Server，在 `/share` 页点「打开」。
+- **续期**：`jwt` 12 小时由原站凭 `ZFSESSID` 自动续，网关只跟随 `Set-Cookie`；**只有会话锚点失效才需要管理员重登**（密码不落库、不经过网关日志）。
+- **风险**：共享会员账号大概率违反平台 ToS；只限内网、不对外提供入口。跨域 CDN 的 Referer/签名、Copilot/`global.guangdada.net` 等额外跨域服务一期不保证。
+
 ### 导入约定
 
 所有 Python 文件使用绝对导入（无前导点），`main.py` 开头通过 `sys.path.insert(0, _current_dir)` 确保导入正确。`database.py` 独立计算 `_db_path()`。
@@ -1028,11 +1060,12 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - [普通用户放开账户区（广告账户 / MCC / 设置）](docs/superpowers/specs/2026-10-12-open-account-area-to-normal-users-design.md)（前端 `meta.admin` 摘除；判据从 1 条拆成 3 条 —— 能进页面 / 能改全局字典 / 能管别人的数据；后端本来就只做 owner 隔离；§3.4 记了一次同族自我纠错：五张字典里**只有 `regions`** 有硬闸，其余四张是 owner 隔离，不该一起藏）
 - [MCC 等级留空落到 id=1（修「建不了 MCC」）](docs/superpowers/specs/2026-10-12-mcc-level-default-design.md)（上条真机验收时用户报的 409：**与权限无关** —— 前端空串 `level_id` 撞 `PRAGMA foreign_keys=ON`，又被 `except IntegrityError` 误报成「MCC ID 已存在」；用户裁定空即补建 id=1）
 - [薪资计算（工具集）](docs/superpowers/specs/2026-11-04-salary-calculator-design.md)（读用户做表 A–N 自动聚合：代投费=ΣM、纯增值=Σ(F−K)、消耗=ΣK；底薪四档下拉、成本手填、汇率可调；**只算 K 有值的行**并按最后一条 K 提示「计算到几号」）
+- [共享账号网关（广大大 / 有米云）](docs/superpowers/specs/2026-11-06-shared-account-gateway-design.md)（服务端持有会话 + 独立端口反向代理；同事零安装直接浏览原站；AES-GCM 会话罐、一次性票据、按站点 cookie；上游 apex + 跨主机跳转内部跟随）
 - [续作指南](docs/superpowers/specs/NEXT-STEPS.md)
 
 ## 数据库表总览
 
-> 共 52 张表：GG 平台 30 张 + FB 平台 11 张 + TT 平台 11 张。字典表（选项表）5 张三平台共用。
+> 共 55 张表：GG 平台 30 张 + FB 平台 11 张 + TT 平台 11 张 + 共享账号网关 3 张。字典表（选项表）5 张三平台共用。
 
 ### GG 平台
 | 表名 | 用途 | 隔离方式 |
@@ -1097,6 +1130,17 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 | `tt_recharge_records` | TT 充值记录 | created_by 隔离 |
 | `tt_delist_checks` | TT 掉包检测结果 | 关联 tt_packages |
 | `tt_delist_notifications` | TT 掉包通知状态 | user_id 隔离 |
+
+### 共享账号网关（跨平台）
+| 表名 | 用途 | 隔离方式 |
+|------|------|----------|
+| `share_sites` | 共享站点（id / 名称 / 上游 / 端口 / 启用） | 配置驱动，启动时 upsert |
+| `share_sessions` | 会话罐（AES-GCM 密文）+ 状态 / 上次成功 / 失败计数 | 按 site_id |
+| `share_access_log` | 谁在什么时候进入哪个共享站点 | 记录用，**无外键、删用户不清日志**（审计需要） |
+
+> ⚠️ `share_access_log.user_id` **刻意不加 `REFERENCES users(id)`**：登录/进入是审计事实，
+> 用户被删后这条记录仍要留着；加外键会让 `admin_delete_user` 因 FK 失败（连接开了
+> `PRAGMA foreign_keys=ON`）。同理，删用户时不要补清理这张表。
 
 > **删用户时的关联清理**：`admin_delete_user` 必须清理所有引用 `users(id)` 的列 —— 这些列
 > 都是 `REFERENCES users(id)` 且**无 ON DELETE**，连接又开了 `PRAGMA foreign_keys=ON`，

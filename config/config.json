@@ -34,5 +34,40 @@
     },
     "google_sheets": {
         "credentials_path": "config/fit-boulevard-503111-u4-812bc02c2000.json"
+    },
+    "share_gateway": {
+        "enabled": true,
+        "public_host": "",
+        "sites": [
+            {
+                "id": "guangdada",
+                "name": "广大大",
+                "upstream": "https://guangdada.net",
+                "extra_hosts": ["www.guangdada.net", "guangdada.net"],
+                "landing_path": "/modules/creative/display-ads",
+                "port": 80,
+                "enabled": true
+            },
+            {
+                "id": "insightrackr",
+                "name": "Insightrackr",
+                "upstream": "https://data.insightrackr.com",
+                "extra_hosts": ["data.insightrackr.com"],
+                "landing_path": "/",
+                "login_path": "/login",
+                "auth_header": "Authorization",
+                "local_storage_token_key": "token",
+                "port": 8903,
+                "enabled": true
+            },
+            {
+                "id": "appgrowing",
+                "name": "有米云",
+                "upstream": "https://www.appgrowing.cn",
+                "extra_hosts": ["appgrowing.cn", "www.appgrowing.cn"],
+                "port": 8902,
+                "enabled": false
+            }
+        ]
     }
 }

@@ -76,6 +76,7 @@ const ggNavItems = [
   { key: 'youtube', icon: '📺', label: '视频管理', sections: [{ title: '视频', items: [{ icon:'▶',label:'视频展示',path:'/youtube/view'},{ icon:'📝',label:'文案展示',path:'/youtube/copywriting'},{ icon:'➕',label:'导入视频或文案',path:'/youtube/import'},{ icon:'🏷',label:'标签配置',path:'/youtube/config'}]}]},
   { key: 'media', icon: '🎬', label: '媒体工具', sections: [{ title: '媒体', items: [{ icon:'🖼',label:'爬取&视频',path:'/media'}]}]},
   { key: 'toolkit', icon: '🧰', label: '工具集', sections: [{ title: '工具', items: [{ icon:'📊',label:'做表数据',path:'/toolkit/zuobiao'},{ icon:'💰',label:'薪资计算',path:'/toolkit/salary'},{ icon:'🎵',label:'音频替换',path:'/toolkit/audio'},{ icon:'🌐',label:'翻译工具',path:'/toolkit/translate'}]}]},
+  { key: 'share', icon: '🔗', label: '共享账号', sections: [{ title: '共享账号', items: [{ icon:'🌐',label:'共享账号',path:'/share'}]}]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/analysis'}]}]},
   { key: 'data-manage', icon: '📋', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'数据管理',path:'/data-manage'}]}]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',admin:true }] }]},
@@ -94,6 +95,7 @@ const fbNavItems = [
     ]}
   ]},
   { key: 'fb-extract', icon: '📋', label: '数据提取', sections: [{ title: '提取', items: [{ icon:'📥',label:'FB数据提取',path:'/fb/extract'}]}]},
+  { key: 'share', icon: '🔗', label: '共享账号', sections: [{ title: '共享账号', items: [{ icon:'🌐',label:'共享账号',path:'/share'}]}]},
   { key: 'fb-data', icon: '📊', label: '数据管理', sections: [{ title: '数据', items: [{ icon:'📋',label:'FB数据管理',path:'/fb/data-manage'}]}]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/fb/analysis'}]}]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',admin:true }] }]},
@@ -111,6 +113,7 @@ const ttNavItems = [
     ]}
   ]},
   { key: 'tt-extract', icon: '📥', label: '数据提取', sections: [{ title: '提取', items: [{ icon:'📥',label:'TT数据提取',path:'/tt/extract' }] }]},
+  { key: 'share', icon: '🔗', label: '共享账号', sections: [{ title: '共享账号', items: [{ icon:'🌐',label:'共享账号',path:'/share'}]}]},
   { key: 'analysis', icon: '📈', label: '数据分析', sections: [{ title: '分析', items: [{ icon:'📊',label:'数据看板',path:'/tt/analysis'}]}]},
   { key: 'admin', icon: '🏴', label: '管理', admin: true, sections: [{ title: '管理', items: [{ icon:'👥',label:'用户管理',path:'/admin/users'},{ icon:'⏰',label:'定时任务',path:'/admin/scheduler',admin:true }] }]},
 ]
