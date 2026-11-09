@@ -49,6 +49,17 @@
                 "enabled": true
             },
             {
+                "id": "tiktok_ads",
+                "name": "TikTok 广告后台",
+                "upstream": "https://ads.tiktok.com",
+                "extra_hosts": [],
+                "landing_path": "/i18n/dashboard",
+                "login_path": "/i18n/login",
+                "keep_client_headers": true,
+                "port": 8904,
+                "enabled": true
+            },
+            {
                 "id": "insightrackr",
                 "name": "Insightrackr",
                 "upstream": "https://data.insightrackr.com",

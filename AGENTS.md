@@ -928,7 +928,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 设计见 [`2026-11-06-shared-account-gateway-design.md`](docs/superpowers/specs/2026-11-06-shared-account-gateway-design.md)。
 
 - **入口**：侧边栏「🔗 共享账号」`/share`（GG/FB/TT 三平台可见，户管不显示）；所有登录用户可打开，管理仅 developer。
-- **端口**：每位站点一个独立端口（广大大 **80**、Insightrackr **8903**、有米云 8902），网关在 `main.py` 的 `__main__` 里由 daemon 线程启动；
+- **端口**：每位站点一个独立端口（广大大 **80**、Insightrackr **8903**、TikTok 广告后台 **8904**、有米云 8902），网关在 `main.py` 的 `__main__` 里由 daemon 线程启动；
   **端口必须单独放行防火墙**。端口不监听时页面显示「网关未启动」，主服务不受影响。
   ⚠️ 2026-11-06：广大大从 **8901 改到 80** —— 阿伟那台机器/网络只放行 80 和 5001（8901/8903/8080 的 `Test-NetConnection` 全 False），80 是唯一大家都能到的端口。改端口不影响会话（cookie 不区分端口）。
 - **为什么独立端口**：原站 SPA 的接口是根绝对路径 `/napi/v1/*`、路由读 `location.pathname`，挂在 `/share/xxx/` 前缀下会被打回 GG-Server 自身。独立端口让原站原样跑在根路径。
@@ -940,6 +940,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
   - 已知不覆盖：`agent.guangdada.net`（Copilot）是跨域服务，浏览器直连带 Origin 校验，被 CORS 拦。
 - **落地页**：进入后 302 到 `landing_path`（广大大默认 `/modules/creative/display-ads`；Insightrackr 为 `/`）；原站 `/` 是营销首页，登录了也看不出状态。
 - **Insightrackr（8903，localStorage 型）**：它不用 cookie —— token 存 `localStorage.token`、接口带 `Authorization: <token>`。配置 `auth_header` + `local_storage_token_key` 后，网关从请求头学令牌、转发时回注 `Authorization`，并在 HTML 里注入 `localStorage.setItem("token", …)`；`login_path` 的 401 不触发失效标记。测试见 `test_auth_header_site_learns_and_injects`。
+- **TikTok 广告后台（8904）**：`ads.tiktok.com`，登录/接口都是同源 `/api/*`，会话 cookie（`sessionid` 等 HttpOnly）走会话罐；**必须保留浏览器原始 UA**（`keep_client_headers: true`），因为它的 `X-Bogus`/`msToken` 反爬签名跟 UA 绑定。⚠️ 平台反爬强，共享会话能否长期稳定待实测；登录页/登录接口只允许管理员（`manage_uids`）。
 - **鉴权**：GG-Server 发一次性票据（60 秒、nonce 消费）→ 网关入口换 `__sgw_<site>` cookie（12 小时）；**cookie 名按站点区分**，因为浏览器 cookie 不区分端口。
 - **吊销**：cookie 带会话代次 `ver`（`share_sessions.ver`）；`清空会话`/`停用站点` 时代次 +1，旧 cookie 立即 401（停用只吊销 cookie，不清会话罐，重新启用不用再登录）。代理与 `enter` 都检查 `enabled`（代理侧 5 秒缓存）。
 - **token 学习护栏**：罐里有**未过期** `user-token` 时**一律不接受别的值**（不论来源 uid）—— 防止同事顶号、也防止旧浏览器把管理员重登的新 token 回滚。需要更新只能：上游 `/napi/*` 返回 **401** → `mark_auth_invalid()` 把旧令牌标过期（同时状态改「需重新登录」）→ 重新登录的新 token 学进来；或管理员点「清空会话」。

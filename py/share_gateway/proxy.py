@@ -97,11 +97,16 @@ def _looks_like_login(path: str, login_path: str = "") -> bool:
 
     登录请求本身可能带着**过期**的 Authorization 头，不能拿它去学共享令牌，
     否则刚清掉的旧 token 又会被学回罐里，新登录反而永远生效不了。
+
+    只匹配「登录端点本身」（`/login`、`/logon`、`/signin` 结尾或其子路径），
+    不要用「路径里含 login」那种宽匹配 —— 会把 `/api/v1/user/login/status`
+    这类登录后的接口也当成登录请求，导致管理员每调一次就被标记失效。
     """
-    p = (path or "").lower()
-    if login_path and (p == login_path.lower() or p.startswith(login_path.lower() + "/")):
+    p = (path or "").lower().rstrip("/")
+    lp = (login_path or "").lower().rstrip("/")
+    if lp and (p == lp or p.startswith(lp + "/")):
         return True
-    return any(k in p for k in ("login", "logon", "signin", "sign-in"))
+    return p.endswith(("/login", "/logon", "/signin", "/sign-in"))
 
 
 def _site_hosts(upstream: str, extra_hosts: list[str]) -> list[str]:
@@ -345,10 +350,12 @@ class GatewayApp:
         body = self._read_body(environ, raw_length)
 
         headers = self._request_headers(environ)
-        # 统一 UA，避免平台把 Chrome/Edge 当成两台设备踢共享会话
-        headers["User-Agent"] = (self.site.get("user_agent") or DEFAULT_UA)
-        for k in [k for k in headers if k.lower().startswith("sec-ch-ua")]:
-            headers.pop(k, None)
+        # 统一 UA，避免平台把 Chrome/Edge 当成两台设备踢共享会话。
+        # TikTok 这类有反爬签名的站点必须保留浏览器原始 UA（X-Bogus 等签名跟 UA 绑定）。
+        if not self.site.get("keep_client_headers"):
+            headers["User-Agent"] = (self.site.get("user_agent") or DEFAULT_UA)
+            for k in [k for k in headers if k.lower().startswith("sec-ch-ua")]:
+                headers.pop(k, None)
         browser_cookies = parse_cookie_header(environ.get("HTTP_COOKIE", ""))
         # 网关自己的 cookie 一个都不往上游带（含其它站点的 `__sgw_*`）
         browser_cookies = {
