@@ -273,14 +273,13 @@ class GatewayApp:
         if not site_enabled(self.rt.site_id):
             self._log_deny(environ, "站点已停用")
             return self._unauthorized(start_response, "该共享站点已停用。")
-        # 只有管理员能登录原站：同事一登录就会把共享会话顶掉
+        # 只有管理员/开发者能登录原站：同事一登录就会把共享会话顶掉
         if _looks_like_login(path, (self.site.get("login_path") or "").strip()):
-            manage_uids = [int(x) for x in (self.site.get("manage_uids") or [1])]
             try:
                 uid = int(payload.get("uid") or 0)
             except (TypeError, ValueError):
                 uid = 0
-            if uid not in manage_uids:
+            if not self._can_manage_login(uid):
                 self._log_deny(environ, f"非管理员尝试登录原站 uid={uid}")
                 return self._error_page(
                     start_response, 403,
@@ -289,6 +288,18 @@ class GatewayApp:
 
         return self._proxy(environ, start_response, path, query, gw_origin,
                            uid=payload.get("uid"))
+
+    def _can_manage_login(self, uid: int) -> bool:
+        """能否登录原站：显式配置的 uid，或 GG-Server 角色在 manage_roles 里。"""
+        uids = [int(x) for x in (self.site.get("manage_uids") or [1])]
+        if uid in uids:
+            return True
+        roles = [str(r).lower() for r in
+                 (self.site.get("manage_roles") or ["developer", "admin"])]
+        try:
+            return (store.user_role(uid) or "").lower() in roles
+        except Exception:
+            return False
 
     def _log_deny(self, environ, reason: str) -> None:
         _log.warning(
@@ -371,11 +382,10 @@ class GatewayApp:
             uid_int = int(uid or 0)
         except (TypeError, ValueError):
             uid_int = 0
-        manage_uids = [int(x) for x in (self.site.get("manage_uids") or [1])]
         if is_login_req:
             # 登录请求本身可能带着旧令牌：不学；管理员登录前先把旧会话标失效，
             # 新登录的令牌才能被学进来。
-            if uid_int in manage_uids:
+            if self._can_manage_login(uid_int):
                 self.rt.mark_auth_invalid()
         elif not auth_header_name:
             self.rt.learn_browser_cookies(environ.get("HTTP_COOKIE", ""), uid=uid)

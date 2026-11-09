@@ -10,6 +10,16 @@ def _rows(rows):
     return [dict(r) for r in rows]
 
 
+def user_role(uid: int) -> str | None:
+    """查 GG-Server 用户角色（用于判断能否登录原站）。"""
+    db = database.get_db()
+    try:
+        row = db.execute("SELECT role FROM users WHERE id=?", (int(uid),)).fetchone()
+        return row[0] if row else None
+    finally:
+        db.close()
+
+
 def ensure_site(site: dict) -> None:
     """把配置里的站点写进库（名称/上游/端口以配置为准，enabled 只在首次生效）。"""
     db = database.get_db()
