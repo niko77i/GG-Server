@@ -4281,22 +4281,24 @@ def accounts_list():
     mcc_cache_key = f"accounts:mcc_options:{user_id}:{scope}"
     mcc_options = _app_cache.get(mcc_cache_key)
     if mcc_options is None:
-        if sub_owner is None:
-            # 跨用户 + 未筛选具体用户：与列表口径一致，不加归属条件
-            mcc_options = [dict(r) for r in db.execute(
-                "SELECT id, name, mcc_id FROM mcc ORDER BY name"
-            ).fetchall()]
-        elif owner_filter:
-            mcc_options = [dict(r) for r in db.execute(
-                "SELECT id, name, mcc_id FROM mcc WHERE owner_id = ? ORDER BY name",
-                (owner_filter,)
-            ).fetchall()]
-        else:
-            mcc_options = [dict(r) for r in db.execute(
-                "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids=? OR "
-                "shared_user_ids LIKE ? OR shared_user_ids LIKE ? OR shared_user_ids LIKE ?) ORDER BY name",
-                (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
-            ).fetchall()]
+        # 候选口径（用户 2026-11-06 定）：**自己创建的 MCC** ∪ **自己产品用到的 MCC**
+        # （产品用到但自己没创建的也要给 —— 否则给产品下的账户选不到它所在的 MCC）。
+        #
+        # 三条历史弯路，别再走回去：
+        #   ① 只看 `shared_user_ids`（"共享给我的"）→ 新建 MCC 没被共享过就看不见；
+        #   ② 跟着「归属人」筛选收窄成 `WHERE owner_id = 筛选值` → 默认「归属人=自己」时
+        #      名下 0 个 MCC 的账号下拉直接为空（黑子实例）；
+        #   ③ 跨用户角色一律给全部 109 个 → 用户明确否掉：「不是共享所有 MCC」。
+        mcc_options = [dict(r) for r in db.execute(
+            "SELECT id, name, mcc_id FROM mcc "
+            "WHERE owner_id = ? OR id IN ("
+            "  SELECT mcc_id FROM products WHERE mcc_id IS NOT NULL AND mcc_id != '' AND ("
+            "    owner_id = ? OR runner_ids = ? OR runner_ids LIKE ? "
+            "    OR runner_ids LIKE ? OR runner_ids LIKE ?)) "
+            "ORDER BY name",
+            (user_id, user_id, f"[{uid_str}]", f"[{uid_str},%",
+             f"%, {uid_str},%", f"%, {uid_str}]")
+        ).fetchall()]
         _app_cache.set(mcc_cache_key, mcc_options, ttl=120)
     agents_cache_key = f"accounts:agents:{user_id}:{scope}"
     agents = _app_cache.get(agents_cache_key)
@@ -6270,13 +6272,24 @@ def mcc_list():
 @app.route("/api/mcc/options", methods=["GET"])
 @jwt_required()
 def mcc_options():
+    """账户弹窗里的 MCC 下拉候选。
+
+    口径与 `accounts_list` 里的 `mcc_options` **完全一致**（用户 2026-11-06 定）：
+    **自己创建的 MCC** ∪ **自己产品用到的 MCC**（含没被共享过来、但你产品在用的）。
+    不按 shared_user_ids 列表、也不给「全部 MCC」—— 两条都试过并被否掉。
+    """
     user_id = int(get_jwt_identity())
     db = _yt_db()
     uid_str = str(user_id)
     rows = db.execute(
-        "SELECT id, name, mcc_id FROM mcc WHERE (owner_id=? OR shared_user_ids=? OR "
-        "shared_user_ids LIKE ? OR shared_user_ids LIKE ? OR shared_user_ids LIKE ?) ORDER BY name",
-        (user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]")
+        "SELECT id, name, mcc_id FROM mcc "
+        "WHERE owner_id = ? OR id IN ("
+        "  SELECT mcc_id FROM products WHERE mcc_id IS NOT NULL AND mcc_id != '' AND ("
+        "    owner_id = ? OR runner_ids = ? OR runner_ids LIKE ? "
+        "    OR runner_ids LIKE ? OR runner_ids LIKE ?)) "
+        "ORDER BY name",
+        (user_id, user_id, f"[{uid_str}]", f"[{uid_str},%",
+         f"%, {uid_str},%", f"%, {uid_str}]")
     ).fetchall()
     db.close()
     return jsonify({"success": True, "options": [dict(r) for r in rows]})
@@ -8529,12 +8542,20 @@ def translate_text():
 @app.route("/api/users/names", methods=["GET"])
 @jwt_required()
 def users_names():
-    """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。"""
+    """在跑人员候选：**所有非 hidden 的 GG 用户** ∪ 已参与过产品的用户。
+
+    ⚠️ 原实现是 `JOIN products`（内连接），只返回「已经拥有某个产品 / 已在某个产品里当在跑
+    人员」的用户 ⇒ 新用户永远进不了候选列表，而他又正因为进不了列表才没法被指派（死循环）。
+    2026-11-05 实例：新建的 admin「黑子」(id=51) 名下有 0 个产品，产品管理里根本选不到。
+
+    现改为 LEFT JOIN + 「有产品 **或** platform='gg'」：老用户顺序不变、新用户可选；
+    仍排除 hidden；非 GG 平台用户只有在真的参与过产品时才出现（避免 FB/TT 用户混进 GG 页）。
+    """
     db = database.get_db()
     rows = db.execute("""
         SELECT DISTINCT u.id, u.username, u.display_name
         FROM users u
-        JOIN products p ON (
+        LEFT JOIN products p ON (
             p.owner_id = u.id
             OR p.runner_ids = '[' || u.id || ']'
             OR p.runner_ids LIKE '[' || u.id || ',%'
@@ -8542,6 +8563,7 @@ def users_names():
             OR p.runner_ids LIKE '%, ' || u.id || ']'
         )
         WHERE u.role != 'hidden'
+          AND (p.id IS NOT NULL OR COALESCE(u.platform, 'gg') = 'gg')
         ORDER BY u.id
     """).fetchall()
     db.close()

@@ -10,7 +10,7 @@
 
       <div style="display:flex;gap:8px;margin-bottom:8px;">
         <el-input v-model="store.mccFilters.search" placeholder="🔍 搜索名称/ID..." @input="onFilterChange" style="flex:1;" clearable />
-        <OwnerFilterSelect v-model="store.mccFilters.owner_id" @change="onOwnerChange" />
+        <OwnerFilterSelect v-model="store.mccFilters.owner_id" :default-scope="false" @change="onOwnerChange" />
         <el-input v-model="store.mccFilters.level" placeholder="等级关键词..." @input="onFilterChange" style="width:150px;" clearable />
       </div>
     </div>

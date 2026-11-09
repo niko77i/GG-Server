@@ -11,7 +11,15 @@ import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { defaultOwnerScope } from '@/utils/ownerScope'
 
-const props = defineProps({ modelValue: { type: [String, Number], default: '' } })
+const props = defineProps({
+  modelValue: { type: [String, Number], default: '' },
+  // 是否套用「默认按归属人筛选」（developer/admin → 自己）。
+  // ⚠️ MCC 面板必须传 false：MCC 的可见性口径是 **owner ∪ shared_user_ids**
+  // （2026-06-29 的共享设计），而 owner 过滤在 `mcc_list` 里是**排他**的
+  // （`m.owner_id = ?`，不含共享）—— 一进来就筛自己等于把「共享给我的 MCC」全藏掉，
+  // 表现就是「MCC 变成私人的了」（2026-11-06 实测：阿伟 admin 默认只有 3 条，实际可见 109）。
+  defaultScope: { type: Boolean, default: true },
+})
 const emit = defineEmits(['update:modelValue', 'change'])
 
 const auth = useAuthStore()
@@ -40,7 +48,9 @@ watch(
 
 // 首次进入面板时套用默认作用域（developer/admin → 自己；户管 → 全部）。
 // 只在父组件尚无值时生效：用户手动清空或另选后不会被打回（watch 只认 user.id 变化）。
+// `default-scope=false` 的面板（MCC）保持「全部」，见 props 注释。
 function applyDefaultScope() {
+  if (!props.defaultScope) return
   const v = props.modelValue
   if (v !== '' && v !== null && v !== undefined) return
   const def = defaultOwnerScope(auth.user, auth.effectivePlatform)

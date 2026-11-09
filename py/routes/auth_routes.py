@@ -186,8 +186,12 @@ def auth_profile():
 @auth_bp.route("/names", methods=["GET"], endpoint="users_names")
 @jwt_required()
 def users_names():
-    """返回在产品表中有数据的用户（owner 或 runner），供 runner 选择器使用。
-    非 developer 用户看不到 developer 角色用户。"""
+    """在跑人员候选（与 `main.users_names` 同一口径）：所有非 hidden 的 GG 用户 ∪ 已参与产品的用户。
+
+    ⚠️ 原先用 `JOIN products`（内连接），新用户（还没挂过任何产品）永远查不出来 ——
+    详见 `py/main.py::users_names` 的注释（2026-11-05「黑子」实例）。
+    非 developer 用户看不到 developer 角色用户。
+    """
     current_user_id = get_jwt_identity()
     db = database.get_db()
     dev_filter = ""
@@ -200,14 +204,15 @@ def users_names():
     rows = db.execute(f"""
         SELECT DISTINCT u.id, u.username, u.display_name, u.platform
         FROM users u
-        JOIN products p ON (
+        LEFT JOIN products p ON (
             p.owner_id = u.id
             OR p.runner_ids = '[' || u.id || ']'
             OR p.runner_ids LIKE '[' || u.id || ',%'
             OR p.runner_ids LIKE '%, ' || u.id || ',%'
             OR p.runner_ids LIKE '%, ' || u.id || ']'
         )
-        WHERE u.role != 'hidden'{dev_filter}
+        WHERE u.role != 'hidden'
+          AND (p.id IS NOT NULL OR COALESCE(u.platform, 'gg') = 'gg'){dev_filter}
         ORDER BY u.id
     """).fetchall()
     db.close()
