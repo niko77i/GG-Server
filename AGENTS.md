@@ -944,7 +944,7 @@ TT 掉包检测与通知**完整对齐 GG**，唯一差别是走**独立的 `tt_
 - **鉴权**：GG-Server 发一次性票据（60 秒、nonce 消费）→ 网关入口换 `__sgw_<site>` cookie（12 小时）；**cookie 名按站点区分**，因为浏览器 cookie 不区分端口。
 - **吊销**：cookie 带会话代次 `ver`（`share_sessions.ver`）；`清空会话`/`停用站点` 时代次 +1，旧 cookie 立即 401（停用只吊销 cookie，不清会话罐，重新启用不用再登录）。代理与 `enter` 都检查 `enabled`（代理侧 5 秒缓存）。
 - **token 学习护栏**：罐里有**未过期** `user-token` 时**一律不接受别的值**（不论来源 uid）—— 防止同事顶号、也防止旧浏览器把管理员重登的新 token 回滚。需要更新只能：上游 `/napi/*` 返回 **401** → `mark_auth_invalid()` 把旧令牌标过期（同时状态改「需重新登录」）→ 重新登录的新 token 学进来；或管理员点「清空会话」。
-- **只有管理员能登录原站**：登录页/登录接口（路径含 `login`/`logon`/`signin`）对 `manage_uids`（默认 `[1]`）以外的人一律 403 —— 同事一登录就会把共享会话顶掉（原站会提示「您已在其他设备登录」）。管理员登录前先标失效，新令牌才能学进来。
+- **只有管理员/开发者能登录原站**：登录页/登录接口（路径含 `login`/`logon`/`signin`）只允许 `manage_uids`（默认 `[1]`）或 `manage_roles`（默认 `["developer","admin"]`）里的人 —— 同事一登录就会把共享会话顶掉（原站会提示「您已在其他设备登录」）。管理员登录前先标失效，新令牌才能学进来。想让更少人能动，把 `manage_roles` 改成 `["developer"]`。
 - **统一 UA**：转发上游时把 `User-Agent` 换成固定 Chrome UA 并去掉 `sec-ch-ua*`，否则同一 token 从 Chrome/Edge 同时访问会被平台认成多设备、踢下线。
 - **缓冲上限**：文本响应用有界读取（≤ 8MB）后重写，**不能因为「没有 Content-Length」就跳过重写** —— 原站 SPA 壳是 chunked，跳过重写会漏掉 no-referrer，CDN 立刻 403 → 白屏；超过上限才「已读前缀 + 剩余流」回退透传。
 - **链接主机名**：网关 URL 复用浏览器访问 GG-Server 的 Host；Host 为 `127.0.0.1`/`localhost`（在服务器本机打开）时回退 `share_gateway.public_host` 或自动探测本机对外 IP（优先 Tailscale 100.64/10），否则复制给同事的链接会指向**同事自己的机器**（ERR_CONNECTION_REFUSED）。
