@@ -6,7 +6,9 @@
 import json
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
+
+import requests
 
 from share_gateway import jar as jar_mod, store
 
@@ -221,6 +223,41 @@ class SiteRuntime:
                     return c.get("v") or ""
         return ""
 
+    def probe_auth(self) -> tuple[str, str | None]:
+        """真的拿令牌去调一次上游接口，判断会话是否还有效。
+
+        `check_status` 只能看本地有没有令牌、有没有过期；令牌被上游作废时它看不出来，
+        表现就是「账户掉了，但页面显示可用、检测也检测不到」。配置 `auth_check_path`
+        后，心跳/手动「检测」都会实际请求一次。
+        """
+        path = (self.site.get("auth_check_path") or "").strip()
+        token = self.auth_header_value()
+        if not (path and token):
+            return "unknown", None
+        try:
+            resp = requests.get(
+                urljoin(self.upstream + "/", path.lstrip("/")),
+                headers={
+                    self.site.get("auth_header") or "Authorization": token,
+                    "Accept": "application/json, text/plain, */*",
+                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/126.0.0.0 Safari/537.36"),
+                },
+                timeout=15,
+            )
+        except requests.RequestException as exc:
+            return "unknown", f"检测失败：{exc}"
+        body = resp.text[:800]
+        if resp.status_code == 200 and ('"code":200' in body or '"success":true' in body):
+            return "ok", None
+        if resp.status_code in (401, 403) or "-3106" in body or "登录已过期" in body:
+            self.mark_auth_invalid()
+            return "expired", "登录已过期，需要重新登录"
+        if resp.status_code >= 500:
+            return "unknown", f"检测失败：上游 {resp.status_code}"
+        return "unknown", f"检测返回 {resp.status_code}"
+
     def browser_sync_cookies(self) -> list[dict]:
         """需要下发到浏览器、让 SPA 读到的非 httpOnly 令牌。"""
         with self._lock:
@@ -276,8 +313,10 @@ class SiteRuntime:
         jar = self.snapshot()
         if not jar:
             return "unknown", "尚未登录"
-        if self.site.get("auth_header") and self.auth_header_value():
-            return "ok", None
+        if self.site.get("auth_header"):
+            if self.auth_header_value():
+                return "ok", None
+            return "expired", "会话已过期，需要重新登录"
         auth = [c for c in jar if c.get("n") in AUTH_COOKIES]
         if not auth:
             # 有 cookie 但没有已知鉴权名：无法判断，按 ok 处理（避免误报）
@@ -296,7 +335,15 @@ class SiteRuntime:
             cookie.get("n"), DEFAULT_SESSION_TTL)
 
     def refresh_status(self) -> tuple[str, str | None]:
-        status, error = self.check_status()
+        probed_status, probed_error = "unknown", None
+        if self.site.get("auth_check_path"):
+            probed_status, probed_error = self.probe_auth()
+        if probed_status == "expired":
+            status, error = "expired", probed_error
+        elif probed_status == "ok":
+            status, error = "ok", None
+        else:
+            status, error = self.check_status()
         self.status, self.last_error = status, error
         try:
             if status == "ok":

@@ -68,6 +68,7 @@
                 "login_path": "/login",
                 "auth_header": "Authorization",
                 "local_storage_token_key": "token",
+                "auth_check_path": "/api/v1/ast?page_id=dashboard&workspace_id=0&app_id=IST",
                 "port": 8903,
                 "enabled": true
             },

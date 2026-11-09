@@ -515,6 +515,14 @@ class GatewayApp:
             resp.close()
             return self._error_page(start_response, 502, "?????????????????")
         text = raw.decode(_charset(ctype), errors="replace")
+        # Insightrackr 这类站点过期时返回的是 200/404 + `{"code":-3106,"message":"登录已过期"}`，
+        # 不是 401；不识别就会一直显示「可用」。
+        if auth_header_name and "json" in ctype.lower() and (
+                '"code":-3106' in text or "登录已过期" in text):
+            try:
+                self.rt.mark_auth_invalid()
+            except Exception:
+                pass
         text = rewrite_text(text, self.hosts, gw_origin)
         is_html = "html" in ctype.lower()
         if is_html:
