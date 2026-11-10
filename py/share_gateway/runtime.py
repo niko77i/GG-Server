@@ -223,40 +223,104 @@ class SiteRuntime:
                     return c.get("v") or ""
         return ""
 
+    def raw_auth_value(self) -> str:
+        """不看过期时间，拿 Authorization 伪条目的值（用于判断 401 是不是旧令牌造成）。"""
+        with self._lock:
+            for c in self._jar:
+                if c.get("n") == AUTH_PSEUDO:
+                    return c.get("v") or ""
+        return ""
+
+    def raw_cookie_value(self, name: str) -> str:
+        """不看过期时间，拿某个 cookie 的值。"""
+        with self._lock:
+            for c in self._jar:
+                if c.get("n") == name:
+                    return c.get("v") or ""
+        return ""
+
+    def _restore_cookie(self, name: str, value: str) -> None:
+        now = time.time()
+        with self._lock:
+            self._jar = jar_mod.merge(self._jar, {
+                "n": name, "v": value, "d": self.upstream_host, "p": "/",
+                "e": now + LEARNED_TOKEN_TTL, "s": False, "h": False, "ho": False,
+                "ss": "", "fs": now,
+            })
+            self._persist_locked()
+
     def probe_auth(self) -> tuple[str, str | None]:
         """真的拿令牌去调一次上游接口，判断会话是否还有效。
 
-        `check_status` 只能看本地有没有令牌、有没有过期；令牌被上游作废时它看不出来，
-        表现就是「账户掉了，但页面显示可用、检测也检测不到」。配置 `auth_check_path`
-        后，心跳/手动「检测」都会实际请求一次。
+        - `auth_header` 型（Insightrackr）：用 Authorization 头；
+        - cookie 型（广大大）：配置 `auth_check_cookie` 后，用 Cookie + x-nbs-user-token 探。
+          即便本地已经把 cookie 标成过期，也会拿原始值试一次 —— 探通就恢复有效期，
+          避免「一个旧浏览器的 401 把全员的会话判死，但点开其实还能用」。
         """
         path = (self.site.get("auth_check_path") or "").strip()
-        token = self.auth_header_value()
-        if not (path and token):
+        if not path:
             return "unknown", None
+        auth_header = (self.site.get("auth_header") or "").strip()
+        cookie_name = (self.site.get("auth_check_cookie") or "").strip()
+        token = self.auth_header_value() if auth_header else (
+            self.raw_cookie_value(cookie_name) if cookie_name else "")
+        if not token:
+            return "unknown", None
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/126.0.0.0 Safari/537.36"),
+        }
+        if auth_header:
+            headers[auth_header] = token
+        else:
+            headers["Cookie"] = f"{cookie_name}={token}"
+            headers["x-nbs-user-token"] = token
         try:
             resp = requests.get(
                 urljoin(self.upstream + "/", path.lstrip("/")),
-                headers={
-                    self.site.get("auth_header") or "Authorization": token,
-                    "Accept": "application/json, text/plain, */*",
-                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                   "Chrome/126.0.0.0 Safari/537.36"),
-                },
-                timeout=15,
+                headers=headers, timeout=15,
             )
         except requests.RequestException as exc:
             return "unknown", f"检测失败：{exc}"
         body = resp.text[:800]
-        if resp.status_code == 200 and ('"code":200' in body or '"success":true' in body):
-            return "ok", None
-        if resp.status_code in (401, 403) or "-3106" in body or "登录已过期" in body:
+        expired = (resp.status_code in (401, 403)
+                   or "-3106" in body or "登录已过期" in body)
+        if expired:
             self.mark_auth_invalid()
             return "expired", "登录已过期，需要重新登录"
+        if resp.status_code == 200:
+            # 探测通过：cookie 型站点如果之前被旧浏览器的 401 误标过期，这里恢复有效期
+            if not auth_header and cookie_name:
+                self._restore_cookie(cookie_name, token)
+            return "ok", None
         if resp.status_code >= 500:
             return "unknown", f"检测失败：上游 {resp.status_code}"
         return "unknown", f"检测返回 {resp.status_code}"
+
+    def mark_auth_ok(self) -> None:
+        """有已鉴权接口返回 200 时调用：如果之前被误标过期，把 cookie 有效期恢复。
+
+        典型场景：某个旧浏览器 401 把共享会话标成「需重新登录」，但其实令牌还能用；
+        只要有人用共享会话成功调通一个接口，就说明它是好的。
+        """
+        now = time.time()
+        changed = False
+        with self._lock:
+            for c in self._jar:
+                if c.get("n") in AUTH_COOKIES and c.get("e") is not None and c["e"] <= now:
+                    c["e"] = now + LEARNED_TOKEN_TTL
+                    changed = True
+            if changed:
+                self._persist_locked()
+            if self.status != "ok":
+                self.status = "ok"
+                self.last_error = None
+        try:
+            store.update_status(self.site_id, "ok", None, ok=True)
+        except Exception:
+            pass
 
     def browser_sync_cookies(self) -> list[dict]:
         """需要下发到浏览器、让 SPA 读到的非 httpOnly 令牌。"""

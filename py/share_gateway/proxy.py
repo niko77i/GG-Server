@@ -422,19 +422,38 @@ class GatewayApp:
         except requests.RequestException as exc:
             return self._error_page(start_response, 502, f"无法连接上游：{exc}")
 
-        # 上游判 401：说明罐里的令牌在服务端已失效。标成过期，好让重新登录的新
-        # token 能被学习进来（否则「已有有效令牌不覆盖」会把新 token 一直挡掉）。
+        # 上游判 401/403：只有「请求里带的就是罐里的当前令牌」才算共享会话失效。
+        # 旧浏览器可能还揣着上一轮的令牌，它 401 不能把全员的会话判死
+        # （否则会「页面显示需重登，但点开其实还能用」）。
         login_path = (self.site.get("login_path") or "").strip()
         if resp.status_code in (401, 403) and path != login_path and (
                 path.startswith("/napi/") or auth_header_name):
-            _log.warning("[ShareGW] %s 上游 %s：path=%s ip=%s（会话已失效）",
-                         self.rt.site_id, resp.status_code, path[:120],
-                         environ.get("REMOTE_ADDR") or "")
+            if auth_header_name:
+                sent = (environ.get("HTTP_AUTHORIZATION") or "").strip()
+                current = self.rt.raw_auth_value()
+            else:
+                sent = (environ.get("HTTP_X_NBS_USER_TOKEN")
+                        or parse_cookie_header(environ.get("HTTP_COOKIE", "")).get("user-token")
+                        or "").strip()
+                current = self.rt.raw_cookie_value("user-token")
+            stale = bool(sent and current and sent != current)
+            if stale:
+                _log.info("[ShareGW] %s 旧令牌 401（%s），忽略", self.rt.site_id, path[:80])
+            else:
+                _log.warning("[ShareGW] %s 上游 %s：path=%s ip=%s（会话已失效）",
+                             self.rt.site_id, resp.status_code, path[:120],
+                             environ.get("REMOTE_ADDR") or "")
+                try:
+                    self.rt.mark_auth_invalid()
+                except Exception:
+                    pass
+        # 诊断日志：只记文档和错误（静态资源太吵）
+        if resp.status_code == 200 and path.startswith("/napi/"):
+            # 已鉴权接口 200 = 共享会话可用；修掉「旧浏览器 401 导致页面显示需重登」的情况
             try:
-                self.rt.mark_auth_invalid()
+                self.rt.mark_auth_ok()
             except Exception:
                 pass
-        # 诊断日志：只记文档和错误（静态资源太吵）
         if resp.status_code >= 400 or "text/html" in (resp.headers.get("Content-Type") or "").lower():
             _log.info("[ShareGW] %s %s %s ip=%s %.0fms",
                       self.rt.site_id, resp.status_code, path[:100],
@@ -442,7 +461,8 @@ class GatewayApp:
 
         try:
             return self._respond(resp, start_response, gw_origin, method,
-                                 environ.get("HTTP_ACCEPT_ENCODING", ""))
+                                 environ.get("HTTP_ACCEPT_ENCODING", ""),
+                                 environ.get("HTTP_AUTHORIZATION", ""))
         except Exception as exc:  # 任何意外都别把 waitress 线程炸掉
             try:
                 resp.close()
@@ -481,7 +501,8 @@ class GatewayApp:
             )
         return resp
 
-    def _respond(self, resp, start_response, gw_origin, method, accept_encoding=""):
+    def _respond(self, resp, start_response, gw_origin, method, accept_encoding="",
+                 client_auth=""):
         ctype = resp.headers.get("Content-Type", "") or ""
         encoding = (resp.headers.get("Content-Encoding") or "").lower().strip()
         status = f"{resp.status_code} {resp.reason or ''}".strip()
@@ -529,10 +550,13 @@ class GatewayApp:
         # 不是 401；不识别就会一直显示「可用」。
         if auth_header_name and "json" in ctype.lower() and (
                 '"code":-3106' in text or "登录已过期" in text):
-            try:
-                self.rt.mark_auth_invalid()
-            except Exception:
-                pass
+            sent = (client_auth or "").strip()
+            current = self.rt.raw_auth_value()
+            if not (sent and current and sent != current):
+                try:
+                    self.rt.mark_auth_invalid()
+                except Exception:
+                    pass
         text = rewrite_text(text, self.hosts, gw_origin)
         is_html = "html" in ctype.lower()
         if is_html:
