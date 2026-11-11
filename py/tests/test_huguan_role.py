@@ -635,12 +635,17 @@ class TestGgMccListCrossUser:
         codes = {m["mcc_id"] for m in resp.get_json()["mcc_list"]}
         assert codes == {"MCC-1"}
 
-    def test_regular_user_still_scoped(self, client):
-        """回归：普通用户看不到别人的 MCC，且 owner_id 参数无效。"""
+    def test_regular_user_sees_all_mcc(self, client):
+        """2026-11-11 用户裁定：MCC 对**全部投手**开放（顶级 MCC 人人可见）。
+
+        旧口径是「owner ∪ shared」，普通用户看不到别人的 MCC —— 已被推翻。
+        `owner_id` 参数对非跨用户角色仍被忽略（不能据此筛别人的）。
+        """
         _, _, u1, _ = self._setup(client)
         hdr, _ = _create_user(client, "_ggmcc_u3", role="user")
         resp = client.get(f"/api/mcc/list?size=50&owner_id={u1}", headers=hdr)
-        assert resp.get_json()["mcc_list"] == []
+        codes = {m["mcc_id"] for m in resp.get_json()["mcc_list"]}
+        assert codes == {"MCC-1", "MCC-2"}
 
 
 class TestGgAccountListDropdownOwnerLeak:
@@ -676,8 +681,9 @@ class TestGgAccountListDropdownOwnerLeak:
         data = resp.get_json()
         # accounts 本就被 where 的归属分支挡掉，不是本用例的重点
         assert data["accounts"] == []
-        # 三个下拉字段才是守卫真正保护的地方
-        assert [m["name"] for m in data["mcc_options"]] == []
+        # MCC 自 2026-11-11 起对全部投手开放（用户裁定），不再是「越权泄漏」；
+        # 仍受归属保护的是代理与时区两个下拉。
+        assert [m["name"] for m in data["mcc_options"]] == ["A的MCC"]
         assert _agent_names(data) == []
         assert data["timezone_options"] == []
 
@@ -2726,31 +2732,32 @@ class TestGgAccountListDropdownScope:
         assert {"Asia/Shanghai", "America/New_York"} <= set(data["timezone_options"])
 
     def test_huguan_owner_filter_narrows_dropdowns(self, client):
-        """对照组：户管 + owner_id=u1 → 三个下拉只含 u1 的（改动前就该通过）。"""
+        """对照组：户管 + owner_id=u1 → 代理/时区只含 u1 的；**MCC 例外**（全局开放）。"""
         hg, _, u1, _, _, _ = self._setup(client)
         resp = client.get(f"/api/accounts/list?size=50&owner_id={u1}", headers=hg)
         data = resp.get_json()
-        assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
+        # MCC 2026-11-11 起对全部投手开放，不再随归属人筛选收窄
+        assert {"U1的MCC", "U2的MCC"} <= {m["name"] for m in data["mcc_options"]}
         assert _agent_names(data) == ["代理S1"]
         assert data["timezone_options"] == ["Asia/Shanghai"]
 
     def test_regular_user_dropdowns_stay_scoped_to_self(self, client):
-        """纯增量对照组：非跨用户 + 不带 owner_id → 只含自己的，不含他人的。"""
+        """纯增量对照组：非跨用户 + 不带 owner_id → 代理/时区只含自己的；MCC 例外（全局）。"""
         _, _, _, _, hdr_u1, _ = self._setup(client)
         resp = client.get("/api/accounts/list?size=50", headers=hdr_u1)
         data = resp.get_json()
         assert {a["account_id"] for a in data["accounts"]} == {"GG-SC-1"}
-        assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
+        assert {"U1的MCC", "U2的MCC"} <= {m["name"] for m in data["mcc_options"]}
         assert _agent_names(data) == ["代理S1"]
         assert data["timezone_options"] == ["Asia/Shanghai"]
 
     def test_regular_user_ignores_owner_id_on_dropdowns(self, client):
-        """非跨用户 + owner_id=他人 → 参数被忽略，三个下拉仍只含自己的。"""
+        """非跨用户 + owner_id=他人 → 参数被忽略；代理/时区仍只含自己的，MCC 全局。"""
         _, _, _, u2, hdr_u1, _ = self._setup(client)
         resp = client.get(f"/api/accounts/list?size=50&owner_id={u2}", headers=hdr_u1)
         data = resp.get_json()
         assert {a["account_id"] for a in data["accounts"]} == {"GG-SC-1"}
-        assert {m["name"] for m in data["mcc_options"]} == {"U1的MCC"}
+        assert {"U1的MCC", "U2的MCC"} <= {m["name"] for m in data["mcc_options"]}
         assert _agent_names(data) == ["代理S1"]
         assert data["timezone_options"] == ["Asia/Shanghai"]
 

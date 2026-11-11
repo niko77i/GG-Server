@@ -267,22 +267,33 @@ WHERE m.mcc_id = ?
 
 ---
 
-## 2026-11-06 补记：账户页 / 账户弹窗的 MCC 候选口径（定稿）
+## 2026-11-11 定稿：MCC 对**全部投手**开放（可见/可选），写操作仍按归属
 
-**账户管理里的 MCC 下拉 = 自己创建的 MCC ∪ 自己产品用到的 MCC**（产品用到但自己没创建的也给）。
-不按 `shared_user_ids` 列表给，也不给「全部 MCC」—— 这两条都试过并被用户否掉：
+用户 2026-11-11 裁定：**「顶级 MCC 应该是每个投手都有的」**，MCC 改为全部投手都有权限；
+广告账户页的 MCC 下拉同样。此前几轮口径全部作废：
 
-| 口径 | 卡尔 | 阿伟 | 黑子 | 结论 |
+| 口径 | 卡尔 | 阿伟 | 黑子（名下 0 个） | 结论 |
 |---|---|---|---|---|
-| 只看 shared 列表（原始实现，且被「归属人=自己」收窄） | 104 | 3 | **0** | ❌ 黑子下拉为空 |
-| 跨用户角色给全部 MCC | 109 | 109 | 109 | ❌ 用户否掉：「不是共享所有 MCC」 |
-| **自己创建 ∪ 自己产品用到**（定稿） | **106** | **18** | **1** | ✅ 黑子的 1 个正是他产品 339 的 MCC |
+| 只看 shared 列表 + 被「归属人=自己」收窄 | 104 | 3 | **0** | ❌ 下拉为空 |
+| 跨用户角色给全部 | 109 | 109 | 109 | ❌ 当时被否，**最终又回到这条** |
+| 自己创建 ∪ 自己产品用到 | 106 | 18 | 1 | ❌ 仍不够（顶级 MCC 看不到） |
+| **全部 MCC，对全部投手开放**（定稿） | **113** | **113** | **113** | ✅ |
 
-实现落两处（必须同步改，否则列表页和弹窗会不一致）：
+**读 / 写分开**（这是本次的关键边界，别一起放宽）：
 
-- `main.py::accounts_list` 的 `mcc_options`（账户列表 / 批量改 MCC / 行内改 MCC 用它）；
-- `main.py::mcc_options`（新增/编辑账户弹窗用它）。
+- **读**：`/api/mcc/list`、`/api/mcc/<id>/detail`、`/api/mcc/options`、
+  `/api/accounts/list` 的 `mcc_options` —— 一律全量，不看 owner / shared。
+- **写**：`/api/mcc/create|update|delete|link` 与「把子 MCC 挂到别人 MCC 下」仍只允许
+  `owner_id` 本人或跨用户角色（developer/admin/户管）；共享者只读 → `_mcc_visible()` 保持
+  旧的 owner ∪ shared 判据，**别把它改成 1=1**。
 
-两者都**不跟「归属人」筛选走**：下拉回答的是「能把账户挂到哪些 MCC」，不是「某人名下的 MCC」。
-回归测试 `py/tests/test_mcc_options_scope.py`（4 条：自己创建的、产品在用的、无关/仅共享的不出现、
-列表页不被归属人筛选收窄）。
+回归测试：`py/tests/test_mcc_options_scope.py`（3 条，全部用户可见）、
+`test_huguan_role.py::TestGgMccListCrossUser` / `TestGgAccountListDropdownScope`（已按新口径改写）、
+`test_lookup_ownership.py::TestGgMccLinkDetailOwnership` / `TestGgMccParentOwnership`
+（详情放行、link 与父级归属仍收口）。
+
+### 实现落点（三处必须同步，否则会出现「MCC 页看得见、账户页看不见」）
+
+- `main.py::mcc_list` 的 `perm_where`（无 owner_id 筛选时 `1=1`）；
+- `main.py::mcc_options`（账户弹窗）；
+- `main.py::accounts_list` 里的 `mcc_options`（账户列表 / 批量改 MCC / 行内改 MCC）。

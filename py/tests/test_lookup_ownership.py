@@ -132,12 +132,18 @@ class TestGgMccLinkDetailOwnership:
         db.close()
         assert str(b_id) not in (shared or "")
 
-    def test_cannot_read_others_mcc_detail(self, client):
+    def test_anyone_can_read_mcc_detail_but_cannot_link(self, client):
+        """详情是只读视图：2026-11-11 起「MCC 对全部投手开放」，非 owner 也能看。
+
+        但 **link 是写操作**（会把 uid 写进 shared_user_ids），仍只允许 owner / 已共享者 ——
+        `test_cannot_link_others_mcc` 继续钉这条。
+        """
         _, a_id = _create_user(client, "mcc_a2")
         b_hdr, _ = _create_user(client, "mcc_b2")
         mid = _mk_mcc(a_id, "mcc-0002")
         resp = client.get(f"/api/mcc/{mid}/detail", headers=b_hdr)
-        assert resp.status_code == 403
+        assert resp.status_code == 200
+        assert resp.get_json()["mcc"]["id"] == mid
 
     def test_owner_can_read_own_mcc_detail(self, client):
         """防过度收口。"""
@@ -249,10 +255,11 @@ class TestGgMccParentOwnership:
         assert resp.status_code == 200
 
     def test_link_chain_cannot_reach_victim(self, client):
-        """**端到端集成腿**：完整走一遍 ①②③，末态必须仍看不见受害者 MCC。
+        """**端到端集成腿**：完整走一遍 ①②③，末态 B 仍不能**改动**受害者 MCC。
 
-        可证伪：父级归属校验缺失时，B 能建成子 MCC 并 link，随后 detail 返回 200
-        且带上受害者的账户清单 ⇒ 断言失败。
+        ⚠️ 2026-11-11 政策变更：MCC 详情（只读）已对全部投手开放，所以第 ③ 步不再是
+        「看不见」，而是「看得见但改不动」—— 断言改为 PUT 受害者 MCC 必须 403。
+        「共享列表没被污染」这条（②）仍然保留：它是写入侧的真实不变量。
         """
         a_id = _create_user(client, "mp_a7")[1]
         b_hdr, b_id = _create_user(client, "mp_b7")
@@ -271,5 +278,7 @@ class TestGgMccParentOwnership:
         db.close()
         assert str(b_id) not in (shared or "")
 
-        # ③ 末态：仍看不见
-        assert client.get(f"/api/mcc/{victim}/detail", headers=b_hdr).status_code == 403
+        # ③ 末态：详情可读（全员开放），但**写不动**
+        assert client.get(f"/api/mcc/{victim}/detail", headers=b_hdr).status_code == 200
+        assert client.put(f"/api/mcc/{victim}", json={"name": "被改名"},
+                          headers=b_hdr).status_code == 403

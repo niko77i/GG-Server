@@ -125,9 +125,11 @@ FB 三张全局字典写入口）—— 放宽它等于把编辑别人数据的�
 
 #### 个人数据（按 user_id 隔离）
 - `accounts` — GG 广告账户管理（owner_id）
-- `mcc` — GG MCC 管理（owner_id + **shared_user_ids**；MCC 是**共享**语义，见 2026-06-29 设计，
-  列表口径 owner ∪ shared；⚠️ 所以 MCC 页的「归属人」**不能**默认筛自己 —— owner 过滤是排他的，
-  会把共享 MCC 藏掉，2026-11-06 已回退，见 `2026-09-23-owner-filter-default-scope-design.md` 顶部修订）
+- `mcc` — GG MCC 管理（owner_id + shared_user_ids）。**可见性（2026-11-11 用户裁定）**：
+  MCC 列表 / 详情 / 账户页的 MCC 下拉 = **全部 MCC，对全部投手开放**（顶级 MCC 人人该有）；
+  **写操作**（改、删、link、挂父级）仍按 `owner_id` 或跨用户角色 → 共享者只读，别放宽成"人人可改"。
+  ⚠️ MCC 页的「归属人」**不能**默认筛自己 —— owner 过滤是排他的，会把别人的 MCC 藏掉，
+  2026-11-06 已回退，见 `2026-09-23-owner-filter-default-scope-design.md` 顶部修订
 - `video_history` — AI 视频生成历史
 - `videos`（is_public=0）— YouTube 个人视频库
 - `ad_reports` / `fb_ad_reports` — 做表数据（TT 数据提取为纯前端解析，不落库）

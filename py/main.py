@@ -4281,23 +4281,10 @@ def accounts_list():
     mcc_cache_key = f"accounts:mcc_options:{user_id}:{scope}"
     mcc_options = _app_cache.get(mcc_cache_key)
     if mcc_options is None:
-        # 候选口径（用户 2026-11-06 定）：**自己创建的 MCC** ∪ **自己产品用到的 MCC**
-        # （产品用到但自己没创建的也要给 —— 否则给产品下的账户选不到它所在的 MCC）。
-        #
-        # 三条历史弯路，别再走回去：
-        #   ① 只看 `shared_user_ids`（"共享给我的"）→ 新建 MCC 没被共享过就看不见；
-        #   ② 跟着「归属人」筛选收窄成 `WHERE owner_id = 筛选值` → 默认「归属人=自己」时
-        #      名下 0 个 MCC 的账号下拉直接为空（黑子实例）；
-        #   ③ 跨用户角色一律给全部 109 个 → 用户明确否掉：「不是共享所有 MCC」。
+        # 2026-11-11 用户裁定：MCC 对**全部投手**开放 —— 账户页下拉给全量，
+        # 不跟「归属人」筛选、也不按 owner/shared 收窄（否则新投手选不到 MCC）。
         mcc_options = [dict(r) for r in db.execute(
-            "SELECT id, name, mcc_id FROM mcc "
-            "WHERE owner_id = ? OR id IN ("
-            "  SELECT mcc_id FROM products WHERE mcc_id IS NOT NULL AND mcc_id != '' AND ("
-            "    owner_id = ? OR runner_ids = ? OR runner_ids LIKE ? "
-            "    OR runner_ids LIKE ? OR runner_ids LIKE ?)) "
-            "ORDER BY name",
-            (user_id, user_id, f"[{uid_str}]", f"[{uid_str},%",
-             f"%, {uid_str},%", f"%, {uid_str}]")
+            "SELECT id, name, mcc_id FROM mcc ORDER BY name"
         ).fetchall()]
         _app_cache.set(mcc_cache_key, mcc_options, ttl=120)
     agents_cache_key = f"accounts:agents:{user_id}:{scope}"
@@ -6195,12 +6182,12 @@ def mcc_list():
     if owner_filter:
         perm_where = "m.owner_id = ?"
         perm_params = [owner_filter]
-    elif cross_user:
+    else:
+        # 2026-11-11 用户裁定：**MCC 对全部投手可见**（顶级 MCC 本来就该人人都有）。
+        # 之前按 owner ∪ shared_user_ids 收窄，导致新投手看不到顶级 MCC、账户里选不到；
+        # 现在列表/选项一律全量，**改/删仍按 owner（或跨用户角色）**，共享者只读。
         perm_where = "1=1"
         perm_params = []
-    else:
-        perm_where = "(m.owner_id = ? OR m.shared_user_ids = ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ? OR m.shared_user_ids LIKE ?)"
-        perm_params = [user_id, f"[{uid_str}]", f"[{uid_str},%", f"%, {uid_str},%", f"%, {uid_str}]"]
 
     has_filter = bool(search or level)
 
@@ -6274,23 +6261,11 @@ def mcc_list():
 def mcc_options():
     """账户弹窗里的 MCC 下拉候选。
 
-    口径与 `accounts_list` 里的 `mcc_options` **完全一致**（用户 2026-11-06 定）：
-    **自己创建的 MCC** ∪ **自己产品用到的 MCC**（含没被共享过来、但你产品在用的）。
-    不按 shared_user_ids 列表、也不给「全部 MCC」—— 两条都试过并被否掉。
+    2026-11-11 用户裁定：**全部 MCC 对全部投手开放**（与 `mcc_list` 同口径）。
+    原先按 owner / shared 收窄，新投手（名下 0 个 MCC）下拉为空 —— 「选不到 MCC」。
     """
-    user_id = int(get_jwt_identity())
     db = _yt_db()
-    uid_str = str(user_id)
-    rows = db.execute(
-        "SELECT id, name, mcc_id FROM mcc "
-        "WHERE owner_id = ? OR id IN ("
-        "  SELECT mcc_id FROM products WHERE mcc_id IS NOT NULL AND mcc_id != '' AND ("
-        "    owner_id = ? OR runner_ids = ? OR runner_ids LIKE ? "
-        "    OR runner_ids LIKE ? OR runner_ids LIKE ?)) "
-        "ORDER BY name",
-        (user_id, user_id, f"[{uid_str}]", f"[{uid_str},%",
-         f"%, {uid_str},%", f"%, {uid_str}]")
-    ).fetchall()
+    rows = db.execute("SELECT id, name, mcc_id FROM mcc ORDER BY name").fetchall()
     db.close()
     return jsonify({"success": True, "options": [dict(r) for r in rows]})
 
@@ -6571,15 +6546,11 @@ def mcc_batch_delete():
 
 
 def _mcc_perm_where(alias: str, user_id: int):
-    """「当前用户能否看见该 MCC」的 (SQL 片段, 参数) —— 口径照抄 `mcc_list`（本文件上方）。
+    """「当前用户能否**改动**（关联/挂父级）该 MCC」的 (SQL 片段, 参数)。
 
-    owner 本人，或 uid 出现在 `shared_user_ids`（JSON 数组）里。四条 LIKE 覆盖
-    uid 位于数组首/中/尾三种位置（`[u]` / `[u,...` / `..., u,...` / `..., u]`）。
-    末尾那条裸 string `= ?` 也是照抄来的：兜住历史上没按 JSON 数组写的脏值。
-
-    抽成助手是为了让 `mcc_link` / `mcc_detail` 与列表页**判据同源** —— 三处若各写
-    一份，日后再改列表口径就会漏掉这两处（本文件已多次栽在这类「漏一处」上）。
-    `mcc_list` 原处未动，避免为重构而改动已验证的代码。
+    注意与**可见性**分开（2026-11-11）：MCC 的列表/详情/账户下拉已对全部投手开放
+    （顶级 MCC 人人可见），但「把 MCC 关联到自己名下」「把子 MCC 挂到别人 MCC 下」
+    这类**结构性写入**仍只允许 owner 或已共享者 —— 否则任何人都能改别人的 MCC 树。
     """
     uid_s = str(user_id)
     return (
@@ -6591,7 +6562,7 @@ def _mcc_perm_where(alias: str, user_id: int):
 
 
 def _mcc_visible(db, mid, user_id) -> bool:
-    """该 MCC 是否对该用户可见（owner 或已共享）。跨用户角色由调用方另行放行。"""
+    """该 MCC 是否可被该用户**写入关联/挂父级**（owner 或已共享）。跨用户角色由调用方另行放行。"""
     sql, params = _mcc_perm_where("m", user_id)
     return db.execute(f"SELECT 1 FROM mcc m WHERE m.id=? AND {sql}",
                       [mid] + params).fetchone() is not None
@@ -6632,14 +6603,9 @@ def mcc_detail(mid):
     if not mcc:
         db.close()
         return jsonify({"success": False, "error": "MCC 不存在"}), 404
-    # 归属校验：原实现回**任意** MCC 的完整树（上级、直属/间接账户、关联产品）。
-    # 口径与 `mcc_list` 同源（owner 或已共享），跨用户角色放行。
-    _uid = int(get_jwt_identity())
-    _actor = auth.get_user_by_id(_uid)
-    if ((_actor or {}).get("role", "user") not in CROSS_USER_ROLES
-            and not _mcc_visible(db, mid, _uid)):
-        db.close()
-        return jsonify({"success": False, "error": "无权限"}), 403
+    # 详情是**只读**视图：2026-11-11 用户裁定「MCC 对全部投手开放」，列表能看见的
+    # 详情也必须能打开（否则点 📋 就 403）。写入类闸门不在这里 —— 见 `_mcc_visible`
+    # 的注释：关联/挂父级仍只允许 owner 或已共享者。
     mcc_data = dict(mcc)
     # 上级 MCC
     if mcc["parent_mcc_id"]:
