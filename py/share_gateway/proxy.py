@@ -61,15 +61,30 @@ _enabled_lock = threading.Lock()
 _tls = threading.local()
 
 
+_IDLE_RESET_SECONDS = 300
+
+
 def _session_for_thread() -> requests.Session:
     sess = getattr(_tls, "session", None)
+    last = getattr(_tls, "last_used", 0.0)
+    now = time.time()
+    # 空闲太久（典型：放到第二天）时池里的 keep-alive 连接早被上游关了，
+    # 直接复用会先卡住/报 502，表现为「第一次打开一直转圈，再点一次就好」。
+    # 空闲超过 5 分钟就丢弃旧 Session，重新建连接。
+    if sess is not None and now - last > _IDLE_RESET_SECONDS:
+        try:
+            sess.close()
+        except Exception:
+            pass
+        sess = None
     if sess is None:
         sess = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10, pool_maxsize=50, max_retries=0)
+            pool_connections=10, pool_maxsize=50, max_retries=2)
         sess.mount("http://", adapter)
         sess.mount("https://", adapter)
         _tls.session = sess
+    _tls.last_used = now
     # 不依赖 Session 的 cookie jar：cookie 由我们自己的加密罐管理，
     # 清空避免跨请求/跨站点残留。
     sess.cookies.clear()
@@ -323,12 +338,18 @@ class GatewayApp:
         if not site_enabled(self.rt.site_id):
             return self._unauthorized(start_response, "该共享站点已停用。")
         _log.info("[ShareGW] %s 进入：uid=%s", self.rt.site_id, payload.get("uid"))
+        # 网关 cookie 有效期：默认 12h，可按站点配 `cookie_ttl_hours`（广大大设 72h，
+        # 免得每天上班都要从 GG-Server 重新点一次「打开」）。
+        try:
+            cookie_ttl = int(float(self.site.get("cookie_ttl_hours") or 12) * 3600)
+        except (TypeError, ValueError):
+            cookie_ttl = ticket_mod.COOKIE_TTL
         value = ticket_mod.make_cookie(
             self.secret, self.rt.site_id, int(payload.get("uid") or 0),
-            payload.get("name") or "", ver=self.rt.ver)
+            payload.get("name") or "", ttl=cookie_ttl, ver=self.rt.ver)
         cookie = (
             f"{ticket_mod.cookie_name(self.rt.site_id)}={value}; Path=/; HttpOnly; SameSite=Lax; "
-            f"Max-Age={ticket_mod.COOKIE_TTL}"
+            f"Max-Age={cookie_ttl}"
         )
         # 进入后直接落到工作台（原站 `/` 是营销首页，登着也看不出已登录）
         landing = (self.site.get("landing_path") or "/").strip() or "/"

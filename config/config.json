@@ -45,6 +45,7 @@
                 "upstream": "https://guangdada.net",
                 "extra_hosts": ["www.guangdada.net", "guangdada.net"],
                 "landing_path": "/modules/creative/display-ads",
+                "cookie_ttl_hours": 72,
                 "port": 80,
                 "enabled": true
             },
@@ -69,6 +70,7 @@
                 "auth_header": "Authorization",
                 "local_storage_token_key": "token",
                 "auth_check_path": "/api/v1/ast?page_id=dashboard&workspace_id=0&app_id=IST",
+                "cookie_ttl_hours": 72,
                 "port": 8903,
                 "enabled": true
             },
