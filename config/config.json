@@ -46,6 +46,7 @@
                 "extra_hosts": ["www.guangdada.net", "guangdada.net"],
                 "landing_path": "/modules/creative/display-ads",
                 "cookie_ttl_hours": 72,
+                "asset_proxy_hosts": ["nbs-bj-global.zingfront.com", "static-global.zingfront.com"],
                 "port": 80,
                 "enabled": true
             },

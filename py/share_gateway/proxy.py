@@ -14,6 +14,7 @@ import gzip
 import html as html_mod
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -23,6 +24,12 @@ from urllib.parse import parse_qs, quote, urljoin, urlsplit
 import requests
 
 from share_gateway import jar as jar_mod, store, ticket as ticket_mod
+
+# 静态资源本地缓存（CDN 的 JS 包 12MB 且没有 Cache-Control，浏览器每天都要重下，
+# 慢网络下首次打开要一分钟；网关缓存后从局域网/Tailscale 直接给）。
+ASSET_CACHE_ROOT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "temp", "data", "share_assets")
+ASSET_PREFIX = "/__sgw/asset/"
 
 _log = logging.getLogger(__name__)
 
@@ -250,6 +257,8 @@ class GatewayApp:
         self.origin = (site.get("upstream") or "").rstrip("/")
         self.upstream_host = (urlsplit(self.origin).hostname or "").lower()
         self.hosts = _site_hosts(self.origin, site.get("extra_hosts") or [])
+        self.asset_hosts = [str(h).strip().lower() for h in
+                            (site.get("asset_proxy_hosts") or []) if str(h).strip()]
 
     # ---------------- WSGI 入口 ----------------
 
@@ -272,6 +281,10 @@ class GatewayApp:
 
         if path == "/__sgw/enter":
             return self._enter(start_response, query)
+
+        # 静态资源本地缓存（无需网关 cookie，浏览器会把 cookie 带上但这里不做校验）
+        if path.startswith(ASSET_PREFIX):
+            return self._serve_asset(start_response, path)
 
         cookie_val = parse_cookie_header(environ.get("HTTP_COOKIE", "")).get(
             ticket_mod.cookie_name(self.rt.site_id))
@@ -315,6 +328,111 @@ class GatewayApp:
             return (store.user_role(uid) or "").lower() in roles
         except Exception:
             return False
+
+    # ---------------- 静态资源本地缓存 ----------------
+
+    def _rewrite_asset_hosts(self, text: str) -> str:
+        if not text or not self.asset_hosts:
+            return text
+        for h in self.asset_hosts:
+            text = text.replace("https://" + h + "/", ASSET_PREFIX + h + "/")
+            text = text.replace("http://" + h + "/", ASSET_PREFIX + h + "/")
+            text = text.replace("//" + h + "/", ASSET_PREFIX + h + "/")
+        return text
+
+    def _asset_path(self, host: str, rest: str) -> str | None:
+        parts = [p for p in rest.split("/") if p]
+        if not parts or any(p in (".", "..") or "\\" in p for p in parts):
+            return None
+        return os.path.join(ASSET_CACHE_ROOT, self.rt.site_id, host, *parts)
+
+    def _serve_asset(self, start_response, path):
+        rel = path[len(ASSET_PREFIX):]
+        if "/" not in rel:
+            return self._error_page(start_response, 404, "资源不存在")
+        host, rest = rel.split("/", 1)
+        host = host.lower()
+        if host not in self.asset_hosts:
+            return self._error_page(start_response, 404, "未授权的资源域名")
+        fp = self._asset_path(host, rest)
+        if not fp:
+            return self._error_page(start_response, 404, "资源路径非法")
+
+        if os.path.isfile(fp):
+            try:
+                with open(fp, "rb") as f:
+                    data = f.read()
+                return self._send_asset(start_response, data, rest)
+            except OSError:
+                pass
+
+        url = "https://" + host + "/" + rest
+        try:
+            sess = _session_for_thread()
+            resp = sess.get(
+                url,
+                headers={
+                    "User-Agent": (self.site.get("user_agent") or DEFAULT_UA),
+                    "Accept-Encoding": "gzip, deflate",
+                },
+                timeout=(10, 120),
+            )
+        except requests.RequestException as exc:
+            return self._error_page(start_response, 502, f"资源下载失败：{exc}")
+        if resp.status_code != 200:
+            return self._error_page(start_response, 502,
+                                    f"资源下载失败：上游 {resp.status_code}")
+        data = resp.content
+        if len(data) > 64 * 1024 * 1024:
+            return self._error_page(start_response, 502, "资源过大")
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if (rest.endswith((".js", ".css", ".html"))
+                or any(k in ctype for k in ("javascript", "text/css", "text/html"))):
+            text = data.decode("utf-8", errors="replace")
+            text = self._rewrite_asset_hosts(text)
+            data = text.encode("utf-8")
+        try:
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            tmp = fp + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, fp)
+        except OSError:
+            pass
+        return self._send_asset(start_response, data, rest, ctype)
+
+    def _send_asset(self, start_response, data: bytes, rest: str, ctype: str = ""):
+        if not ctype:
+            low = rest.lower()
+            if low.endswith(".js"):
+                ctype = "application/javascript; charset=utf-8"
+            elif low.endswith(".css"):
+                ctype = "text/css; charset=utf-8"
+            elif low.endswith(".svg"):
+                ctype = "image/svg+xml"
+            elif low.endswith(".woff2"):
+                ctype = "font/woff2"
+            elif low.endswith(".woff"):
+                ctype = "font/woff"
+            elif low.endswith(".png"):
+                ctype = "image/png"
+            elif low.endswith(".jpg") or low.endswith(".jpeg"):
+                ctype = "image/jpeg"
+            elif low.endswith(".webp"):
+                ctype = "image/webp"
+            elif low.endswith(".mp4"):
+                ctype = "video/mp4"
+            elif low.endswith(".json"):
+                ctype = "application/json; charset=utf-8"
+            else:
+                ctype = "application/octet-stream"
+        start_response("200 OK", [
+            ("Content-Type", ctype),
+            ("Content-Length", str(len(data))),
+            # 资源名带 hash，可长期缓存；第二次打开不再走网络
+            ("Cache-Control", "public, max-age=31536000, immutable"),
+        ])
+        return [data]
 
     def _log_deny(self, environ, reason: str) -> None:
         _log.warning(
@@ -581,6 +699,7 @@ class GatewayApp:
         text = rewrite_text(text, self.hosts, gw_origin)
         is_html = "html" in ctype.lower()
         if is_html:
+            text = self._rewrite_asset_hosts(text)
             text = inject_no_referrer(text)
             ls_key = (self.site.get("local_storage_token_key") or "").strip()
             if ls_key:
